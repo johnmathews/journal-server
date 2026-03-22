@@ -2,6 +2,11 @@
 
 A personal journal insight engine that ingests journal entries and answers natural language queries about them.
 
+The code for this project can be public but the journal entries themselves - the text, the images, the databses, must
+stay private and be gitignored.
+
+The github remote repo can be called "journal-agent".
+
 ## Ingestion
 
 Two sources of journal data:

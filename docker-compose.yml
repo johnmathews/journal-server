@@ -1,0 +1,32 @@
+services:
+  journal:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - journal_data:/data
+    environment:
+      - DB_PATH=/data/journal.db
+      - CHROMADB_HOST=chromadb
+      - CHROMADB_PORT=8001
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      chromadb:
+        condition: service_healthy
+
+  chromadb:
+    image: chromadb/chroma:1.5.5
+    volumes:
+      - chroma_data:/data
+    ports:
+      - "8001:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  journal_data:
+  chroma_data:

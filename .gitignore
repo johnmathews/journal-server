@@ -1,0 +1,53 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# Coverage
+htmlcov/
+.coverage
+.coverage.*
+
+# Data — NEVER commit personal journal content
+*.db
+*.db-wal
+*.db-shm
+chroma-data/
+data/
+
+# Journal source files (images, audio) — personal content
+journal-images/
+journal-audio/
+uploads/
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.mp3
+*.m4a
+*.wav
+*.mp4
+*.webm
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Engineering team working docs
+.engineering-team/
