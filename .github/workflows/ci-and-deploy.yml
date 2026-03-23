@@ -66,3 +66,21 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Extract ChromaDB metadata
+        id: chromadb-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/johnmathews/journal-chromadb
+          tags: |
+            type=sha
+            type=raw,value=latest
+
+      - name: Build and push ChromaDB image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.chromadb
+          push: true
+          tags: ${{ steps.chromadb-meta.outputs.tags }}
+          labels: ${{ steps.chromadb-meta.outputs.labels }}
