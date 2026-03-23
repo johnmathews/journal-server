@@ -5,8 +5,8 @@
 
 services:
   journal:
-    image: ghcr.io/johnmathews/journal-agent:latest
     container_name: journal
+    image: ghcr.io/johnmathews/journal-agent:latest
     environment:
       - TZ=${TZ:-Europe/Amsterdam}
       - DB_PATH=/data/journal.db
@@ -26,8 +26,8 @@ services:
     restart: always
 
   journal-chromadb:
-    image: chromadb/chroma:1.5.5
     container_name: journal-chromadb
+    image: chromadb/chroma:1.5.5
     environment:
       - TZ=${TZ:-Europe/Amsterdam}
     volumes:
@@ -35,7 +35,7 @@ services:
     ports:
       - "8401:8000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v2/heartbeat')"]
       interval: 30s
       timeout: 10s
       retries: 3
