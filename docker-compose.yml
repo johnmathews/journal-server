@@ -35,7 +35,7 @@ services:
     ports:
       - "8401:8000"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v2/heartbeat')"]
+      test: ["CMD-SHELL", "perl -e 'use IO::Socket::INET; my $s = IO::Socket::INET->new(PeerAddr => \"localhost\", PeerPort => 8000, Timeout => 5) or exit 1; print $s \"GET /api/v2/heartbeat HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n\"; my $r = <$s>; exit($r =~ /200/ ? 0 : 1)'"]
       interval: 30s
       timeout: 10s
       retries: 3
