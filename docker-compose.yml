@@ -7,7 +7,7 @@
 services:
   journal:
     container_name: journal
-    image: ghcr.io/johnmathews/journal-agent:latest
+    image: ghcr.io/johnmathews/journal-server:latest
     environment:
       - TZ=${TZ:-Europe/Amsterdam}
       - DB_PATH=/data/journal.db

@@ -126,7 +126,7 @@ class IngestionService:
         """Download a file from a URL, return (data, media_type)."""
         log.info("Downloading from %s", url)
         try:
-            req = Request(url, headers={"User-Agent": "journal-agent/0.1"})
+            req = Request(url, headers={"User-Agent": "journal-server/0.1"})
             if (
                 "files.slack.com" in url
                 and self._slack_bot_token

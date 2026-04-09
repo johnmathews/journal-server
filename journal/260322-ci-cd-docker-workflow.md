@@ -1,7 +1,7 @@
 # CI/CD: Add Docker build and push to ghcr.io
 
 Renamed `.github/workflows/ci.yml` to `ci-and-deploy.yml` and added a `build-and-push` job
-that builds the Docker image and pushes it to `ghcr.io/johnmathews/journal-agent`.
+that builds the Docker image and pushes it to `ghcr.io/johnmathews/journal-server`.
 
 The new job:
 - Only runs on pushes to `main` (not on PRs)

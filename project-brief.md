@@ -5,7 +5,7 @@ A personal journal insight engine that ingests journal entries and answers natur
 The code for this project can be public but the journal entries themselves - the text, the images, the databses, must
 stay private and be gitignored.
 
-The github remote repo can be called "journal-agent".
+The github remote repo can be called "journal-server".
 
 ## Ingestion
 

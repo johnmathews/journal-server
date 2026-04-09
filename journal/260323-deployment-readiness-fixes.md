@@ -18,7 +18,7 @@ the journal MCP server to port 8400, ChromaDB external port to 8401.
 
 ### High: Volume and integration conventions
 The original docker-compose.yml used named volumes and `build: .`. Rewrote it to:
-- Pull from `ghcr.io/johnmathews/journal-agent:latest`
+- Pull from `ghcr.io/johnmathews/journal-server:latest`
 - Bind mounts to `/srv/media/config/journal/` (matches existing stack convention)
 - Container names, restart policy, TZ — all matching existing services
 

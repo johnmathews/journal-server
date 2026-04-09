@@ -23,8 +23,8 @@ queries about them.
 
 ```bash
 # Clone and install
-git clone https://github.com/johnmathews/journal-agent.git
-cd journal-agent
+git clone https://github.com/johnmathews/journal-server.git
+cd journal-server
 uv sync
 
 # Set up environment

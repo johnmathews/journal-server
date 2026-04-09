@@ -9,8 +9,8 @@
 ## Setup
 
 ```bash
-git clone https://github.com/johnmathews/journal-agent.git
-cd journal-agent
+git clone https://github.com/johnmathews/journal-server.git
+cd journal-server
 uv sync
 ```
 
