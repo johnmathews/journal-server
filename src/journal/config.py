@@ -31,8 +31,8 @@ class Config:
     embedding_dimensions: int = 1024
 
     # Chunking
-    chunk_max_tokens: int = 500
-    chunk_overlap_tokens: int = 100
+    chunk_max_tokens: int = 150
+    chunk_overlap_tokens: int = 40
 
     # MCP Server
     mcp_host: str = field(default_factory=lambda: os.environ.get("MCP_HOST", "0.0.0.0"))

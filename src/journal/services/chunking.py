@@ -15,8 +15,8 @@ def count_tokens(text: str) -> int:
 
 def chunk_text(
     text: str,
-    max_tokens: int = 500,
-    overlap_tokens: int = 100,
+    max_tokens: int = 150,
+    overlap_tokens: int = 40,
 ) -> list[str]:
     """Split text into overlapping chunks on paragraph/sentence boundaries.
 

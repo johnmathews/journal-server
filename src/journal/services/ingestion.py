@@ -22,8 +22,8 @@ class IngestionService:
         ocr_provider: OCRProvider,
         transcription_provider: TranscriptionProvider,
         embeddings_provider: EmbeddingsProvider,
-        chunk_max_tokens: int = 500,
-        chunk_overlap_tokens: int = 100,
+        chunk_max_tokens: int = 150,
+        chunk_overlap_tokens: int = 40,
     ) -> None:
         self._repo = repository
         self._vector_store = vector_store

@@ -114,6 +114,10 @@ def journal_search_entries(
         limit: Max results to return (1-50, default 10).
         offset: Pagination offset for retrieving more results.
     """
+    log.info(
+        "Tool call: journal_search_entries(query=%r, start_date=%s, end_date=%s)",
+        query, start_date, end_date,
+    )
     service = _get_query(ctx)
     results = service.search_entries(query, start_date, end_date, min(limit, 50), offset)
 
@@ -143,6 +147,7 @@ def journal_get_entries_by_date(
     Args:
         date: Date in ISO 8601 format (e.g. "2026-03-22").
     """
+    log.info("Tool call: journal_get_entries_by_date(date=%s)", date)
     service = _get_query(ctx)
     entries = service.get_entries_by_date(date)
 
@@ -173,6 +178,10 @@ def journal_list_entries(
         limit: Max results (1-50, default 20).
         offset: Pagination offset.
     """
+    log.info(
+        "Tool call: journal_list_entries(start_date=%s, end_date=%s, limit=%d)",
+        start_date, end_date, limit,
+    )
     service = _get_query(ctx)
     entries = service.list_entries(start_date, end_date, min(limit, 50), offset)
 
@@ -198,6 +207,7 @@ def journal_get_statistics(
         start_date: Start of period (ISO 8601). Defaults to all time.
         end_date: End of period (ISO 8601). Defaults to today.
     """
+    log.info("Tool call: journal_get_statistics(start_date=%s, end_date=%s)", start_date, end_date)
     service = _get_query(ctx)
     stats = service.get_statistics(start_date, end_date)
 
@@ -226,6 +236,10 @@ def journal_get_mood_trends(
         end_date: End of period (ISO 8601). Defaults to today.
         granularity: Time grouping - "day", "week", or "month" (default "week").
     """
+    log.info(
+        "Tool call: journal_get_mood_trends(start_date=%s, end_date=%s, granularity=%s)",
+        start_date, end_date, granularity,
+    )
     service = _get_query(ctx)
     trends = service.get_mood_trends(start_date, end_date, granularity)
 
@@ -254,6 +268,10 @@ def journal_get_topic_frequency(
         start_date: Start of period (ISO 8601). Optional.
         end_date: End of period (ISO 8601). Optional.
     """
+    log.info(
+        "Tool call: journal_get_topic_frequency(topic=%r, start_date=%s, end_date=%s)",
+        topic, start_date, end_date,
+    )
     service = _get_query(ctx)
     freq = service.get_topic_frequency(topic, start_date, end_date)
 
@@ -290,6 +308,10 @@ def journal_ingest_entry(
     import base64
     from datetime import date as date_type
 
+    log.info(
+        "Tool call: journal_ingest_entry(source_type=%s, media_type=%s, date=%s, size=%d)",
+        source_type, media_type, date, len(data_base64),
+    )
     service = _get_ingestion(ctx)
     data = base64.b64decode(data_base64)
     entry_date = date or date_type.today().isoformat()

@@ -28,8 +28,8 @@ All configuration is via environment variables. No config files are needed.
 | `transcription_model` | `gpt-4o-transcribe` | OpenAI model for transcription |
 | `embedding_model` | `text-embedding-3-large` | OpenAI model for embeddings |
 | `embedding_dimensions` | `1024` | Embedding vector dimensions (reduced from 3072) |
-| `chunk_max_tokens` | `500` | Maximum tokens per text chunk |
-| `chunk_overlap_tokens` | `100` | Token overlap between chunks |
+| `chunk_max_tokens` | `150` | Maximum tokens per text chunk |
+| `chunk_overlap_tokens` | `40` | Token overlap between chunks |
 
 ## Docker Compose
 
