@@ -12,9 +12,9 @@ The main interface is via Slack. The [Nanoclaw](https://github.com/johnmathews/n
 
 ### Interface Layer
 Thin adapters that expose the service layer to external consumers:
-- **MCP Server** (`mcp_server.py`) — 8 tools via FastMCP, streamable HTTP transport
+- **MCP Server** (`mcp_server.py`) — 10 tools via FastMCP, streamable HTTP transport
 - **CLI** (`cli.py`) — argparse-based command-line interface
-- **API** — Future REST endpoints (out of scope for v0.1)
+- **REST API** (`api.py`) — 4 endpoints via `mcp.custom_route()`, same port as MCP server
 
 ### Service Layer
 Business logic orchestration:
@@ -31,15 +31,39 @@ Adapters for external APIs, each behind a Protocol interface:
 - **EntryRepository** — SQLite with FTS5 for structured data and keyword search
 - **VectorStore** — ChromaDB for semantic similarity search
 
+## Data Model: raw_text vs final_text
+
+Each entry has two text fields:
+
+- **`raw_text`** — Immutable OCR or transcription output. Never modified after ingestion. Preserves the original provider output for audit and comparison.
+- **`final_text`** — Starts as a copy of `raw_text`. This is the text used by all downstream features: chunking, embeddings, FTS5 indexing, search, and word count.
+
+Editing `final_text` (e.g., to correct OCR errors) triggers re-chunking, re-embedding, and FTS5 rebuild for that entry. The original `raw_text` remains unchanged.
+
+### Multi-Page Entries
+
+Multiple images can be ingested into a single entry. Each image is OCR'd independently, and the results are combined into one entry:
+
+- The `entry_pages` table stores per-page `raw_text` and page ordering
+- The entry's `raw_text` and `final_text` are the concatenation of all page texts
+- Adding pages to an existing entry triggers the same re-chunking and re-embedding flow
+
 ## Data Flow
 
 ### Ingestion
 ```
 Image/Audio → Provider (OCR/Whisper) → Raw Text
-    → SQLite (entry + metadata)
-    → Chunking (500 tokens, 100 overlap)
+    → SQLite (entry with raw_text + final_text, entry_pages for images)
+    → Chunking (150 tokens, 40 overlap) using final_text
     → Embeddings (OpenAI, 1024 dims)
     → ChromaDB (chunks + embeddings + metadata)
+```
+
+### OCR Correction
+```
+Edit final_text → Update SQLite → Delete old ChromaDB chunks
+    → Re-chunk final_text → Re-embed → Store new chunks
+    → FTS5 trigger auto-rebuilds index
 ```
 
 ### Query
@@ -53,11 +77,12 @@ Natural Language Query
 ## Database Schema
 
 ### SQLite
-- `entries` — Core table (date, source_type, raw_text, word_count)
+- `entries` — Core table (date, source_type, raw_text, final_text, word_count, chunk_count)
+- `entry_pages` — Per-page OCR text for multi-page entries (entry_id, page_number, raw_text, source_file_id)
 - `mood_scores` — Multi-dimensional mood tracking per entry
 - `people`, `places`, `tags` — Entity tables with junction tables for many-to-many
 - `source_files` — Original file metadata with SHA-256 dedup
-- `entries_fts` — FTS5 virtual table with porter stemming
+- `entries_fts` — FTS5 virtual table with porter stemming (indexes final_text)
 
 ### ChromaDB
 - Single collection `journal_entries` with cosine distance

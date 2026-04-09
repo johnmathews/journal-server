@@ -4,7 +4,7 @@ import logging
 import sqlite3
 from typing import Protocol, runtime_checkable
 
-from journal.models import Entry, MoodTrend, Statistics, TopicFrequency
+from journal.models import Entry, EntryPage, MoodTrend, Statistics, TopicFrequency
 
 log = logging.getLogger(__name__)
 
@@ -12,10 +12,23 @@ log = logging.getLogger(__name__)
 @runtime_checkable
 class EntryRepository(Protocol):
     def create_entry(
-        self, entry_date: str, source_type: str, raw_text: str, word_count: int
+        self, entry_date: str, source_type: str, raw_text: str, word_count: int,
+        final_text: str | None = None,
     ) -> Entry: ...
 
     def get_entry(self, entry_id: int) -> Entry | None: ...
+
+    def update_final_text(
+        self, entry_id: int, final_text: str, word_count: int, chunk_count: int
+    ) -> Entry | None: ...
+
+    def add_entry_page(
+        self, entry_id: int, page_number: int, raw_text: str, source_file_id: int | None = None
+    ) -> None: ...
+
+    def get_entry_pages(self, entry_id: int) -> list[EntryPage]: ...
+
+    def update_chunk_count(self, entry_id: int, chunk_count: int) -> None: ...
 
     def get_entries_by_date(self, date: str) -> list[Entry]: ...
 
@@ -52,6 +65,12 @@ class EntryRepository(Protocol):
         granularity: str = "week",
     ) -> list[MoodTrend]: ...
 
+    def count_entries(
+        self, start_date: str | None = None, end_date: str | None = None
+    ) -> int: ...
+
+    def get_page_count(self, entry_id: int) -> int: ...
+
     def get_topic_frequency(
         self, topic: str, start_date: str | None = None, end_date: str | None = None
     ) -> TopicFrequency: ...
@@ -63,7 +82,9 @@ def _row_to_entry(row: sqlite3.Row) -> Entry:
         entry_date=row["entry_date"],
         source_type=row["source_type"],
         raw_text=row["raw_text"],
+        final_text=row["final_text"] or row["raw_text"],
         word_count=row["word_count"],
+        chunk_count=row["chunk_count"],
         language=row["language"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -75,13 +96,15 @@ class SQLiteEntryRepository:
         self._conn = conn
 
     def create_entry(
-        self, entry_date: str, source_type: str, raw_text: str, word_count: int
+        self, entry_date: str, source_type: str, raw_text: str, word_count: int,
+        final_text: str | None = None,
     ) -> Entry:
+        actual_final = final_text if final_text is not None else raw_text
         sql = (
-            "INSERT INTO entries (entry_date, source_type, raw_text, word_count)"
-            " VALUES (?, ?, ?, ?)"
+            "INSERT INTO entries (entry_date, source_type, raw_text, final_text, word_count)"
+            " VALUES (?, ?, ?, ?, ?)"
         )
-        cursor = self._conn.execute(sql, (entry_date, source_type, raw_text, word_count))
+        cursor = self._conn.execute(sql, (entry_date, source_type, raw_text, actual_final, word_count))
         self._conn.commit()
         entry_id = cursor.lastrowid
         log.info("Created entry %d for date %s", entry_id, entry_date)
@@ -135,6 +158,53 @@ class SQLiteEntryRepository:
         sql += " ORDER BY rank"
         rows = self._conn.execute(sql, params).fetchall()
         return [_row_to_entry(r) for r in rows]
+
+    def update_final_text(
+        self, entry_id: int, final_text: str, word_count: int, chunk_count: int
+    ) -> Entry | None:
+        self._conn.execute(
+            "UPDATE entries SET final_text = ?, word_count = ?, chunk_count = ?,"
+            " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+            (final_text, word_count, chunk_count, entry_id),
+        )
+        self._conn.commit()
+        log.info("Updated final_text for entry %d", entry_id)
+        return self.get_entry(entry_id)
+
+    def add_entry_page(
+        self, entry_id: int, page_number: int, raw_text: str, source_file_id: int | None = None
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO entry_pages (entry_id, page_number, raw_text, source_file_id)"
+            " VALUES (?, ?, ?, ?)",
+            (entry_id, page_number, raw_text, source_file_id),
+        )
+        self._conn.commit()
+        log.info("Added page %d to entry %d", page_number, entry_id)
+
+    def get_entry_pages(self, entry_id: int) -> list[EntryPage]:
+        rows = self._conn.execute(
+            "SELECT * FROM entry_pages WHERE entry_id = ? ORDER BY page_number",
+            (entry_id,),
+        ).fetchall()
+        return [
+            EntryPage(
+                id=row["id"],
+                entry_id=row["entry_id"],
+                page_number=row["page_number"],
+                raw_text=row["raw_text"],
+                source_file_id=row["source_file_id"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    def update_chunk_count(self, entry_id: int, chunk_count: int) -> None:
+        self._conn.execute(
+            "UPDATE entries SET chunk_count = ? WHERE id = ?",
+            (chunk_count, entry_id),
+        )
+        self._conn.commit()
 
     def get_statistics(
         self, start_date: str | None = None, end_date: str | None = None
@@ -279,6 +349,27 @@ class SQLiteEntryRepository:
             )
             for row in rows
         ]
+
+    def count_entries(
+        self, start_date: str | None = None, end_date: str | None = None
+    ) -> int:
+        query = "SELECT COUNT(*) as cnt FROM entries WHERE 1=1"
+        params: list[str] = []
+        if start_date:
+            query += " AND entry_date >= ?"
+            params.append(start_date)
+        if end_date:
+            query += " AND entry_date <= ?"
+            params.append(end_date)
+        row = self._conn.execute(query, params).fetchone()
+        return row["cnt"]
+
+    def get_page_count(self, entry_id: int) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) as cnt FROM entry_pages WHERE entry_id = ?",
+            (entry_id,),
+        ).fetchone()
+        return row["cnt"]
 
     def get_topic_frequency(
         self, topic: str, start_date: str | None = None, end_date: str | None = None

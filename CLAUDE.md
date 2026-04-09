@@ -25,6 +25,7 @@ src/journal/
     query.py         — Query routing (semantic + FTS5 + stats)
     chunking.py      — Text chunking with tiktoken
   mcp_server.py      — FastMCP server (streamable HTTP)
+  api.py             — REST API endpoints via mcp.custom_route()
   cli.py             — CLI interface
 tests/               — pytest tests mirroring src structure
 docs/                — Project documentation

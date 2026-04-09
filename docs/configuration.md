@@ -19,6 +19,7 @@ All configuration is via environment variables. No config files are needed.
 | `MCP_HOST` | `0.0.0.0` | MCP server bind address |
 | `MCP_PORT` | `8000` | MCP server port (use 8400 on media VM to avoid Gluetun conflict) |
 | `SLACK_BOT_TOKEN` | | Slack bot token for downloading files from Slack URLs |
+| `API_CORS_ORIGINS` | | Comma-separated list of allowed CORS origins for the REST API (e.g., `http://localhost:5173`). Empty disables CORS. |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 
 ## Models (hardcoded defaults, changeable in config.py)

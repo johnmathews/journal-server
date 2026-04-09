@@ -41,3 +41,22 @@ def test_fts_table_exists(db_conn):
 def test_foreign_keys_enabled(db_conn):
     result = db_conn.execute("PRAGMA foreign_keys").fetchone()
     assert result[0] == 1
+
+
+def test_entry_pages_table_exists(db_conn):
+    tables = db_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='entry_pages'"
+    ).fetchone()
+    assert tables is not None
+
+
+def test_entries_has_final_text_column(db_conn):
+    columns = db_conn.execute("PRAGMA table_info(entries)").fetchall()
+    column_names = [col["name"] for col in columns]
+    assert "final_text" in column_names
+    assert "chunk_count" in column_names
+
+
+def test_migration_version_is_at_least_2(db_conn):
+    version = get_current_version(db_conn)
+    assert version >= 2

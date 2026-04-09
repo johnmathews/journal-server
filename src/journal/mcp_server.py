@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
+from journal.api import register_api_routes
 from journal.config import load_config
 from journal.db.connection import get_connection
 from journal.db.migrations import run_migrations
@@ -88,6 +89,10 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
 
 mcp = FastMCP("journal", lifespan=lifespan)
 
+# Register REST API routes — they access the shared _services dict directly,
+# bypassing the MCP lifespan context (which is per-session).
+register_api_routes(mcp, lambda: _services)
+
 
 def _get_query(ctx: Context) -> QueryService:
     return ctx.request_context.lifespan_context["query"]
@@ -129,11 +134,11 @@ def journal_search_entries(
     for r in results:
         lines.append(f"--- {r.entry_date} (relevance: {r.score:.0%}) ---")
         # Show the matching chunk for context, then the full entry
-        if r.chunk_text and r.chunk_text != r.raw_text:
+        if r.chunk_text and r.chunk_text != r.text:
             lines.append(f"Best match: ...{r.chunk_text[:200]}...")
-        lines.append(r.raw_text[:500])
-        if len(r.raw_text) > 500:
-            lines.append(f"... ({len(r.raw_text)} chars total)")
+        lines.append(r.text[:500])
+        if len(r.text) > 500:
+            lines.append(f"... ({len(r.text)} chars total)")
         lines.append("")
     return "\n".join(lines)
 
@@ -158,7 +163,7 @@ def journal_get_entries_by_date(
     lines = [f"{len(entries)} entries for {date}:\n"]
     for e in entries:
         lines.append(f"--- Entry {e.id} ({e.source_type}, {e.word_count} words) ---")
-        lines.append(e.raw_text)
+        lines.append(e.final_text)
         lines.append("")
     return "\n".join(lines)
 
@@ -191,7 +196,7 @@ def journal_list_entries(
 
     lines = [f"Showing {len(entries)} entries:\n"]
     for e in entries:
-        preview = e.raw_text[:100].replace("\n", " ")
+        preview = e.final_text[:100].replace("\n", " ")
         lines.append(f"- {e.entry_date} | {e.source_type} | {e.word_count} words | {preview}...")
     return "\n".join(lines)
 
@@ -281,7 +286,7 @@ def journal_get_topic_frequency(
 
     lines = [f"'{topic}' appears in {freq.count} entries:"]
     for e in freq.entries[:10]:
-        preview = e.raw_text[:80].replace("\n", " ")
+        preview = e.final_text[:80].replace("\n", " ")
         lines.append(f"  - {e.entry_date}: {preview}...")
     if freq.count > 10:
         lines.append(f"  ... and {freq.count - 10} more entries")
@@ -333,7 +338,8 @@ def journal_ingest_from_url(
         f"  Date: {entry.entry_date}\n"
         f"  Source: {entry.source_type}\n"
         f"  Words: {entry.word_count}\n"
-        f"  Preview: {entry.raw_text[:200]}..."
+        f"  Chunks: {entry.chunk_count}\n"
+        f"  Preview: {entry.final_text[:200]}..."
     )
 
 
@@ -379,12 +385,93 @@ def journal_ingest_entry(
         f"  Date: {entry.entry_date}\n"
         f"  Source: {entry.source_type}\n"
         f"  Words: {entry.word_count}\n"
-        f"  Preview: {entry.raw_text[:200]}..."
+        f"  Chunks: {entry.chunk_count}\n"
+        f"  Preview: {entry.final_text[:200]}..."
+    )
+
+
+@mcp.tool()
+def journal_ingest_multi_page(
+    images_base64: list[str],
+    media_types: list[str],
+    date: str | None = None,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> str:
+    """Ingest multiple page images as a single journal entry.
+
+    Args:
+        images_base64: List of base64-encoded image data, one per page in order.
+        media_types: List of MIME types, one per image (e.g. ["image/jpeg", "image/jpeg"]).
+        date: Date of the journal entry (ISO 8601). Defaults to today.
+    """
+    import base64
+    from datetime import date as date_type
+
+    log.info(
+        "Tool call: journal_ingest_multi_page(pages=%d, date=%s)",
+        len(images_base64), date,
+    )
+    service = _get_ingestion(ctx)
+    entry_date = date or date_type.today().isoformat()
+
+    if len(images_base64) != len(media_types):
+        return "Error: images_base64 and media_types must have the same length."
+
+    images = [
+        (base64.b64decode(img), mt)
+        for img, mt in zip(images_base64, media_types)
+    ]
+
+    entry = service.ingest_multi_page_entry(images, entry_date)
+
+    return (
+        f"Multi-page entry ingested successfully.\n"
+        f"  ID: {entry.id}\n"
+        f"  Date: {entry.entry_date}\n"
+        f"  Pages: {len(images)}\n"
+        f"  Words: {entry.word_count}\n"
+        f"  Chunks: {entry.chunk_count}\n"
+        f"  Preview: {entry.final_text[:200]}..."
+    )
+
+
+@mcp.tool()
+def journal_update_entry_text(
+    entry_id: int,
+    final_text: str,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> str:
+    """Update the corrected text of a journal entry, triggering re-embedding.
+
+    Use this to fix OCR errors. The original raw text is preserved; only the
+    corrected version (final_text) is updated. All downstream features (search,
+    analytics) will use the corrected text.
+
+    Args:
+        entry_id: The ID of the entry to update.
+        final_text: The corrected text content.
+    """
+    log.info("Tool call: journal_update_entry_text(entry_id=%d)", entry_id)
+    service = _get_ingestion(ctx)
+    try:
+        entry = service.update_entry_text(entry_id, final_text)
+    except ValueError as e:
+        return f"Error: {e}"
+
+    return (
+        f"Entry {entry.id} updated successfully.\n"
+        f"  Words: {entry.word_count}\n"
+        f"  Chunks: {entry.chunk_count}\n"
+        f"  Preview: {entry.final_text[:200]}..."
     )
 
 
 def main() -> None:
-    """Run the MCP server."""
+    """Run the MCP server with REST API and optional CORS."""
+    import anyio
+    import uvicorn
+    from starlette.middleware.cors import CORSMiddleware
+
     config = load_config()
     mcp.settings.host = config.mcp_host
     mcp.settings.port = config.mcp_port
@@ -401,7 +488,29 @@ def main() -> None:
             enable_dns_rebinding_protection=False,
         )
 
-    mcp.run(transport="streamable-http")
+    # Build the Starlette app from FastMCP (includes MCP routes + custom_routes)
+    app = mcp.streamable_http_app()
+
+    # Add CORS middleware if configured
+    if config.api_cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=config.api_cors_origins,
+            allow_methods=["GET", "PATCH", "OPTIONS"],
+            allow_headers=["Content-Type"],
+        )
+
+    async def _serve() -> None:
+        uvi_config = uvicorn.Config(
+            app,
+            host=config.mcp_host,
+            port=config.mcp_port,
+            log_level="info",
+        )
+        server = uvicorn.Server(uvi_config)
+        await server.serve()
+
+    anyio.run(_serve)
 
 
 if __name__ == "__main__":

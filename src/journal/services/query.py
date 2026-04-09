@@ -3,7 +3,7 @@
 import logging
 
 from journal.db.repository import EntryRepository
-from journal.models import Entry, MoodTrend, SearchResult, Statistics, TopicFrequency
+from journal.models import Entry, EntryPage, MoodTrend, SearchResult, Statistics, TopicFrequency
 from journal.providers.embeddings import EmbeddingsProvider
 from journal.vectorstore.store import VectorStore
 
@@ -70,7 +70,7 @@ class QueryService:
                 SearchResult(
                     entry_id=entry.id,
                     entry_date=entry.entry_date,
-                    raw_text=entry.raw_text,
+                    text=entry.final_text or entry.raw_text,
                     score=1.0 - vr.distance,  # Convert distance to similarity
                     chunk_text=vr.chunk_text,
                 )
@@ -108,3 +108,6 @@ class QueryService:
         self, topic: str, start_date: str | None = None, end_date: str | None = None
     ) -> TopicFrequency:
         return self._repo.get_topic_frequency(topic, start_date, end_date)
+
+    def get_entry_pages(self, entry_id: int) -> list[EntryPage]:
+        return self._repo.get_entry_pages(entry_id)

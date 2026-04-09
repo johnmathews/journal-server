@@ -50,6 +50,15 @@ class Config:
         ]
     )
 
+    # REST API CORS
+    api_cors_origins: list[str] = field(
+        default_factory=lambda: [
+            h.strip()
+            for h in os.environ.get("API_CORS_ORIGINS", "").split(",")
+            if h.strip()
+        ]
+    )
+
 
 def load_config() -> Config:
     """Load configuration from environment variables."""

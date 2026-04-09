@@ -102,7 +102,7 @@ def cmd_ingest(args, config):
         sys.exit(1)
 
     print(f"Ingested entry {entry.id} for {entry.entry_date} ({entry.word_count} words)")
-    print(f"Preview: {entry.raw_text[:200]}...")
+    print(f"Preview: {entry.final_text[:200]}...")
 
 
 def cmd_search(args, config):
@@ -116,9 +116,9 @@ def cmd_search(args, config):
 
     for r in results:
         print(f"\n--- {r.entry_date} (relevance: {r.score:.0%}) ---")
-        print(r.raw_text[:300])
-        if len(r.raw_text) > 300:
-            print(f"... ({len(r.raw_text)} chars total)")
+        print(r.text[:300])
+        if len(r.text) > 300:
+            print(f"... ({len(r.text)} chars total)")
 
 
 def cmd_list(args, config):
@@ -131,8 +131,71 @@ def cmd_list(args, config):
         return
 
     for e in entries:
-        preview = e.raw_text[:80].replace("\n", " ")
+        preview = e.final_text[:80].replace("\n", " ")
         print(f"{e.entry_date} | {e.source_type} | {e.word_count:>5} words | {preview}...")
+
+
+def cmd_ingest_multi(args, config):
+    """Ingest multiple page images as a single journal entry."""
+    ingestion, _ = _build_services(config)
+
+    images: list[tuple[bytes, str]] = []
+    image_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+    media_types_map = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }
+
+    for file_str in args.files:
+        file_path = Path(file_str)
+        if not file_path.exists():
+            print(f"Error: File not found: {file_path}", file=sys.stderr)
+            sys.exit(1)
+        ext = file_path.suffix.lower()
+        if ext not in image_exts:
+            print(f"Error: Unsupported image type: {ext}", file=sys.stderr)
+            sys.exit(1)
+        media_type = media_types_map.get(ext, "application/octet-stream")
+        images.append((file_path.read_bytes(), media_type))
+
+    entry_date = args.date or date.today().isoformat()
+    entry = ingestion.ingest_multi_page_entry(images, entry_date)
+
+    print(f"Ingested multi-page entry {entry.id} for {entry.entry_date}")
+    print(f"  Pages: {len(images)}, Words: {entry.word_count}, Chunks: {entry.chunk_count}")
+    print(f"  Preview: {entry.final_text[:200]}...")
+
+
+def cmd_backfill_chunks(args, config):
+    """Backfill chunk_count for existing entries from ChromaDB."""
+    conn = get_connection(config.db_path)
+    run_migrations(conn)
+    repo = SQLiteEntryRepository(conn)
+
+    vector_store = ChromaVectorStore(
+        host=config.chromadb_host,
+        port=config.chromadb_port,
+        collection_name=config.chromadb_collection,
+    )
+
+    entries = repo.list_entries(limit=10000)
+    updated = 0
+    for entry in entries:
+        if entry.chunk_count == 0:
+            # Query ChromaDB for chunks belonging to this entry
+            results = vector_store._collection.get(
+                where={"entry_id": entry.id},
+            )
+            count = len(results["ids"]) if results["ids"] else 0
+            if count > 0:
+                repo.update_chunk_count(entry.id, count)
+                updated += 1
+                print(f"  Entry {entry.id} ({entry.entry_date}): {count} chunks")
+
+    print(f"\nBackfilled {updated} entries.")
 
 
 def cmd_stats(args, config):
@@ -164,6 +227,13 @@ def main():
     p_ingest.add_argument("--date", help="Entry date (ISO 8601, default: today)")
     p_ingest.add_argument("--language", default="en", help="Language for voice transcription")
 
+    # ingest-multi
+    p_ingest_multi = subparsers.add_parser(
+        "ingest-multi", help="Ingest multiple pages as one entry"
+    )
+    p_ingest_multi.add_argument("files", nargs="+", help="Paths to image files (in page order)")
+    p_ingest_multi.add_argument("--date", help="Entry date (ISO 8601, default: today)")
+
     # search
     p_search = subparsers.add_parser("search", help="Search entries semantically")
     p_search.add_argument("query", help="Natural language search query")
@@ -182,14 +252,19 @@ def main():
     p_stats.add_argument("--start-date", help="Filter from date")
     p_stats.add_argument("--end-date", help="Filter until date")
 
+    # backfill-chunks
+    subparsers.add_parser("backfill-chunks", help="Backfill chunk_count from ChromaDB")
+
     args = parser.parse_args()
     setup_logging(args.log_level)
     config = load_config()
 
     commands = {
         "ingest": cmd_ingest,
+        "ingest-multi": cmd_ingest_multi,
         "search": cmd_search,
         "list": cmd_list,
         "stats": cmd_stats,
+        "backfill-chunks": cmd_backfill_chunks,
     }
     commands[args.command](args, config)

@@ -194,3 +194,110 @@ class TestTopicFrequency:
         assert freq.topic == "Vienna"
         assert freq.count == 2
         assert len(freq.entries) == 2
+
+
+class TestFinalText:
+    def test_create_entry_defaults_final_text_to_raw_text(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "Hello world", 2)
+        assert entry.final_text == "Hello world"
+        assert entry.raw_text == "Hello world"
+
+    def test_create_entry_with_explicit_final_text(self, repo):
+        entry = repo.create_entry(
+            "2026-03-22", "ocr", "raw OCR output", 3, final_text="corrected text"
+        )
+        assert entry.raw_text == "raw OCR output"
+        assert entry.final_text == "corrected text"
+
+    def test_update_final_text(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "raw text", 2)
+        assert entry.final_text == "raw text"
+
+        updated = repo.update_final_text(entry.id, "corrected text", 2, 3)
+        assert updated is not None
+        assert updated.final_text == "corrected text"
+        assert updated.word_count == 2
+        assert updated.chunk_count == 3
+        # raw_text unchanged
+        assert updated.raw_text == "raw text"
+
+    def test_update_final_text_not_found(self, repo):
+        result = repo.update_final_text(999, "text", 1, 1)
+        assert result is None
+
+    def test_chunk_count_default(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "Hello", 1)
+        assert entry.chunk_count == 0
+
+    def test_update_chunk_count(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "Hello world", 2)
+        repo.update_chunk_count(entry.id, 5)
+        updated = repo.get_entry(entry.id)
+        assert updated is not None
+        assert updated.chunk_count == 5
+
+    def test_fts_indexes_final_text(self, repo):
+        """FTS should index final_text, not raw_text."""
+        repo.create_entry(
+            "2026-03-22", "ocr", "raw OCR garbled",
+            3, final_text="corrected Vienna text"
+        )
+        # Should find via final_text
+        results = repo.search_text("Vienna")
+        assert len(results) == 1
+        # Should NOT find via raw_text content that's not in final_text
+        results = repo.search_text("garbled")
+        assert len(results) == 0
+
+
+class TestEntryPages:
+    def test_add_and_get_entry_pages(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "Combined text", 2)
+        repo.add_entry_page(entry.id, 1, "Page one text")
+        repo.add_entry_page(entry.id, 2, "Page two text")
+
+        pages = repo.get_entry_pages(entry.id)
+        assert len(pages) == 2
+        assert pages[0].page_number == 1
+        assert pages[0].raw_text == "Page one text"
+        assert pages[1].page_number == 2
+        assert pages[1].raw_text == "Page two text"
+
+    def test_get_entry_pages_empty(self, repo):
+        entry = repo.create_entry("2026-03-22", "voice", "Voice note", 2)
+        pages = repo.get_entry_pages(entry.id)
+        assert pages == []
+
+    def test_add_entry_page_with_source_file(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "Text", 1)
+        # Create a source file first
+        repo._conn.execute(
+            "INSERT INTO source_files (entry_id, file_path, file_type, file_hash)"
+            " VALUES (?, ?, ?, ?)",
+            (entry.id, "image.jpg", "image/jpeg", "abc123"),
+        )
+        repo._conn.commit()
+        sf_id = repo._conn.execute("SELECT id FROM source_files WHERE file_hash = 'abc123'").fetchone()["id"]
+
+        repo.add_entry_page(entry.id, 1, "Page text", source_file_id=sf_id)
+        pages = repo.get_entry_pages(entry.id)
+        assert len(pages) == 1
+        assert pages[0].source_file_id == sf_id
+
+    def test_pages_ordered_by_page_number(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "Combined", 1)
+        # Insert in reverse order
+        repo.add_entry_page(entry.id, 3, "Third")
+        repo.add_entry_page(entry.id, 1, "First")
+        repo.add_entry_page(entry.id, 2, "Second")
+
+        pages = repo.get_entry_pages(entry.id)
+        assert [p.page_number for p in pages] == [1, 2, 3]
+        assert [p.raw_text for p in pages] == ["First", "Second", "Third"]
+
+    def test_unique_page_number_per_entry(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "Text", 1)
+        repo.add_entry_page(entry.id, 1, "Page one")
+
+        with pytest.raises(Exception):
+            repo.add_entry_page(entry.id, 1, "Duplicate page one")

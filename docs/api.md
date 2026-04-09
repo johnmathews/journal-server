@@ -1,6 +1,122 @@
+# API Reference
+
+## REST API Endpoints
+
+The journal server exposes REST API endpoints alongside the MCP protocol, both on the same port. These endpoints are registered via `mcp.custom_route()` and served by the same Starlette/ASGI application.
+
+CORS is configurable via the `API_CORS_ORIGINS` environment variable (see [configuration.md](configuration.md)).
+
+### GET /api/entries
+
+List entries with pagination and optional date filtering.
+
+**Query parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `start_date` | string | no | | Filter from date (ISO 8601) |
+| `end_date` | string | no | | Filter until date (ISO 8601) |
+| `limit` | int | no | 20 | Max results (1-100) |
+| `offset` | int | no | 0 | Pagination offset |
+
+**Response (200):**
+```json
+{
+  "items": [
+    {
+      "id": 1,
+      "entry_date": "2026-04-09",
+      "source_type": "image",
+      "page_count": 2,
+      "word_count": 450,
+      "chunk_count": 5,
+      "created_at": "2026-04-09T10:30:00"
+    }
+  ],
+  "total": 42,
+  "limit": 20,
+  "offset": 0
+}
+```
+
+### GET /api/entries/{id}
+
+Get a single entry with full text.
+
+**Response (200):**
+```json
+{
+  "id": 1,
+  "entry_date": "2026-04-09",
+  "source_type": "image",
+  "raw_text": "original OCR output...",
+  "final_text": "corrected text...",
+  "page_count": 2,
+  "word_count": 450,
+  "chunk_count": 5,
+  "language": "en",
+  "created_at": "2026-04-09T10:30:00",
+  "updated_at": "2026-04-09T11:00:00"
+}
+```
+
+**Response (404):**
+```json
+{ "error": "not_found", "message": "Entry 999 not found" }
+```
+
+### PATCH /api/entries/{id}
+
+Update an entry's `final_text`. Triggers re-chunking, re-embedding, and FTS5 rebuild.
+
+**Request body:**
+```json
+{ "final_text": "corrected text..." }
+```
+
+**Response (200):** Updated entry detail (same shape as GET /api/entries/{id}).
+
+**Response (400):**
+```json
+{ "error": "validation_error", "message": "final_text is required" }
+```
+
+**Response (404):**
+```json
+{ "error": "not_found", "message": "Entry 999 not found" }
+```
+
+### GET /api/stats
+
+Journal statistics with optional date filtering.
+
+**Query parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `start_date` | string | no | Filter from date (ISO 8601) |
+| `end_date` | string | no | Filter until date (ISO 8601) |
+
+**Response (200):**
+```json
+{
+  "total_entries": 42,
+  "date_range_start": "2025-01-15",
+  "date_range_end": "2026-04-09",
+  "total_words": 18500,
+  "avg_words_per_entry": 440,
+  "entries_per_month": {
+    "2026-03": 8,
+    "2026-04": 3
+  }
+}
+```
+
+---
+
 # MCP Tool Reference
 
-The journal MCP server exposes 8 tools via streamable HTTP transport.
+The journal MCP server exposes 10 tools via streamable HTTP transport.
 
 ## Query Tools
 
@@ -101,6 +217,25 @@ the file is available at a URL — this avoids MCP tool parameter size limits.
 | `media_type`  | string | yes      |         | MIME type (e.g. "image/jpeg")        |
 | `date`        | string | no       | today   | Entry date (ISO 8601)                |
 | `language`    | string | no       | "en"    | Language for voice transcription     |
+
+### journal_ingest_multi_page
+
+Ingest multiple images as pages of a single journal entry, or add pages to an existing entry. Images are OCR'd individually and combined into one entry.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `urls` | list[string] | yes | | URLs of page images (ordered) |
+| `date` | string | no | today | Entry date (ISO 8601) |
+| `entry_id` | int | no | | Existing entry ID to add pages to |
+
+### journal_update_entry_text
+
+Update an entry's `final_text` to correct OCR errors. Triggers re-chunking, re-embedding, and FTS5 rebuild. The original `raw_text` is preserved.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `entry_id` | int | yes | Entry ID to update |
+| `final_text` | string | yes | Corrected text |
 
 ## Transport
 

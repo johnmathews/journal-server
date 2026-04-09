@@ -9,10 +9,22 @@ class Entry:
     entry_date: str
     source_type: str
     raw_text: str
-    word_count: int
+    final_text: str = ""
+    word_count: int = 0
+    chunk_count: int = 0
     language: str = "en"
     created_at: str = ""
     updated_at: str = ""
+
+
+@dataclass
+class EntryPage:
+    id: int
+    entry_id: int
+    page_number: int
+    raw_text: str
+    source_file_id: int | None = None
+    created_at: str = ""
 
 
 @dataclass
@@ -45,7 +57,7 @@ class MoodTrend:
 class SearchResult:
     entry_id: int
     entry_date: str
-    raw_text: str
+    text: str
     score: float
     chunk_text: str = ""
 
