@@ -218,7 +218,7 @@ class IngestionService:
         entry = self._repo.create_entry(date, "ocr", combined_text, word_count)
 
         # Store source files and pages
-        for i, (image_data, _) in enumerate(images):
+        for i, (_image_data, _) in enumerate(images):
             source_file_id = self._store_source_file(
                 entry.id, f"image_{date}_p{i + 1}", page_media_types[i], page_hashes[i],
             )

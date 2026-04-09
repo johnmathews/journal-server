@@ -27,6 +27,8 @@ htmlcov/
 *.db
 *.db-wal
 *.db-shm
+*.sqlite
+*.sqlite3
 chroma-data/
 data/
 

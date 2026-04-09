@@ -419,7 +419,7 @@ def journal_ingest_multi_page(
 
     images = [
         (base64.b64decode(img), mt)
-        for img, mt in zip(images_base64, media_types)
+        for img, mt in zip(images_base64, media_types, strict=True)
     ]
 
     entry = service.ingest_multi_page_entry(images, entry_date)

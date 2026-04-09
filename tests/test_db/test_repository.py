@@ -1,5 +1,7 @@
 """Tests for SQLite repository."""
 
+import sqlite3
+
 import pytest
 
 from journal.db.repository import SQLiteEntryRepository
@@ -277,7 +279,10 @@ class TestEntryPages:
             (entry.id, "image.jpg", "image/jpeg", "abc123"),
         )
         repo._conn.commit()
-        sf_id = repo._conn.execute("SELECT id FROM source_files WHERE file_hash = 'abc123'").fetchone()["id"]
+        row = repo._conn.execute(
+            "SELECT id FROM source_files WHERE file_hash = 'abc123'"
+        ).fetchone()
+        sf_id = row["id"]
 
         repo.add_entry_page(entry.id, 1, "Page text", source_file_id=sf_id)
         pages = repo.get_entry_pages(entry.id)
@@ -299,5 +304,5 @@ class TestEntryPages:
         entry = repo.create_entry("2026-03-22", "ocr", "Text", 1)
         repo.add_entry_page(entry.id, 1, "Page one")
 
-        with pytest.raises(Exception):
+        with pytest.raises(sqlite3.IntegrityError):
             repo.add_entry_page(entry.id, 1, "Duplicate page one")

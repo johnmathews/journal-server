@@ -104,7 +104,8 @@ class SQLiteEntryRepository:
             "INSERT INTO entries (entry_date, source_type, raw_text, final_text, word_count)"
             " VALUES (?, ?, ?, ?, ?)"
         )
-        cursor = self._conn.execute(sql, (entry_date, source_type, raw_text, actual_final, word_count))
+        params = (entry_date, source_type, raw_text, actual_final, word_count)
+        cursor = self._conn.execute(sql, params)
         self._conn.commit()
         entry_id = cursor.lastrowid
         log.info("Created entry %d for date %s", entry_id, entry_date)
