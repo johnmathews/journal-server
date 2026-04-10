@@ -17,6 +17,16 @@ class VectorSearchResult:
     metadata: dict[str, Any]
 
 
+@dataclass
+class ChunkRecord:
+    """A stored chunk with its embedding. Used by eval-chunking."""
+
+    entry_id: int
+    chunk_index: int
+    text: str
+    embedding: list[float]
+
+
 @runtime_checkable
 class VectorStore(Protocol):
     def add_entry(
@@ -37,6 +47,8 @@ class VectorStore(Protocol):
     def delete_entry(self, entry_id: int) -> None: ...
 
     def count(self) -> int: ...
+
+    def get_chunks_for_entry(self, entry_id: int) -> list[ChunkRecord]: ...
 
 
 class ChromaVectorStore:
@@ -107,6 +119,35 @@ class ChromaVectorStore:
     def count(self) -> int:
         return self._collection.count()
 
+    def get_chunks_for_entry(self, entry_id: int) -> list[ChunkRecord]:
+        """Fetch every stored chunk for one entry, including its embedding.
+
+        Used by the eval-chunking CLI to compute cohesion/separation
+        metrics without re-embedding.
+        """
+        results = self._collection.get(
+            where={"entry_id": entry_id},
+            include=["documents", "embeddings", "metadatas"],
+        )
+        if not results["ids"]:
+            return []
+        records: list[ChunkRecord] = []
+        for i, _doc_id in enumerate(results["ids"]):
+            meta = results["metadatas"][i] if results["metadatas"] else {}
+            records.append(
+                ChunkRecord(
+                    entry_id=entry_id,
+                    chunk_index=meta.get("chunk_index", i),
+                    text=results["documents"][i] if results["documents"] else "",
+                    embedding=list(results["embeddings"][i])
+                    if results["embeddings"] is not None
+                    else [],
+                )
+            )
+        # Sort by chunk_index so downstream code sees them in ingestion order.
+        records.sort(key=lambda r: r.chunk_index)
+        return records
+
 
 class InMemoryVectorStore:
     """Simple in-memory vector store for testing."""
@@ -166,6 +207,20 @@ class InMemoryVectorStore:
 
     def count(self) -> int:
         return len(self._entries)
+
+    def get_chunks_for_entry(self, entry_id: int) -> list[ChunkRecord]:
+        records = [
+            ChunkRecord(
+                entry_id=entry_id,
+                chunk_index=doc["metadata"].get("chunk_index", 0),
+                text=doc["chunk_text"],
+                embedding=doc["embedding"],
+            )
+            for doc in self._entries.values()
+            if doc["entry_id"] == entry_id
+        ]
+        records.sort(key=lambda r: r.chunk_index)
+        return records
 
     @staticmethod
     def _cosine_distance(a: list[float], b: list[float]) -> float:

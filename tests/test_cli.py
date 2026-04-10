@@ -58,6 +58,17 @@ def test_cli_rechunk_help(capsys):
     assert "--dry-run" in captured.out
 
 
+def test_cli_eval_chunking_help(capsys):
+    """Test that eval-chunking subcommand shows help with the --json flag."""
+    with pytest.raises(SystemExit) as exc_info:
+        sys.argv = ["journal", "eval-chunking", "--help"]
+        main()
+    assert exc_info.value.code == 0
+    captured = capsys.readouterr()
+    assert "eval-chunking" in captured.out
+    assert "--json" in captured.out
+
+
 def test_cli_all_commands_registered(capsys):
     """Test that all expected commands appear in help output."""
     with pytest.raises(SystemExit):
@@ -72,5 +83,6 @@ def test_cli_all_commands_registered(capsys):
         "stats",
         "backfill-chunks",
         "rechunk",
+        "eval-chunking",
     ):
         assert cmd in captured.out, f"Command '{cmd}' not found in help output"

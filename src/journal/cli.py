@@ -15,6 +15,7 @@ from journal.providers.ocr import AnthropicOCRProvider
 from journal.providers.transcription import OpenAITranscriptionProvider
 from journal.services.backfill import backfill_chunk_counts, rechunk_entries
 from journal.services.chunking import build_chunker
+from journal.services.chunking_eval import evaluate_chunking
 from journal.services.ingestion import IngestionService
 from journal.services.query import QueryService
 from journal.vectorstore.store import ChromaVectorStore
@@ -198,6 +199,50 @@ def cmd_backfill_chunks(args, config):
         print(f"\nErrors ({len(result.errors)}):")
         for err in result.errors:
             print(f"  {err}")
+
+
+def cmd_eval_chunking(args, config):
+    """Measure chunking quality on the currently-stored corpus.
+
+    Computes three numbers:
+    - cohesion: sentences within a chunk are similar (higher = better)
+    - separation: adjacent chunks within an entry are distinct (higher = better)
+    - ratio: cohesion / (1 - separation), a single number to optimise
+
+    No ground truth required. Re-run after `journal rechunk` to compare
+    chunking configurations — higher ratio means better chunks.
+    """
+    import json
+
+    conn = get_connection(config.db_path)
+    run_migrations(conn)
+    repo = SQLiteEntryRepository(conn)
+
+    vector_store = ChromaVectorStore(
+        host=config.chromadb_host,
+        port=config.chromadb_port,
+        collection_name=config.chromadb_collection,
+    )
+    embeddings = OpenAIEmbeddingsProvider(
+        api_key=config.openai_api_key,
+        model=config.embedding_model,
+        dimensions=config.embedding_dimensions,
+    )
+
+    result = evaluate_chunking(repo, vector_store, embeddings)
+
+    if args.json:
+        print(json.dumps(result.as_dict(), indent=2))
+        return
+
+    print("Chunking quality (higher = better):")
+    print(f"  Cohesion:   {result.cohesion:.3f}  (intra-chunk sentence similarity)")
+    print(f"  Separation: {result.separation:.3f}  (inter-chunk distinctness)")
+    print(f"  Ratio:      {result.ratio:.3f}  (cohesion / (1 - separation))")
+    print()
+    print(f"  {result.n_chunks_evaluated} chunks evaluated")
+    print(f"  {result.n_entries_evaluated} entries evaluated")
+    print(f"  {result.n_pairs_evaluated} adjacent chunk pairs evaluated")
 
 
 def cmd_rechunk(args, config):
@@ -403,6 +448,17 @@ def main():
         help="Report what would change without writing to ChromaDB or SQLite",
     )
 
+    # eval-chunking
+    p_eval = subparsers.add_parser(
+        "eval-chunking",
+        help="Measure chunking quality (cohesion / separation / ratio)",
+    )
+    p_eval.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON output",
+    )
+
     # seed
     p_seed = subparsers.add_parser(
         "seed", help="Seed database with sample entries (no API keys needed)",
@@ -421,6 +477,7 @@ def main():
         "stats": cmd_stats,
         "backfill-chunks": cmd_backfill_chunks,
         "rechunk": cmd_rechunk,
+        "eval-chunking": cmd_eval_chunking,
         "seed": cmd_seed,
     }
     commands[args.command](args, config)
