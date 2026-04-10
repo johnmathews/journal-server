@@ -13,6 +13,8 @@ from journal.logging import setup_logging
 from journal.providers.embeddings import OpenAIEmbeddingsProvider
 from journal.providers.ocr import AnthropicOCRProvider
 from journal.providers.transcription import OpenAITranscriptionProvider
+from journal.services.backfill import backfill_chunk_counts
+from journal.services.chunking import chunk_text
 from journal.services.ingestion import IngestionService
 from journal.services.query import QueryService
 from journal.vectorstore.store import ChromaVectorStore
@@ -170,32 +172,29 @@ def cmd_ingest_multi(args, config):
 
 
 def cmd_backfill_chunks(args, config):
-    """Backfill chunk_count for existing entries from ChromaDB."""
+    """Re-run the chunker over every entry and update its stored chunk_count.
+
+    Fixes entries whose `chunk_count` is stale (e.g. seeded entries, or
+    entries created before migration 0002 added the column). Does not touch
+    the vector store — embeddings are not regenerated.
+    """
     conn = get_connection(config.db_path)
     run_migrations(conn)
     repo = SQLiteEntryRepository(conn)
 
-    vector_store = ChromaVectorStore(
-        host=config.chromadb_host,
-        port=config.chromadb_port,
-        collection_name=config.chromadb_collection,
+    result = backfill_chunk_counts(
+        repo,
+        max_tokens=config.chunk_max_tokens,
+        overlap_tokens=config.chunk_overlap_tokens,
     )
 
-    entries = repo.list_entries(limit=10000)
-    updated = 0
-    for entry in entries:
-        if entry.chunk_count == 0:
-            # Query ChromaDB for chunks belonging to this entry
-            results = vector_store._collection.get(
-                where={"entry_id": entry.id},
-            )
-            count = len(results["ids"]) if results["ids"] else 0
-            if count > 0:
-                repo.update_chunk_count(entry.id, count)
-                updated += 1
-                print(f"  Entry {entry.id} ({entry.entry_date}): {count} chunks")
-
-    print(f"\nBackfilled {updated} entries.")
+    print(f"Updated:   {result.updated}")
+    print(f"Unchanged: {result.unchanged}")
+    print(f"Skipped:   {result.skipped} (no text)")
+    if result.errors:
+        print(f"\nErrors ({len(result.errors)}):")
+        for err in result.errors:
+            print(f"  {err}")
 
 
 def cmd_seed(args, config):
@@ -278,12 +277,21 @@ def cmd_seed(args, config):
         # Add a page record for OCR entries
         if sample["source_type"] == "ocr":
             repo.add_entry_page(entry.id, 1, sample["text"])
+        # Compute and store chunk_count so the UI shows the real value even
+        # though we don't generate embeddings during seeding.
+        chunks = chunk_text(
+            sample["text"], config.chunk_max_tokens, config.chunk_overlap_tokens
+        )
+        repo.update_chunk_count(entry.id, len(chunks))
         created += 1
         src = sample["source_type"]
-        print(f"  Created entry {entry.id}: {sample['date']} ({src}, {word_count} words)")
+        print(
+            f"  Created entry {entry.id}: {sample['date']} "
+            f"({src}, {word_count} words, {len(chunks)} chunks)"
+        )
 
     print(f"\nSeeded {created} entries.")
-    print("No embeddings generated (use backfill or re-ingest for search).")
+    print("No embeddings generated (re-ingest entries if you want semantic search).")
 
 
 def cmd_stats(args, config):

@@ -116,7 +116,25 @@ uv run journal seed              # all 5 samples
 uv run journal seed --count 2    # just 2
 ```
 
-Seeded entries won't have embeddings, so semantic search won't find them. To add embeddings, re-ingest with API keys or use the backfill command (future).
+Seeded entries won't have embeddings, so semantic search won't find them. To add embeddings, re-ingest with API keys. The `seed` command does compute `chunk_count` correctly from the chunker, so the webapp's "chunks" column shows the right value even without embeddings.
+
+### Backfilling chunk_count
+
+If entries exist with a stale `chunk_count = 0` — e.g. from seed data predating the chunk-count fix, or from database rows created before migration 0002 added the column — run:
+
+```bash
+uv run journal backfill-chunks
+```
+
+This re-runs the tokenizer/chunker over every entry's `final_text || raw_text` and updates the stored column. It does **not** regenerate embeddings (so no API keys are required) and it's idempotent — re-running reports everything as `Unchanged`.
+
+```
+Updated:   0
+Unchanged: 5
+Skipped:   0 (no text)
+```
+
+If you need to rebuild embeddings as well, re-ingest the entry via the REST API or CLI — the PATCH path in `update_entry_text()` re-chunks and re-embeds in one call.
 
 ## Local ChromaDB
 
