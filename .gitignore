@@ -18,6 +18,17 @@ build/
 .env
 .env.local
 
+# Secrets
+*.key
+*.pem
+*.p12
+credentials.json
+vault_password
+
+# Claude Code local overrides
+.claude/settings.local.json
+.claude/worktrees/
+
 # Coverage
 htmlcov/
 .coverage

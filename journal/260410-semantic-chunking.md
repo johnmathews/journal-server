@@ -102,3 +102,7 @@ These are "intrinsic" — no golden query set needed. Re-run after rechunking wi
 - [ ] If best values differ from defaults, update `config.py`
 - [ ] Document final chosen values in a follow-up journal entry
 - [ ] Consider building a golden query set once the corpus is ~20 entries
+
+## Session wrap-up
+
+The `/done` wrap-up found one gap: `.gitignore` was missing generic secret patterns (`*.key`, `*.pem`, `credentials.json`, `*.p12`, `vault_password`) and `.claude/settings.local.json` / `.claude/worktrees/`. The webapp already had these covered. Added them to the server's `.gitignore` as a preemptive hardening — no secrets were actually leaked. Coverage reports: server 74.59% (above the 65% threshold), webapp 96.93% / 98.37% lines. Both CI workflows verified — single `ci-and-deploy.yml` (server) and `ci.yml` (webapp), each pushing to `ghcr.io/johnmathews/<repo>` on push to main. ChromaDB healthcheck (curl-based) verified working in production by `docker ps` output earlier in the session.
