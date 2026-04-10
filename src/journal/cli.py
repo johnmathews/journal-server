@@ -13,7 +13,7 @@ from journal.logging import setup_logging
 from journal.providers.embeddings import OpenAIEmbeddingsProvider
 from journal.providers.ocr import AnthropicOCRProvider
 from journal.providers.transcription import OpenAITranscriptionProvider
-from journal.services.backfill import backfill_chunk_counts
+from journal.services.backfill import backfill_chunk_counts, rechunk_entries
 from journal.services.chunking import build_chunker
 from journal.services.ingestion import IngestionService
 from journal.services.query import QueryService
@@ -200,6 +200,34 @@ def cmd_backfill_chunks(args, config):
             print(f"  {err}")
 
 
+def cmd_rechunk(args, config):
+    """Re-run the FULL chunking + embedding pipeline over every entry.
+
+    Unlike `backfill-chunks`, which only recomputes the `chunk_count`
+    column, this command deletes each entry's existing vectors from
+    ChromaDB and regenerates them using the currently-configured
+    strategy. Use this when you've changed `CHUNKING_STRATEGY` or any
+    semantic chunker parameter and want the stored chunks to match.
+
+    With `--dry-run`, reports what would change without writing to
+    ChromaDB or SQLite and without calling the embeddings API.
+    """
+    ingestion, _ = _build_services(config)
+    repo = ingestion._repo  # type: ignore[attr-defined]
+
+    result = rechunk_entries(ingestion, repo, dry_run=args.dry_run)
+
+    prefix = "[dry-run] " if args.dry_run else ""
+    print(f"{prefix}Updated:          {result.updated}")
+    print(f"{prefix}Skipped:          {result.skipped} (no text)")
+    print(f"{prefix}Old total chunks: {result.old_total_chunks}")
+    print(f"{prefix}New total chunks: {result.new_total_chunks}")
+    if result.errors:
+        print(f"\nErrors ({len(result.errors)}):")
+        for err in result.errors:
+            print(f"  {err}")
+
+
 def cmd_seed(args, config):
     """Seed the database with sample journal entries for development."""
     conn = get_connection(config.db_path)
@@ -359,7 +387,21 @@ def main():
     p_stats.add_argument("--end-date", help="Filter until date")
 
     # backfill-chunks
-    subparsers.add_parser("backfill-chunks", help="Backfill chunk_count from ChromaDB")
+    subparsers.add_parser(
+        "backfill-chunks",
+        help="Re-run the chunker and update stored chunk_count (no re-embedding)",
+    )
+
+    # rechunk
+    p_rechunk = subparsers.add_parser(
+        "rechunk",
+        help="Re-chunk and re-embed every entry using the current strategy",
+    )
+    p_rechunk.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would change without writing to ChromaDB or SQLite",
+    )
 
     # seed
     p_seed = subparsers.add_parser(
@@ -378,6 +420,7 @@ def main():
         "list": cmd_list,
         "stats": cmd_stats,
         "backfill-chunks": cmd_backfill_chunks,
+        "rechunk": cmd_rechunk,
         "seed": cmd_seed,
     }
     commands[args.command](args, config)

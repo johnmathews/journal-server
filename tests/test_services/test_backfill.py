@@ -1,9 +1,16 @@
 """Tests for the backfill service."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from journal.db.repository import SQLiteEntryRepository
-from journal.services.backfill import BackfillResult, backfill_chunk_counts
+from journal.services.backfill import (
+    BackfillResult,
+    RechunkResult,
+    backfill_chunk_counts,
+    rechunk_entries,
+)
 from journal.services.chunking import FixedTokenChunker
 
 
@@ -130,4 +137,90 @@ class TestBackfillChunkCounts:
         assert r.updated == 0
         assert r.unchanged == 0
         assert r.skipped == 0
+        assert r.errors == []
+
+
+class TestRechunkEntries:
+    def test_updates_every_entry_via_ingestion_service(self, repo):
+        _insert(repo, "Entry one.")
+        _insert(repo, "Entry two.")
+        _insert(repo, "Entry three.")
+
+        mock_ingestion = MagicMock()
+        mock_ingestion.rechunk_entry.return_value = 2  # each returns 2 chunks
+
+        result = rechunk_entries(mock_ingestion, repo)
+
+        assert result.updated == 3
+        assert result.skipped == 0
+        assert result.errors == []
+        assert result.new_total_chunks == 6
+        assert mock_ingestion.rechunk_entry.call_count == 3
+
+    def test_skips_entries_with_no_text(self, repo):
+        _insert(repo, "Has text.")
+        empty = repo.create_entry("2026-03-03", "ocr", "", 0)
+        repo.update_chunk_count(empty.id, 0)
+
+        mock_ingestion = MagicMock()
+        mock_ingestion.rechunk_entry.return_value = 1
+
+        result = rechunk_entries(mock_ingestion, repo)
+
+        assert result.updated == 1
+        assert result.skipped == 1
+        assert mock_ingestion.rechunk_entry.call_count == 1
+
+    def test_dry_run_propagates_flag(self, repo):
+        _insert(repo, "Entry to dry-run.")
+
+        mock_ingestion = MagicMock()
+        mock_ingestion.rechunk_entry.return_value = 1
+
+        rechunk_entries(mock_ingestion, repo, dry_run=True)
+
+        mock_ingestion.rechunk_entry.assert_called_once()
+        _args, kwargs = mock_ingestion.rechunk_entry.call_args
+        assert kwargs["dry_run"] is True
+
+    def test_per_entry_errors_do_not_abort_batch(self, repo):
+        _insert(repo, "Good one.")
+        _insert(repo, "Bad one.")
+        _insert(repo, "Another good one.")
+
+        mock_ingestion = MagicMock()
+        mock_ingestion.rechunk_entry.side_effect = [
+            1,                                  # first succeeds
+            RuntimeError("embedding failed"),   # second raises
+            3,                                  # third still processed
+        ]
+
+        result = rechunk_entries(mock_ingestion, repo)
+
+        assert result.updated == 2
+        assert len(result.errors) == 1
+        assert "embedding failed" in result.errors[0]
+
+    def test_old_and_new_total_chunks_tracked(self, repo):
+        e1 = _insert(repo, "First entry.")
+        e2 = _insert(repo, "Second entry.")
+        # Pretend the stored chunk counts are 2 and 3 respectively.
+        repo.update_chunk_count(e1.id, 2)
+        repo.update_chunk_count(e2.id, 3)
+
+        mock_ingestion = MagicMock()
+        # New chunker produces more chunks — 4 and 5.
+        mock_ingestion.rechunk_entry.side_effect = [4, 5]
+
+        result = rechunk_entries(mock_ingestion, repo)
+
+        assert result.old_total_chunks == 5  # 2 + 3
+        assert result.new_total_chunks == 9  # 4 + 5
+
+    def test_rechunk_result_defaults(self):
+        r = RechunkResult()
+        assert r.updated == 0
+        assert r.skipped == 0
+        assert r.old_total_chunks == 0
+        assert r.new_total_chunks == 0
         assert r.errors == []

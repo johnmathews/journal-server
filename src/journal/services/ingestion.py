@@ -283,6 +283,41 @@ class IngestionService:
         log.info("Updated entry %d: %d words, %d chunks", entry_id, word_count, chunk_count)
         return updated  # type: ignore[return-value]
 
+    def rechunk_entry(self, entry_id: int, *, dry_run: bool = False) -> int:
+        """Re-chunk and re-embed an existing entry in place.
+
+        Used by the `journal rechunk` CLI and by future tuning scripts.
+        Reads `final_text` (or falls back to `raw_text`), runs the full
+        chunk → embed → store pipeline, updates the stored chunk_count.
+        Does not touch the entry's text content.
+
+        When `dry_run=True`, runs the chunker only — no embeddings are
+        computed, the vector store is left alone, and `chunk_count` in
+        SQLite is NOT updated. Returns the chunk count that would have
+        been written.
+        """
+        entry = self._repo.get_entry(entry_id)
+        if entry is None:
+            raise ValueError(f"Entry {entry_id} not found")
+
+        text = entry.final_text or entry.raw_text
+        if not text or not text.strip():
+            log.warning("Entry %d has no text — skipping rechunk", entry_id)
+            return 0
+
+        if dry_run:
+            return len(self._chunker.chunk(text))
+
+        # Delete the old vectors BEFORE producing new ones so we don't
+        # accidentally end up with duplicates if _process_text fails
+        # partway through. If embed_texts then raises, the entry will
+        # have zero chunks in ChromaDB — callers should handle this and
+        # (re-)retry.
+        self._vector_store.delete_entry(entry_id)
+        chunk_count = self._process_text(entry_id, text, entry.entry_date)
+        self._repo.update_chunk_count(entry_id, chunk_count)
+        return chunk_count
+
     def _store_source_file(
         self, entry_id: int, file_path: str, file_type: str, file_hash: str
     ) -> int | None:

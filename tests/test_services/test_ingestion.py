@@ -289,3 +289,65 @@ class TestMetadataPrefix:
         # No weekday component when the date can't be parsed.
         assert "Monday" not in embed_inputs[0]
         assert "Sunday" not in embed_inputs[0]
+
+
+class TestRechunkEntry:
+    """WU-D: IngestionService.rechunk_entry() end-to-end test with an in-memory
+    vector store so we can observe the old → new chunk transition."""
+
+    def test_rechunk_replaces_existing_vectors(self, ingestion_service, mock_embeddings):
+        # Ingest once with a chunker that produces N chunks.
+        entry = ingestion_service.ingest_image(
+            b"fake image", "image/jpeg", "2026-03-22"
+        )
+        original_chunks = entry.chunk_count
+        assert original_chunks > 0
+
+        # Reset the embeddings mock so we can assert the rechunk call.
+        mock_embeddings.embed_texts.reset_mock()
+
+        new_count = ingestion_service.rechunk_entry(entry.id)
+
+        # Rechunk called embed_texts again (one call for the new chunks).
+        mock_embeddings.embed_texts.assert_called_once()
+        # The stored chunk_count is updated.
+        refreshed = ingestion_service._repo.get_entry(entry.id)
+        assert refreshed.chunk_count == new_count
+
+    def test_rechunk_missing_entry_raises(self, ingestion_service):
+        with pytest.raises(ValueError, match="not found"):
+            ingestion_service.rechunk_entry(999)
+
+    def test_rechunk_dry_run_does_not_touch_embeddings_or_db(
+        self, ingestion_service, mock_embeddings
+    ):
+        entry = ingestion_service.ingest_image(
+            b"fake image", "image/jpeg", "2026-03-22"
+        )
+        original_count = entry.chunk_count
+
+        mock_embeddings.embed_texts.reset_mock()
+        # Also snapshot the vector store size so we can verify nothing
+        # was deleted or added.
+        before_count = ingestion_service._vector_store.count()
+
+        new_count = ingestion_service.rechunk_entry(entry.id, dry_run=True)
+
+        # Dry run still returns a chunk count.
+        assert new_count >= 1
+        # But it did NOT call embed_texts.
+        mock_embeddings.embed_texts.assert_not_called()
+        # Vector store unchanged.
+        assert ingestion_service._vector_store.count() == before_count
+        # SQLite chunk_count unchanged.
+        refreshed = ingestion_service._repo.get_entry(entry.id)
+        assert refreshed.chunk_count == original_count
+
+    def test_rechunk_empty_text_returns_zero(self, ingestion_service):
+        # Manually create an entry with no text (bypasses ingest_image
+        # which would have rejected empty OCR output).
+        entry = ingestion_service._repo.create_entry("2026-03-22", "ocr", "", 0)
+        ingestion_service._repo.update_chunk_count(entry.id, 0)
+
+        result = ingestion_service.rechunk_entry(entry.id)
+        assert result == 0
