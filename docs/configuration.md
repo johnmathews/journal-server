@@ -9,7 +9,7 @@ All configuration is via environment variables. No config files are needed.
 | `ANTHROPIC_API_KEY` | Anthropic API key for OCR (Claude Opus 4.6 vision) |
 | `OPENAI_API_KEY` | OpenAI API key for Whisper transcription and embeddings |
 
-## Optional
+## Optional — deployment
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -22,6 +22,20 @@ All configuration is via environment variables. No config files are needed.
 | `API_CORS_ORIGINS` | | Comma-separated list of allowed CORS origins for the REST API (e.g., `http://localhost:5173`). Empty disables CORS. |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 
+## Optional — chunking
+
+See `docs/architecture.md` → "Chunking Strategies" for the algorithm and tradeoffs.
+
+| Variable                          | Default    | Applies to    | Description |
+|-----------------------------------|------------|---------------|-------------|
+| `CHUNKING_STRATEGY`               | `semantic` | both          | `"fixed"` or `"semantic"` |
+| `CHUNKING_MAX_TOKENS`             | `150`      | both          | Upper bound for chunk size |
+| `CHUNKING_OVERLAP_TOKENS`         | `40`       | fixed only    | Tokens carried between adjacent chunks |
+| `CHUNKING_MIN_TOKENS`             | `30`       | semantic only | Minimum chunk size; smaller segments are merged |
+| `CHUNKING_BOUNDARY_PERCENTILE`    | `25`       | semantic only | Adjacent similarities at/below this percentile are cut positions |
+| `CHUNKING_DECISIVE_PERCENTILE`    | `10`       | semantic only | Cuts at/below this are clean (no overlap); between 10 and 25 are weak cuts with adaptive tail overlap |
+| `CHUNKING_EMBED_METADATA_PREFIX`  | `true`     | both          | Prepend `"Date: YYYY-MM-DD. Weekday."` to each chunk before embedding (stored document stays un-prefixed) |
+
 ## Models (hardcoded defaults, changeable in config.py)
 
 | Setting | Default | Description |
@@ -30,8 +44,6 @@ All configuration is via environment variables. No config files are needed.
 | `transcription_model` | `gpt-4o-transcribe` | OpenAI model for transcription |
 | `embedding_model` | `text-embedding-3-large` | OpenAI model for embeddings |
 | `embedding_dimensions` | `1024` | Embedding vector dimensions (reduced from 3072) |
-| `chunk_max_tokens` | `150` | Maximum tokens per text chunk |
-| `chunk_overlap_tokens` | `40` | Token overlap between chunks |
 
 ## Docker Compose
 

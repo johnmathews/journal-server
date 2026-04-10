@@ -27,7 +27,7 @@ In both cases, this service does the same thing: embed the query, find nearest v
 Thin adapters that expose the service layer to external consumers:
 - **MCP Server** (`mcp_server.py`) — 10 tools via FastMCP, streamable HTTP transport. The primary interface, designed to be called by LLM-based MCP clients that interpret results for the user.
 - **REST API** (`api.py`) — 4 endpoints via `mcp.custom_route()`, same port as MCP server. Used by the journal-webapp frontend.
-- **CLI** (`cli.py`) — argparse-based command-line interface. Exposes 6 commands (ingest, ingest-multi, search, list, stats, backfill-chunks) for direct use without an LLM client.
+- **CLI** (`cli.py`) — argparse-based command-line interface. Exposes 9 commands (ingest, ingest-multi, search, list, stats, backfill-chunks, rechunk, eval-chunking, seed) for direct use without an LLM client.
 
 ### Service Layer
 Business logic orchestration:
@@ -61,14 +61,75 @@ Multiple images can be ingested into a single entry. Each image is OCR'd indepen
 - The entry's `raw_text` and `final_text` are the concatenation of all page texts
 - Adding pages to an existing entry triggers the same re-chunking and re-embedding flow
 
+## Chunking Strategies
+
+Chunking — splitting a journal entry into overlapping fragments before embedding — is the single biggest lever on retrieval quality. The service supports two strategies, selected via the `CHUNKING_STRATEGY` environment variable.
+
+### `fixed` — `FixedTokenChunker`
+
+Paragraph-first packing with a tiktoken budget, sentence-level fallback for long paragraphs, fixed overlap. Deterministic, no external API calls. Defined in `services/chunking.py`.
+
+Algorithm:
+1. If the whole text fits in `chunking_max_tokens`, return it as one chunk.
+2. Split on blank lines into paragraphs; greedily pack them into chunks up to the max.
+3. When flushing a chunk, carry `chunking_overlap_tokens` worth of trailing paragraphs into the next chunk.
+4. If a single paragraph exceeds the max, fall back to sentence-level packing within that paragraph.
+
+Good for: predictable behaviour, no dependency on an embedding provider, cheap rechunking.
+Bad for: stream-of-consciousness prose where topic boundaries don't align with paragraph breaks.
+
+### `semantic` — `SemanticChunker` (default)
+
+Content-adaptive chunker that cuts where meaning actually shifts. One extra `embed_texts` call per ingested entry. Defined in `services/chunking.py`.
+
+Algorithm:
+1. Split into sentences via `pysbd` (handles abbreviations, decimals, em-dashes).
+2. Batch-embed every sentence through the configured `EmbeddingsProvider`.
+3. Compute adjacent-sentence cosine similarity using numpy.
+4. Apply **two percentile thresholds**:
+   - `chunking_boundary_percentile` (default 25) — adjacent similarities at or below this percentile are cut positions.
+   - `chunking_decisive_percentile` (default 10) — cuts at or below this are "clean" (no tail overlap). Cuts between the two are "weak" — the boundary sentence gets **duplicated into the next chunk as transition context** (adaptive tail overlap).
+5. Enforce `chunking_min_tokens` by merging undersized segments into their nearest neighbour.
+6. Enforce `chunking_max_tokens` by falling back to fixed-token packing for oversized segments.
+
+Adaptive overlap is the key refinement: decisive topic shifts get a hard cut, ambiguous transitions get a soft one. That keeps most embeddings tight while preserving context for sentences that span two topics.
+
+### Metadata prefix
+
+Independent of strategy, when `CHUNKING_EMBED_METADATA_PREFIX=true` (default on), each chunk is embedded with a `"Date: YYYY-MM-DD. Weekday.\n\n"` header prepended. The stored document in ChromaDB is still the un-prefixed chunk text, so downstream consumers get clean content — but the embedding vector carries date-sensitive signal that helps queries like "what did I write about Atlas in February" match the right entries.
+
+### `rechunk` CLI
+
+Swapping strategy would leave the existing ChromaDB chunks reflecting the old strategy. The `journal rechunk` command fixes that: it iterates every entry, deletes its vectors, and regenerates them using the currently-configured strategy. Use `--dry-run` to preview counts without writing or calling the embeddings API.
+
+### `eval-chunking` CLI
+
+Chunking quality without ground truth is measurable via intrinsic metrics over the stored corpus:
+
+- **Cohesion** — mean pairwise cosine similarity of sentences within each chunk (higher = chunks are internally consistent).
+- **Separation** — `1 − cosine` between adjacent chunks within an entry (higher = chunks are actually distinct from each other).
+- **Ratio** — `cohesion / (1 − separation)`, a single number to optimise.
+
+Tuning loop:
+```bash
+for pct in 15 20 25 30 35; do
+  CHUNKING_STRATEGY=semantic CHUNKING_BOUNDARY_PERCENTILE=$pct \
+    uv run journal rechunk
+  CHUNKING_STRATEGY=semantic CHUNKING_BOUNDARY_PERCENTILE=$pct \
+    uv run journal eval-chunking --json
+done
+```
+
+Pick the value with the highest ratio and set it as the default in `config.py`.
+
 ## Data Flow
 
 ### Ingestion
 ```
 Image/Audio → Provider (OCR/Whisper) → Raw Text
     → SQLite (entry with raw_text + final_text, entry_pages for images)
-    → Chunking (150 tokens, 40 overlap) using final_text
-    → Embeddings (OpenAI, 1024 dims)
+    → Chunking (strategy: fixed or semantic) using final_text
+    → Embeddings (OpenAI, 1024 dims; optional date-metadata prefix)
     → ChromaDB (chunks + embeddings + metadata)
 ```
 

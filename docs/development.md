@@ -158,6 +158,73 @@ Either command is safe to run against a live container — the backfill only iss
 
 After running, hard-refresh the webapp — the entry list is cached in the Pinia store for the session, so the column may still show stale values until you reload.
 
+### Rechunking (full pipeline, regenerates embeddings)
+
+Unlike `backfill-chunks`, which only updates the `chunk_count` column, `rechunk` deletes each entry's existing vectors from ChromaDB and regenerates them using the currently-configured strategy. Use this when you've changed `CHUNKING_STRATEGY` or any semantic chunker parameter and want the stored chunks to match.
+
+```bash
+# Re-chunk every entry using the current config.
+uv run journal rechunk
+
+# Preview what would change without writing or calling the embeddings API.
+uv run journal rechunk --dry-run
+```
+
+**Rechunk costs embeddings API calls** (one batched call per entry). For a corpus of 50 entries, that's ~50 OpenAI calls. Cheap but not free.
+
+In production (media VM):
+
+```bash
+docker exec journal-server uv run journal rechunk
+docker exec journal-server uv run journal rechunk --dry-run
+```
+
+### Measuring chunking quality
+
+`eval-chunking` computes three intrinsic metrics over the stored corpus:
+
+- **Cohesion** — sentences within a chunk are similar (higher = better)
+- **Separation** — adjacent chunks within an entry are distinct (higher = better)
+- **Ratio** — `cohesion / (1 − separation)`, a single number to optimise
+
+```bash
+# Human-readable output
+uv run journal eval-chunking
+
+# Machine-readable (for scripting tuning loops)
+uv run journal eval-chunking --json
+```
+
+No ground-truth labels needed. Re-run after a `rechunk` to compare chunking configurations — higher ratio means better chunks for your corpus.
+
+### Tuning the semantic chunker
+
+Once you have enough real entries in the corpus, iterate on the percentile values:
+
+```bash
+for pct in 15 20 25 30 35; do
+  echo "=== boundary_percentile=$pct ==="
+  CHUNKING_STRATEGY=semantic CHUNKING_BOUNDARY_PERCENTILE=$pct \
+    uv run journal rechunk
+  CHUNKING_STRATEGY=semantic CHUNKING_BOUNDARY_PERCENTILE=$pct \
+    uv run journal eval-chunking
+done
+```
+
+Pick the value with the highest ratio, then update `chunking_boundary_percentile` in `config.py` (or set the env var on the production container).
+
+### Configuration reference
+
+| Env var                             | Default    | Applies to      | Description |
+|-------------------------------------|------------|-----------------|-------------|
+| `CHUNKING_STRATEGY`                 | `semantic` | both            | `"fixed"` or `"semantic"` |
+| `CHUNKING_MAX_TOKENS`               | `150`      | both            | Upper bound for chunk size |
+| `CHUNKING_OVERLAP_TOKENS`           | `40`       | fixed only      | Tokens carried between adjacent chunks |
+| `CHUNKING_MIN_TOKENS`               | `30`       | semantic only   | Minimum chunk size; smaller segments are merged |
+| `CHUNKING_BOUNDARY_PERCENTILE`      | `25`       | semantic only   | Adjacent similarities at/below this percentile are cut positions |
+| `CHUNKING_DECISIVE_PERCENTILE`      | `10`       | semantic only   | Cuts at/below this are clean (no overlap); between 10 and 25 are weak cuts (adaptive tail overlap) |
+| `CHUNKING_EMBED_METADATA_PREFIX`    | `true`     | both            | Prepend `"Date: YYYY-MM-DD. Weekday."` to each chunk before embedding (stored document stays un-prefixed) |
+
 ## Local ChromaDB
 
 The `docker-compose.dev.yml` runs ChromaDB on port 8401 (matching `.env.example`):
