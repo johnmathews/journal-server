@@ -54,12 +54,29 @@ class MoodTrend:
 
 
 @dataclass
+class ChunkMatch:
+    """A single chunk that matched a query, with its relevance score."""
+
+    text: str
+    score: float
+
+
+@dataclass
 class SearchResult:
+    """One entry's contribution to a search result set.
+
+    `text` is the full parent entry (`final_text or raw_text`).
+    `matching_chunks` lists every chunk in the entry that scored above
+    the vector store's similarity cutoff, sorted by score descending.
+    `score` is the top (max) chunk score — used to rank entries against
+    each other in the result list.
+    """
+
     entry_id: int
     entry_date: str
     text: str
     score: float
-    chunk_text: str = ""
+    matching_chunks: list[ChunkMatch] = field(default_factory=list)
 
 
 @dataclass

@@ -148,10 +148,19 @@ def journal_search_entries(
 
     lines = [f"Found {len(results)} entries matching '{query}':\n"]
     for r in results:
-        lines.append(f"--- {r.entry_date} (relevance: {r.score:.0%}) ---")
-        # Show the matching chunk for context, then the full entry
-        if r.chunk_text and r.chunk_text != r.text:
-            lines.append(f"Best match: ...{r.chunk_text[:200]}...")
+        lines.append(
+            f"--- {r.entry_date} (top relevance: {r.score:.0%}, "
+            f"{len(r.matching_chunks)} matching chunk"
+            f"{'s' if len(r.matching_chunks) != 1 else ''}) ---"
+        )
+        # Show every matching chunk (not just the top one) so LLM consumers
+        # see all passages in this entry that were relevant to the query.
+        for i, cm in enumerate(r.matching_chunks, start=1):
+            snippet = cm.text[:200]
+            ellipsis = "..." if len(cm.text) > 200 else ""
+            lines.append(f"  match {i} ({cm.score:.0%}): {snippet}{ellipsis}")
+        # Then the full parent entry for context.
+        lines.append("")
         lines.append(r.text[:500])
         if len(r.text) > 500:
             lines.append(f"... ({len(r.text)} chars total)")

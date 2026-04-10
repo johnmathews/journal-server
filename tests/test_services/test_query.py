@@ -68,11 +68,93 @@ def test_search_entries(seeded_service, mock_embeddings):
     assert len(results) >= 1
     assert results[0].entry_date == "2026-03-22"
     assert results[0].score > 0
+    # WU-G: every result carries the list of matching chunks.
+    assert len(results[0].matching_chunks) >= 1
+    assert results[0].matching_chunks[0].text == "Walked through Vienna with Atlas"
 
 
 def test_search_entries_empty(query_service):
     results = query_service.search_entries("anything")
     assert results == []
+
+
+def test_search_aggregates_multiple_chunks_per_entry(repo, vector_store, mock_embeddings):
+    """A query matching 3 chunks in the same entry should return ONE result
+    with 3 ChunkMatch objects, not 3 separate results."""
+    entry = repo.create_entry(
+        "2026-03-24",
+        "ocr",
+        "Long entry with many thoughts about Vienna and Atlas and Robyn.",
+        11,
+    )
+    # Three chunks from the same entry, all pointing in similar directions.
+    vector_store.add_entry(
+        entry_id=entry.id,
+        chunks=[
+            "Vienna was beautiful in spring",
+            "Atlas loved the playground in Vienna",
+            "Dinner in Vienna was memorable",
+        ],
+        embeddings=[[0.9, 0.1, 0.0], [0.8, 0.2, 0.0], [0.85, 0.15, 0.0]],
+        metadata={"entry_date": "2026-03-24"},
+    )
+    mock_embeddings.embed_query.return_value = [1.0, 0.0, 0.0]
+
+    svc = QueryService(
+        repository=repo,
+        vector_store=vector_store,
+        embeddings_provider=mock_embeddings,
+    )
+    results = svc.search_entries("Vienna")
+
+    assert len(results) == 1
+    assert len(results[0].matching_chunks) == 3
+    # Chunks within the entry are sorted by score descending.
+    scores = [cm.score for cm in results[0].matching_chunks]
+    assert scores == sorted(scores, reverse=True)
+    # Entry-level score is the top chunk score.
+    assert results[0].score == results[0].matching_chunks[0].score
+
+
+def test_search_sorts_entries_by_top_score(repo, vector_store, mock_embeddings):
+    """Two entries, one with a strong match, one with a weak match —
+    the strong-match entry should come first."""
+    e_weak = repo.create_entry("2026-03-25", "ocr", "weak match entry", 3)
+    e_strong = repo.create_entry("2026-03-26", "ocr", "strong match entry", 3)
+
+    vector_store.add_entry(
+        entry_id=e_weak.id,
+        chunks=["weak match"],
+        embeddings=[[0.1, 0.9, 0.0]],
+        metadata={"entry_date": "2026-03-25"},
+    )
+    vector_store.add_entry(
+        entry_id=e_strong.id,
+        chunks=["strong match"],
+        embeddings=[[0.95, 0.05, 0.0]],
+        metadata={"entry_date": "2026-03-26"},
+    )
+    mock_embeddings.embed_query.return_value = [1.0, 0.0, 0.0]
+
+    svc = QueryService(
+        repository=repo,
+        vector_store=vector_store,
+        embeddings_provider=mock_embeddings,
+    )
+    results = svc.search_entries("match")
+
+    assert len(results) == 2
+    assert results[0].entry_id == e_strong.id
+    assert results[1].entry_id == e_weak.id
+    assert results[0].score > results[1].score
+
+
+def test_search_result_has_full_parent_text(seeded_service, mock_embeddings):
+    """The `text` field on a SearchResult should carry the full entry text,
+    not just the matched chunk."""
+    mock_embeddings.embed_query.return_value = [1.0, 0.0, 0.0]
+    results = seeded_service.search_entries("Vienna")
+    assert results[0].text == "Walked through Vienna with Atlas"
 
 
 def test_get_entries_by_date(seeded_service):
