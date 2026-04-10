@@ -140,6 +140,16 @@ Edit final_text → Update SQLite → Delete old ChromaDB chunks
     → FTS5 trigger auto-rebuilds index
 ```
 
+### Deletion
+```
+DELETE /api/entries/{id} → IngestionService.delete_entry()
+    → ChromaDB.delete_entry(id)  (purge vector chunks first)
+    → SQLite DELETE FROM entries WHERE id = ?
+    → Foreign-key cascades drop entry_pages, entry_people, entry_places,
+      entry_tags, mood_scores, source_files
+    → FTS5 AFTER DELETE trigger removes the row from the full-text index
+```
+
 ### Query
 ```
 Natural Language Query

@@ -22,6 +22,8 @@ class EntryRepository(Protocol):
         self, entry_id: int, final_text: str, word_count: int, chunk_count: int
     ) -> Entry | None: ...
 
+    def delete_entry(self, entry_id: int) -> bool: ...
+
     def add_entry_page(
         self, entry_id: int, page_number: int, raw_text: str, source_file_id: int | None = None
     ) -> None: ...
@@ -171,6 +173,15 @@ class SQLiteEntryRepository:
         self._conn.commit()
         log.info("Updated final_text for entry %d", entry_id)
         return self.get_entry(entry_id)
+
+    def delete_entry(self, entry_id: int) -> bool:
+        """Delete an entry and all cascading rows. Returns True if a row was deleted."""
+        cursor = self._conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
+        self._conn.commit()
+        deleted = cursor.rowcount > 0
+        if deleted:
+            log.info("Deleted entry %d", entry_id)
+        return deleted
 
     def add_entry_page(
         self, entry_id: int, page_number: int, raw_text: str, source_file_id: int | None = None

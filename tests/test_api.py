@@ -296,6 +296,53 @@ class TestUpdateEntry:
         assert response.status_code == 400
 
 
+class TestDeleteEntry:
+    def test_delete_entry_removes_row(
+        self,
+        client: TestClient,
+        repo: SQLiteEntryRepository,
+        mock_vector_store: MagicMock,
+    ) -> None:
+        entry = repo.create_entry("2026-03-22", "ocr", "Hello", 1)
+        response = client.delete(f"/api/entries/{entry.id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data == {"deleted": True, "id": entry.id}
+        assert repo.get_entry(entry.id) is None
+        mock_vector_store.delete_entry.assert_called_once_with(entry.id)
+
+    def test_delete_entry_not_found(
+        self, client: TestClient, mock_vector_store: MagicMock
+    ) -> None:
+        response = client.delete("/api/entries/999")
+        assert response.status_code == 404
+        assert "not found" in response.json()["error"].lower()
+        mock_vector_store.delete_entry.assert_not_called()
+
+    def test_delete_entry_cascades_pages(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        entry = repo.create_entry("2026-03-22", "ocr", "Combined", 1)
+        repo.add_entry_page(entry.id, 1, "Page one")
+        repo.add_entry_page(entry.id, 2, "Page two")
+
+        response = client.delete(f"/api/entries/{entry.id}")
+        assert response.status_code == 200
+        assert repo.get_entry_pages(entry.id) == []
+
+    def test_delete_entry_removes_from_list(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        ids = _seed_entries(repo, 3)
+        response = client.delete(f"/api/entries/{ids[0]}")
+        assert response.status_code == 200
+
+        list_response = client.get("/api/entries")
+        data = list_response.json()
+        assert data["total"] == 2
+        assert ids[0] not in [item["id"] for item in data["items"]]
+
+
 class TestGetStats:
     def test_get_stats(
         self, client: TestClient, repo: SQLiteEntryRepository

@@ -86,6 +86,22 @@ Update an entry's `final_text`. Triggers re-chunking, re-embedding, and FTS5 reb
 { "error": "not_found", "message": "Entry 999 not found" }
 ```
 
+### DELETE /api/entries/{id}
+
+Delete an entry. Removes the SQLite row (cascading to pages, tags, people,
+places, mood scores, and source files) and purges the entry's chunks from
+the vector store.
+
+**Response (200):**
+```json
+{ "deleted": true, "id": 1 }
+```
+
+**Response (404):**
+```json
+{ "error": "Entry 999 not found" }
+```
+
 ### GET /api/stats
 
 Journal statistics with optional date filtering.

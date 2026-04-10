@@ -105,11 +105,11 @@ def register_api_routes(
 
     @mcp.custom_route(
         "/api/entries/{entry_id:int}",
-        methods=["GET", "PATCH"],
+        methods=["GET", "PATCH", "DELETE"],
         name="api_entry_detail",
     )
     async def entry_detail(request: Request) -> JSONResponse:
-        """Get or update a single journal entry."""
+        """Get, update, or delete a single journal entry."""
         services = services_getter()
         if services is None:
             return JSONResponse(
@@ -122,6 +122,8 @@ def register_api_routes(
             return await _get_entry(services, entry_id)
         elif request.method == "PATCH":
             return await _patch_entry(request, services, entry_id)
+        elif request.method == "DELETE":
+            return await _delete_entry(services, entry_id)
         else:
             return JSONResponse(
                 {"error": "Method not allowed"}, status_code=405
@@ -182,6 +184,17 @@ def register_api_routes(
         page_count = query_svc._repo.get_page_count(entry_id)
         log.info("PATCH /api/entries/%d — updated, %d words", entry_id, updated.word_count)
         return JSONResponse(_entry_to_dict(updated, page_count))
+
+    async def _delete_entry(services: dict, entry_id: int) -> JSONResponse:
+        ingestion_svc: IngestionService = services["ingestion"]
+        deleted = ingestion_svc.delete_entry(entry_id)
+        if not deleted:
+            log.warning("DELETE /api/entries/%d — not found", entry_id)
+            return JSONResponse(
+                {"error": f"Entry {entry_id} not found"}, status_code=404
+            )
+        log.info("DELETE /api/entries/%d — deleted", entry_id)
+        return JSONResponse({"deleted": True, "id": entry_id})
 
     @mcp.custom_route("/api/stats", methods=["GET"], name="api_stats")
     async def get_stats(request: Request) -> JSONResponse:

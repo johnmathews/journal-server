@@ -283,6 +283,21 @@ class IngestionService:
         log.info("Updated entry %d: %d words, %d chunks", entry_id, word_count, chunk_count)
         return updated  # type: ignore[return-value]
 
+    def delete_entry(self, entry_id: int) -> bool:
+        """Delete an entry from both SQLite and the vector store.
+
+        Returns True if the entry existed and was removed, False if it
+        was not found. Vector chunks are removed first so that a failure
+        to clean up ChromaDB surfaces before we drop the SQLite row.
+        """
+        entry = self._repo.get_entry(entry_id)
+        if entry is None:
+            return False
+
+        log.info("Deleting entry %d", entry_id)
+        self._vector_store.delete_entry(entry_id)
+        return self._repo.delete_entry(entry_id)
+
     def rechunk_entry(self, entry_id: int, *, dry_run: bool = False) -> int:
         """Re-chunk and re-embed an existing entry in place.
 
