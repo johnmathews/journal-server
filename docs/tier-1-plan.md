@@ -323,11 +323,12 @@ is complete.
 
 ---
 
-### Item 4 — Search UI `[both]`
+### Item 4 — Search UI `[both]` — ✅ shipped 2026-04-11
 
 **Backend shipped 2026-04-11** — see
-`journal/260411-search-backend.md`. T1.4.a/b/c and their tests are
-done; frontend units T1.4.d/e/f remain for a later webapp session.
+`journal/260411-search-backend.md`. **Frontend shipped 2026-04-11** —
+see `journal-webapp/journal/260411-search-ui.md`. All T1.4 work
+units are done.
 
 - **T1.4.a** `[S]` ✅ **Backend: expose FTS5 search via service.**
   `QueryService.keyword_search()` delegates to a new
@@ -348,21 +349,27 @@ done; frontend units T1.4.d/e/f remain for a later webapp session.
   question 7), `start_date`, `end_date`, `limit` (clamped
   `[1, 50]`), `offset`. Bearer-authenticated via the existing
   middleware. Full contract in `docs/api.md`.
-- **T1.4.d** `[M]` — **Webapp: `/search` route and SearchView
-  shell.** New route, input box, mode toggle (radio),
-  date-range filter (reuse whatever EntryListView uses, or
-  port into a shared composable). Pinia store for search state
-  so back-navigation preserves the query.
-- **T1.4.e** `[M]` — **Webapp: results list with highlights.**
-  Each result shows the entry date, a snippet of the top matching
-  chunk with the query terms visually highlighted, and the
-  relevance score. Click-through goes to `EntryDetailView` with
-  a query param (`?chunk=N`) that scrolls the chunk into view on
-  mount. The chunk highlight reuses `useOverlayHighlight` or a
-  simpler variant.
-- **T1.4.f** `[M]` — **Tests.** Backend: mode selection, pagination,
-  offset correctness. Frontend: store behaviour, results
-  rendering, click-through scroll-into-view.
+- **T1.4.d** `[M]` ✅ **Webapp: `/search` route and SearchView
+  shell.** Shipped as `src/views/SearchView.vue` with query input,
+  semantic/keyword mode toggle, and date range inputs.
+  `src/stores/search.ts` (`useSearchStore`) holds query/mode/date
+  state so back-navigation preserves the query.
+- **T1.4.e** `[M]` ✅ **Webapp: results list with highlights.**
+  Each result shows the entry date, relevance score, and a
+  snippet rendered through `src/utils/searchSnippet.ts` which
+  converts the server's `\x02`/`\x03` marker chars to `<mark>`
+  tags with HTML escaping. Click-through links include
+  `?chunk=N` for semantic hits; `EntryDetailView` reads the
+  param on mount, flips the overlay to chunks mode, waits for
+  chunks to load, and `scrollIntoView` on the matching
+  `[aria-label="chunk N start"]` badge element. Keyword hits
+  omit `chunk` since FTS5 doesn't produce per-chunk scores.
+- **T1.4.f** `[M]` ✅ **Tests.** 23 new backend tests (repo FTS5
+  snippets, query service enrichment + keyword_search, API
+  endpoint happy paths + error cases) and 34 new webapp tests
+  (api client, snippet renderer, store, SearchView, chunk
+  scroll-into-view in EntryDetailView). All pass; coverage held
+  above the gates in both repos.
 
 **Open question:** for keyword mode, do we want to run FTS5's
 snippet generator for each result so we can show the matching

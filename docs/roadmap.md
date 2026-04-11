@@ -171,7 +171,7 @@ doesn't silently burn tokens on users who don't want it.
 
 ---
 
-### 4. Search UI `[both]` — backend shipped 2026-04-11
+### 4. Search UI `[both]` — ✅ shipped 2026-04-11
 
 Dedicated webapp `/search` view.
 
@@ -184,17 +184,23 @@ Dedicated webapp `/search` view.
 3. ✅ Keyword mode returns FTS5 `snippet()` output with `\x02`/`\x03`
    marker chars wrapping matched terms.
 
-**Frontend — still outstanding**
-1. Text input + mode toggle (semantic / keyword)
-2. Results list with relevance scores
-3. Matching chunk highlights per result (reuse the overlay
-   highlight mechanism from `EntryDetailView.vue` — the backend
-   now serves char offsets directly)
-4. Date range filter
-5. Click-through to `EntryDetailView` with the matching chunk
-   pre-scrolled into view
+**Frontend — shipped 2026-04-11** (see
+`journal-webapp/journal/260411-search-ui.md`):
+1. ✅ `/search` route and `SearchView.vue` with query input, mode
+   toggle (semantic default), and date range filter.
+2. ✅ Pinia `useSearchStore` preserves query/mode/dates across
+   navigation and surfaces `ApiRequestError` messages verbatim.
+3. ✅ Results list with FTS5 snippet highlights rendered via
+   `src/utils/searchSnippet.ts` (converts `\x02`/`\x03` marker
+   chars to `<mark>` tags with HTML escaping).
+4. ✅ Click-through to `EntryDetailView` with `?chunk=N` on
+   semantic hits; `EntryDetailView` reads the param, flips the
+   overlay to chunks mode, and `scrollIntoView` on the matching
+   chunk badge.
 
-**Source:** `journal-webapp/docs/future-features.md` "Phase 3: Search UI".
+**Source:** `journal-webapp/docs/future-features.md` "Phase 3:
+Search UI" (now obsolete — this roadmap entry is the record of
+what actually shipped).
 
 ---
 
@@ -569,6 +575,10 @@ Included so we don't accidentally re-surface these as TODOs.
     rebinding protection always on, loopback-only bind, SSRF guard,
     `chmod 600`, `docs/security.md`)
 12. Multi-page chunking page-join fix (277→5 chunks mystery closed)
+13. Search UI (Tier 1 item 4) — `GET /api/search` backend with
+    semantic + keyword modes, FTS5 `snippet()` highlights, chunk
+    offsets on `ChunkMatch`, and the webapp `/search` view with
+    `?chunk=N` deep-link scroll-into-view
 
 ---
 
