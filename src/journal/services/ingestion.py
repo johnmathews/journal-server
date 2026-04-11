@@ -354,8 +354,22 @@ class IngestionService:
             page_hashes.append(file_hash)
             page_media_types.append(media_type)
 
-        # Combine page texts
-        combined_text = "\n\n".join(page_texts)
+        # Combine page texts. Each page is stripped of leading/trailing
+        # whitespace (OCR output frequently has trailing newlines) and
+        # joined with a SINGLE newline rather than a blank line. This
+        # matters for chunking: `FixedTokenChunker` splits paragraphs
+        # on `"\n\n"`, so a blank-line join turns every page boundary
+        # into a paragraph break. The packer doesn't flush *at* a
+        # paragraph break — it flushes when the next paragraph would
+        # overflow the token budget — but once each page is a single
+        # ~80-token paragraph, any two-page combination (80 + 80 = 160)
+        # already exceeds the 150-token budget, so the packer flushes
+        # at the page boundary and wastes nearly half the budget. Joining
+        # with a single newline keeps the paragraph splitter blind to
+        # page boundaries, letting the packer combine pages up to the
+        # real budget. The verbatim per-page OCR output is still stored
+        # in `entry_pages.raw_text` below.
+        combined_text = "\n".join(p.strip() for p in page_texts)
         word_count = len(combined_text.split())
 
         # Create single entry

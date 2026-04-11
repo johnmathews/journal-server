@@ -185,7 +185,11 @@ class TestMultiPageIngestion:
         assert entry.source_type == "ocr"
         assert "Page one text." in entry.raw_text
         assert "Page two text." in entry.raw_text
-        assert entry.raw_text == "Page one text.\n\nPage two text."
+        # Pages are joined with a single newline (not "\n\n") so page
+        # boundaries don't force paragraph splits in the chunker. See
+        # the join comment in `ingest_multi_page_entry` for the full
+        # rationale.
+        assert entry.raw_text == "Page one text.\nPage two text."
         assert entry.final_text == entry.raw_text
         assert entry.chunk_count > 0
 
@@ -206,6 +210,75 @@ class TestMultiPageIngestion:
     def test_ingest_multi_page_empty_list(self, ingestion_service):
         with pytest.raises(ValueError, match="At least one image"):
             ingestion_service.ingest_multi_page_entry(images=[], date="2026-03-22")
+
+    def test_ingest_multi_page_strips_trailing_whitespace_before_join(
+        self, ingestion_service, mock_ocr
+    ):
+        """Pages with trailing newlines must not re-introduce a blank-line join.
+
+        OCR providers typically end their output with a newline. If we
+        joined with `"\\n"` naively we'd get `"Page one.\\n\\nPage two."`
+        which recreates the paragraph-split bug this change fixes.
+        """
+        mock_ocr.extract_text.side_effect = ["Page one.\n", "Page two.\n"]
+        entry = ingestion_service.ingest_multi_page_entry(
+            images=[(b"img1", "image/jpeg"), (b"img2", "image/jpeg")],
+            date="2026-03-24",
+        )
+        assert entry.raw_text == "Page one.\nPage two."
+        assert "\n\n" not in entry.raw_text
+
+    def test_ingest_multi_page_packs_efficiently(
+        self, ingestion_service, mock_ocr, mock_embeddings
+    ):
+        """Regression for 277-word/5-chunk pathology.
+
+        With the old `"\\n\\n"` page join, three moderate pages
+        (each ~80 tokens, well under the 150-token budget) were each
+        flushed as their own chunk because adding the next page's
+        paragraph would exceed the budget. After the fix, the greedy
+        packer can combine pages up to the real budget and we should
+        see ~2 chunks instead of 3.
+        """
+        # Three ~82-token pages, each a single paragraph. Any two pages
+        # combined exceed the 150-token budget (2*82=164) so packing
+        # must flush somewhere — but the chunker should cross the page
+        # boundary freely, not use page boundaries as preferred cut
+        # points. Old `"\n\n"` join: 3 chunks of ~82 each (budget 55%
+        # utilised). New `"\n"` join: 2 chunks of ~140 each (budget 93%
+        # utilised).
+        page = (
+            "Woke up late and the sky was grey, drizzly, the kind of "
+            "morning that makes you want to stay under the covers. Made "
+            "coffee and sat by the window watching the crows argue over "
+            "the suet block hanging from the birch. Felt oddly content "
+            "despite everything piling up. Thought again about Friday's "
+            "meeting and whether to finally raise the staffing issue "
+            "with the whole team present this time."
+        )
+        mock_ocr.extract_text.side_effect = [page, page, page]
+        # The default mock returns one embedding regardless of input.
+        # Provide a callable side_effect so the chunker-produced list
+        # gets a matching number of vectors back.
+        mock_embeddings.embed_texts.side_effect = lambda texts: [
+            [0.1, 0.2, 0.3] for _ in texts
+        ]
+        entry = ingestion_service.ingest_multi_page_entry(
+            images=[
+                (b"img1", "image/jpeg"),
+                (b"img2", "image/jpeg"),
+                (b"img3", "image/jpeg"),
+            ],
+            date="2026-03-25",
+        )
+        # With the old "\n\n" join this produced 3 chunks of ~85 tokens
+        # each (budget underfilled). With the new "\n" join the chunker
+        # packs material up toward the 150-token budget, yielding 2
+        # chunks. Assert strictly 2 to lock in the improvement.
+        assert entry.chunk_count == 2, (
+            f"expected 2 chunks for 3 moderate pages, got {entry.chunk_count} "
+            "— page-join separator regression"
+        )
 
     def test_ingest_multi_page_duplicate_page(self, ingestion_service, mock_ocr):
         # First page OCRs fine, second has same hash so should fail at duplicate check
