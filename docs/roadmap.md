@@ -461,6 +461,84 @@ or rip it out.
 
 ---
 
+### 17. `FixedTokenChunker` sizing review `[server]`
+
+Observed on 2026-04-11 via the webapp chunks overlay on entry 7
+(277 words, 2 pages, date 2026-02-15): the current
+`FixedTokenChunker(max_tokens=150, overlap_tokens=40)` produces
+**5 chunks** for that entry, which is over-fragmented. Three
+smells from the overlay:
+
+1. **Tail orphan** — a 12-word closing sentence ("I assume in a
+   few years he will have different interests.") got ejected into
+   its own chunk, severed from the parenting paragraph it belongs
+   to. Orphan chunks embed as standalone thoughts with no context
+   and hurt retrieval quality.
+2. **Split mid-theme** — the marriage/parenting reflection gets
+   cut across two chunks, so a search for "marriage" only hits
+   half the content.
+3. **Below recommended size** — `text-embedding-3-large` docs
+   recommend 256-512 tokens per chunk for best retrieval.
+   150-token chunks leave retrieval quality on the table.
+
+**Action:** sweep `(max_tokens, overlap_tokens)` over the existing
+corpus using the `journal eval-chunking` CLI. Candidate points:
+`(150,40)` baseline, `(200,40)`, `(250,30)`, `(300,25)`. Expect
+~250/30 to produce 2-3 chunks for a 277-word entry with clean
+paragraph boundaries. Commit the winner to `config.py` and update
+the regression test
+`test_ingest_multi_page_packs_efficiently` (currently locks the
+old 2-chunk count at `max_tokens=150`).
+
+**Related:** #13 (semantic chunker percentile tuning). Both sweeps
+are worth doing in the same session once the corpus reaches ~20
+entries so the numbers are meaningful.
+
+**Source:** conversation with Claude, 2026-04-11, reviewing the
+chunks overlay on entry 7.
+
+---
+
+### 18. Grow OCR glossary to unlock prompt caching `[server]`
+
+As of 2026-04-11 the deployed `OCR_CONTEXT_DIR` loads ~333 chars
+of glossary content. Combined with `SYSTEM_PROMPT` +
+`CONTEXT_USAGE_INSTRUCTIONS` the composed system block is ~328
+tokens — well below Anthropic's 4,096-token `cache_control`
+minimum, so the system block is re-sent uncached on every OCR
+call. The boot-time warning fires on every restart:
+
+```
+OCR system text is 328 tokens (approx) — below the 4096-token
+cache minimum for claude-opus-4-6. cache_control will be silently
+ignored and every request will pay full input price.
+```
+
+**Action:** grow the context directory organically until the
+composed system text crosses 4,096 tokens (≈ 15-20 KB of markdown
+across `people.md`, `places.md`, `topics.md`, and any other
+categories that make sense). Genuine content is preferred — both
+for OCR accuracy and for caching — rather than padding with
+filler. Once over the threshold every OCR call becomes ~12.5×
+cheaper on the system block.
+
+**Cost pressure is low** — at ~1 page/day the uncached system
+block is cents per month, so this is a "do it when you have more
+proper nouns to add" item, not urgent. But it should be done at
+some point, and if you decide *not* to, consider adding a
+`warning_suppressed` flag to silence the repeat warning so it
+doesn't numb you to other cache-related issues.
+
+**Related:** #16 (glossary accuracy evaluation). Do both in the
+same session — grow the glossary, measure the accuracy delta on a
+held-out sample, check the warning is gone.
+
+**Source:** conversation with Claude, 2026-04-11. Server logs
+after the `OCR_CONTEXT_DIR` path fix at 23:46:31 show the
+glossary loading correctly but still below the cache minimum.
+
+---
+
 ## Deferred / known gaps (not planned, but tracked)
 
 ### D1. Legacy multipage entries with the old `\n\n` page join `[server]`
