@@ -83,6 +83,7 @@ def test_cli_all_commands_registered(capsys):
         "stats",
         "health",
         "backfill-chunks",
+        "backfill-mood",
         "rechunk",
         "eval-chunking",
     ):
@@ -138,6 +139,79 @@ def test_cmd_health_emits_json_without_a_running_server(
     assert "checks" in payload
     # Four checks: sqlite, chromadb, anthropic, openai.
     assert len(payload["checks"]) == 4
+
+
+def test_cli_backfill_mood_help(capsys):
+    """`journal backfill-mood --help` documents all flags."""
+    with pytest.raises(SystemExit) as exc_info:
+        sys.argv = ["journal", "backfill-mood", "--help"]
+        main()
+    assert exc_info.value.code == 0
+    captured = capsys.readouterr()
+    assert "backfill-mood" in captured.out
+    for flag in ("--force", "--prune-retired", "--dry-run", "--start-date"):
+        assert flag in captured.out
+
+
+def test_cmd_backfill_mood_dry_run(tmp_path, capsys):
+    """`cmd_backfill_mood --dry-run` exercises the full code path
+    (load dimensions, build services, run backfill) without
+    calling the scorer or writing to the DB."""
+    from unittest.mock import MagicMock, patch
+
+    from journal.cli import cmd_backfill_mood
+    from journal.config import Config
+    from journal.db.connection import get_connection
+    from journal.db.migrations import run_migrations
+    from journal.db.repository import SQLiteEntryRepository
+
+    # Seed a real DB with two entries.
+    db_path = tmp_path / "mood_cli.db"
+    conn = get_connection(db_path)
+    run_migrations(conn)
+    repo = SQLiteEntryRepository(conn)
+    repo.create_entry("2026-04-01", "ocr", "first", 1)
+    repo.create_entry("2026-04-02", "ocr", "second", 1)
+    conn.close()
+
+    # Point the config at a minimal valid mood-dimensions file.
+    dims_path = tmp_path / "dims.toml"
+    dims_path.write_text(
+        """
+[[dimension]]
+name = "joy_sadness"
+positive_pole = "joy"
+negative_pole = "sadness"
+scale_type = "bipolar"
+notes = "notes"
+"""
+    )
+
+    config = Config(
+        db_path=db_path,
+        anthropic_api_key="a" * 40,
+        mood_dimensions_path=dims_path,
+    )
+
+    # Patch the scorer constructor so no real Anthropic client is built.
+    with patch(
+        "journal.providers.mood_scorer.AnthropicMoodScorer"
+    ) as mock_cls:
+        mock_cls.return_value = MagicMock()
+        cmd_backfill_mood(
+            MagicMock(
+                force=False,
+                prune_retired=False,
+                dry_run=True,
+                start_date=None,
+                end_date=None,
+            ),
+            config,
+        )
+
+    out = capsys.readouterr().out
+    assert "dry-run" in out.lower() or "Dry run" in out
+    assert "Scored:" in out
 
 
 def test_cmd_health_compact_mode(tmp_path, capsys):

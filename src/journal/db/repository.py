@@ -10,6 +10,7 @@ from journal.models import (
     Entry,
     EntryPage,
     IngestionStats,
+    MoodScore,
     MoodTrend,
     Statistics,
     TopicFrequency,
@@ -20,9 +21,63 @@ log = logging.getLogger(__name__)
 
 # Hardcoded set of supported dashboard bin widths. Callers validate
 # against this before any SQL runs. Adding a new granularity
-# requires updates in this tuple AND the `_bin_start_expr` helper
+# requires updates in this tuple AND the `_bin_start_sql` helper
 # below — deliberately explicit so the contract never drifts.
 _SUPPORTED_BINS: tuple[str, ...] = ("week", "month", "quarter", "year")
+
+# Mood-trends supports the same set plus `day`, which predates the
+# dashboard and is still exposed via the LLM-facing MCP tool.
+_SUPPORTED_MOOD_BINS: tuple[str, ...] = (
+    "day",
+    "week",
+    "month",
+    "quarter",
+    "year",
+)
+
+
+def _bin_start_sql(granularity: str, column: str = "entry_date") -> str:
+    """SQL expression that returns the canonical bucket-start ISO
+    date for a row's `entry_date` at the requested granularity.
+
+    Raises `ValueError` on unsupported granularity. `column` lets
+    callers that select from a JOINed table pass a qualified name
+    like `e.entry_date` — the bin-start computation otherwise has
+    no business knowing the join shape.
+
+    - **day**: `entry_date` itself (identity).
+    - **week**: Monday of the week containing entry_date. Uses
+      `strftime('%w')` (0=Sunday..6=Saturday) and walks back
+      `(weekday + 6) % 7` days, which lands on the preceding
+      Monday for every day of the week.
+    - **month**: 1st of the month.
+    - **quarter**: 1st of Jan/Apr/Jul/Oct. Computed as "start of
+      month, then minus `(month - 1) % 3` months".
+    - **year**: January 1 of the year.
+    """
+    if granularity not in (*_SUPPORTED_MOOD_BINS,):
+        raise ValueError(
+            f"Unsupported granularity {granularity!r}; "
+            f"must be one of {_SUPPORTED_MOOD_BINS}"
+        )
+    if granularity == "day":
+        return column
+    if granularity == "week":
+        return (
+            f"date({column}, "
+            f"'-' || ((CAST(strftime('%w', {column}) AS INT) + 6) % 7) "
+            f"|| ' days')"
+        )
+    if granularity == "month":
+        return f"date({column}, 'start of month')"
+    if granularity == "quarter":
+        return (
+            f"date({column}, 'start of month', "
+            f"'-' || ((CAST(strftime('%m', {column}) AS INT) - 1) % 3) "
+            f"|| ' months')"
+        )
+    # year
+    return f"date({column}, 'start of year')"
 
 
 @runtime_checkable
@@ -95,6 +150,22 @@ class EntryRepository(Protocol):
     def add_mood_score(
         self, entry_id: int, dimension: str, score: float, confidence: float | None = None
     ) -> None: ...
+
+    def replace_mood_scores(
+        self,
+        entry_id: int,
+        scores: list[tuple[str, float, float | None]],
+    ) -> None: ...
+
+    def get_mood_scores(self, entry_id: int) -> list[MoodScore]: ...
+
+    def get_entries_missing_mood_scores(
+        self, dimension_names: list[str]
+    ) -> list[int]: ...
+
+    def prune_retired_mood_scores(
+        self, current_names: list[str]
+    ) -> int: ...
 
     def get_mood_trends(
         self,
@@ -485,18 +556,146 @@ class SQLiteEntryRepository:
         )
         self._conn.commit()
 
+    def replace_mood_scores(
+        self,
+        entry_id: int,
+        scores: list[tuple[str, float, float | None]],
+    ) -> None:
+        """Idempotently write a set of mood scores for a single entry.
+
+        `scores` is a list of `(dimension, score, confidence)` tuples.
+        Delete-then-insert in a single transaction so a re-score is
+        atomic — concurrent readers never see a partially-updated
+        set. Intended for ingestion and the backfill CLI.
+
+        Dimensions NOT included in `scores` but already present in
+        the DB for this entry are **preserved** — callers can pass a
+        subset to rewrite only some facets. The service layer passes
+        the full current dimension set; backfill can target a subset
+        if only some are stale.
+        """
+        if not scores:
+            return
+        dim_names = [s[0] for s in scores]
+        placeholders = ",".join("?" for _ in dim_names)
+        with self._conn:
+            self._conn.execute(
+                f"DELETE FROM mood_scores WHERE entry_id = ? "
+                f"AND dimension IN ({placeholders})",
+                (entry_id, *dim_names),
+            )
+            self._conn.executemany(
+                "INSERT INTO mood_scores "
+                "(entry_id, dimension, score, confidence) "
+                "VALUES (?, ?, ?, ?)",
+                [
+                    (entry_id, name, score, confidence)
+                    for name, score, confidence in scores
+                ],
+            )
+        log.debug(
+            "Replaced %d mood scores for entry %d", len(scores), entry_id
+        )
+
+    def get_mood_scores(self, entry_id: int) -> list[MoodScore]:
+        """Return every mood score for a single entry, in dimension
+        order. Used by `replace_mood_scores` callers for verification
+        and by the backfill's `--stale-only` gate."""
+        rows = self._conn.execute(
+            "SELECT entry_id, dimension, score, confidence "
+            "FROM mood_scores WHERE entry_id = ? ORDER BY dimension",
+            (entry_id,),
+        ).fetchall()
+        return [
+            MoodScore(
+                entry_id=row["entry_id"],
+                dimension=row["dimension"],
+                score=row["score"],
+                confidence=row["confidence"],
+            )
+            for row in rows
+        ]
+
+    def get_entries_missing_mood_scores(
+        self, dimension_names: list[str]
+    ) -> list[int]:
+        """Return entry ids that are missing at least one of the
+        listed dimensions in `mood_scores`. Drives the backfill
+        CLI's `--stale-only` mode: we re-score every entry that
+        doesn't already have a value for every current facet.
+
+        Empty `dimension_names` returns an empty list — there's
+        nothing to check against. An empty corpus also returns
+        empty.
+        """
+        if not dimension_names:
+            return []
+        placeholders = ",".join("?" for _ in dimension_names)
+        rows = self._conn.execute(
+            f"""
+            SELECT e.id AS id
+            FROM entries e
+            WHERE (
+                SELECT COUNT(DISTINCT m.dimension)
+                FROM mood_scores m
+                WHERE m.entry_id = e.id
+                  AND m.dimension IN ({placeholders})
+            ) < ?
+            ORDER BY e.entry_date ASC, e.id ASC
+            """,
+            (*dimension_names, len(dimension_names)),
+        ).fetchall()
+        return [int(r["id"]) for r in rows]
+
+    def prune_retired_mood_scores(
+        self, current_names: list[str]
+    ) -> int:
+        """Delete `mood_scores` rows whose dimension is NOT in
+        `current_names` — used by the backfill CLI's
+        `--prune-retired` flag. Returns the number of rows deleted.
+
+        An empty `current_names` list is treated as "prune
+        everything" (every stored dimension is, by definition,
+        not in an empty current set). Callers should only pass
+        an empty list if they really want to wipe `mood_scores`
+        entirely.
+        """
+        if not current_names:
+            cursor = self._conn.execute("DELETE FROM mood_scores")
+            self._conn.commit()
+            log.info(
+                "Pruned ALL %d mood_scores rows (empty current set)",
+                cursor.rowcount,
+            )
+            return cursor.rowcount
+        placeholders = ",".join("?" for _ in current_names)
+        cursor = self._conn.execute(
+            f"DELETE FROM mood_scores "
+            f"WHERE dimension NOT IN ({placeholders})",
+            tuple(current_names),
+        )
+        self._conn.commit()
+        log.info(
+            "Pruned %d mood_scores rows with retired dimensions",
+            cursor.rowcount,
+        )
+        return cursor.rowcount
+
     def get_mood_trends(
         self,
         start_date: str | None = None,
         end_date: str | None = None,
         granularity: str = "week",
     ) -> list[MoodTrend]:
-        if granularity == "day":
-            period_expr = "e.entry_date"
-        elif granularity == "month":
-            period_expr = "strftime('%Y-%m', e.entry_date)"
-        else:  # week
-            period_expr = "strftime('%Y-W%W', e.entry_date)"
+        # Delegates bin-start computation to `_bin_start_sql` so the
+        # supported granularity set and the SQL expression stay in
+        # sync with `get_writing_frequency`. `day` is still supported
+        # here for the LLM-facing MCP tool — the dashboard uses
+        # week/month/quarter/year only. `period` is returned as a
+        # canonical ISO date (e.g. "2026-03-02" for a week), not a
+        # `%Y-%W`-style format string, so the webapp can plot it on
+        # the same axis as the writing-frequency series.
+        period_expr = _bin_start_sql(granularity, column="e.entry_date")
 
         query = f"""
             SELECT
@@ -666,37 +865,7 @@ class SQLiteEntryRepository:
                 f"must be one of {_SUPPORTED_BINS}"
             )
 
-        # Compute the canonical bin-start date for an `entry_date`.
-        # Each branch returns a SQL expression, not a string literal,
-        # and is interpolated into the final query. This is safe
-        # because `granularity` was validated against the hardcoded
-        # tuple above — no user input reaches the SQL.
-        if granularity == "week":
-            # Monday of the week containing entry_date. SQLite's
-            # `date(..., 'weekday 1')` moves FORWARD to the next
-            # Monday (or stays put if already Monday), which is the
-            # wrong direction. We go back (weekday-1+6)%7 days from
-            # the current weekday to land on the preceding Monday.
-            # `strftime('%w')` returns 0..6 with Sunday=0.
-            bin_expr = (
-                "date(entry_date, "
-                "'-' || ((CAST(strftime('%w', entry_date) AS INT) + 6) % 7) "
-                "|| ' days')"
-            )
-        elif granularity == "month":
-            bin_expr = "date(entry_date, 'start of month')"
-        elif granularity == "quarter":
-            # First day of the quarter: January/April/July/October.
-            # Start from start of month, then subtract
-            # ((month - 1) % 3) months.
-            bin_expr = (
-                "date(entry_date, 'start of month', "
-                "'-' || ((CAST(strftime('%m', entry_date) AS INT) - 1) % 3) "
-                "|| ' months')"
-            )
-        else:  # "year"
-            bin_expr = "date(entry_date, 'start of year')"
-
+        bin_expr = _bin_start_sql(granularity, column="entry_date")
         sql = f"""
             SELECT
                 {bin_expr} AS bin_start,

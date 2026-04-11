@@ -123,6 +123,35 @@ class Config:
         default_factory=lambda: os.environ.get("JOURNAL_API_TOKEN") or None
     )
 
+    # Mood scoring. Off by default — opt in explicitly via
+    # `JOURNAL_ENABLE_MOOD_SCORING=true`. When enabled, ingestion
+    # calls the MoodScorer provider after chunking/embedding for
+    # each entry and writes the results to `mood_scores`. The
+    # dimension set is loaded from `mood_dimensions_path` (TOML)
+    # at server startup.
+    enable_mood_scoring: bool = field(
+        default_factory=lambda: os.environ.get(
+            "JOURNAL_ENABLE_MOOD_SCORING", "false"
+        ).lower() in ("1", "true", "yes", "on")
+    )
+    mood_scorer_model: str = field(
+        default_factory=lambda: os.environ.get(
+            "MOOD_SCORER_MODEL", "claude-sonnet-4-5"
+        )
+    )
+    mood_scorer_max_tokens: int = field(
+        default_factory=lambda: int(
+            os.environ.get("MOOD_SCORER_MAX_TOKENS", "1024")
+        )
+    )
+    mood_dimensions_path: Path = field(
+        default_factory=lambda: Path(
+            os.environ.get(
+                "MOOD_DIMENSIONS_PATH", "config/mood-dimensions.toml"
+            )
+        )
+    )
+
     # Entity extraction
     entity_extraction_model: str = "claude-opus-4-6"
     entity_extraction_max_tokens: int = 4096

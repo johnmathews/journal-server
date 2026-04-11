@@ -5,6 +5,7 @@ import hashlib
 import ipaddress
 import logging
 import socket
+from typing import TYPE_CHECKING
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -16,6 +17,9 @@ from journal.providers.ocr import OCRProvider
 from journal.providers.transcription import TranscriptionProvider
 from journal.services.chunking import ChunkingStrategy
 from journal.vectorstore.store import VectorStore
+
+if TYPE_CHECKING:
+    from journal.services.mood_scoring import MoodScoringService
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +93,7 @@ class IngestionService:
         chunker: ChunkingStrategy,
         slack_bot_token: str = "",
         embed_metadata_prefix: bool = True,
+        mood_scoring: "MoodScoringService | None" = None,
     ) -> None:
         self._repo = repository
         self._vector_store = vector_store
@@ -98,6 +103,14 @@ class IngestionService:
         self._chunker = chunker
         self._slack_bot_token = slack_bot_token
         self._embed_metadata_prefix = embed_metadata_prefix
+        # Optional mood scoring. When `None`, ingestion and update
+        # paths skip the step entirely — no LLM calls, no DB
+        # writes. When set, `_process_text` calls `score_entry` at
+        # the end of every ingestion/update path so the stored
+        # `mood_scores` stay consistent with the current
+        # `final_text`. Scoring failures are logged by the service
+        # and never propagate back into the ingestion flow.
+        self._mood_scoring = mood_scoring
 
     def ingest_image(
         self, image_data: bytes, media_type: str, date: str
@@ -312,6 +325,15 @@ class IngestionService:
             metadata={"entry_date": date},
         )
         log.info("Stored %d chunks with embeddings for entry %d", len(chunks), entry_id)
+
+        # Optional mood scoring. Called after embeddings so that a
+        # scoring failure cannot roll back the (expensive)
+        # embedding step. `score_entry` never raises — it logs and
+        # returns 0 on failure — so ingestion continues cleanly
+        # even if the LLM is unreachable.
+        if self._mood_scoring is not None:
+            self._mood_scoring.score_entry(entry_id, text)
+
         return len(chunks)
 
     def _is_duplicate(self, file_hash: str) -> bool:

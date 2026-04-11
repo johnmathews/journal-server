@@ -623,6 +623,130 @@ def register_api_routes(
             }
         )
 
+    @mcp.custom_route(
+        "/api/dashboard/mood-dimensions",
+        methods=["GET"],
+        name="api_dashboard_mood_dimensions",
+    )
+    async def dashboard_mood_dimensions(
+        request: Request,
+    ) -> JSONResponse:
+        """Return the currently-loaded mood dimensions.
+
+        Serves as the source of truth for the webapp's mood chart:
+        the dimension definitions live in a server-side TOML file,
+        and the frontend fetches them via this endpoint on page
+        load so adding/removing a facet in the file (plus a
+        server restart) flows through to the UI without a webapp
+        rebuild.
+
+        When mood scoring is disabled (`JOURNAL_ENABLE_MOOD_SCORING=false`)
+        or no dimensions are loaded, returns an empty list with
+        200 — callers should treat that as "no mood data to
+        display" rather than an error.
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+
+        dimensions = services.get("mood_dimensions") or ()
+        payload = [
+            {
+                "name": d.name,
+                "positive_pole": d.positive_pole,
+                "negative_pole": d.negative_pole,
+                "scale_type": d.scale_type,
+                "score_min": d.score_min,
+                "score_max": d.score_max,
+                "notes": d.notes,
+            }
+            for d in dimensions
+        ]
+        log.info(
+            "GET /api/dashboard/mood-dimensions — %d dimensions",
+            len(payload),
+        )
+        return JSONResponse({"dimensions": payload})
+
+    @mcp.custom_route(
+        "/api/dashboard/mood-trends",
+        methods=["GET"],
+        name="api_dashboard_mood_trends",
+    )
+    async def dashboard_mood_trends(request: Request) -> JSONResponse:
+        """Aggregate mood scores per bucket, grouped by dimension.
+
+        Query params:
+
+        - `from` — ISO-8601 start date (optional)
+        - `to` — ISO-8601 end date (optional)
+        - `bin` — `week` (default), `month`, `quarter`, `year`
+          (matches the writing-stats endpoint)
+        - `dimension` — optional filter. When present, only the
+          named dimension is returned. When absent, all
+          dimensions are returned.
+
+        Returns a `{from, to, bin, bins}` envelope. Each `bin`
+        entry is `{period, dimension, avg_score, entry_count}`.
+        Empty buckets are omitted — a bucket with zero scored
+        entries does not appear in the series.
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+
+        query_svc: QueryService = services["query"]
+
+        bin_param = request.query_params.get("bin", "week")
+        start_date = request.query_params.get("from")
+        end_date = request.query_params.get("to")
+        dimension_filter = request.query_params.get("dimension")
+
+        try:
+            trends = query_svc.get_mood_trends(
+                start_date=start_date,
+                end_date=end_date,
+                granularity=bin_param,
+            )
+        except ValueError as e:
+            log.info(
+                "GET /api/dashboard/mood-trends — invalid bin %r: %s",
+                bin_param,
+                e,
+            )
+            return JSONResponse(
+                {
+                    "error": "invalid_bin",
+                    "message": str(e),
+                },
+                status_code=400,
+            )
+
+        if dimension_filter:
+            trends = [t for t in trends if t.dimension == dimension_filter]
+
+        log.info(
+            "GET /api/dashboard/mood-trends — bin=%s from=%s to=%s "
+            "dim=%s returned %d buckets",
+            bin_param,
+            start_date,
+            end_date,
+            dimension_filter,
+            len(trends),
+        )
+        return JSONResponse(
+            {
+                "from": start_date,
+                "to": end_date,
+                "bin": bin_param,
+                "bins": [asdict(t) for t in trends],
+            }
+        )
+
     @mcp.custom_route("/api/search", methods=["GET"], name="api_search")
     async def search(request: Request) -> JSONResponse:
         """Full-text search across journal entries.

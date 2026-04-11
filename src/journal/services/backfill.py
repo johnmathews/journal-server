@@ -9,6 +9,7 @@ entry's `final_text || raw_text` and updates the stored column. It does
 the chunker would produce today.
 """
 
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,9 @@ from journal.services.chunking import ChunkingStrategy
 
 if TYPE_CHECKING:
     from journal.services.ingestion import IngestionService
+    from journal.services.mood_scoring import MoodScoringService
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -135,5 +139,144 @@ def rechunk_entries(
         except Exception as exc:  # noqa: BLE001 — surface any pipeline failure
             result.errors.append(f"entry {entry.id}: {exc}")
             continue
+
+    return result
+
+
+@dataclass
+class MoodBackfillResult:
+    """Outcome of `backfill_mood_scores`."""
+
+    scored: int = 0          # entries successfully re-scored
+    skipped: int = 0         # entries skipped (no text, already current, etc.)
+    pruned: int = 0          # mood_scores rows deleted when --prune-retired
+    errors: list[str] = field(default_factory=list)
+    # Set True when dry-run flag is on; counters then reflect what
+    # WOULD happen, no scoring calls or writes actually executed.
+    dry_run: bool = False
+
+
+def backfill_mood_scores(
+    *,
+    repository: EntryRepository,
+    mood_scoring: "MoodScoringService",
+    mode: str = "stale-only",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    prune_retired: bool = False,
+    dry_run: bool = False,
+) -> MoodBackfillResult:
+    """Backfill mood scores against the currently-loaded dimensions.
+
+    Modes:
+
+    - **`stale-only`** (default): score entries that are missing at
+      least one of the current dimensions. Idempotent and cheap —
+      repeatedly running this walks toward completeness without
+      re-scoring already-complete entries.
+    - **`force`**: rescore every entry in the selected date range,
+      regardless of what's already stored. Used when you edit a
+      dimension's `notes`/labels and want deterministic
+      reinterpretation.
+
+    `prune_retired`, when set, deletes `mood_scores` rows whose
+    `dimension` is not in the currently loaded tuple. Preserved
+    across runs by default so historical data survives config
+    edits; users opt into deletion explicitly.
+
+    `dry_run=True` makes the function count what it would do but
+    not call the scorer or write to the database. Returns a
+    `MoodBackfillResult` with `dry_run=True` set so the CLI can
+    distinguish "would do" from "did".
+
+    Returns a `MoodBackfillResult`. Per-entry errors are captured
+    and do not abort the batch — the backfill should make
+    progress even if one entry happens to trigger an LLM failure.
+    """
+    if mode not in ("stale-only", "force"):
+        raise ValueError(
+            f"Unsupported mode {mode!r}; must be 'stale-only' or 'force'"
+        )
+
+    result = MoodBackfillResult(dry_run=dry_run)
+    dim_names = [d.name for d in mood_scoring.dimensions]
+
+    if not dim_names:
+        log.warning(
+            "No mood dimensions loaded; nothing to backfill."
+        )
+        return result
+
+    # Prune first so `--prune-retired` with `--dry-run` still
+    # reports what WOULD be removed, but does not actually delete.
+    if prune_retired:
+        if dry_run:
+            # Dry-run count: every row whose dimension is NOT in
+            # the current set. Using a lightweight count query
+            # rather than the real prune keeps the dry-run path
+            # side-effect-free.
+            placeholders = ",".join("?" for _ in dim_names)
+            row = repository._conn.execute(  # type: ignore[attr-defined]
+                f"SELECT COUNT(*) AS cnt FROM mood_scores "
+                f"WHERE dimension NOT IN ({placeholders})",
+                tuple(dim_names),
+            ).fetchone()
+            result.pruned = int(row["cnt"])
+        else:
+            result.pruned = repository.prune_retired_mood_scores(
+                dim_names
+            )
+
+    # Pick the target entry set.
+    if mode == "stale-only":
+        entry_ids = repository.get_entries_missing_mood_scores(dim_names)
+    else:
+        # Force mode: every entry (optionally date-windowed).
+        entries = repository.list_entries(
+            start_date=start_date,
+            end_date=end_date,
+            limit=1_000_000,
+        )
+        entry_ids = [e.id for e in entries]
+
+    # Apply date window to stale-only mode too — cheaper as a
+    # post-filter than a second SQL query.
+    if mode == "stale-only" and (start_date or end_date):
+        filtered: list[int] = []
+        for entry_id in entry_ids:
+            entry = repository.get_entry(entry_id)
+            if entry is None:
+                continue
+            if start_date and entry.entry_date < start_date:
+                continue
+            if end_date and entry.entry_date > end_date:
+                continue
+            filtered.append(entry_id)
+        entry_ids = filtered
+
+    for entry_id in entry_ids:
+        entry = repository.get_entry(entry_id)
+        if entry is None:
+            result.skipped += 1
+            continue
+        text = (entry.final_text or entry.raw_text or "").strip()
+        if not text:
+            result.skipped += 1
+            continue
+
+        if dry_run:
+            result.scored += 1
+            continue
+
+        try:
+            n = mood_scoring.score_entry(entry.id, text)
+        except Exception as exc:  # noqa: BLE001 — batch resilience
+            result.errors.append(f"entry {entry.id}: {exc}")
+            continue
+
+        if n > 0:
+            result.scored += 1
+        else:
+            result.skipped += 1
 
     return result

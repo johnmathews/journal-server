@@ -706,6 +706,190 @@ class TestSearch:
         assert response.json()["mode"] == "semantic"
 
 
+class TestDashboardMoodDimensions:
+    """T1.3b.vi — GET /api/dashboard/mood-dimensions."""
+
+    @pytest.fixture
+    def mood_client(
+        self, repo: SQLiteEntryRepository, mock_embeddings: MagicMock
+    ) -> Generator[tuple[TestClient, dict]]:
+        from mcp.server.fastmcp import FastMCP
+
+        from journal.api import register_api_routes
+        from journal.services.chunking import FixedTokenChunker
+        from journal.services.mood_dimensions import MoodDimension
+
+        dimensions = (
+            MoodDimension(
+                name="joy_sadness",
+                positive_pole="joy",
+                negative_pole="sadness",
+                scale_type="bipolar",
+                notes="bipolar joy test",
+            ),
+            MoodDimension(
+                name="agency",
+                positive_pole="agency",
+                negative_pole="apathy",
+                scale_type="unipolar",
+                notes="unipolar agency test",
+            ),
+        )
+        mock_ocr = MagicMock()
+        mock_transcription = MagicMock()
+
+        ingestion = IngestionService(
+            repository=repo,
+            vector_store=MagicMock(),
+            ocr_provider=mock_ocr,
+            transcription_provider=mock_transcription,
+            embeddings_provider=mock_embeddings,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+        )
+        query = QueryService(
+            repository=repo,
+            vector_store=MagicMock(),
+            embeddings_provider=mock_embeddings,
+        )
+        services = {
+            "ingestion": ingestion,
+            "query": query,
+            "mood_dimensions": dimensions,
+        }
+        test_mcp = FastMCP("test-journal")
+        register_api_routes(test_mcp, lambda: services)
+        app = test_mcp.streamable_http_app()
+        with TestClient(app, raise_server_exceptions=False) as tc:
+            yield tc, services
+
+    def test_mood_dimensions_returns_full_shape(
+        self, mood_client: tuple[TestClient, dict]
+    ) -> None:
+        client, _ = mood_client
+        resp = client.get("/api/dashboard/mood-dimensions")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "dimensions" in data
+        assert len(data["dimensions"]) == 2
+        bipolar = next(
+            d for d in data["dimensions"] if d["name"] == "joy_sadness"
+        )
+        assert bipolar["scale_type"] == "bipolar"
+        assert bipolar["score_min"] == -1.0
+        assert bipolar["score_max"] == 1.0
+        assert bipolar["positive_pole"] == "joy"
+        assert bipolar["negative_pole"] == "sadness"
+        assert bipolar["notes"] == "bipolar joy test"
+
+        unipolar = next(
+            d for d in data["dimensions"] if d["name"] == "agency"
+        )
+        assert unipolar["scale_type"] == "unipolar"
+        assert unipolar["score_min"] == 0.0
+        assert unipolar["score_max"] == 1.0
+
+    def test_mood_dimensions_empty_when_disabled(
+        self,
+        repo: SQLiteEntryRepository,
+        mock_embeddings: MagicMock,
+    ) -> None:
+        """With scoring disabled, the services dict has no
+        `mood_dimensions` key; the endpoint should return an
+        empty array, not a 500."""
+        from mcp.server.fastmcp import FastMCP
+
+        from journal.api import register_api_routes
+        from journal.services.chunking import FixedTokenChunker
+
+        ingestion = IngestionService(
+            repository=repo,
+            vector_store=MagicMock(),
+            ocr_provider=MagicMock(),
+            transcription_provider=MagicMock(),
+            embeddings_provider=mock_embeddings,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+        )
+        query = QueryService(
+            repository=repo,
+            vector_store=MagicMock(),
+            embeddings_provider=mock_embeddings,
+        )
+        services = {"ingestion": ingestion, "query": query}
+        test_mcp = FastMCP("test-journal")
+        register_api_routes(test_mcp, lambda: services)
+        with TestClient(
+            test_mcp.streamable_http_app(), raise_server_exceptions=False
+        ) as tc:
+            resp = tc.get("/api/dashboard/mood-dimensions")
+            assert resp.status_code == 200
+            assert resp.json()["dimensions"] == []
+
+
+class TestDashboardMoodTrends:
+    """T1.3b.vi — GET /api/dashboard/mood-trends."""
+
+    def test_happy_path_returns_trends(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        e = repo.create_entry("2026-03-02", "ocr", "mon entry", 2)
+        repo.add_mood_score(e.id, "joy_sadness", 0.5)
+        repo.add_mood_score(e.id, "agency", 0.7)
+
+        resp = client.get("/api/dashboard/mood-trends?bin=week")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["bin"] == "week"
+        assert len(data["bins"]) == 2
+        by_dim = {b["dimension"]: b for b in data["bins"]}
+        assert by_dim["joy_sadness"]["avg_score"] == 0.5
+        assert by_dim["agency"]["avg_score"] == 0.7
+        # Canonical Monday date.
+        assert by_dim["joy_sadness"]["period"] == "2026-03-02"
+
+    def test_dimension_filter(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        e = repo.create_entry("2026-03-02", "ocr", "x", 1)
+        repo.add_mood_score(e.id, "joy_sadness", 0.5)
+        repo.add_mood_score(e.id, "agency", 0.7)
+
+        resp = client.get(
+            "/api/dashboard/mood-trends?bin=week&dimension=agency"
+        )
+        data = resp.json()
+        assert len(data["bins"]) == 1
+        assert data["bins"][0]["dimension"] == "agency"
+
+    def test_invalid_bin_returns_400(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        resp = client.get("/api/dashboard/mood-trends?bin=fortnight")
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "invalid_bin"
+
+    def test_empty_corpus_returns_empty(
+        self, client: TestClient
+    ) -> None:
+        resp = client.get("/api/dashboard/mood-trends")
+        assert resp.status_code == 200
+        assert resp.json()["bins"] == []
+
+    def test_503_when_services_not_initialized(self) -> None:
+        from mcp.server.fastmcp import FastMCP
+
+        from journal.api import register_api_routes
+
+        test_mcp = FastMCP("test-journal")
+        register_api_routes(test_mcp, lambda: None)
+        with TestClient(
+            test_mcp.streamable_http_app(), raise_server_exceptions=False
+        ) as tc:
+            assert tc.get("/api/dashboard/mood-trends").status_code == 503
+            assert (
+                tc.get("/api/dashboard/mood-dimensions").status_code == 503
+            )
+
+
 class TestHealth:
     """T1.2.d — GET /health route."""
 

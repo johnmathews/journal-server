@@ -1,0 +1,130 @@
+# Mood dimension definitions — source of truth for the per-entry
+# scoring pipeline and the dashboard mood chart.
+#
+# Each `[[dimension]]` block defines one facet. Fields:
+#
+#   name           — stable canonical key stored in `mood_scores.dimension`.
+#                    Must be snake_case and unique. Rename with care:
+#                    renaming here orphans historical scores under the old
+#                    name until pruned with `journal backfill-mood
+#                    --prune-retired`.
+#   positive_pole  — human-readable label for the high end of the scale.
+#                    Appears in the LLM prompt, the chart legend, and the
+#                    dashboard dimension toggle.
+#   negative_pole  — label for the low end. For unipolar facets this is
+#                    typically "absence of <positive_pole>".
+#   scale_type     — one of "bipolar" (score range -1..+1, with 0 as a
+#                    meaningful neutral) or "unipolar" (score range 0..+1,
+#                    with 0 meaning "absent" rather than "opposite").
+#                    Picks the right shape for facets where the negative
+#                    pole is genuinely absence (apathy, indifference)
+#                    rather than an opposite feeling.
+#   notes          — one or two sentences of scoring criteria that go into
+#                    the LLM prompt verbatim. Stable re-interpretation
+#                    after an edit happens via `journal backfill-mood
+#                    --force`.
+#
+# **Adding a facet:**   append a new [[dimension]] block, then optionally
+#                       run `journal backfill-mood --stale-only` to
+#                       score historical entries against the new facet.
+#                       Old entries without the facet are stored sparsely
+#                       as `null` and do not require a migration.
+# **Removing a facet:** delete the block. Historical scores under the
+#                       retired name are preserved by default; pass
+#                       `--prune-retired` to delete them if you're sure
+#                       you want them gone.
+# **Editing a facet:**  edit in place and run `journal backfill-mood
+#                       --force` so the LLM reinterprets every entry
+#                       against the new criteria. Scores persist under
+#                       the same `name`, so the chart continuity is
+#                       preserved.
+#
+# Ordering is load-bearing only for chart display — the dashboard renders
+# lines in the order defined here.
+
+[[dimension]]
+name = "joy_sadness"
+positive_pole = "joy"
+negative_pole = "sadness"
+scale_type = "bipolar"
+notes = """
+Predominantly joyful / light-hearted (+1) vs predominantly sad /
+heavy-hearted (-1). Score 0 when neither clearly dominates or the
+entry reads as emotionally flat. Small positive values (+0.2) are
+fine for mild good moods; reserve +1 for genuine elation.
+"""
+
+[[dimension]]
+name = "anxiety_eagerness"
+positive_pole = "eagerness"
+negative_pole = "anxiety"
+scale_type = "bipolar"
+notes = """
+Anxious / agitated / dreading something (-1) vs eager / enthusiastic /
+looking forward (+1). Score 0 for calm and settled, the neutral
+centre. This axis captures "activation toward vs activation away",
+so a calm but unenthusiastic state reads as 0, not negative.
+"""
+
+[[dimension]]
+name = "agency"
+positive_pole = "agency"
+negative_pole = "apathy"
+scale_type = "unipolar"
+notes = """
+How strongly does the entry convey a sense of agency — feeling in
+control, capable of acting on the writer's environment? Score 0 when
+the entry shows apathy or resignation (absence of agency). Score 1
+when the writer is clearly taking initiative or feels capable of
+shaping outcomes. This is unipolar because apathy is felt as
+absence, not as an active opposite of agency.
+"""
+
+[[dimension]]
+name = "comfort_discomfort"
+positive_pole = "comfort"
+negative_pole = "discomfort"
+scale_type = "bipolar"
+notes = """
+Comfortable / at ease (+1) vs uncomfortable / unsettled (-1).
+Captures both physical and emotional comfort — journal entries
+rarely separate them cleanly. Score on the gestalt.
+"""
+
+[[dimension]]
+name = "energy_fatigue"
+positive_pole = "energetic"
+negative_pole = "tired"
+scale_type = "bipolar"
+notes = """
+Energetic / alert (+1) vs tired / drained (-1). This is arousal
+level, independent of valence: you can be energetic-and-anxious
+or tired-and-content.
+"""
+
+[[dimension]]
+name = "fulfillment"
+positive_pole = "meaningful fulfillment"
+negative_pole = "indifference"
+scale_type = "unipolar"
+notes = """
+How strongly does the entry convey a sense of meaning or
+fulfillment? Score 0 for indifference (absence of felt meaning) and
+1 for strong fulfillment / rightness. Unipolar because indifference
+reads as absence rather than opposition. Not the same as joy — you
+can be joyful without feeling fulfilled, and fulfilled without
+feeling joyful.
+"""
+
+[[dimension]]
+name = "proactive_reactive"
+positive_pole = "proactive"
+negative_pole = "reactive"
+scale_type = "bipolar"
+notes = """
+Proactive / initiating / setting the day's agenda (+1) vs reactive /
+responding to external pressures / pushed around by events (-1).
+Score 0 for a balanced mix. This is a stance dimension more than a
+mood dimension — tracked because it might correlate interestingly
+with the other facets over time.
+"""

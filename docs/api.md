@@ -376,6 +376,94 @@ Full-text search across journal entries. Supports two modes:
 
 ---
 
+### GET /api/dashboard/mood-dimensions
+
+Return the currently-loaded mood-scoring dimensions. Used by
+the webapp's mood chart to discover the active facet set, their
+scale types, and score ranges without hardcoding anything in
+the frontend.
+
+**No query parameters.**
+
+**Response (200):**
+
+```json
+{
+  "dimensions": [
+    {
+      "name": "joy_sadness",
+      "positive_pole": "joy",
+      "negative_pole": "sadness",
+      "scale_type": "bipolar",
+      "score_min": -1.0,
+      "score_max": 1.0,
+      "notes": "..."
+    },
+    {
+      "name": "agency",
+      "positive_pole": "agency",
+      "negative_pole": "apathy",
+      "scale_type": "unipolar",
+      "score_min": 0.0,
+      "score_max": 1.0,
+      "notes": "..."
+    }
+  ]
+}
+```
+
+When mood scoring is disabled (`JOURNAL_ENABLE_MOOD_SCORING`
+unset or false) the endpoint returns 200 with an empty
+`dimensions` array. Callers should treat that as "no mood data
+to display" rather than an error.
+
+See `docs/mood-scoring.md` for the full rationale, facet
+definitions, bipolar vs unipolar semantics, and the rebuild
+procedure.
+
+---
+
+### GET /api/dashboard/mood-trends
+
+Aggregate mood scores per time bucket, grouped by dimension.
+Used by the dashboard's mood chart.
+
+**Query parameters:**
+
+| Parameter   | Type   | Required | Default | Description                                   |
+|-------------|--------|----------|---------|-----------------------------------------------|
+| `bin`       | string | no       | `week`  | `week`, `month`, `quarter`, or `year`         |
+| `from`      | string | no       |         | Inclusive ISO-8601 start date                 |
+| `to`        | string | no       |         | Inclusive ISO-8601 end date                   |
+| `dimension` | string | no       |         | Filter to a single dimension by `name`        |
+
+**Response (200):**
+
+```json
+{
+  "from": "2026-01-01",
+  "to": "2026-04-11",
+  "bin": "week",
+  "bins": [
+    {"period": "2026-01-05", "dimension": "joy_sadness", "avg_score": 0.3, "entry_count": 4},
+    {"period": "2026-01-05", "dimension": "agency",      "avg_score": 0.6, "entry_count": 4},
+    {"period": "2026-01-12", "dimension": "joy_sadness", "avg_score": 0.5, "entry_count": 5}
+  ]
+}
+```
+
+- `period` is the canonical ISO-8601 date of the bucket start
+  (Monday for weeks, first of month/quarter/year for the others).
+- `avg_score` is the mean across every scored entry in the bucket.
+- Empty buckets are omitted.
+
+**Error responses:**
+
+- `400` — `bin` is not one of `week`/`month`/`quarter`/`year`
+- `503` — server not initialised
+
+---
+
 ### GET /api/dashboard/writing-stats
 
 Aggregated writing frequency and word count per time bucket,

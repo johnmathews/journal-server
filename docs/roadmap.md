@@ -113,7 +113,7 @@ review):
 
 ---
 
-### 3. Dashboard view `[both]` — 3a shipped 2026-04-11, 3b/3c outstanding
+### 3. Dashboard view `[both]` — 3a + 3b shipped 2026-04-11, 3c outstanding
 
 Scoped webapp view at `/` (Option B — Dashboard is now the
 home route; entries list moved to `/entries`). Uses Chart.js 4
@@ -131,9 +131,13 @@ styled to match the Mosaic aesthetic.
 3. ⏳ **People mentions over time** — stacked area / multi-line,
    top-N people. Depends on Tier 1 item 1 (real entity
    extraction) before it's meaningful. **3c, not yet started.**
-4. ⏳ **Mood dimensions** — per-entry scoring via Claude Haiku,
-   opt-in via `JOURNAL_ENABLE_MOOD_SCORING`, mood-trends chart.
-   **3b, not yet started.**
+4. ✅ **Mood dimensions** — per-entry scoring via Claude Sonnet
+   4.5 (env-overridable), opt-in via `JOURNAL_ENABLE_MOOD_SCORING`.
+   Facet set is user-editable via `config/mood-dimensions.toml`
+   with mixed bipolar (`-1..+1`) / unipolar (`0..+1`) scale
+   types per facet. Regeneration via `journal backfill-mood
+   [--force | --stale-only] [--prune-retired] [--dry-run]`.
+   See `docs/mood-scoring.md`.
 5. ⏳ **Topic frequency heatmap or bar chart** — most-mentioned
    entities of type `topic` over time. Feeds off entity
    extraction. **3c, blocked on item 1.**
@@ -594,6 +598,19 @@ Included so we don't accidentally re-surface these as TODOs.
     ingestion stats, in-process query latency histogram, and
     per-component liveness checks; bearer-auth-exempt on loopback;
     `journal health` CLI prints the same payload
+15. Dashboard 3a (Tier 1 item 3a) — `GET /api/dashboard/writing-stats`
+    and webapp DashboardView at `/` (Option B routing — entries
+    list moved to `/entries`). Chart.js 4 line charts for writing
+    frequency and word count per week/month/quarter/year
+16. Dashboard 3b (Tier 1 item 3b) — per-entry mood scoring via
+    `config/mood-dimensions.toml` (bipolar + unipolar facets),
+    `MoodScorer` Protocol + Anthropic Sonnet 4.5 adapter via
+    tool use, `replace_mood_scores` with sparse storage,
+    opt-in `JOURNAL_ENABLE_MOOD_SCORING` config flag,
+    `journal backfill-mood` CLI with stale-only / force /
+    prune-retired / dry-run modes, `GET /api/dashboard/mood-dimensions`
+    and `GET /api/dashboard/mood-trends` endpoints, and a mood
+    chart in the dashboard. See `docs/mood-scoring.md`
 
 ---
 

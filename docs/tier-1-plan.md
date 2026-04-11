@@ -252,53 +252,86 @@ notes.
    alongside the original `week`/`month`; `day` dropped as
    too noisy for the target corpus.
 
-#### Item 3b — Mood scoring + mood chart
+#### Item 3b — Mood scoring + mood chart — ✅ backend shipped 2026-04-11
 
-This is the biggest unit in Tier 1 because it introduces a new
-LLM call in the ingestion path.
+Backend in `journal-server@HEAD`. Webapp mood chart is the last
+remaining piece and ships as a sibling commit in
+`journal-webapp`. Session notes:
+`journal/260411-mood-scoring-backend.md`. Full rationale:
+`docs/mood-scoring.md`.
 
-- **T1.3b.i** `[S]` — **Design decision: mood dimensions.** The
-  existing `mood_scores` schema lets dimensions be free text,
-  but we need a committed canonical set so the chart knows what
-  to plot. Proposed initial set: `overall`, `energy`, `anxiety`,
-  `gratitude`, `productivity`. All scored in `[-1, +1]` (schema
-  already constrains this). Document in `docs/mood-scoring.md`.
-- **T1.3b.ii** `[M]` — **Protocol + adapter.** New
-  `src/journal/providers/mood_scorer.py`:
-  ```python
-  @runtime_checkable
-  class MoodScorer(Protocol):
-      def score(self, text: str) -> list[MoodScore]: ...
-  ```
-  Concrete `AnthropicMoodScorer` uses Claude Haiku (cheaper than
-  Opus, fast, fine for this task). System prompt describes the
-  dimension set and output JSON schema. Parses JSON, validates
-  scores are in range, returns `list[MoodScore]`. Cost per
-  entry: a few cents at most.
-- **T1.3b.iii** `[S]` — **Config flag.** New setting
-  `JOURNAL_ENABLE_MOOD_SCORING` (default `False`). When false,
-  the scorer Protocol is not instantiated and ingestion skips
-  the scoring step entirely.
-- **T1.3b.iv** `[S]` — **Wire into ingestion.** In `_process_text`
-  or right after `create_entry`, call `mood_scorer.score(text)`
-  if configured, then write results via
-  `repository.replace_mood_scores(entry_id, scores)` (new method
-  following the `replace_chunks` precedent — delete-then-insert,
-  idempotent on re-run).
-- **T1.3b.v** `[S]` — **Rechunk-style backfill CLI.**
-  `journal backfill-mood` that walks existing entries missing
-  scores and runs the scorer. Same guard rails as
-  `rechunk_entries` — dry-run flag, date-range filter.
-- **T1.3b.vi** `[S]` — **Backend: mood-trends endpoint.**
-  `GET /api/dashboard/mood-trends?from=&to=&bin=week&dims=...`.
-  Wraps existing `QueryService.get_mood_trends`.
-- **T1.3b.vii** `[M]` — **Frontend: mood chart.** Multi-line
-  Chart.js chart with a dimension toggle (checkbox per dimension,
-  default all on). Ties into the same date picker as 3a.
-- **T1.3b.viii** `[M]` — **Tests.** Scorer adapter tests (mock
-  the Anthropic client, assert schema validation). Ingestion
-  test that the flag gates the call. Backfill CLI test. Endpoint
-  test. Frontend test.
+**Design refinements vs the original plan:**
+
+1. The fixed 5-facet set (`overall, energy, anxiety, gratitude,
+   productivity`) was replaced with a **7-facet user-editable
+   config** in `config/mood-dimensions.toml`. Mixed bipolar /
+   unipolar scale types per facet — some axes (joy vs sadness)
+   are genuinely bipolar, others (agency vs apathy) are
+   unipolar because the "negative pole" reads as absence. Old
+   schema forced everything to bipolar which was wrong.
+2. **Config as data**, not code. Python loader parses TOML at
+   startup; editing a facet is a one-file edit + restart.
+3. **Sparse storage by default.** Adding a facet doesn't
+   require a backfill run — new entries pick it up, old ones
+   return `null` for the new facet until an explicit
+   `--stale-only` backfill is run. Regeneration is cheap.
+4. **Sonnet 4.5** instead of Haiku (user preference — noticeably
+   better at subjective calibration on short texts, still
+   ~$0.006/entry).
+
+**Work units:**
+
+- **T1.3b.i** `[S]` ✅ **Dimensions config + loader.** Shipped
+  as `config/mood-dimensions.toml` + `src/journal/services/mood_dimensions.py`
+  with a `MoodDimension` dataclass (`name`, `positive_pole`,
+  `negative_pole`, `scale_type`, `notes`) and a validated
+  `load_mood_dimensions(path)` loader using stdlib `tomllib`
+  (no new deps). 17 unit tests including a smoke test of the
+  shipped config file.
+- **T1.3b.ii** `[M]` ✅ **MoodScorer Protocol + Anthropic adapter.**
+  `src/journal/providers/mood_scorer.py`. Uses tool use via
+  the Messages API. `build_tool_schema(dimensions)` builds the
+  input schema at call time with per-facet min/max bounds based
+  on scale type, so unipolar facets fail schema validation if
+  the model tries to return a negative score. Fallback parses
+  the first JSON object from text blocks if the tool call is
+  missing. 22 unit tests.
+- **T1.3b.iii** `[S]` ✅ **Config flag.** `JOURNAL_ENABLE_MOOD_SCORING`
+  (default False). Also `MOOD_SCORER_MODEL` (default
+  `claude-sonnet-4-5`), `MOOD_SCORER_MAX_TOKENS`, and
+  `MOOD_DIMENSIONS_PATH`.
+- **T1.3b.iv** `[S]` ✅ **Wire into ingestion.**
+  `MoodScoringService` bridges scorer + repo +
+  `replace_mood_scores`. Hook in `IngestionService._process_text`
+  via a new `mood_scoring` optional constructor param. Scoring
+  failures are logged but never propagate back — an entry is
+  always saved even if scoring fails. 6 service tests.
+- **T1.3b.v** `[S]` ✅ **Backfill CLI.** `journal backfill-mood
+  [--force] [--prune-retired] [--dry-run] [--start-date]
+  [--end-date]`. `--stale-only` is the default (mode string,
+  not a flag). Dry-run prints a cost estimate based on Sonnet
+  4.5 pricing. 9 tests across the service + 2 CLI tests.
+- **T1.3b.vi** `[S]` ✅ **Dashboard endpoints.** Two new routes
+  in `api.py`: `GET /api/dashboard/mood-dimensions` surfaces
+  the live facet set for the frontend; `GET /api/dashboard/mood-trends`
+  wraps `QueryService.get_mood_trends` with a `dimension`
+  filter. Both bearer-authenticated. 7 integration tests.
+- **T1.3b.vii** `[M]` ⏳ **Frontend mood chart.** Pending in
+  the webapp sibling commit — multi-line Chart.js chart with
+  dimension toggles, sharing the existing date range + bin
+  picker.
+- **T1.3b.viii** `[M]` ✅ **Backend tests.** 80 new tests
+  across the six backend files (repository CRUD, trends
+  canonical dates, scoring service, backfill service, mood
+  scorer adapter, dimensions loader, API endpoints, CLI).
+  Frontend tests ship with the webapp commit.
+
+**Refactor bonus:** `get_mood_trends` and `get_writing_frequency`
+now share a `_bin_start_sql` helper and both return canonical
+ISO dates instead of `%Y-W%W`-style format strings. The LLM-facing
+`journal_get_mood_trends` MCP tool still accepts `day / week /
+month / quarter / year` for backward compatibility — only the
+supported-granularity set expanded; nothing was removed.
 
 #### Item 3c — People + topic charts
 

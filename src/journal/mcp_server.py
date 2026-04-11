@@ -3,6 +3,7 @@
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -95,6 +96,40 @@ def _init_services() -> dict:
 
     stats_collector = InMemoryStatsCollector()
 
+    # Optional mood-scoring pipeline. Loaded only when the user
+    # explicitly opts in via `JOURNAL_ENABLE_MOOD_SCORING=true`.
+    # Mis-configured dimensions fail loudly at startup — silent
+    # degradation to "no scoring" is a worse failure mode than a
+    # server refusing to start.
+    mood_scoring_service: Any = None
+    mood_dimensions: tuple = ()
+    if config.enable_mood_scoring:
+        from journal.providers.mood_scorer import AnthropicMoodScorer
+        from journal.services.mood_dimensions import load_mood_dimensions
+        from journal.services.mood_scoring import MoodScoringService
+
+        mood_dimensions = load_mood_dimensions(config.mood_dimensions_path)
+        mood_scorer = AnthropicMoodScorer(
+            api_key=config.anthropic_api_key,
+            model=config.mood_scorer_model,
+            max_tokens=config.mood_scorer_max_tokens,
+        )
+        mood_scoring_service = MoodScoringService(
+            scorer=mood_scorer,
+            repository=repo,
+            dimensions=mood_dimensions,
+        )
+        log.info(
+            "Mood scoring enabled: model=%s, dimensions=%d",
+            config.mood_scorer_model,
+            len(mood_dimensions),
+        )
+    else:
+        log.info(
+            "Mood scoring disabled "
+            "(JOURNAL_ENABLE_MOOD_SCORING unset or false)"
+        )
+
     _services = {
         "ingestion": IngestionService(
             repository=repo,
@@ -105,6 +140,7 @@ def _init_services() -> dict:
             chunker=chunker,
             slack_bot_token=config.slack_bot_token,
             embed_metadata_prefix=config.chunking_embed_metadata_prefix,
+            mood_scoring=mood_scoring_service,
         ),
         "query": QueryService(
             repository=repo,
@@ -126,6 +162,13 @@ def _init_services() -> dict:
         # existing lookup style the api.py routes use.
         "config": config,
         "stats": stats_collector,
+        # Mood scoring surfaces (optional — absent when disabled).
+        # `mood_dimensions` powers the `/api/dashboard/mood-dimensions`
+        # endpoint; `mood_scoring` is the service (not currently read
+        # by routes but exposed for symmetry with `ingestion` /
+        # `entity_extraction`).
+        "mood_dimensions": mood_dimensions,
+        "mood_scoring": mood_scoring_service,
     }
 
     entry_count = repo.count_entries()

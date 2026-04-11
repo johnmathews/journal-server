@@ -252,3 +252,224 @@ class TestRechunkEntries:
         assert r.old_total_chunks == 0
         assert r.new_total_chunks == 0
         assert r.errors == []
+
+
+class TestBackfillMoodScores:
+    """T1.3b.v — backfill_mood_scores across stale-only, force,
+    prune-retired, and dry-run modes."""
+
+    @pytest.fixture
+    def dims(self):
+        from journal.services.mood_dimensions import MoodDimension
+
+        return (
+            MoodDimension(
+                name="joy_sadness",
+                positive_pole="joy",
+                negative_pole="sadness",
+                scale_type="bipolar",
+                notes="...",
+            ),
+            MoodDimension(
+                name="agency",
+                positive_pole="agency",
+                negative_pole="apathy",
+                scale_type="unipolar",
+                notes="...",
+            ),
+        )
+
+    def _make_service(self, repo, dims, scorer_side_effect=None):
+        from journal.providers.mood_scorer import RawMoodScore
+        from journal.services.mood_scoring import MoodScoringService
+
+        scorer = MagicMock()
+        if scorer_side_effect is not None:
+            scorer.score.side_effect = scorer_side_effect
+        else:
+            scorer.score.return_value = [
+                RawMoodScore("joy_sadness", 0.5, 0.9),
+                RawMoodScore("agency", 0.7, None),
+            ]
+        return MoodScoringService(scorer, repo, dims), scorer
+
+    def test_stale_only_scores_only_missing_entries(self, repo, dims):
+        from journal.services.backfill import backfill_mood_scores
+
+        # Three entries, one already fully scored, one partially, one bare.
+        e1 = repo.create_entry("2026-04-01", "ocr", "already scored", 2)
+        e2 = repo.create_entry("2026-04-02", "ocr", "partial", 1)
+        repo.create_entry("2026-04-03", "ocr", "bare", 1)
+        repo.replace_mood_scores(
+            e1.id, [("joy_sadness", 0.5, None), ("agency", 0.6, None)]
+        )
+        repo.replace_mood_scores(e2.id, [("joy_sadness", 0.3, None)])
+
+        svc, scorer = self._make_service(repo, dims)
+        result = backfill_mood_scores(
+            repository=repo, mood_scoring=svc, mode="stale-only"
+        )
+
+        # Only e2 and e3 should have been re-scored.
+        assert result.scored == 2
+        assert scorer.score.call_count == 2
+        # e1 still has its original scores.
+        assert len(repo.get_mood_scores(e1.id)) == 2
+
+    def test_force_rescores_every_entry_even_if_complete(
+        self, repo, dims
+    ):
+        from journal.services.backfill import backfill_mood_scores
+
+        e1 = repo.create_entry("2026-04-01", "ocr", "already scored", 2)
+        repo.replace_mood_scores(
+            e1.id, [("joy_sadness", 0.5, None), ("agency", 0.6, None)]
+        )
+
+        svc, scorer = self._make_service(repo, dims)
+        result = backfill_mood_scores(
+            repository=repo, mood_scoring=svc, mode="force"
+        )
+
+        assert result.scored == 1
+        assert scorer.score.call_count == 1
+        # The scores were replaced (to the mock return of 0.5 / 0.7).
+        by_dim = {
+            s.dimension: s.score for s in repo.get_mood_scores(e1.id)
+        }
+        assert by_dim["joy_sadness"] == 0.5
+        assert by_dim["agency"] == 0.7
+
+    def test_dry_run_does_not_call_scorer(self, repo, dims):
+        from journal.services.backfill import backfill_mood_scores
+
+        repo.create_entry("2026-04-01", "ocr", "x", 1)
+        svc, scorer = self._make_service(repo, dims)
+
+        result = backfill_mood_scores(
+            repository=repo,
+            mood_scoring=svc,
+            mode="stale-only",
+            dry_run=True,
+        )
+        assert result.dry_run is True
+        assert result.scored == 1
+        scorer.score.assert_not_called()
+        # And nothing was written.
+        assert repo.get_mood_scores(1) == []
+
+    def test_prune_retired_removes_off_config_dims(self, repo, dims):
+        from journal.services.backfill import backfill_mood_scores
+
+        e = repo.create_entry("2026-04-01", "ocr", "x", 1)
+        # Write two current + one retired dimension.
+        repo.replace_mood_scores(
+            e.id,
+            [
+                ("joy_sadness", 0.5, None),
+                ("agency", 0.6, None),
+                ("retired_dim", 0.1, None),
+            ],
+        )
+        svc, _ = self._make_service(repo, dims)
+        result = backfill_mood_scores(
+            repository=repo,
+            mood_scoring=svc,
+            mode="stale-only",
+            prune_retired=True,
+        )
+        assert result.pruned == 1
+        names = {s.dimension for s in repo.get_mood_scores(e.id)}
+        assert names == {"joy_sadness", "agency"}
+
+    def test_prune_retired_dry_run_counts_without_deleting(
+        self, repo, dims
+    ):
+        from journal.services.backfill import backfill_mood_scores
+
+        e = repo.create_entry("2026-04-01", "ocr", "x", 1)
+        repo.replace_mood_scores(
+            e.id,
+            [("joy_sadness", 0.5, None), ("retired_dim", 0.1, None)],
+        )
+        svc, _ = self._make_service(repo, dims)
+        result = backfill_mood_scores(
+            repository=repo,
+            mood_scoring=svc,
+            mode="stale-only",
+            prune_retired=True,
+            dry_run=True,
+        )
+        assert result.pruned == 1
+        # Still present.
+        names = {s.dimension for s in repo.get_mood_scores(e.id)}
+        assert "retired_dim" in names
+
+    def test_date_filter_stale_only(self, repo, dims):
+        from journal.services.backfill import backfill_mood_scores
+
+        repo.create_entry("2026-02-15", "ocr", "feb", 1)
+        repo.create_entry("2026-03-15", "ocr", "mar", 1)
+        repo.create_entry("2026-04-15", "ocr", "apr", 1)
+
+        svc, scorer = self._make_service(repo, dims)
+        result = backfill_mood_scores(
+            repository=repo,
+            mood_scoring=svc,
+            mode="stale-only",
+            start_date="2026-03-01",
+            end_date="2026-03-31",
+        )
+        assert result.scored == 1
+        assert scorer.score.call_count == 1
+
+    def test_scorer_exception_captured_per_entry(self, repo, dims):
+        from journal.services.backfill import backfill_mood_scores
+
+        repo.create_entry("2026-04-01", "ocr", "one", 1)
+        repo.create_entry("2026-04-02", "ocr", "two", 1)
+        # The MoodScoringService swallows exceptions internally and
+        # returns 0 — so the service itself never raises at the
+        # backfill layer. But we still want to verify that a
+        # returned-zero-score counts as a skip, not a crash.
+        from journal.providers.mood_scorer import RawMoodScore
+
+        scorer = MagicMock()
+        scorer.score.side_effect = [
+            [
+                RawMoodScore("joy_sadness", 0.1, None),
+                RawMoodScore("agency", 0.2, None),
+            ],
+            RuntimeError("boom"),
+        ]
+        from journal.services.mood_scoring import MoodScoringService
+
+        svc = MoodScoringService(scorer, repo, dims)
+        result = backfill_mood_scores(
+            repository=repo, mood_scoring=svc, mode="stale-only"
+        )
+        # First entry scored OK, second entry returned 0 (warning
+        # logged). The backfill counts both but distinguishes
+        # scored vs skipped.
+        assert result.scored == 1
+        assert result.skipped == 1
+
+    def test_empty_dimensions_is_noop(self, repo):
+        from journal.services.backfill import backfill_mood_scores
+        from journal.services.mood_scoring import MoodScoringService
+
+        repo.create_entry("2026-04-01", "ocr", "x", 1)
+        svc = MoodScoringService(MagicMock(), repo, ())
+        result = backfill_mood_scores(
+            repository=repo, mood_scoring=svc, mode="stale-only"
+        )
+        assert result.scored == 0
+
+    def test_invalid_mode_raises(self, repo, dims):
+        from journal.services.backfill import backfill_mood_scores
+
+        svc, _ = self._make_service(repo, dims)
+        with pytest.raises(ValueError, match="Unsupported mode"):
+            backfill_mood_scores(
+                repository=repo, mood_scoring=svc, mode="maybe"
+            )

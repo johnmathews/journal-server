@@ -442,6 +442,183 @@ class TestMoodScores:
         assert len(trends) == 2  # Different weeks
 
 
+class TestMoodScoresCRUD:
+    """T1.3b.iii — replace / get / missing / prune operations on
+    mood_scores."""
+
+    def test_replace_mood_scores_inserts_fresh(self, repo):
+        e = repo.create_entry("2026-04-01", "ocr", "hello", 1)
+        repo.replace_mood_scores(
+            e.id,
+            [
+                ("joy_sadness", 0.5, 0.9),
+                ("agency", 0.7, None),
+            ],
+        )
+        scores = repo.get_mood_scores(e.id)
+        assert len(scores) == 2
+        by_dim = {s.dimension: s for s in scores}
+        assert by_dim["joy_sadness"].score == 0.5
+        assert by_dim["joy_sadness"].confidence == 0.9
+        assert by_dim["agency"].score == 0.7
+        assert by_dim["agency"].confidence is None
+
+    def test_replace_mood_scores_is_idempotent(self, repo):
+        e = repo.create_entry("2026-04-01", "ocr", "hello", 1)
+        repo.replace_mood_scores(e.id, [("joy_sadness", 0.5, None)])
+        repo.replace_mood_scores(e.id, [("joy_sadness", 0.8, None)])
+        scores = repo.get_mood_scores(e.id)
+        # Second call REPLACED the first rather than appending.
+        assert len(scores) == 1
+        assert scores[0].score == 0.8
+
+    def test_replace_mood_scores_preserves_untouched_dims(self, repo):
+        e = repo.create_entry("2026-04-01", "ocr", "hello", 1)
+        repo.replace_mood_scores(
+            e.id,
+            [
+                ("joy_sadness", 0.5, None),
+                ("agency", 0.7, None),
+            ],
+        )
+        # Rewrite only joy_sadness — agency row should survive.
+        repo.replace_mood_scores(e.id, [("joy_sadness", 0.2, None)])
+        scores = repo.get_mood_scores(e.id)
+        assert len(scores) == 2
+        by_dim = {s.dimension: s.score for s in scores}
+        assert by_dim["joy_sadness"] == 0.2
+        assert by_dim["agency"] == 0.7
+
+    def test_replace_mood_scores_empty_list_is_noop(self, repo):
+        e = repo.create_entry("2026-04-01", "ocr", "hello", 1)
+        repo.replace_mood_scores(e.id, [("joy_sadness", 0.5, None)])
+        repo.replace_mood_scores(e.id, [])
+        scores = repo.get_mood_scores(e.id)
+        assert len(scores) == 1  # unchanged
+
+    def test_get_entries_missing_mood_scores_empty_dims(self, repo):
+        e = repo.create_entry("2026-04-01", "ocr", "hello", 1)
+        assert repo.get_entries_missing_mood_scores([]) == []
+        # Also doesn't break when entries exist.
+        assert e.id
+
+    def test_get_entries_missing_mood_scores_all_missing(self, repo):
+        e1 = repo.create_entry("2026-04-01", "ocr", "one", 1)
+        e2 = repo.create_entry("2026-04-02", "ocr", "two", 1)
+        missing = repo.get_entries_missing_mood_scores(
+            ["joy_sadness", "agency"]
+        )
+        assert sorted(missing) == sorted([e1.id, e2.id])
+
+    def test_get_entries_missing_mood_scores_partial(self, repo):
+        e1 = repo.create_entry("2026-04-01", "ocr", "one", 1)
+        e2 = repo.create_entry("2026-04-02", "ocr", "two", 1)
+        # e1 has joy_sadness only; e2 has both.
+        repo.replace_mood_scores(e1.id, [("joy_sadness", 0.5, None)])
+        repo.replace_mood_scores(
+            e2.id,
+            [("joy_sadness", 0.5, None), ("agency", 0.3, None)],
+        )
+        missing = repo.get_entries_missing_mood_scores(
+            ["joy_sadness", "agency"]
+        )
+        assert missing == [e1.id]
+
+    def test_get_entries_missing_mood_scores_ignores_retired_dims(
+        self, repo
+    ):
+        """An entry that has a score for a RETIRED dimension (not in
+        `dimension_names`) should still count as missing if it's
+        missing a current one. `dimension_names` is the current set,
+        not the union of all scored dims."""
+        e = repo.create_entry("2026-04-01", "ocr", "x", 1)
+        repo.replace_mood_scores(e.id, [("old_dim", 0.5, None)])
+        missing = repo.get_entries_missing_mood_scores(["joy_sadness"])
+        assert missing == [e.id]
+
+    def test_prune_retired_mood_scores(self, repo):
+        e = repo.create_entry("2026-04-01", "ocr", "x", 1)
+        repo.replace_mood_scores(
+            e.id,
+            [
+                ("joy_sadness", 0.5, None),
+                ("agency", 0.3, None),
+                ("retired_one", 0.1, None),
+            ],
+        )
+        pruned = repo.prune_retired_mood_scores(["joy_sadness", "agency"])
+        assert pruned == 1
+        scores = repo.get_mood_scores(e.id)
+        assert {s.dimension for s in scores} == {"joy_sadness", "agency"}
+
+    def test_prune_retired_mood_scores_empty_current_wipes_all(
+        self, repo
+    ):
+        e = repo.create_entry("2026-04-01", "ocr", "x", 1)
+        repo.replace_mood_scores(
+            e.id, [("joy_sadness", 0.5, None), ("agency", 0.3, None)]
+        )
+        pruned = repo.prune_retired_mood_scores([])
+        assert pruned == 2
+        assert repo.get_mood_scores(e.id) == []
+
+    def test_prune_retired_mood_scores_noop_when_all_current(self, repo):
+        e = repo.create_entry("2026-04-01", "ocr", "x", 1)
+        repo.replace_mood_scores(
+            e.id, [("joy_sadness", 0.5, None)]
+        )
+        assert repo.prune_retired_mood_scores(["joy_sadness"]) == 0
+
+
+class TestMoodTrendsCanonicalDates:
+    """The refactor moves `get_mood_trends` onto the shared
+    `_bin_start_sql` helper so `period` is now a canonical ISO date
+    (not a %Y-%W string) and the supported granularities match
+    `get_writing_frequency` plus `day`."""
+
+    def test_week_period_is_monday_iso_date(self, repo):
+        # 2026-03-02 is a Monday, 2026-03-04 is Wednesday — same
+        # week, bin_start is Monday 2026-03-02.
+        e1 = repo.create_entry("2026-03-02", "ocr", "a", 1)
+        e2 = repo.create_entry("2026-03-04", "ocr", "b", 1)
+        repo.add_mood_score(e1.id, "joy_sadness", 0.5)
+        repo.add_mood_score(e2.id, "joy_sadness", 0.7)
+        trends = repo.get_mood_trends(granularity="week")
+        assert len(trends) == 1
+        assert trends[0].period == "2026-03-02"
+
+    def test_month_period_is_first_of_month(self, repo):
+        e = repo.create_entry("2026-03-15", "ocr", "a", 1)
+        repo.add_mood_score(e.id, "joy_sadness", 0.5)
+        trends = repo.get_mood_trends(granularity="month")
+        assert trends[0].period == "2026-03-01"
+
+    def test_quarter_period_is_jan_apr_jul_oct(self, repo):
+        e = repo.create_entry("2026-08-15", "ocr", "a", 1)  # Q3
+        repo.add_mood_score(e.id, "joy_sadness", 0.5)
+        trends = repo.get_mood_trends(granularity="quarter")
+        assert trends[0].period == "2026-07-01"
+
+    def test_year_period_is_jan_first(self, repo):
+        e = repo.create_entry("2026-06-15", "ocr", "a", 1)
+        repo.add_mood_score(e.id, "joy_sadness", 0.5)
+        trends = repo.get_mood_trends(granularity="year")
+        assert trends[0].period == "2026-01-01"
+
+    def test_day_granularity_still_works(self, repo):
+        """Backward compat for the LLM-facing MCP tool."""
+        e = repo.create_entry("2026-03-15", "ocr", "a", 1)
+        repo.add_mood_score(e.id, "joy_sadness", 0.5)
+        trends = repo.get_mood_trends(granularity="day")
+        assert trends[0].period == "2026-03-15"
+
+    def test_invalid_granularity_raises(self, repo):
+        import pytest
+
+        with pytest.raises(ValueError, match="Unsupported granularity"):
+            repo.get_mood_trends(granularity="fortnight")
+
+
 class TestTopicFrequency:
     def test_get_topic_frequency(self, repo):
         repo.create_entry("2026-03-01", "ocr", "Walked through Vienna", 3)
