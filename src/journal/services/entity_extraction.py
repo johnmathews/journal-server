@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Any
 from journal.models import ExtractionResult
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from journal.db.repository import EntryRepository
     from journal.entitystore.store import EntityStore
     from journal.providers.embeddings import EmbeddingsProvider
@@ -48,6 +50,24 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     if norm_a == 0.0 or norm_b == 0.0:
         return 0.0
     return dot / (math.sqrt(norm_a) * math.sqrt(norm_b))
+
+
+def _report_progress(
+    callback: Callable[[int, int], None] | None,
+    current: int,
+    total: int,
+) -> None:
+    """Invoke a progress callback, swallowing any exception it raises.
+
+    A broken progress sink must never break the batch — the whole
+    point of the callback is out-of-band reporting.
+    """
+    if callback is None:
+        return
+    try:
+        callback(current, total)
+    except Exception as exc:  # noqa: BLE001 — callback may raise anything
+        log.warning("Progress callback failed: %s", exc)
 
 
 class EntityExtractionService:
@@ -244,12 +264,24 @@ class EntityExtractionService:
         start_date: str | None = None,
         end_date: str | None = None,
         stale_only: bool = False,
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
     ) -> list[ExtractionResult]:
         """Run extraction across many entries with filter support.
 
         Per-entry exceptions are captured and surfaced as warnings on
         a synthetic ExtractionResult so one bad entry can't halt the
         whole batch.
+
+        Args:
+            on_progress: Optional keyword-only callback invoked as
+                ``on_progress(current, total)``. Called once with
+                ``(0, total)`` after the target entry set has been
+                resolved but before the loop begins, then with the
+                1-based ``(current, total)`` after each entry is
+                processed — whether it succeeded or failed. A raising
+                callback is logged and swallowed: a broken progress
+                sink must never break the batch.
         """
         ids = self._resolve_batch_ids(
             entry_ids=entry_ids,
@@ -259,8 +291,11 @@ class EntityExtractionService:
         )
         log.info("Extracting entities for %d entries", len(ids))
 
+        total = len(ids)
+        _report_progress(on_progress, 0, total)
+
         results: list[ExtractionResult] = []
-        for eid in ids:
+        for idx, eid in enumerate(ids, start=1):
             try:
                 results.append(self.extract_from_entry(eid))
             except Exception as e:  # noqa: BLE001 — we want to keep going
@@ -276,6 +311,7 @@ class EntityExtractionService:
                         warnings=[f"extraction failed: {e}"],
                     )
                 )
+            _report_progress(on_progress, idx, total)
         return results
 
     # ------------------------------------------------------------------

@@ -528,6 +528,324 @@ the app-wide middleware.
 
 ---
 
+---
+
+## Entity endpoints
+
+Endpoints that expose the extracted-entity graph built by the entity
+extraction pipeline. See [entity-extraction.md](entity-extraction.md)
+for how entities, mentions, and relationships are produced, and
+[jobs.md](jobs.md) for how the extraction runs are scheduled.
+
+### GET /api/entities
+
+List entities with optional type filter, case-insensitive substring
+search, and pagination. The search filter is applied after the store
+query, so `total` reflects the unfiltered count for the given
+`entity_type`.
+
+**Query parameters:**
+
+| Parameter | Type   | Required | Default | Description                                                          |
+|-----------|--------|----------|---------|----------------------------------------------------------------------|
+| `type`    | string | no       |         | Filter by entity type (e.g. `person`, `place`, `activity`)           |
+| `search`  | string | no       |         | Case-insensitive substring match against canonical name and aliases  |
+| `limit`   | int    | no       | 50      | Max results (capped at 200)                                          |
+| `offset`  | int    | no       | 0       | Pagination offset                                                    |
+
+**Response (200):**
+```json
+{
+  "items": [
+    {
+      "id": 7,
+      "canonical_name": "Atlas",
+      "entity_type": "person",
+      "aliases": ["Atlas G."],
+      "mention_count": 23,
+      "first_seen": "2026-01-04"
+    }
+  ],
+  "total": 42,
+  "limit": 50,
+  "offset": 0
+}
+```
+
+### GET /api/entities/{entity_id}
+
+Return the full detail record for a single entity.
+
+**Response (200):**
+```json
+{
+  "id": 7,
+  "canonical_name": "Atlas",
+  "entity_type": "person",
+  "aliases": ["Atlas G."],
+  "description": "Long-time friend, lives in Vienna.",
+  "first_seen": "2026-01-04",
+  "created_at": "2026-01-04T10:22:13+00:00",
+  "updated_at": "2026-03-18T14:01:55+00:00"
+}
+```
+
+**Response (404):**
+```json
+{ "error": "Entity 999 not found" }
+```
+
+### GET /api/entities/{entity_id}/mentions
+
+List every recorded mention of an entity, oldest first. Each mention
+carries the entry it was extracted from, the exact quoted span, and
+the extractor's confidence.
+
+**Query parameters:**
+
+| Parameter | Type | Required | Default | Description                   |
+|-----------|------|----------|---------|-------------------------------|
+| `limit`   | int  | no       | 50      | Max mentions (capped at 200)  |
+| `offset`  | int  | no       | 0       | Pagination offset             |
+
+**Response (200):**
+```json
+{
+  "entity_id": 7,
+  "mentions": [
+    {
+      "id": 103,
+      "entity_id": 7,
+      "entry_id": 42,
+      "entry_date": "2026-03-22",
+      "quote": "Walked through Vienna with Atlas",
+      "confidence": 0.93,
+      "extraction_run_id": "b1e2...",
+      "created_at": "2026-03-22T18:04:11+00:00"
+    }
+  ],
+  "total": 1
+}
+```
+
+`total` is the length of the returned page, not the unpaginated
+count — clients that need a hard total should rely on the entity
+summary's `mention_count` instead.
+
+**Response (404):**
+```json
+{ "error": "Entity 999 not found" }
+```
+
+### GET /api/entities/{entity_id}/relationships
+
+Return the subject-predicate-object relationships that touch an
+entity, split into outgoing (entity is the subject) and incoming
+(entity is the object) lists.
+
+**No query parameters.**
+
+**Response (200):**
+```json
+{
+  "entity_id": 7,
+  "outgoing": [
+    {
+      "id": 12,
+      "subject_entity_id": 7,
+      "predicate": "lives_in",
+      "object_entity_id": 19,
+      "quote": "Atlas lives in Vienna",
+      "entry_id": 42,
+      "confidence": 0.88,
+      "extraction_run_id": "b1e2...",
+      "created_at": "2026-03-22T18:04:11+00:00"
+    }
+  ],
+  "incoming": []
+}
+```
+
+**Response (404):**
+```json
+{ "error": "Entity 999 not found" }
+```
+
+### GET /api/entries/{entry_id}/entities
+
+List the entities extracted from a single entry, with per-entity
+mention counts scoped to that entry.
+
+**No query parameters.**
+
+**Response (200):**
+```json
+{
+  "entry_id": 42,
+  "items": [
+    {
+      "id": 7,
+      "canonical_name": "Atlas",
+      "entity_type": "person",
+      "aliases": ["Atlas G."],
+      "mention_count": 2,
+      "first_seen": "2026-01-04"
+    }
+  ],
+  "total": 1
+}
+```
+
+**Response (404):**
+```json
+{ "error": "Entry 999 not found" }
+```
+
+---
+
+## Batch job endpoints
+
+Long-running batch operations (entity extraction, mood backfill) run
+asynchronously on an in-process single-worker job runner. Clients
+submit a job, receive `202 Accepted` with a `job_id`, and then poll
+`GET /api/jobs/{job_id}` once per second until `status` reaches a
+terminal value (`succeeded` or `failed`).
+
+See [jobs.md](jobs.md) for the full data model, threading
+invariants, restart recovery semantics, and result payload shapes.
+
+### POST /api/entities/extract
+
+Submit an entity-extraction batch job. This endpoint replaced the
+previously synchronous entity extraction call — the single-entry path
+(`entry_id`) also goes through the jobs table, so there is no
+synchronous alternative. Unknown keys, wrong types, and invalid
+values are rejected synchronously by `JobRunner.submit_entity_extraction`
+before any row is written.
+
+**Request body:**
+```json
+{
+  "entry_id": 42,
+  "start_date": "2026-03-01",
+  "end_date": "2026-03-31",
+  "stale_only": true
+}
+```
+
+All four fields are optional. When `entry_id` is present the runner
+calls `extract_from_entry` and returns a one-result batch; otherwise
+it runs `extract_batch` with the date and staleness filters.
+
+**Response (202):**
+```json
+{ "job_id": "a3f9...", "status": "queued" }
+```
+
+**Response (400):**
+```json
+{ "error": "Unknown parameter: foo" }
+```
+
+Returned when the body is not a JSON object, when it contains
+unknown keys, or when a field has the wrong type.
+
+**Response (503):**
+```json
+{ "error": "Server not initialized" }
+```
+
+Poll `GET /api/jobs/{job_id}` for progress and the final result. See
+[jobs.md](jobs.md) for the full result-payload shape.
+
+### POST /api/mood/backfill
+
+Submit a mood-score backfill batch job. `mode` is required and
+selects between idempotent rescoring of stale entries and a full
+rescore. `prune_retired` and `dry_run` are intentionally not surfaced
+here — use the CLI for those.
+
+**Request body:**
+```json
+{
+  "mode": "stale-only",
+  "start_date": "2026-03-01",
+  "end_date": "2026-03-31"
+}
+```
+
+| Field        | Type   | Required | Description                                                |
+|--------------|--------|----------|------------------------------------------------------------|
+| `mode`       | string | yes      | `"stale-only"` or `"force"`                                |
+| `start_date` | string | no       | Inclusive ISO-8601 start date                              |
+| `end_date`   | string | no       | Inclusive ISO-8601 end date                                |
+
+`stale-only` rescores only entries missing at least one currently-loaded
+mood dimension; `force` rescores every entry in the date window.
+
+**Response (202):**
+```json
+{ "job_id": "8e12...", "status": "queued" }
+```
+
+**Response (400):**
+```json
+{ "error": "mode must be 'stale-only' or 'force'" }
+```
+
+Returned when the body is not a JSON object, `mode` is missing or
+invalid, or an unknown key is present.
+
+**Response (503):**
+```json
+{ "error": "Server not initialized" }
+```
+
+Poll `GET /api/jobs/{job_id}` for progress and the final result. See
+[jobs.md](jobs.md) for the full result-payload shape.
+
+### GET /api/jobs/{job_id}
+
+Return the full serialised state of a batch job. Clients should poll
+this endpoint once per second until `status` is `succeeded` or
+`failed`. Every field is always present in the response — absent
+values are `null` rather than missing keys — so clients can rely on
+a fixed schema.
+
+**No query parameters.**
+
+**Response (200):**
+```json
+{
+  "id": "a3f9...",
+  "type": "entity_extraction",
+  "status": "running",
+  "params": { "stale_only": true },
+  "progress_current": 12,
+  "progress_total": 48,
+  "result": null,
+  "error_message": null,
+  "created_at": "2026-04-12T09:14:33+00:00",
+  "started_at": "2026-04-12T09:14:33+00:00",
+  "finished_at": null
+}
+```
+
+- `type` is `entity_extraction` or `mood_backfill`.
+- `status` transitions `queued` → `running` → `succeeded` | `failed`.
+- `result` is populated on success (shape depends on `type` — see
+  [jobs.md](jobs.md)).
+- `error_message` is populated when `status = failed`, including the
+  sentinel `"server restarted before job completed"` for jobs
+  reconciled on startup after an unclean shutdown.
+
+**Response (404):**
+```json
+{ "error": "Job not found" }
+```
+
+---
+
 ### GET /api/stats
 
 Journal statistics with optional date filtering.
@@ -558,7 +876,7 @@ Journal statistics with optional date filtering.
 
 # MCP Tool Reference
 
-The journal MCP server exposes 10 tools via streamable HTTP transport.
+The journal MCP server exposes its tools via streamable HTTP transport.
 
 ## Query Tools
 
@@ -701,6 +1019,168 @@ Update an entry's `final_text` to correct OCR errors. Triggers re-chunking, re-e
 |-----------|------|----------|-------------|
 | `entry_id` | int | yes | Entry ID to update |
 | `final_text` | string | yes | Corrected text |
+
+## Entity Tools
+
+Tools that read and write the extracted-entity graph. Entity
+extraction itself is exposed as both a legacy synchronous tool
+(`journal_extract_entities`) and an async batch wrapper
+(`journal_extract_entities_batch`, documented under
+[Batch Job Tools](#batch-job-tools)).
+
+### journal_extract_entities
+
+Run the entity extraction batch job over one or more entries
+synchronously. **Legacy** — this tool blocks the MCP call for the
+full duration of extraction and does not produce progress events.
+New code should use `journal_extract_entities_batch` instead, which
+routes through the shared JobRunner and matches the semantics used
+by the webapp.
+
+| Parameter    | Type | Required | Default | Description                                                           |
+|--------------|------|----------|---------|-----------------------------------------------------------------------|
+| `entry_id`   | int  | no       |         | Extract from this single entry only                                   |
+| `start_date` | string | no     |         | Filter entries from this date (ISO 8601)                              |
+| `end_date`   | string | no     |         | Filter entries until this date (ISO 8601)                             |
+| `stale_only` | bool | no       | false   | Only process entries flagged stale since the last extraction run      |
+
+Returns a human-readable summary string with aggregated counts
+(`entities_created`, `entities_matched`, `mentions_created`,
+`relationships_created`) and any warnings emitted by the extractor.
+
+### journal_list_entities
+
+List extracted entities, optionally filtered by type.
+
+| Parameter     | Type   | Required | Default | Description                                                                    |
+|---------------|--------|----------|---------|--------------------------------------------------------------------------------|
+| `entity_type` | string | no       |         | One of `person`, `place`, `activity`, `organization`, `topic`, `other`         |
+| `limit`       | int    | no       | 50      | Max results (capped at 200)                                                    |
+
+Returns a string listing each entity as
+`[id] type: canonical_name — N mentions (aliases: ...)`.
+
+### journal_get_entity_mentions
+
+Return every recorded mention of a specific entity across the
+journal.
+
+| Parameter   | Type | Required | Default | Description                  |
+|-------------|------|----------|---------|------------------------------|
+| `entity_id` | int  | yes      |         | The entity to look up        |
+| `limit`     | int  | no       | 50      | Max mentions to return       |
+
+Returns a string with one mention per line —
+`entry N: "quoted span" (confidence X.XX)`. Returns
+`Entity {id} not found.` if the entity does not exist.
+
+### journal_get_entity_relationships
+
+Return the outgoing and incoming relationships that touch an entity.
+Outgoing edges are triples where the entity is the subject;
+incoming edges are triples where it is the object.
+
+| Parameter   | Type | Required | Description              |
+|-------------|------|----------|--------------------------|
+| `entity_id` | int  | yes      | The entity whose edges to return |
+
+Returns a string grouped into outgoing and incoming sections. Each
+edge renders as `-> predicate -> other_entity (entry N, conf X.XX)`
+(or the reverse for incoming). Returns `Entity {id} not found.` or
+`No relationships recorded for {name}.` when appropriate.
+
+## Batch Job Tools
+
+Async batch-job wrappers around the same `JobRunner` that backs the
+REST endpoints. The two `_batch` tools **block** the MCP tool call
+until the job reaches a terminal state — they poll the jobs table
+every 500 ms with a default timeout of 3600 s. Failed jobs return a
+structured dict rather than raising, so the caller can read the
+error message and respond to the user.
+
+See [jobs.md](jobs.md) for the full data model, result payload
+shapes, and restart-recovery semantics.
+
+### journal_extract_entities_batch
+
+Submit an entity-extraction job and block until it finishes. Same
+parameter shape as the legacy synchronous `journal_extract_entities`
+tool, but routed through the shared `JobRunner` so progress is
+persisted in the jobs table and the result matches what the webapp
+consumes.
+
+| Parameter    | Type   | Required | Default | Description                                                      |
+|--------------|--------|----------|---------|------------------------------------------------------------------|
+| `entry_id`   | int    | no       |         | Extract from this single entry only                              |
+| `start_date` | string | no       |         | Filter entries from this date (ISO 8601)                         |
+| `end_date`   | string | no       |         | Filter entries until this date (ISO 8601)                        |
+| `stale_only` | bool   | no       | false   | Only process entries flagged stale since the last extraction run |
+
+**Returns:**
+```json
+{
+  "status": "succeeded",
+  "job_id": "a3f9...",
+  "result": {
+    "processed": 42,
+    "entities_created": 18,
+    "entities_matched": 67,
+    "mentions_created": 112,
+    "relationships_created": 9,
+    "warnings": []
+  },
+  "error_message": null
+}
+```
+
+`status` is `succeeded`, `failed`, or `timeout`. On validation
+errors (unknown keys, wrong types) the tool returns
+`{"status": "failed", "job_id": null, "result": null, "error_message": "..."}`
+without ever creating a job row.
+
+### journal_backfill_mood_scores_batch
+
+Submit a mood-score backfill job and block until it finishes. Same
+execution model as `journal_extract_entities_batch`.
+
+| Parameter    | Type   | Required | Description                                                                 |
+|--------------|--------|----------|-----------------------------------------------------------------------------|
+| `mode`       | string | yes      | `"stale-only"` (score only entries missing a current dimension) or `"force"` (rescore every entry in range) |
+| `start_date` | string | no       | Restrict to entries from this date (ISO 8601)                               |
+| `end_date`   | string | no       | Restrict to entries up to this date (ISO 8601)                              |
+
+**Returns:**
+```json
+{
+  "status": "succeeded",
+  "job_id": "8e12...",
+  "result": {
+    "scored": 40,
+    "skipped": 2,
+    "errors": []
+  },
+  "error_message": null
+}
+```
+
+Same failure semantics as `journal_extract_entities_batch` — a bad
+`mode` or an otherwise-invalid param shape returns a `failed` dict
+without writing a job row.
+
+### journal_get_job_status
+
+Non-blocking lookup of a batch job by id. Useful for checking the
+state of a job submitted elsewhere (for example, one the webapp
+started) from inside an MCP conversation.
+
+| Parameter | Type   | Required | Description                                  |
+|-----------|--------|----------|----------------------------------------------|
+| `job_id`  | string | yes      | The UUID returned by a batch-job submission  |
+
+**Returns:** the full serialised job dict —
+`{id, type, status, params, progress_current, progress_total, result, error_message, created_at, started_at, finished_at}`.
+If the job is not found, the returned dict is
+`{"error": "Job not found", "job_id": "..."}`.
 
 ## Transport
 

@@ -10,6 +10,7 @@ the chunker would produce today.
 """
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -21,6 +22,24 @@ if TYPE_CHECKING:
     from journal.services.mood_scoring import MoodScoringService
 
 log = logging.getLogger(__name__)
+
+
+def _report_progress(
+    callback: Callable[[int, int], None] | None,
+    current: int,
+    total: int,
+) -> None:
+    """Invoke a progress callback, swallowing any exception it raises.
+
+    A broken progress sink must never break the batch — the whole
+    point of the callback is out-of-band reporting.
+    """
+    if callback is None:
+        return
+    try:
+        callback(current, total)
+    except Exception as exc:  # noqa: BLE001 — callback may raise anything
+        log.warning("Progress callback failed: %s", exc)
 
 
 @dataclass
@@ -165,6 +184,7 @@ def backfill_mood_scores(
     end_date: str | None = None,
     prune_retired: bool = False,
     dry_run: bool = False,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> MoodBackfillResult:
     """Backfill mood scores against the currently-loaded dimensions.
 
@@ -182,12 +202,24 @@ def backfill_mood_scores(
     `prune_retired`, when set, deletes `mood_scores` rows whose
     `dimension` is not in the currently loaded tuple. Preserved
     across runs by default so historical data survives config
-    edits; users opt into deletion explicitly.
+    edits; users opt into deletion explicitly. Prune runs as a
+    single operation before the loop — it does not report progress
+    of its own.
 
     `dry_run=True` makes the function count what it would do but
     not call the scorer or write to the database. Returns a
     `MoodBackfillResult` with `dry_run=True` set so the CLI can
-    distinguish "would do" from "did".
+    distinguish "would do" from "did". Progress is still reported
+    in dry-run mode — the loop advances through the target set even
+    though no writes happen.
+
+    `on_progress`, when provided, is invoked as
+    ``on_progress(current, total)``. Called once with ``(0, total)``
+    after the target entry set has been resolved but before the
+    loop begins, then with the 1-based ``(current, total)`` after
+    each entry is processed — whether it was scored, skipped, or
+    errored. A raising callback is logged and swallowed: a broken
+    progress sink must never break the batch.
 
     Returns a `MoodBackfillResult`. Per-entry errors are captured
     and do not abort the batch — the backfill should make
@@ -254,29 +286,35 @@ def backfill_mood_scores(
             filtered.append(entry_id)
         entry_ids = filtered
 
-    for entry_id in entry_ids:
-        entry = repository.get_entry(entry_id)
-        if entry is None:
-            result.skipped += 1
-            continue
-        text = (entry.final_text or entry.raw_text or "").strip()
-        if not text:
-            result.skipped += 1
-            continue
+    total = len(entry_ids)
+    _report_progress(on_progress, 0, total)
 
-        if dry_run:
-            result.scored += 1
-            continue
-
+    for idx, entry_id in enumerate(entry_ids, start=1):
         try:
-            n = mood_scoring.score_entry(entry.id, text)
-        except Exception as exc:  # noqa: BLE001 — batch resilience
-            result.errors.append(f"entry {entry.id}: {exc}")
-            continue
+            entry = repository.get_entry(entry_id)
+            if entry is None:
+                result.skipped += 1
+                continue
+            text = (entry.final_text or entry.raw_text or "").strip()
+            if not text:
+                result.skipped += 1
+                continue
 
-        if n > 0:
-            result.scored += 1
-        else:
-            result.skipped += 1
+            if dry_run:
+                result.scored += 1
+                continue
+
+            try:
+                n = mood_scoring.score_entry(entry.id, text)
+            except Exception as exc:  # noqa: BLE001 — batch resilience
+                result.errors.append(f"entry {entry.id}: {exc}")
+                continue
+
+            if n > 0:
+                result.scored += 1
+            else:
+                result.skipped += 1
+        finally:
+            _report_progress(on_progress, idx, total)
 
     return result

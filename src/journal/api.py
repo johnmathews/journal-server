@@ -33,9 +33,11 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
     from starlette.requests import Request
 
+    from journal.db.jobs_repository import SQLiteJobRepository
     from journal.entitystore.store import EntityStore
-    from journal.services.entity_extraction import EntityExtractionService
+    from journal.models import Job
     from journal.services.ingestion import IngestionService
+    from journal.services.jobs import JobRunner
     from journal.services.query import QueryService
 
 log = logging.getLogger(__name__)
@@ -127,15 +129,25 @@ def _relationship_dict(rel: Any) -> dict[str, Any]:
     }
 
 
-def _extraction_result_dict(result: Any) -> dict[str, Any]:
+def _job_to_dict(job: Job) -> dict[str, Any]:
+    """Convert a Job dataclass to a JSON-serialisable dict.
+
+    Mirrors the canonical serialised shape the webapp consumes for
+    jobs — every field is always present, even when null, so the
+    client can rely on a fixed schema.
+    """
     return {
-        "entry_id": result.entry_id,
-        "extraction_run_id": result.extraction_run_id,
-        "entities_created": result.entities_created,
-        "entities_matched": result.entities_matched,
-        "mentions_created": result.mentions_created,
-        "relationships_created": result.relationships_created,
-        "warnings": list(result.warnings),
+        "id": job.id,
+        "type": job.type,
+        "status": job.status,
+        "params": job.params,
+        "progress_current": job.progress_current,
+        "progress_total": job.progress_total,
+        "result": job.result,
+        "error_message": job.error_message,
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
     }
 
 
@@ -882,43 +894,121 @@ def register_api_routes(
         name="api_entities_extract",
     )
     async def extract_entities(request: Request) -> JSONResponse:
-        """Run the entity extraction batch job on demand."""
+        """Submit an entity-extraction batch job.
+
+        Request body matches the legacy synchronous shape —
+        ``{entry_id?, start_date?, end_date?, stale_only?}`` — so
+        existing clients continue to compile. Validation (unknown
+        keys, bad types) happens in the JobRunner and bubbles up as
+        a 400. The single-entry ``entry_id`` path also goes through
+        the jobs table now; there is no synchronous path.
+
+        Returns 202 with ``{"job_id", "status"}``. Clients should
+        poll ``GET /api/jobs/{job_id}`` to observe progress and
+        result.
+        """
         services = _require_services()
         if services is None:
             return JSONResponse(
                 {"error": "Server not initialized"}, status_code=503
             )
-        extraction_svc: EntityExtractionService = services["entity_extraction"]
+        job_runner: JobRunner = services["job_runner"]
 
         try:
             body = await request.json()
         except (json.JSONDecodeError, ValueError):
             body = {}
-
-        entry_id = body.get("entry_id")
-        start_date = body.get("start_date")
-        end_date = body.get("end_date")
-        stale_only = bool(body.get("stale_only", False))
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "Request body must be a JSON object"},
+                status_code=400,
+            )
 
         try:
-            if entry_id is not None:
-                results = [extraction_svc.extract_from_entry(int(entry_id))]
-            else:
-                results = extraction_svc.extract_batch(
-                    start_date=start_date,
-                    end_date=end_date,
-                    stale_only=stale_only,
-                )
+            job = job_runner.submit_entity_extraction(body)
         except ValueError as e:
             log.warning("POST /api/entities/extract — %s", e)
             return JSONResponse({"error": str(e)}, status_code=400)
 
         log.info(
-            "POST /api/entities/extract — processed %d entries", len(results)
+            "POST /api/entities/extract — queued job %s", job.id
         )
         return JSONResponse(
-            {"results": [_extraction_result_dict(r) for r in results]}
+            {"job_id": job.id, "status": job.status},
+            status_code=202,
         )
+
+    @mcp.custom_route(
+        "/api/mood/backfill",
+        methods=["POST"],
+        name="api_mood_backfill",
+    )
+    async def mood_backfill(request: Request) -> JSONResponse:
+        """Submit a mood-score backfill batch job.
+
+        Request body: ``{mode, start_date?, end_date?}`` where
+        ``mode`` is ``"stale-only"`` or ``"force"``. Unknown keys
+        or bad types return 400. Returns 202 with
+        ``{"job_id", "status"}``.
+        """
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+        job_runner: JobRunner = services["job_runner"]
+
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "Request body must be a JSON object"},
+                status_code=400,
+            )
+
+        try:
+            job = job_runner.submit_mood_backfill(body)
+        except ValueError as e:
+            log.warning("POST /api/mood/backfill — %s", e)
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+        log.info("POST /api/mood/backfill — queued job %s", job.id)
+        return JSONResponse(
+            {"job_id": job.id, "status": job.status},
+            status_code=202,
+        )
+
+    @mcp.custom_route(
+        "/api/jobs/{job_id:str}",
+        methods=["GET"],
+        name="api_job_detail",
+    )
+    async def job_detail(request: Request) -> JSONResponse:
+        """Return the current state of a batch job by id.
+
+        404 if the job id is unknown. Otherwise returns the full
+        serialised job dict (``_job_to_dict`` shape).
+        """
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+        job_repository: SQLiteJobRepository = services["job_repository"]
+        job_id = str(request.path_params["job_id"])
+        job = job_repository.get(job_id)
+        if job is None:
+            log.info("GET /api/jobs/%s — not found", job_id)
+            return JSONResponse(
+                {"error": "Job not found"}, status_code=404
+            )
+        log.info(
+            "GET /api/jobs/%s — status=%s progress=%d/%d",
+            job_id, job.status, job.progress_current, job.progress_total,
+        )
+        return JSONResponse(_job_to_dict(job))
 
     @mcp.custom_route(
         "/api/entities", methods=["GET"], name="api_list_entities"

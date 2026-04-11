@@ -153,3 +153,184 @@ class TestMCPToolModuleImports:
     def test_update_entry_text_tool_exists(self):
         from journal.mcp_server import journal_update_entry_text
         assert callable(journal_update_entry_text)
+
+    def test_batch_job_tools_exist(self):
+        """Work Unit 5b — async batch-job MCP tool wrappers."""
+        from journal.mcp_server import (
+            journal_backfill_mood_scores_batch,
+            journal_extract_entities_batch,
+            journal_get_job_status,
+        )
+        assert callable(journal_extract_entities_batch)
+        assert callable(journal_backfill_mood_scores_batch)
+        assert callable(journal_get_job_status)
+
+
+class TestBatchJobTools:
+    """Integration tests for the async batch-job MCP tool wrappers.
+
+    These tools call `_get_job_runner(ctx)` and
+    `_get_job_repository(ctx)`, so the test fakes a `Context` that
+    exposes a `lifespan_context` dict containing a live JobRunner +
+    JobRepository pair wired to in-memory fakes.
+    """
+
+    @pytest.fixture
+    def job_context(self, tmp_path):
+        import sqlite3
+
+        from journal.db.jobs_repository import SQLiteJobRepository
+        from journal.db.migrations import run_migrations
+        from journal.models import ExtractionResult
+        from journal.services.backfill import MoodBackfillResult
+        from journal.services.jobs import JobRunner
+        from tests.test_services.test_jobs_runner import (
+            FakeEntityExtractionService,
+            FakeMoodBackfill,
+        )
+
+        db_path = tmp_path / "mcp-jobs.db"
+        conn = sqlite3.connect(
+            str(db_path), check_same_thread=False
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        run_migrations(conn)
+        repo = SQLiteJobRepository(conn)
+
+        extraction_result = ExtractionResult(
+            entry_id=1,
+            extraction_run_id="run-1",
+            entities_created=2,
+            entities_matched=0,
+            mentions_created=4,
+            relationships_created=1,
+            warnings=[],
+        )
+        extraction = FakeEntityExtractionService(
+            batch_results=[extraction_result],
+            single_result=extraction_result,
+        )
+        mood = FakeMoodBackfill(
+            result=MoodBackfillResult(scored=5, skipped=2),
+            entries_to_count=2,
+        )
+        runner = JobRunner(
+            job_repository=repo,
+            entity_extraction_service=extraction,  # type: ignore[arg-type]
+            mood_backfill_callable=mood,
+            mood_scoring_service=object(),  # type: ignore[arg-type]
+            entry_repository=object(),  # type: ignore[arg-type]
+        )
+
+        # The tools read from `ctx.request_context.lifespan_context`
+        # via `_get_job_runner(ctx)` helpers. Mock it directly rather
+        # than booting a full FastMCP lifespan.
+        ctx = MagicMock()
+        ctx.request_context.lifespan_context = {
+            "job_runner": runner,
+            "job_repository": repo,
+        }
+
+        yield ctx, repo, runner, extraction, mood
+
+        runner.shutdown(wait=True)
+        conn.close()
+
+    def test_extract_entities_batch_happy_path(self, job_context):
+        from journal.mcp_server import journal_extract_entities_batch
+
+        ctx, repo, runner, extraction, _mood = job_context
+
+        result = journal_extract_entities_batch(
+            start_date="2026-01-01", ctx=ctx
+        )
+        assert result["status"] == "succeeded"
+        assert result["job_id"]
+        assert result["error_message"] is None
+        assert result["result"]["processed"] == 1
+        assert result["result"]["entities_created"] == 2
+
+        # The runner recorded the batch call with the right params.
+        assert extraction.batch_calls[0]["start_date"] == "2026-01-01"
+
+    def test_extract_entities_batch_validation_error(self, job_context):
+        """Invalid params return a failed dict, not an exception."""
+        from journal.mcp_server import journal_extract_entities_batch
+
+        ctx, _repo, _runner, _extraction, _mood = job_context
+
+        # `entry_id=-1` is still a valid int; to trigger a ValueError
+        # we'd have to pass the wrong type. Force the validation by
+        # patching the runner to raise.
+        runner = ctx.request_context.lifespan_context["job_runner"]
+        original = runner.submit_entity_extraction
+
+        def raise_invalid(params):
+            raise ValueError("bad params")
+
+        runner.submit_entity_extraction = raise_invalid  # type: ignore[assignment]
+        try:
+            result = journal_extract_entities_batch(ctx=ctx)
+        finally:
+            runner.submit_entity_extraction = original  # type: ignore[assignment]
+
+        assert result["status"] == "failed"
+        assert result["job_id"] is None
+        assert result["error_message"] == "bad params"
+        assert result["result"] is None
+
+    def test_backfill_mood_scores_batch_happy_path(self, job_context):
+        from journal.mcp_server import (
+            journal_backfill_mood_scores_batch,
+        )
+
+        ctx, _repo, _runner, _extraction, mood = job_context
+
+        result = journal_backfill_mood_scores_batch(
+            mode="stale-only", start_date="2026-01-01", ctx=ctx
+        )
+        assert result["status"] == "succeeded"
+        assert result["result"]["scored"] == 5
+        assert result["result"]["skipped"] == 2
+        assert mood.calls[0]["mode"] == "stale-only"
+
+    def test_backfill_mood_scores_batch_invalid_mode(self, job_context):
+        """Bad mode surfaces as a structured failed dict."""
+        from journal.mcp_server import (
+            journal_backfill_mood_scores_batch,
+        )
+
+        ctx, _repo, _runner, _extraction, _mood = job_context
+
+        result = journal_backfill_mood_scores_batch(
+            mode="nonsense", ctx=ctx
+        )
+        assert result["status"] == "failed"
+        assert result["job_id"] is None
+        assert "mode" in result["error_message"]
+
+    def test_get_job_status_unknown_id(self, job_context):
+        from journal.mcp_server import journal_get_job_status
+
+        ctx, _repo, _runner, _extraction, _mood = job_context
+        result = journal_get_job_status("not-a-real-id", ctx=ctx)
+        assert result["error"] == "Job not found"
+        assert result["job_id"] == "not-a-real-id"
+
+    def test_get_job_status_after_success(self, job_context):
+        from journal.mcp_server import (
+            journal_extract_entities_batch,
+            journal_get_job_status,
+        )
+
+        ctx, _repo, _runner, _extraction, _mood = job_context
+        submitted = journal_extract_entities_batch(ctx=ctx)
+        status = journal_get_job_status(submitted["job_id"], ctx=ctx)
+        assert status["id"] == submitted["job_id"]
+        assert status["type"] == "entity_extraction"
+        assert status["status"] == "succeeded"
+        assert status["progress_total"] == 1
+        assert status["result"]["processed"] == 1
+        assert status["error_message"] is None

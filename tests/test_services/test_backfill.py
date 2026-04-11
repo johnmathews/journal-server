@@ -473,3 +473,72 @@ class TestBackfillMoodScores:
             backfill_mood_scores(
                 repository=repo, mood_scoring=svc, mode="maybe"
             )
+
+    def test_backfill_mood_scores_calls_progress_callback(
+        self, repo, dims
+    ):
+        from journal.services.backfill import backfill_mood_scores
+
+        repo.create_entry("2026-04-01", "ocr", "one", 1)
+        repo.create_entry("2026-04-02", "ocr", "two", 1)
+        repo.create_entry("2026-04-03", "ocr", "three", 1)
+
+        svc, _ = self._make_service(repo, dims)
+
+        calls: list[tuple[int, int]] = []
+        backfill_mood_scores(
+            repository=repo,
+            mood_scoring=svc,
+            mode="stale-only",
+            on_progress=lambda c, t: calls.append((c, t)),
+        )
+
+        assert calls == [(0, 3), (1, 3), (2, 3), (3, 3)]
+
+    def test_backfill_mood_scores_progress_in_dry_run(self, repo, dims):
+        """Dry-run still advances through the entry set; progress must fire."""
+        from journal.services.backfill import backfill_mood_scores
+
+        repo.create_entry("2026-04-01", "ocr", "one", 1)
+        repo.create_entry("2026-04-02", "ocr", "two", 1)
+
+        svc, scorer = self._make_service(repo, dims)
+
+        calls: list[tuple[int, int]] = []
+        backfill_mood_scores(
+            repository=repo,
+            mood_scoring=svc,
+            mode="stale-only",
+            dry_run=True,
+            on_progress=lambda c, t: calls.append((c, t)),
+        )
+        scorer.score.assert_not_called()
+        assert calls == [(0, 2), (1, 2), (2, 2)]
+
+    def test_backfill_mood_scores_raising_callback_does_not_break_batch(
+        self, repo, dims, caplog
+    ):
+        from journal.services.backfill import backfill_mood_scores
+
+        repo.create_entry("2026-04-01", "ocr", "one", 1)
+        repo.create_entry("2026-04-02", "ocr", "two", 1)
+
+        svc, _ = self._make_service(repo, dims)
+
+        def boom(current: int, total: int) -> None:
+            raise RuntimeError("callback kaboom")
+
+        with caplog.at_level("WARNING", logger="journal.services.backfill"):
+            result = backfill_mood_scores(
+                repository=repo,
+                mood_scoring=svc,
+                mode="stale-only",
+                on_progress=boom,
+            )
+
+        # Batch still scored both entries.
+        assert result.scored == 2
+        # And the callback failure was logged.
+        assert any(
+            "Progress callback failed" in rec.message for rec in caplog.records
+        )

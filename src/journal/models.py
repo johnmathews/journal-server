@@ -1,7 +1,7 @@
 """Shared data models."""
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 
 @dataclass
@@ -215,3 +215,32 @@ class ExtractionResult:
     mentions_created: int
     relationships_created: int
     warnings: list[str] = field(default_factory=list)
+
+
+JobStatus = Literal["queued", "running", "succeeded", "failed"]
+JobType = Literal["entity_extraction", "mood_backfill"]
+
+
+@dataclass
+class Job:
+    """One async batch job row.
+
+    Mirrors the `jobs` table. `params` and `result` are the
+    deserialised forms of `params_json` and `result_json` — the
+    repository handles encoding on write and decoding on read, so
+    callers only ever see Python dicts. `status` transitions are
+    append-only in practice: queued -> running -> (succeeded | failed).
+    Timestamps are ISO 8601 UTC strings.
+    """
+
+    id: str
+    type: str
+    status: str
+    params: dict[str, Any]
+    progress_current: int
+    progress_total: int
+    result: dict[str, Any] | None
+    error_message: str | None
+    created_at: str
+    started_at: str | None
+    finished_at: str | None

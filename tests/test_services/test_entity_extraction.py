@@ -372,3 +372,81 @@ class TestErrors:
         service = _make_service(repo, entity_store, extractor)
         with pytest.raises(ValueError, match="not found"):
             service.extract_from_entry(999)
+
+
+class TestBatchProgressCallback:
+    def test_extract_batch_calls_progress_callback(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        e1 = repo.create_entry("2026-03-22", "ocr", "first", 1).id
+        e2 = repo.create_entry("2026-03-23", "ocr", "second", 1).id
+        e3 = repo.create_entry("2026-03-24", "ocr", "third", 1).id
+
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw()
+        service = _make_service(repo, entity_store, extractor)
+
+        calls: list[tuple[int, int]] = []
+
+        def spy(current: int, total: int) -> None:
+            calls.append((current, total))
+
+        service.extract_batch(entry_ids=[e1, e2, e3], on_progress=spy)
+
+        assert calls == [(0, 3), (1, 3), (2, 3), (3, 3)]
+
+    def test_extract_batch_progress_reports_on_failure(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        """Progress must advance even when an entry fails."""
+        e1 = repo.create_entry("2026-03-22", "ocr", "first", 1).id
+        e2 = repo.create_entry("2026-03-23", "ocr", "second", 1).id
+
+        extractor = MagicMock()
+
+        def side_effect(entry_text, entry_date, author_name):  # type: ignore[no-untyped-def]
+            if "first" in entry_text:
+                return _raw(entities=[_entity("Atlas", "person")])
+            raise RuntimeError("boom")
+
+        extractor.extract_entities.side_effect = side_effect
+        service = _make_service(repo, entity_store, extractor)
+
+        calls: list[tuple[int, int]] = []
+        service.extract_batch(
+            entry_ids=[e1, e2],
+            on_progress=lambda c, t: calls.append((c, t)),
+        )
+        assert calls == [(0, 2), (1, 2), (2, 2)]
+
+    def test_extract_batch_raising_callback_does_not_break_batch(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        e1 = repo.create_entry("2026-03-22", "ocr", "first", 1).id
+        e2 = repo.create_entry("2026-03-23", "ocr", "second", 1).id
+
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw()
+        service = _make_service(repo, entity_store, extractor)
+
+        def boom(current: int, total: int) -> None:
+            raise RuntimeError("callback kaboom")
+
+        with caplog.at_level("WARNING", logger="journal.services.entity_extraction"):
+            results = service.extract_batch(
+                entry_ids=[e1, e2], on_progress=boom
+            )
+
+        # Batch still completed for every entry.
+        assert len(results) == 2
+        # And the failure was logged rather than propagated.
+        assert any(
+            "Progress callback failed" in rec.message for rec in caplog.records
+        )
