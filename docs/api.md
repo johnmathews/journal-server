@@ -83,18 +83,30 @@ untouched.
 
 ### PATCH /api/entries/{id}
 
-Update an entry's `final_text`. Triggers re-chunking, re-embedding, and FTS5 rebuild.
+Update an entry's `final_text` and/or `entry_date`. At least one field must be
+provided. When `final_text` is updated, triggers re-chunking, re-embedding, and
+FTS5 rebuild.
 
-**Request body:**
+**Request body (all fields optional, at least one required):**
 ```json
-{ "final_text": "corrected text..." }
+{
+  "final_text": "corrected text...",
+  "entry_date": "2026-02-17"
+}
 ```
+
+| Field        | Type   | Required | Description                                  |
+| ------------ | ------ | -------- | -------------------------------------------- |
+| `final_text` | string | no*      | Corrected text (triggers re-embed)           |
+| `entry_date` | string | no*      | ISO 8601 date (YYYY-MM-DD)                   |
+
+\* At least one of `final_text` or `entry_date` must be provided.
 
 **Response (200):** Updated entry detail (same shape as GET /api/entries/{id}).
 
 **Response (400):**
 ```json
-{ "error": "validation_error", "message": "final_text is required" }
+{ "error": "At least one of 'final_text' or 'entry_date' is required" }
 ```
 
 **Response (404):**
@@ -589,12 +601,17 @@ Upload one or more journal page images for OCR. Asynchronous — returns a
 job ID immediately. The job runs OCR on each page, combines the text into
 a single entry, chunks, embeds, and stores.
 
+**Date extraction:** After OCR, the server searches the first 500 characters
+of extracted text for a date (e.g., "TUES 17 FEB 2026", "17/02/2026",
+"2026-02-17"). If found, it overrides the `entry_date` parameter. This means
+journal pages with handwritten dates are automatically dated correctly.
+
 **Request body (multipart/form-data):**
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `images` | file(s) | yes | | One or more image files (JPEG, PNG, GIF, WebP) |
-| `entry_date` | string | no | today | ISO 8601 date |
+| Field        | Type    | Required | Default | Description                                      |
+| ------------ | ------- | -------- | ------- | ------------------------------------------------ |
+| `images`     | file(s) | yes      |         | One or more image files (JPEG, PNG, GIF, WebP)   |
+| `entry_date` | string  | no       | today   | ISO 8601 date (overridden by OCR date if found)  |
 
 **Limits:** 10 MB per file, 50 MB total.
 
