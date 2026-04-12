@@ -57,7 +57,7 @@ def services(
     mock_vector_store: MagicMock,
     mock_embeddings: MagicMock,
     api_db_conn: sqlite3.Connection,
-) -> dict:
+) -> Generator[dict]:
     ingestion = IngestionService(
         repository=repo,
         vector_store=mock_vector_store,
@@ -83,12 +83,13 @@ def services(
         entry_repository=repo,
         ingestion_service=ingestion,
     )
-    return {
+    yield {
         "ingestion": ingestion,
         "query": query,
         "job_runner": job_runner,
         "job_repository": job_repo,
     }
+    job_runner.shutdown(wait=True)
 
 
 @pytest.fixture
