@@ -3,10 +3,11 @@
 -- so the table must be recreated. FTS and triggers are preserved on
 -- final_text (as established by migration 0002).
 
--- 1. Drop FTS triggers and virtual table (they reference entries).
+-- 1. Drop all triggers on entries (FTS + entity stale flag).
 DROP TRIGGER IF EXISTS entries_ai;
 DROP TRIGGER IF EXISTS entries_ad;
 DROP TRIGGER IF EXISTS entries_au;
+DROP TRIGGER IF EXISTS entries_entity_stale_on_final_text;
 DROP TABLE IF EXISTS entries_fts;
 
 -- 2. Create replacement table without the restrictive CHECK.
@@ -64,4 +65,11 @@ END;
 CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE OF final_text ON entries BEGIN
     INSERT INTO entries_fts(entries_fts, rowid, final_text) VALUES ('delete', old.id, old.final_text);
     INSERT INTO entries_fts(rowid, final_text) VALUES (new.id, new.final_text);
+END;
+
+-- 8. Recreate entity stale-flag trigger (from migration 0004).
+CREATE TRIGGER IF NOT EXISTS entries_entity_stale_on_final_text
+AFTER UPDATE OF final_text ON entries
+BEGIN
+    UPDATE entries SET entity_extraction_stale = 1 WHERE id = new.id;
 END;

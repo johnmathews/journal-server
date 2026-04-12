@@ -333,18 +333,12 @@ design pass on how "undo a merge" works at the storage layer.
 
 ## Tier 3 — Polish and research
 
-### 9. Multi-page ingestion UI `[webapp]`
+### 9. ~~Multi-page ingestion UI `[webapp]`~~ — ✅ shipped 2026-04-12
 
-Drag-drop multiple images, reorder before submit, preview per-page
-OCR text, submit as a single multi-page entry via the existing
-`ingest_multi_page_entry` path. Purely a UX improvement — the
-CLI/API path works.
-
-**Backend:** need a file-upload endpoint. Ingestion is currently
-base64 or URL; a `multipart/form-data` POST is cleaner for the
-webapp path.
-
-**Source:** `journal-webapp/docs/future-features.md` "Phase 4".
+**Superseded** by the entry creation feature (Closed item 17). The
+webapp now has a full `/entries/new` view with drag-drop multi-image
+upload, reorder, thumbnails, async OCR job with progress bar, plus
+text entry and file import tabs.
 
 ---
 
@@ -689,6 +683,15 @@ Included so we don't accidentally re-surface these as TODOs.
     prune-retired / dry-run modes, `GET /api/dashboard/mood-dimensions`
     and `GET /api/dashboard/mood-trends` endpoints, and a mood
     chart in the dashboard. See `docs/mood-scoring.md`
+17. Entry creation from webapp (2026-04-12) — three new REST
+    endpoints: `POST /api/entries/ingest/text` (sync JSON),
+    `POST /api/entries/ingest/file` (sync multipart .md/.txt),
+    `POST /api/entries/ingest/images` (async multipart, job-based
+    OCR). `IngestionService.ingest_text()` for text/file entries.
+    `JobRunner` extended with `ingest_images` and `mood_score_entry`
+    job types. Migration 0007 relaxes `source_type` CHECK. Webapp:
+    `/entries/new` with Write Entry, Import File, Upload Images tabs.
+    Supersedes Tier 3 item 9 (multi-page ingestion UI).
 
 ---
 

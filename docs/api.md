@@ -530,6 +530,91 @@ the app-wide middleware.
 
 ---
 
+## Entry creation endpoints
+
+Three endpoints for creating journal entries from the webapp. Text and file
+ingestion are synchronous; image ingestion is asynchronous (returns a job ID).
+
+### POST /api/entries/ingest/text
+
+Create a journal entry from plain text (no OCR). Synchronous.
+
+**Request body (JSON):**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `text` | string | yes | | Entry content |
+| `entry_date` | string | no | today | ISO 8601 date |
+| `source_type` | string | no | `"manual"` | Source type label |
+
+**Response (201):**
+```json
+{
+  "entry": { "id": 1, "entry_date": "2026-04-12", "source_type": "manual", "..." : "..." },
+  "mood_job_id": "uuid-or-null"
+}
+```
+
+`mood_job_id` is non-null when `JOURNAL_ENABLE_MOOD_SCORING=true`. Poll
+`GET /api/jobs/{mood_job_id}` to check scoring completion.
+
+**Errors:** 400 (missing/empty text, invalid JSON).
+
+---
+
+### POST /api/entries/ingest/file
+
+Create a journal entry from an uploaded `.md` or `.txt` file. Synchronous.
+
+**Request body (multipart/form-data):**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `file` | file | yes | | A single `.md` or `.txt` file |
+| `entry_date` | string | no | today | ISO 8601 date |
+
+**Response (201):** Same shape as `POST /api/entries/ingest/text`.
+
+The file content is stored as both `raw_text` and `final_text`. A
+`source_files` record is created with the original filename and SHA256
+hash for duplicate detection.
+
+**Errors:** 400 (wrong extension, empty file, UTF-8 decode error, no file).
+
+---
+
+### POST /api/entries/ingest/images
+
+Upload one or more journal page images for OCR. Asynchronous — returns a
+job ID immediately. The job runs OCR on each page, combines the text into
+a single entry, chunks, embeds, and stores.
+
+**Request body (multipart/form-data):**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `images` | file(s) | yes | | One or more image files (JPEG, PNG, GIF, WebP) |
+| `entry_date` | string | no | today | ISO 8601 date |
+
+**Limits:** 10 MB per file, 50 MB total.
+
+**Response (202):**
+```json
+{
+  "job_id": "uuid",
+  "status": "queued"
+}
+```
+
+Poll `GET /api/jobs/{job_id}` for progress. On success, `result.entry_id`
+contains the new entry's ID.
+
+**Errors:** 400 (no images, unsupported type), 413 (total size exceeded).
+
+---
+
+---
+
 ## Entity endpoints
 
 Endpoints that expose the extracted-entity graph built by the entity
