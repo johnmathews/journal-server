@@ -384,20 +384,21 @@ entries. Needs:
 
 ---
 
-### 11. Low-confidence OCR highlighting `[both]`
+### 11. ~~Low-confidence OCR highlighting `[both]`~~ — ✅ shipped 2026-04-11
 
-Ask the OCR provider to return per-region confidence metadata,
-store it alongside `raw_text`, render it in the original panel as
-dashed-amber underlines (alongside the existing diff highlights).
+Shipped as the "Review" toggle in `EntryDetailView`. The OCR provider
+wraps uncertain words/phrases in `⟪/⟫` sentinels, the parser extracts
+them as `uncertain_spans` (stored in DB via migration 0005), and the
+Review toggle renders them with yellow highlights in the Original OCR
+panel. Spans are anchored to `raw_text` and immune to `final_text`
+edits. UX improved 2026-04-12: toggle is always clickable, shows
+info banner when no uncertain spans exist.
 
-**Open questions:**
-1. Does Anthropic's vision API even return per-region confidence?
-   Need to check the SDK before sizing this.
-2. What happens to the confidence spans after the user edits
-   `final_text`? Character offsets into `raw_text` don't translate
-   cleanly once the text is edited.
+**Original question answered:** Anthropic's vision API does not return
+per-region confidence natively, but prompting the model to wrap
+uncertain spans in sentinels achieves the same result.
 
-**Source:** `journal-webapp/docs/future-features.md` "Phase 3".
+**Source:** `journal-webapp/journal/260411-review-toggle.md`.
 
 ---
 
@@ -719,6 +720,26 @@ Included so we don't accidentally re-surface these as TODOs.
     job types. Migration 0007 relaxes `source_type` CHECK. Webapp:
     `/entries/new` with Write Entry, Import File, Upload Images tabs.
     Supersedes Tier 3 item 9 (multi-page ingestion UI).
+18. Image upload bug fixes (2026-04-12) — nginx `client_max_body_size
+    20m` for the `/api/` proxy, `apiFetch` Content-Type fix for
+    `FormData` uploads, error message extraction (`body.error`
+    fallback), duplicate error display removed, dismiss button +
+    clear-on-tab-switch for error banner.
+19. OCR date extraction + date editing (2026-04-12) — new
+    `date_extraction` module parses dates from OCR text (named
+    months, ISO, DD/MM/YYYY). `PATCH /api/entries/{id}` extended
+    to accept `entry_date` alongside `final_text`. Webapp:
+    clickable date heading in EntryDetailView with inline date
+    picker.
+20. OCR uncertainty highlighting (Tier 3 item 11, 2026-04-11) —
+    Review toggle in EntryDetailView with `⟪/⟫` sentinel parsing,
+    `uncertain_spans` DB storage, yellow highlights on Original
+    OCR panel. UX improved 2026-04-12: always clickable, info
+    banner when no spans exist.
+21. Mobile layout fix (2026-04-12) — corrected text panel was
+    invisible on small screens due to absolute-positioned children
+    in a flex-col layout. Both editor sections now have
+    `min-h-[300px]` on mobile.
 
 ---
 
