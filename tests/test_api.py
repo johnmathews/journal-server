@@ -326,7 +326,7 @@ class TestUpdateEntry:
         )
         assert response.status_code == 400
 
-    def test_patch_entry_missing_final_text(
+    def test_patch_entry_missing_both_fields(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
         entry = repo.create_entry("2026-03-22", "ocr", "Hello", 1)
@@ -335,7 +335,44 @@ class TestUpdateEntry:
             json={"other_field": "value"},
         )
         assert response.status_code == 400
-        assert "final_text" in response.json()["error"]
+        assert "final_text" in response.json()["error"] or "entry_date" in response.json()["error"]
+
+    def test_patch_entry_date_only(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        entry = repo.create_entry("2026-03-22", "ocr", "Hello world", 2)
+        response = client.patch(
+            f"/api/entries/{entry.id}",
+            json={"entry_date": "2026-02-17"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["entry_date"] == "2026-02-17"
+        assert data["raw_text"] == "Hello world"  # unchanged
+
+    def test_patch_entry_date_invalid_format(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        entry = repo.create_entry("2026-03-22", "ocr", "Hello", 1)
+        response = client.patch(
+            f"/api/entries/{entry.id}",
+            json={"entry_date": "not-a-date"},
+        )
+        assert response.status_code == 400
+        assert "ISO 8601" in response.json()["error"]
+
+    def test_patch_entry_date_and_text(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        entry = repo.create_entry("2026-03-22", "ocr", "raw text", 2)
+        response = client.patch(
+            f"/api/entries/{entry.id}",
+            json={"entry_date": "2026-01-01", "final_text": "corrected"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["entry_date"] == "2026-01-01"
+        assert data["final_text"] == "corrected"
 
     def test_patch_entry_empty_final_text(
         self, client: TestClient, repo: SQLiteEntryRepository

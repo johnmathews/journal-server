@@ -93,6 +93,8 @@ class EntryRepository(Protocol):
         self, entry_id: int, final_text: str, word_count: int, chunk_count: int
     ) -> Entry | None: ...
 
+    def update_entry_date(self, entry_id: int, entry_date: str) -> Entry | None: ...
+
     def delete_entry(self, entry_id: int) -> bool: ...
 
     def add_entry_page(
@@ -356,6 +358,16 @@ class SQLiteEntryRepository:
         )
         self._conn.commit()
         log.info("Updated final_text for entry %d", entry_id)
+        return self.get_entry(entry_id)
+
+    def update_entry_date(self, entry_id: int, entry_date: str) -> Entry | None:
+        self._conn.execute(
+            "UPDATE entries SET entry_date = ?,"
+            " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+            (entry_date, entry_id),
+        )
+        self._conn.commit()
+        log.info("Updated entry_date for entry %d to %s", entry_id, entry_date)
         return self.get_entry(entry_id)
 
     def delete_entry(self, entry_id: int) -> bool:

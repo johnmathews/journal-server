@@ -167,6 +167,13 @@ class IngestionService:
         if not raw_text.strip():
             raise ValueError("OCR extracted no text from image")
 
+        # Try to extract date from the OCR text if caller used a default
+        from journal.services.date_extraction import extract_date_from_text
+
+        extracted = extract_date_from_text(raw_text)
+        if extracted:
+            date = extracted
+
         # Store entry (final_text defaults to raw_text)
         word_count = len(raw_text.split())
         entry = self._repo.create_entry(date, "ocr", raw_text, word_count)
@@ -490,6 +497,13 @@ class IngestionService:
                 cumulative_offset += 1  # the "\n" separator between pages
         combined_text = "\n".join(stripped_parts)
         word_count = len(combined_text.split())
+
+        # Try to extract date from the first page's OCR text
+        from journal.services.date_extraction import extract_date_from_text
+
+        extracted = extract_date_from_text(combined_text)
+        if extracted:
+            date = extracted
 
         # Create single entry
         entry = self._repo.create_entry(date, "ocr", combined_text, word_count)

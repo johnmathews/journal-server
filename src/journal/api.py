@@ -299,27 +299,54 @@ def register_api_routes(
             )
 
         final_text = body.get("final_text")
-        if final_text is None or not isinstance(final_text, str):
+        new_date = body.get("entry_date")
+
+        if final_text is None and new_date is None:
             return JSONResponse(
-                {"error": "'final_text' is required and must be a string"},
+                {"error": "At least one of 'final_text' or 'entry_date' is required"},
                 status_code=400,
             )
 
-        if not final_text.strip():
-            return JSONResponse(
-                {"error": "'final_text' must not be empty"},
-                status_code=400,
-            )
+        updated = entry
 
-        try:
-            updated = ingestion_svc.update_entry_text(entry_id, final_text)
-        except ValueError as e:
-            log.warning("PATCH /api/entries/%d — error: %s", entry_id, e)
-            return JSONResponse({"error": str(e)}, status_code=400)
+        # Update date if provided
+        if new_date is not None:
+            if not isinstance(new_date, str) or not new_date.strip():
+                return JSONResponse(
+                    {"error": "'entry_date' must be a non-empty string"},
+                    status_code=400,
+                )
+            try:
+                import datetime as dt
+                dt.date.fromisoformat(new_date)
+            except ValueError:
+                return JSONResponse(
+                    {"error": "'entry_date' must be a valid ISO 8601 date (YYYY-MM-DD)"},
+                    status_code=400,
+                )
+            updated = query_svc._repo.update_entry_date(entry_id, new_date)
+
+        # Update text if provided
+        if final_text is not None:
+            if not isinstance(final_text, str):
+                return JSONResponse(
+                    {"error": "'final_text' must be a string"},
+                    status_code=400,
+                )
+            if not final_text.strip():
+                return JSONResponse(
+                    {"error": "'final_text' must not be empty"},
+                    status_code=400,
+                )
+            try:
+                updated = ingestion_svc.update_entry_text(entry_id, final_text)
+            except ValueError as e:
+                log.warning("PATCH /api/entries/%d — error: %s", entry_id, e)
+                return JSONResponse({"error": str(e)}, status_code=400)
 
         page_count = query_svc._repo.get_page_count(entry_id)
         uncertain_spans = query_svc._repo.get_uncertain_spans(entry_id)
-        log.info("PATCH /api/entries/%d — updated, %d words", entry_id, updated.word_count)
+        log.info("PATCH /api/entries/%d — updated", entry_id)
         return JSONResponse(_entry_to_dict(updated, page_count, uncertain_spans))
 
     async def _delete_entry(services: dict, entry_id: int) -> JSONResponse:
