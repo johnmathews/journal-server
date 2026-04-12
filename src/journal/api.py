@@ -77,7 +77,9 @@ def _entry_to_dict(
     }
 
 
-def _entity_summary(entity: Any, mention_count: int = 0) -> dict[str, Any]:
+def _entity_summary(
+    entity: Any, mention_count: int = 0, last_seen: str = ""
+) -> dict[str, Any]:
     """Convert an Entity to a JSON-serialisable summary dict."""
     return {
         "id": entity.id,
@@ -86,6 +88,7 @@ def _entity_summary(entity: Any, mention_count: int = 0) -> dict[str, Any]:
         "aliases": list(entity.aliases),
         "mention_count": mention_count,
         "first_seen": entity.first_seen,
+        "last_seen": last_seen,
     }
 
 
@@ -1341,7 +1344,7 @@ def register_api_routes(
                 or any(needle in a.lower() for a in e.aliases)
             ]
         total = entity_store.count_entities(entity_type=entity_type)
-        items = [_entity_summary(e, c) for e, c in rows]
+        items = [_entity_summary(e, c, ls) for e, c, ls in rows]
         log.info(
             "GET /api/entities — returned %d/%d entities", len(items), total
         )

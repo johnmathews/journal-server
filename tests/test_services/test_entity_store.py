@@ -191,7 +191,7 @@ class TestListing:
         store.create_mention(vienna.id, sample_entry_id, "Vienna", 0.9, "run1")
 
         rows = store.list_entities_with_mention_counts()
-        counts = {e.canonical_name: c for e, c in rows}
+        counts = {e.canonical_name: c for e, c, _ls in rows}
         assert counts["Atlas"] == 2
         assert counts["Vienna"] == 1
 

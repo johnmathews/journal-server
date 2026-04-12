@@ -66,7 +66,7 @@ class EntityStore(Protocol):
         entity_type: str | None = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> list[tuple[Entity, int]]: ...
+    ) -> list[tuple[Entity, int, str]]: ...
 
     def count_entities(self, entity_type: str | None = None) -> int: ...
 
@@ -282,11 +282,13 @@ class SQLiteEntityStore:
         entity_type: str | None = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> list[tuple[Entity, int]]:
+    ) -> list[tuple[Entity, int, str]]:
         sql = (
-            "SELECT e.*, COUNT(m.id) AS mention_count"
+            "SELECT e.*, COUNT(m.id) AS mention_count,"
+            " MAX(ent.entry_date) AS last_seen"
             " FROM entities e"
             " LEFT JOIN entity_mentions m ON m.entity_id = e.id"
+            " LEFT JOIN entries ent ON m.entry_id = ent.id"
         )
         params: list[object] = []
         if entity_type:
@@ -299,7 +301,10 @@ class SQLiteEntityStore:
         )
         params.extend([limit, offset])
         rows = self._conn.execute(sql, params).fetchall()
-        return [(self._hydrate(r), int(r["mention_count"])) for r in rows]
+        return [
+            (self._hydrate(r), int(r["mention_count"]), r["last_seen"] or "")
+            for r in rows
+        ]
 
     def count_entities(self, entity_type: str | None = None) -> int:
         sql = "SELECT COUNT(*) AS cnt FROM entities"
