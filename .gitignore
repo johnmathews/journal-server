@@ -62,9 +62,6 @@ uploads/
 .DS_Store
 Thumbs.db
 
-# Engineering team working docs
-.engineering-team/
-
 # Playwright MCP ephemeral output — console logs, page
 # snapshots, and screenshots from verification runs. Written
 # relative to the shell CWD, which may land in this repo when
