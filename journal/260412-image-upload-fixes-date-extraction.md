@@ -45,7 +45,24 @@ to the repository layer.
 - `tests/test_services/test_date_extraction.py` — 25 tests covering all
   supported date formats, edge cases, and invalid dates
 
+### 5. Duplicate upload error messages
+
+Changed cryptic hash-based messages to user-friendly text explaining the
+issue and suggesting to delete the existing entry first.
+
+### 6. Entity list API: last_seen field
+
+Added `last_seen` (MAX entry_date from mentions) to the entity summary
+response. Computed via LEFT JOIN through entity_mentions → entries in the
+existing `list_entities_with_mention_counts` query.
+
+### 7. Roadmap updates
+
+Marked item 11 (OCR uncertainty highlighting) as shipped. Added closed
+items 18-21 for this session's work. Expanded item 8 to full entity
+management (combine/rename/delete) based on user feedback.
+
 ## Tests
 
-- 28 new tests total (25 date extraction + 3 PATCH date endpoint)
+- 28 new tests (25 date extraction + 3 PATCH date endpoint)
 - Full suite: 682 passed
