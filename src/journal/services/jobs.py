@@ -332,7 +332,7 @@ class JobRunner:
                 (data, media_type) for data, media_type, _filename in images_with_names
             ]
             entry_date = params["entry_date"]
-            total = len(images) + 1  # pages + processing step
+            total = len(images)
 
             def progress_callback(current: int, total_pages: int) -> None:
                 self._jobs.update_progress(job_id, current, total)

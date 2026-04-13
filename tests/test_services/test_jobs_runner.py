@@ -556,6 +556,137 @@ class TestSerialisation:
 # --------------------------------------------------------------------
 
 
+class FakeIngestionService:
+    """Matches the slice of IngestionService the runner touches.
+
+    Returns a fake Entry with the given id. Optionally calls the
+    on_progress callback for multi-page ingestion.
+    """
+
+    def __init__(self, *, entry_id: int = 1) -> None:
+        from journal.models import Entry
+
+        self._entry = Entry(
+            id=entry_id,
+            entry_date="2026-04-13",
+            source_type="photo",
+            raw_text="fake text",
+            final_text="fake text",
+        )
+        self.ingest_image_calls: list[tuple[bytes, str, str]] = []
+        self.multi_page_calls: list[int] = []
+
+    def ingest_image(
+        self, image_data: bytes, media_type: str, date: str
+    ) -> Any:
+        self.ingest_image_calls.append((image_data, media_type, date))
+        return self._entry
+
+    def ingest_multi_page_entry(
+        self,
+        images: list[tuple[bytes, str]],
+        date: str,
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> Any:
+        self.multi_page_calls.append(len(images))
+        for i in range(len(images)):
+            if on_progress is not None:
+                on_progress(i + 1, len(images))
+        return self._entry
+
+
+# --------------------------------------------------------------------
+# Happy path — image ingestion
+# --------------------------------------------------------------------
+
+
+class TestImageIngestionProgress:
+    """Regression tests for progress_total == page count (no off-by-one)."""
+
+    def test_single_image_progress_total_equals_page_count(
+        self, runner_factory, jobs_repo
+    ):
+        ingestion = FakeIngestionService()
+        runner = runner_factory()
+        runner._ingestion = ingestion  # type: ignore[attr-defined]
+
+        images = [(b"img1", "image/jpeg", "page1.jpg")]
+        job = runner.submit_image_ingestion(images, "2026-04-13")
+        runner.shutdown(wait=True)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "succeeded"
+        assert final.progress_total == 1  # 1 page, NOT 2
+        assert final.progress_current == 1
+
+    def test_multi_image_progress_total_equals_page_count(
+        self, runner_factory, jobs_repo
+    ):
+        ingestion = FakeIngestionService()
+        runner = runner_factory()
+        runner._ingestion = ingestion  # type: ignore[attr-defined]
+
+        images = [
+            (b"img1", "image/jpeg", "page1.jpg"),
+            (b"img2", "image/jpeg", "page2.jpg"),
+            (b"img3", "image/jpeg", "page3.jpg"),
+        ]
+        job = runner.submit_image_ingestion(images, "2026-04-13")
+        runner.shutdown(wait=True)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "succeeded"
+        assert final.progress_total == 3  # 3 pages, NOT 4
+        assert final.progress_current == 3
+        assert final.result == {"entry_id": 1}
+
+    def test_progress_current_never_exceeds_total(
+        self, runner_factory, jobs_repo
+    ):
+        """Verify every progress update has current <= total."""
+        ingestion = FakeIngestionService()
+        runner = runner_factory()
+        runner._ingestion = ingestion  # type: ignore[attr-defined]
+
+        # Patch update_progress to record all calls
+        updates: list[tuple[str, int, int]] = []
+        original_update = jobs_repo.update_progress
+
+        def tracking_update(job_id: str, current: int, total: int) -> None:
+            updates.append((job_id, current, total))
+            original_update(job_id, current, total)
+
+        jobs_repo.update_progress = tracking_update  # type: ignore[method-assign]
+
+        images = [
+            (b"img1", "image/jpeg", "page1.jpg"),
+            (b"img2", "image/jpeg", "page2.jpg"),
+        ]
+        job = runner.submit_image_ingestion(images, "2026-04-13")
+        runner.shutdown(wait=True)
+
+        # Every update should have current <= total
+        for _jid, current, total in updates:
+            assert current <= total, (
+                f"progress_current ({current}) exceeded "
+                f"progress_total ({total})"
+            )
+
+        # Final state should be 2/2
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.progress_current == 2
+        assert final.progress_total == 2
+
+
+# --------------------------------------------------------------------
+# Shutdown
+# --------------------------------------------------------------------
+
+
 class TestShutdown:
     def test_submit_after_shutdown_raises(self, runner_factory):
         runner = runner_factory()
