@@ -84,8 +84,8 @@ untouched.
 ### PATCH /api/entries/{id}
 
 Update an entry's `final_text` and/or `entry_date`. At least one field must be
-provided. When `final_text` is updated, triggers re-chunking, re-embedding, and
-FTS5 rebuild.
+provided. When `final_text` is updated, triggers re-chunking, re-embedding,
+FTS5 rebuild, and an async entity re-extraction job.
 
 **Request body (all fields optional, at least one required):**
 ```json
@@ -103,6 +103,10 @@ FTS5 rebuild.
 \* At least one of `final_text` or `entry_date` must be provided.
 
 **Response (200):** Updated entry detail (same shape as GET /api/entries/{id}).
+When `final_text` was updated, the response includes an additional
+`entity_extraction_job_id` field (string) with the ID of the queued
+background extraction job. Omitted when only `entry_date` was changed or
+if the job could not be queued.
 
 **Response (400):**
 ```json

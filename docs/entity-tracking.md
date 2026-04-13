@@ -42,6 +42,10 @@ Kicked off via:
   changed since their last extraction run
 - `POST /api/entities/extract` with `{entry_id?, start_date?, end_date?, stale_only?}`
 - MCP tool `journal_extract_entities(...)`
+- **Automatically** when entry text is saved via `PATCH /api/entries/{id}`
+  with `final_text` — the API queues an async extraction job so entity
+  mentions stay in sync with corrected text. The response includes
+  `entity_extraction_job_id` when a job is queued.
 
 Every invocation assigns a fresh UUID `extraction_run_id` which is
 written on every mention and relationship row the run produces. Re-

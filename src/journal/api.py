@@ -336,6 +336,7 @@ def register_api_routes(
             updated = query_svc._repo.update_entry_date(entry_id, new_date)
 
         # Update text if provided
+        entity_extraction_job_id: str | None = None
         if final_text is not None:
             if not isinstance(final_text, str):
                 return JSONResponse(
@@ -353,10 +354,37 @@ def register_api_routes(
                 log.warning("PATCH /api/entries/%d — error: %s", entry_id, e)
                 return JSONResponse({"error": str(e)}, status_code=400)
 
+            # Fire async entity re-extraction so mentions stay in sync
+            # with the corrected text. The SQLite trigger already marks
+            # the entry stale; this just kicks off the job immediately
+            # rather than waiting for the next batch run.
+            try:
+                job_runner: JobRunner = services["job_runner"]
+                job = job_runner.submit_entity_extraction(
+                    {"entry_id": entry_id}
+                )
+                entity_extraction_job_id = job.id
+                log.info(
+                    "PATCH /api/entries/%d — queued entity re-extraction job %s",
+                    entry_id,
+                    job.id,
+                )
+            except Exception:
+                # Entity re-extraction is best-effort; don't fail the
+                # save if the job queue is unavailable.
+                log.warning(
+                    "PATCH /api/entries/%d — failed to queue entity re-extraction",
+                    entry_id,
+                    exc_info=True,
+                )
+
         page_count = query_svc._repo.get_page_count(entry_id)
         uncertain_spans = query_svc._repo.get_uncertain_spans(entry_id)
         log.info("PATCH /api/entries/%d — updated", entry_id)
-        return JSONResponse(_entry_to_dict(updated, page_count, uncertain_spans))
+        resp = _entry_to_dict(updated, page_count, uncertain_spans)
+        if entity_extraction_job_id is not None:
+            resp["entity_extraction_job_id"] = entity_extraction_job_id
+        return JSONResponse(resp)
 
     async def _delete_entry(services: dict, entry_id: int) -> JSONResponse:
         ingestion_svc: IngestionService = services["ingestion"]

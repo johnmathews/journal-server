@@ -397,6 +397,89 @@ class TestUpdateEntry:
         )
         assert response.status_code == 400
 
+    def test_patch_text_succeeds_without_job_runner(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        """Entity re-extraction is best-effort — PATCH must succeed even
+        when the services dict has no job_runner (e.g. in test setups)."""
+        entry = repo.create_entry("2026-03-22", "ocr", "raw text", 2)
+        response = client.patch(
+            f"/api/entries/{entry.id}",
+            json={"final_text": "corrected text"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["final_text"] == "corrected text"
+        # No job_runner → no extraction job id in response
+        assert "entity_extraction_job_id" not in data
+
+    def test_patch_text_queues_entity_extraction(
+        self,
+        repo: SQLiteEntryRepository,
+        mock_vector_store: MagicMock,
+        mock_embeddings: MagicMock,
+        services: dict,
+    ) -> None:
+        """When a job_runner is present, PATCH text should fire an async
+        entity re-extraction job and include the job id in the response."""
+        mock_job = MagicMock()
+        mock_job.id = "test-job-123"
+        mock_runner = MagicMock()
+        mock_runner.submit_entity_extraction = MagicMock(return_value=mock_job)
+        services["job_runner"] = mock_runner
+
+        from mcp.server.fastmcp import FastMCP
+
+        from journal.api import register_api_routes
+
+        test_mcp = FastMCP("test-journal-entity")
+        register_api_routes(test_mcp, lambda: services)
+        app = test_mcp.streamable_http_app()
+
+        entry = repo.create_entry("2026-03-22", "ocr", "raw text", 2)
+
+        with TestClient(app, raise_server_exceptions=False) as tc:
+            response = tc.patch(
+                f"/api/entries/{entry.id}",
+                json={"final_text": "corrected text"},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["entity_extraction_job_id"] == "test-job-123"
+        mock_runner.submit_entity_extraction.assert_called_once_with(
+            {"entry_id": entry.id}
+        )
+
+    def test_patch_date_only_does_not_queue_extraction(
+        self,
+        repo: SQLiteEntryRepository,
+        services: dict,
+    ) -> None:
+        """Changing only entry_date should not trigger entity extraction."""
+        mock_runner = MagicMock()
+        services["job_runner"] = mock_runner
+
+        from mcp.server.fastmcp import FastMCP
+
+        from journal.api import register_api_routes
+
+        test_mcp = FastMCP("test-journal-entity-date")
+        register_api_routes(test_mcp, lambda: services)
+        app = test_mcp.streamable_http_app()
+
+        entry = repo.create_entry("2026-03-22", "ocr", "Hello world", 2)
+
+        with TestClient(app, raise_server_exceptions=False) as tc:
+            response = tc.patch(
+                f"/api/entries/{entry.id}",
+                json={"entry_date": "2026-01-01"},
+            )
+
+        assert response.status_code == 200
+        assert "entity_extraction_job_id" not in response.json()
+        mock_runner.submit_entity_extraction.assert_not_called()
+
 
 class TestDeleteEntry:
     def test_delete_entry_removes_row(
