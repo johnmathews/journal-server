@@ -337,6 +337,7 @@ def register_api_routes(
 
         # Update text if provided
         entity_extraction_job_id: str | None = None
+        reprocess_job_id: str | None = None
         if final_text is not None:
             if not isinstance(final_text, str):
                 return JSONResponse(
@@ -349,17 +350,31 @@ def register_api_routes(
                     status_code=400,
                 )
             try:
-                updated = ingestion_svc.update_entry_text(entry_id, final_text)
+                updated = ingestion_svc.save_final_text(entry_id, final_text)
             except ValueError as e:
                 log.warning("PATCH /api/entries/%d — error: %s", entry_id, e)
                 return JSONResponse({"error": str(e)}, status_code=400)
 
-            # Fire async entity re-extraction so mentions stay in sync
-            # with the corrected text. The SQLite trigger already marks
-            # the entry stale; this just kicks off the job immediately
-            # rather than waiting for the next batch run.
+            # Queue background jobs: re-embedding (slow) and entity
+            # re-extraction. Both are best-effort — don't fail the
+            # save if the job queue is unavailable.
+            job_runner: JobRunner = services["job_runner"]
             try:
-                job_runner: JobRunner = services["job_runner"]
+                job = job_runner.submit_reprocess_embeddings(entry_id)
+                reprocess_job_id = job.id
+                log.info(
+                    "PATCH /api/entries/%d — queued reprocess-embeddings job %s",
+                    entry_id,
+                    job.id,
+                )
+            except Exception:
+                log.warning(
+                    "PATCH /api/entries/%d — failed to queue reprocess-embeddings",
+                    entry_id,
+                    exc_info=True,
+                )
+
+            try:
                 job = job_runner.submit_entity_extraction(
                     {"entry_id": entry_id}
                 )
@@ -370,8 +385,6 @@ def register_api_routes(
                     job.id,
                 )
             except Exception:
-                # Entity re-extraction is best-effort; don't fail the
-                # save if the job queue is unavailable.
                 log.warning(
                     "PATCH /api/entries/%d — failed to queue entity re-extraction",
                     entry_id,
@@ -384,6 +397,8 @@ def register_api_routes(
         resp = _entry_to_dict(updated, page_count, uncertain_spans)
         if entity_extraction_job_id is not None:
             resp["entity_extraction_job_id"] = entity_extraction_job_id
+        if reprocess_job_id is not None:
+            resp["reprocess_job_id"] = reprocess_job_id
         return JSONResponse(resp)
 
     async def _delete_entry(services: dict, entry_id: int) -> JSONResponse:

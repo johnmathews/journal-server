@@ -575,6 +575,7 @@ class FakeIngestionService:
         )
         self.ingest_image_calls: list[tuple[bytes, str, str]] = []
         self.multi_page_calls: list[int] = []
+        self.reprocess_calls: list[int] = []
 
     def ingest_image(
         self, image_data: bytes, media_type: str, date: str
@@ -594,6 +595,10 @@ class FakeIngestionService:
             if on_progress is not None:
                 on_progress(i + 1, len(images))
         return self._entry
+
+    def reprocess_embeddings(self, entry_id: int) -> int:
+        self.reprocess_calls.append(entry_id)
+        return 5  # fake chunk count
 
 
 # --------------------------------------------------------------------
@@ -680,6 +685,43 @@ class TestImageIngestionProgress:
         assert final is not None
         assert final.progress_current == 2
         assert final.progress_total == 2
+
+
+# --------------------------------------------------------------------
+# Happy path — reprocess embeddings
+# --------------------------------------------------------------------
+
+
+class TestReprocessEmbeddings:
+    def test_reprocess_job_runs_to_success(self, runner_factory, jobs_repo):
+        ingestion = FakeIngestionService()
+        runner = runner_factory()
+        runner._ingestion = ingestion  # type: ignore[attr-defined]
+
+        job = runner.submit_reprocess_embeddings(42)
+        runner.shutdown(wait=True)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "succeeded"
+        assert final.progress_current == 1
+        assert final.progress_total == 1
+        assert final.result == {"entry_id": 42, "chunk_count": 5}
+        assert ingestion.reprocess_calls == [42]
+
+    def test_reprocess_without_ingestion_service_fails(
+        self, runner_factory, jobs_repo
+    ):
+        runner = runner_factory()
+        # runner._ingestion is None by default (not set on fixture)
+
+        job = runner.submit_reprocess_embeddings(1)
+        runner.shutdown(wait=True)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "failed"
+        assert "not available" in (final.error_message or "")
 
 
 # --------------------------------------------------------------------

@@ -76,6 +76,10 @@ _MOOD_SCORE_ENTRY_KEYS: dict[str, type | tuple[type, ...]] = {
     "entry_id": int,
 }
 
+_REPROCESS_EMBEDDINGS_KEYS: dict[str, type | tuple[type, ...]] = {
+    "entry_id": int,
+}
+
 
 def _validate_params(
     params: dict[str, Any],
@@ -236,6 +240,19 @@ class JobRunner:
         self._executor.submit(self._run_mood_score_entry, job.id, params)
         return job
 
+    def submit_reprocess_embeddings(self, entry_id: int) -> Job:
+        """Queue a re-embedding job for an entry after text is saved.
+
+        Re-chunks the entry's text, calls the embedding provider, and
+        updates the vector store. This is the slow part of a text save
+        that was previously done synchronously in the PATCH handler.
+        """
+        params = {"entry_id": entry_id}
+        _validate_params(params, _REPROCESS_EMBEDDINGS_KEYS, job_type="reprocess_embeddings")
+        job = self._jobs.create("reprocess_embeddings", params)
+        self._executor.submit(self._run_reprocess_embeddings, job.id, params)
+        return job
+
     def shutdown(self, wait: bool = False) -> None:
         """Stop the executor, cancelling queued-but-not-started tasks.
 
@@ -382,6 +399,31 @@ class JobRunner:
             self._jobs.mark_succeeded(job_id, {"entry_id": entry_id, "scores_written": count})
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Mood score entry job %s failed", job_id)
+            try:
+                self._jobs.mark_failed(job_id, str(exc))
+            except Exception:  # noqa: BLE001 — last-resort bookkeeping
+                log.exception("Failed to record failure for job %s", job_id)
+
+    def _run_reprocess_embeddings(
+        self, job_id: str, params: dict[str, Any]
+    ) -> None:
+        """Re-chunk and re-embed an entry's text in the background."""
+        try:
+            self._jobs.mark_running(job_id)
+            self._jobs.update_progress(job_id, 0, 1)
+
+            entry_id = params["entry_id"]
+            if self._ingestion is None:
+                self._jobs.mark_failed(job_id, "Ingestion service not available")
+                return
+
+            chunk_count = self._ingestion.reprocess_embeddings(entry_id)
+            self._jobs.update_progress(job_id, 1, 1)
+            self._jobs.mark_succeeded(
+                job_id, {"entry_id": entry_id, "chunk_count": chunk_count}
+            )
+        except Exception as exc:  # noqa: BLE001 — terminal-state guard
+            log.exception("Reprocess embeddings job %s failed", job_id)
             try:
                 self._jobs.mark_failed(job_id, str(exc))
             except Exception:  # noqa: BLE001 — last-resort bookkeeping

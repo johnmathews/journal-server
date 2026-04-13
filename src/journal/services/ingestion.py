@@ -567,6 +567,44 @@ class IngestionService:
         log.info("Updated entry %d: %d words, %d chunks", entry_id, word_count, chunk_count)
         return updated  # type: ignore[return-value]
 
+    def save_final_text(self, entry_id: int, final_text: str) -> Entry:
+        """Update an entry's final_text in SQLite only (fast).
+
+        Does NOT re-chunk or re-embed. Call ``reprocess_embeddings``
+        separately for the slow embedding pipeline.
+        """
+        entry = self._repo.get_entry(entry_id)
+        if entry is None:
+            raise ValueError(f"Entry {entry_id} not found")
+
+        word_count = len(final_text.split())
+        updated = self._repo.update_final_text(
+            entry_id, final_text, word_count, entry.chunk_count
+        )
+        log.info("Saved final_text for entry %d (%d words)", entry_id, word_count)
+        return updated  # type: ignore[return-value]
+
+    def reprocess_embeddings(self, entry_id: int) -> int:
+        """Re-chunk and re-embed an entry's text (slow).
+
+        Deletes old vectors, re-chunks, calls the embedding provider,
+        stores new vectors, and updates the chunk_count in SQLite.
+        Returns the number of chunks produced.
+        """
+        entry = self._repo.get_entry(entry_id)
+        if entry is None:
+            raise ValueError(f"Entry {entry_id} not found")
+
+        text = entry.final_text or entry.raw_text
+        if not text or not text.strip():
+            raise ValueError(f"Entry {entry_id} has no text to embed")
+
+        self._vector_store.delete_entry(entry_id)
+        chunk_count = self._process_text(entry_id, text, entry.entry_date)
+        self._repo.update_chunk_count(entry_id, chunk_count)
+        log.info("Reprocessed embeddings for entry %d: %d chunks", entry_id, chunk_count)
+        return chunk_count
+
     def delete_entry(self, entry_id: int) -> bool:
         """Delete an entry from both SQLite and the vector store.
 
