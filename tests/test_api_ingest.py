@@ -233,3 +233,89 @@ class TestIngestImages:
         response = client.post("/api/entries/ingest/images", files=files)
         assert response.status_code == 400
         assert "10 MB" in response.json()["error"]
+
+
+class TestAutoEntityExtraction:
+    """Entity extraction should be queued on every ingestion path."""
+
+    def test_text_ingest_queues_entity_extraction(
+        self, client: TestClient, services: dict,
+    ) -> None:
+        response = client.post(
+            "/api/entries/ingest/text",
+            json={"text": "Today was a great day with Alice."},
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["entity_extraction_job_id"] is not None
+
+    def test_file_ingest_queues_entity_extraction(
+        self, client: TestClient, services: dict,
+    ) -> None:
+        files = {"file": ("entry.txt", io.BytesIO(b"Met Bob at the park."), "text/plain")}
+        response = client.post("/api/entries/ingest/file", files=files)
+        assert response.status_code == 201
+        data = response.json()
+        assert data["entity_extraction_job_id"] is not None
+
+
+class TestPatchMoodScoring:
+    """PATCH /api/entries/{id} should queue mood re-scoring when enabled."""
+
+    def test_patch_text_queues_mood_scoring(
+        self, client: TestClient, repo: SQLiteEntryRepository, services: dict,
+    ) -> None:
+        """When config.enable_mood_scoring is True, PATCH should queue a mood job."""
+        from journal.config import Config
+
+        config = Config(enable_mood_scoring=True)
+        services["config"] = config
+
+        entry = repo.create_entry("2026-04-01", "ocr", "raw text", 2)
+        response = client.patch(
+            f"/api/entries/{entry.id}",
+            json={"final_text": "corrected text"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data.get("mood_job_id") is not None
+
+    def test_patch_text_no_mood_without_config(
+        self, client: TestClient, repo: SQLiteEntryRepository,
+    ) -> None:
+        """Without config, no mood job should be queued."""
+        entry = repo.create_entry("2026-04-02", "ocr", "raw text", 2)
+        response = client.patch(
+            f"/api/entries/{entry.id}",
+            json={"final_text": "corrected text"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data.get("mood_job_id") is None
+
+
+class TestListEntriesUncertainSpanCount:
+    """GET /api/entries should include uncertain_span_count per entry."""
+
+    def test_entries_include_uncertain_span_count(
+        self, client: TestClient, repo: SQLiteEntryRepository,
+    ) -> None:
+        entry = repo.create_entry("2026-04-01", "ocr", "Hello Ritsya.", 2)
+        repo.add_uncertain_spans(entry.id, [(6, 12)])
+
+        response = client.get("/api/entries")
+        assert response.status_code == 200
+        items = response.json()["items"]
+        match = [e for e in items if e["id"] == entry.id]
+        assert len(match) == 1
+        assert match[0]["uncertain_span_count"] == 1
+
+    def test_zero_spans_returns_zero(
+        self, client: TestClient, repo: SQLiteEntryRepository,
+    ) -> None:
+        repo.create_entry("2026-04-02", "manual", "Clear text.", 2)
+
+        response = client.get("/api/entries")
+        assert response.status_code == 200
+        items = response.json()["items"]
+        assert all(e["uncertain_span_count"] == 0 for e in items)

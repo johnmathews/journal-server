@@ -30,6 +30,7 @@ List entries with pagination and optional date filtering.
       "page_count": 2,
       "word_count": 450,
       "chunk_count": 5,
+      "uncertain_span_count": 1,
       "created_at": "2026-04-09T10:30:00"
     }
   ],
@@ -567,12 +568,14 @@ Create a journal entry from plain text (no OCR). Synchronous.
 ```json
 {
   "entry": { "id": 1, "entry_date": "2026-04-12", "source_type": "manual", "..." : "..." },
-  "mood_job_id": "uuid-or-null"
+  "mood_job_id": "uuid-or-null",
+  "entity_extraction_job_id": "uuid-or-null"
 }
 ```
 
-`mood_job_id` is non-null when `JOURNAL_ENABLE_MOOD_SCORING=true`. Poll
-`GET /api/jobs/{mood_job_id}` to check scoring completion.
+`mood_job_id` is non-null when `JOURNAL_ENABLE_MOOD_SCORING=true`.
+`entity_extraction_job_id` is always non-null (entity extraction runs on every
+new entry). Poll `GET /api/jobs/{id}` to check completion.
 
 **Errors:** 400 (missing/empty text, invalid JSON).
 

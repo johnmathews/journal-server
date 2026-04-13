@@ -115,6 +115,8 @@ class EntryRepository(Protocol):
 
     def get_uncertain_spans(self, entry_id: int) -> list[tuple[int, int]]: ...
 
+    def get_uncertain_span_count(self, entry_id: int) -> int: ...
+
     def get_entries_by_date(self, date: str) -> list[Entry]: ...
 
     def list_entries(
@@ -511,6 +513,14 @@ class SQLiteEntryRepository:
             (entry_id,),
         ).fetchall()
         return [(int(r["char_start"]), int(r["char_end"])) for r in rows]
+
+    def get_uncertain_span_count(self, entry_id: int) -> int:
+        """Return the number of uncertain spans for an entry."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) as cnt FROM entry_uncertain_spans WHERE entry_id = ?",
+            (entry_id,),
+        ).fetchone()
+        return row["cnt"]
 
     def get_statistics(
         self, start_date: str | None = None, end_date: str | None = None

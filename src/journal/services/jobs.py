@@ -366,6 +366,21 @@ class JobRunner:
 
             self._jobs.update_progress(job_id, total, total)
             self._jobs.mark_succeeded(job_id, {"entry_id": entry.id})
+
+            # Queue entity extraction as a follow-up job. Mood scoring
+            # already happens inline inside ingest_image / ingest_multi_page_entry.
+            try:
+                ej = self.submit_entity_extraction({"entry_id": entry.id})
+                log.info(
+                    "Image ingestion job %s — queued entity extraction %s for entry %d",
+                    job_id, ej.id, entry.id,
+                )
+            except Exception:  # noqa: BLE001 — best-effort enrichment
+                log.warning(
+                    "Image ingestion job %s — failed to queue entity extraction",
+                    job_id,
+                    exc_info=True,
+                )
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Image ingestion job %s failed", job_id)
             # Clean up any remaining image data

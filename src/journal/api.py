@@ -161,7 +161,9 @@ def _job_to_dict(job: Job) -> dict[str, Any]:
     }
 
 
-def _entry_summary(entry: Any, page_count: int = 0) -> dict[str, Any]:
+def _entry_summary(
+    entry: Any, page_count: int = 0, uncertain_span_count: int = 0,
+) -> dict[str, Any]:
     """Convert an Entry to a summary dict (no text fields)."""
     return {
         "id": entry.id,
@@ -170,6 +172,7 @@ def _entry_summary(entry: Any, page_count: int = 0) -> dict[str, Any]:
         "word_count": entry.word_count,
         "chunk_count": entry.chunk_count,
         "page_count": page_count,
+        "uncertain_span_count": uncertain_span_count,
         "created_at": entry.created_at,
     }
 
@@ -237,7 +240,8 @@ def register_api_routes(
         items = []
         for entry in entries:
             page_count = query_svc._repo.get_page_count(entry.id)
-            items.append(_entry_summary(entry, page_count))
+            span_count = query_svc._repo.get_uncertain_span_count(entry.id)
+            items.append(_entry_summary(entry, page_count, span_count))
 
         log.info("GET /api/entries — returned %d/%d entries (offset=%d)", len(items), total, offset)
         return JSONResponse({
@@ -338,6 +342,7 @@ def register_api_routes(
         # Update text if provided
         entity_extraction_job_id: str | None = None
         reprocess_job_id: str | None = None
+        mood_job_id: str | None = None
         if final_text is not None:
             if not isinstance(final_text, str):
                 return JSONResponse(
@@ -355,41 +360,59 @@ def register_api_routes(
                 log.warning("PATCH /api/entries/%d — error: %s", entry_id, e)
                 return JSONResponse({"error": str(e)}, status_code=400)
 
-            # Queue background jobs: re-embedding (slow) and entity
-            # re-extraction. Both are best-effort — don't fail the
-            # save if the job queue is unavailable.
-            job_runner: JobRunner = services["job_runner"]
-            try:
-                job = job_runner.submit_reprocess_embeddings(entry_id)
-                reprocess_job_id = job.id
-                log.info(
-                    "PATCH /api/entries/%d — queued reprocess-embeddings job %s",
-                    entry_id,
-                    job.id,
-                )
-            except Exception:
-                log.warning(
-                    "PATCH /api/entries/%d — failed to queue reprocess-embeddings",
-                    entry_id,
-                    exc_info=True,
-                )
+            # Queue background jobs: re-embedding (slow), entity
+            # re-extraction, and mood re-scoring. All are best-effort
+            # — don't fail the save if the job queue is unavailable.
+            job_runner: JobRunner | None = services.get("job_runner")
+            if job_runner is not None:
+                try:
+                    job = job_runner.submit_reprocess_embeddings(entry_id)
+                    reprocess_job_id = job.id
+                    log.info(
+                        "PATCH /api/entries/%d — queued reprocess-embeddings job %s",
+                        entry_id,
+                        job.id,
+                    )
+                except Exception:
+                    log.warning(
+                        "PATCH /api/entries/%d — failed to queue reprocess-embeddings",
+                        entry_id,
+                        exc_info=True,
+                    )
 
-            try:
-                job = job_runner.submit_entity_extraction(
-                    {"entry_id": entry_id}
-                )
-                entity_extraction_job_id = job.id
-                log.info(
-                    "PATCH /api/entries/%d — queued entity re-extraction job %s",
-                    entry_id,
-                    job.id,
-                )
-            except Exception:
-                log.warning(
-                    "PATCH /api/entries/%d — failed to queue entity re-extraction",
-                    entry_id,
-                    exc_info=True,
-                )
+                try:
+                    job = job_runner.submit_entity_extraction(
+                        {"entry_id": entry_id}
+                    )
+                    entity_extraction_job_id = job.id
+                    log.info(
+                        "PATCH /api/entries/%d — queued entity re-extraction job %s",
+                        entry_id,
+                        job.id,
+                    )
+                except Exception:
+                    log.warning(
+                        "PATCH /api/entries/%d — failed to queue entity re-extraction",
+                        entry_id,
+                        exc_info=True,
+                    )
+
+                config = services.get("config")
+                if config and config.enable_mood_scoring:
+                    try:
+                        mood_job = job_runner.submit_mood_score_entry(entry_id)
+                        mood_job_id = mood_job.id
+                        log.info(
+                            "PATCH /api/entries/%d — queued mood re-scoring job %s",
+                            entry_id,
+                            mood_job.id,
+                        )
+                    except Exception:
+                        log.warning(
+                            "PATCH /api/entries/%d — failed to queue mood re-scoring",
+                            entry_id,
+                            exc_info=True,
+                        )
 
         page_count = query_svc._repo.get_page_count(entry_id)
         uncertain_spans = query_svc._repo.get_uncertain_spans(entry_id)
@@ -399,6 +422,8 @@ def register_api_routes(
             resp["entity_extraction_job_id"] = entity_extraction_job_id
         if reprocess_job_id is not None:
             resp["reprocess_job_id"] = reprocess_job_id
+        if mood_job_id is not None:
+            resp["mood_job_id"] = mood_job_id
         return JSONResponse(resp)
 
     async def _delete_entry(services: dict, entry_id: int) -> JSONResponse:
@@ -1027,13 +1052,28 @@ def register_api_routes(
             log.warning("POST /api/entries/ingest/text — %s", e)
             return JSONResponse({"error": str(e)}, status_code=400)
 
-        # Fire async mood scoring if enabled
+        # Fire async post-ingestion jobs
         mood_job_id = None
+        entity_extraction_job_id = None
         config = services.get("config")
+        job_runner: JobRunner = services["job_runner"]
         if config and config.enable_mood_scoring:
-            job_runner: JobRunner = services["job_runner"]
-            mood_job = job_runner.submit_mood_score_entry(entry.id)
-            mood_job_id = mood_job.id
+            try:
+                mood_job = job_runner.submit_mood_score_entry(entry.id)
+                mood_job_id = mood_job.id
+            except Exception:
+                log.warning(
+                    "POST /api/entries/ingest/text — failed to queue mood scoring",
+                    exc_info=True,
+                )
+        try:
+            ej = job_runner.submit_entity_extraction({"entry_id": entry.id})
+            entity_extraction_job_id = ej.id
+        except Exception:
+            log.warning(
+                "POST /api/entries/ingest/text — failed to queue entity extraction",
+                exc_info=True,
+            )
 
         page_count = ingestion_svc._repo.get_page_count(entry.id)
         log.info(
@@ -1044,6 +1084,7 @@ def register_api_routes(
             {
                 "entry": _entry_to_dict(entry, page_count),
                 "mood_job_id": mood_job_id,
+                "entity_extraction_job_id": entity_extraction_job_id,
             },
             status_code=201,
         )
@@ -1126,13 +1167,28 @@ def register_api_routes(
             entry.id, f"upload:{uploaded.filename}", uploaded.content_type, file_hash,
         )
 
-        # Fire async mood scoring if enabled
+        # Fire async post-ingestion jobs
         mood_job_id = None
+        entity_extraction_job_id = None
         config = services.get("config")
+        job_runner: JobRunner = services["job_runner"]
         if config and config.enable_mood_scoring:
-            job_runner: JobRunner = services["job_runner"]
-            mood_job = job_runner.submit_mood_score_entry(entry.id)
-            mood_job_id = mood_job.id
+            try:
+                mood_job = job_runner.submit_mood_score_entry(entry.id)
+                mood_job_id = mood_job.id
+            except Exception:
+                log.warning(
+                    "POST /api/entries/ingest/file — failed to queue mood scoring",
+                    exc_info=True,
+                )
+        try:
+            ej = job_runner.submit_entity_extraction({"entry_id": entry.id})
+            entity_extraction_job_id = ej.id
+        except Exception:
+            log.warning(
+                "POST /api/entries/ingest/file — failed to queue entity extraction",
+                exc_info=True,
+            )
 
         page_count = ingestion_svc._repo.get_page_count(entry.id)
         log.info(
@@ -1143,6 +1199,7 @@ def register_api_routes(
             {
                 "entry": _entry_to_dict(entry, page_count),
                 "mood_job_id": mood_job_id,
+                "entity_extraction_job_id": entity_extraction_job_id,
             },
             status_code=201,
         )

@@ -220,6 +220,33 @@ Mood backfill jobs store:
 Consumers should not assume any field beyond these — if the server adds new
 counters in a future version, clients must tolerate unknown keys.
 
+## Automatic job triggering
+
+Jobs are queued automatically at key lifecycle events so users don't need to
+manually request entity extraction or mood scoring:
+
+| Event                                | Entity extraction | Mood scoring | Reprocess embeddings |
+| ------------------------------------ | :---------------: | :----------: | :------------------: |
+| `POST /api/entries/ingest/text`      | yes (async job)   | yes (async)  | —                    |
+| `POST /api/entries/ingest/file`      | yes (async job)   | yes (async)  | —                    |
+| `POST /api/entries/ingest/images`    | yes (follow-up)   | inline       | —                    |
+| `PATCH /api/entries/{id}` (text)     | yes (async job)   | yes (async)  | yes (async job)      |
+
+For image ingestion, mood scoring runs inline inside the ingestion worker
+(via `IngestionService._process_text`). Entity extraction is submitted as a
+follow-up job after the image ingestion job succeeds — it runs on the same
+single-worker executor, so it starts once the ingestion job marks itself
+complete.
+
+For text/file ingestion, both mood scoring and entity extraction are submitted
+as separate background jobs immediately after the entry is created. Both are
+best-effort — failures are logged but don't fail the ingest response.
+
+For PATCH, all three background jobs (reprocess embeddings, entity extraction,
+mood scoring) are submitted after the text save succeeds. `mood_job_id` is
+included in the PATCH response alongside the existing `entity_extraction_job_id`
+and `reprocess_job_id`.
+
 ## What's intentionally out of scope for v1
 
 - **Cancellation.** There is no API to cancel a running job. Jobs are fast
