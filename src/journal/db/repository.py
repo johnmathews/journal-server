@@ -117,6 +117,8 @@ class EntryRepository(Protocol):
 
     def get_uncertain_span_count(self, entry_id: int) -> int: ...
 
+    def verify_doubts(self, entry_id: int) -> bool: ...
+
     def get_entries_by_date(self, date: str) -> list[Entry]: ...
 
     def list_entries(
@@ -216,6 +218,7 @@ def _row_to_entry(row: sqlite3.Row) -> Entry:
         language=row["language"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        doubts_verified=bool(row["doubts_verified"]),
     )
 
 
@@ -515,12 +518,37 @@ class SQLiteEntryRepository:
         return [(int(r["char_start"]), int(r["char_end"])) for r in rows]
 
     def get_uncertain_span_count(self, entry_id: int) -> int:
-        """Return the number of uncertain spans for an entry."""
+        """Return the number of uncertain spans for an entry.
+
+        Returns 0 when the user has verified all doubts for this entry
+        (``doubts_verified = 1``), even if span rows still exist in the
+        database. The raw spans are preserved for future analysis.
+        """
+        row = self._conn.execute(
+            "SELECT doubts_verified FROM entries WHERE id = ?",
+            (entry_id,),
+        ).fetchone()
+        if row and row["doubts_verified"]:
+            return 0
         row = self._conn.execute(
             "SELECT COUNT(*) as cnt FROM entry_uncertain_spans WHERE entry_id = ?",
             (entry_id,),
         ).fetchone()
         return row["cnt"]
+
+    def verify_doubts(self, entry_id: int) -> bool:
+        """Mark all doubts on an entry as verified.
+
+        Sets ``doubts_verified = 1`` on the entry row. The underlying
+        uncertain span rows are preserved for future use. Returns
+        ``True`` if the entry exists, ``False`` otherwise.
+        """
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE entries SET doubts_verified = 1 WHERE id = ?",
+                (entry_id,),
+            )
+        return cursor.rowcount > 0
 
     def get_statistics(
         self, start_date: str | None = None, end_date: str | None = None

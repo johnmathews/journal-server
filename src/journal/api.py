@@ -57,7 +57,11 @@ def _entry_to_dict(
     that don't have the span list (or don't need it — e.g. the list
     endpoint) omit the argument; the serializer then emits an empty
     array so the field is always present in the response shape.
+
+    When ``entry.doubts_verified`` is true, spans are suppressed —
+    the user has confirmed all doubts are correct.
     """
+    verified = getattr(entry, "doubts_verified", False)
     return {
         "id": entry.id,
         "entry_date": entry.entry_date,
@@ -70,7 +74,10 @@ def _entry_to_dict(
         "language": entry.language,
         "created_at": entry.created_at,
         "updated_at": entry.updated_at,
-        "uncertain_spans": [
+        "doubts_verified": verified,
+        "uncertain_spans": []
+        if verified
+        else [
             {"char_start": start, "char_end": end}
             for start, end in (uncertain_spans or [])
         ],
@@ -173,6 +180,7 @@ def _entry_summary(
         "chunk_count": entry.chunk_count,
         "page_count": page_count,
         "uncertain_span_count": uncertain_span_count,
+        "doubts_verified": getattr(entry, "doubts_verified", False),
         "created_at": entry.created_at,
     }
 
@@ -436,6 +444,46 @@ def register_api_routes(
             )
         log.info("DELETE /api/entries/%d — deleted", entry_id)
         return JSONResponse({"deleted": True, "id": entry_id})
+
+    @mcp.custom_route(
+        "/api/entries/{entry_id:int}/verify-doubts",
+        methods=["POST"],
+        name="api_verify_doubts",
+    )
+    async def verify_doubts(request: Request) -> JSONResponse:
+        """Mark all OCR doubts on an entry as verified.
+
+        Sets doubts_verified=1 on the entry. The underlying uncertain
+        span rows are preserved for future analysis. After verification,
+        GET and list endpoints return uncertain_span_count=0 and an
+        empty uncertain_spans array for this entry.
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+
+        query_svc: QueryService = services["query"]
+        entry_id = int(request.path_params["entry_id"])
+
+        ok = query_svc._repo.verify_doubts(entry_id)
+        if not ok:
+            log.warning(
+                "POST /api/entries/%d/verify-doubts — not found", entry_id
+            )
+            return JSONResponse(
+                {"error": f"Entry {entry_id} not found"}, status_code=404
+            )
+
+        log.info(
+            "POST /api/entries/%d/verify-doubts — doubts verified", entry_id
+        )
+        entry = query_svc._repo.get_entry(entry_id)
+        page_count = query_svc._repo.get_page_count(entry_id)
+        return JSONResponse(
+            _entry_to_dict(entry, page_count, uncertain_spans=[])
+        )
 
     @mcp.custom_route(
         "/api/entries/{entry_id:int}/chunks",

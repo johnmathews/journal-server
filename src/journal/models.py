@@ -16,6 +16,7 @@ class Entry:
     language: str = "en"
     created_at: str = ""
     updated_at: str = ""
+    doubts_verified: bool = False
 
 
 @dataclass

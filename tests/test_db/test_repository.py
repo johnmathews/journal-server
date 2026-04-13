@@ -840,3 +840,37 @@ class TestUncertainSpans:
         entry = repo.create_entry("2026-03-22", "ocr", "hello", 1)
         with pytest.raises(sqlite3.IntegrityError):
             repo.add_uncertain_spans(entry.id, [(-1, 5)])
+
+
+class TestVerifyDoubts:
+    def test_verify_doubts_sets_flag(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "hello world", 2)
+        assert entry.doubts_verified is False
+        assert repo.verify_doubts(entry.id) is True
+        refreshed = repo.get_entry(entry.id)
+        assert refreshed.doubts_verified is True
+
+    def test_verify_doubts_returns_false_for_missing_entry(self, repo):
+        assert repo.verify_doubts(999) is False
+
+    def test_get_uncertain_span_count_returns_zero_when_verified(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "hello world", 2)
+        repo.add_uncertain_spans(entry.id, [(0, 5), (6, 11)])
+        assert repo.get_uncertain_span_count(entry.id) == 2
+        repo.verify_doubts(entry.id)
+        assert repo.get_uncertain_span_count(entry.id) == 0
+
+    def test_get_uncertain_spans_still_returns_rows_when_verified(self, repo):
+        """Span rows are preserved for future analysis even after verification."""
+        entry = repo.create_entry("2026-03-22", "ocr", "hello world", 2)
+        repo.add_uncertain_spans(entry.id, [(0, 5)])
+        repo.verify_doubts(entry.id)
+        # Raw spans are still in the DB
+        spans = repo.get_uncertain_spans(entry.id)
+        assert spans == [(0, 5)]
+
+    def test_verify_doubts_is_idempotent(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "hello", 1)
+        repo.verify_doubts(entry.id)
+        assert repo.verify_doubts(entry.id) is True
+        assert repo.get_entry(entry.id).doubts_verified is True

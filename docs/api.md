@@ -31,6 +31,7 @@ List entries with pagination and optional date filtering.
       "word_count": 450,
       "chunk_count": 5,
       "uncertain_span_count": 1,
+      "doubts_verified": false,
       "created_at": "2026-04-09T10:30:00"
     }
   ],
@@ -58,6 +59,7 @@ Get a single entry with full text.
   "language": "en",
   "created_at": "2026-04-09T10:30:00",
   "updated_at": "2026-04-09T11:00:00",
+  "doubts_verified": false,
   "uncertain_spans": [
     { "char_start": 6, "char_end": 12 },
     { "char_start": 18, "char_end": 24 }
@@ -76,6 +78,12 @@ webapp's Review toggle for the consumer UI.
 `uncertain_spans` is preserved across `PATCH /api/entries/{id}` —
 edits change `final_text` but leave `raw_text` and its span list
 untouched.
+
+`doubts_verified` indicates whether the user has confirmed all OCR
+doubts are correct via `POST /api/entries/{id}/verify-doubts`. When
+`true`, the API returns `uncertain_spans: []` and `uncertain_span_count: 0`
+even though the underlying span rows are preserved in the database for
+future analysis (e.g., glossary enrichment, accuracy tracking).
 
 **Response (404):**
 ```json
@@ -117,6 +125,24 @@ if the job could not be queued.
 **Response (404):**
 ```json
 { "error": "not_found", "message": "Entry 999 not found" }
+```
+
+### POST /api/entries/{id}/verify-doubts
+
+Mark all OCR doubts on an entry as verified and correct. Sets
+`doubts_verified = true` on the entry. The underlying uncertain span rows
+are preserved in the database for future analysis. After verification, GET
+and list endpoints return `uncertain_span_count: 0` and an empty
+`uncertain_spans` array.
+
+**Request body:** None required.
+
+**Response (200):** Updated entry detail (same shape as GET /api/entries/{id})
+with `doubts_verified: true` and `uncertain_spans: []`.
+
+**Response (404):**
+```json
+{ "error": "Entry 999 not found" }
 ```
 
 ### DELETE /api/entries/{id}

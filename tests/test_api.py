@@ -465,6 +465,55 @@ class TestUpdateEntry:
         mock_runner.submit_entity_extraction.assert_not_called()
 
 
+class TestVerifyDoubts:
+    def test_verify_doubts_clears_spans_in_response(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        entry = repo.create_entry("2026-03-22", "ocr", "Hello Ritsya.", 2)
+        repo.add_uncertain_spans(entry.id, [(6, 12)])
+        response = client.post(f"/api/entries/{entry.id}/verify-doubts")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["doubts_verified"] is True
+        assert data["uncertain_spans"] == []
+
+    def test_verify_doubts_not_found(self, client: TestClient) -> None:
+        response = client.post("/api/entries/999/verify-doubts")
+        assert response.status_code == 404
+
+    def test_verify_doubts_persists_across_get(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        entry = repo.create_entry("2026-03-22", "ocr", "Hello Ritsya.", 2)
+        repo.add_uncertain_spans(entry.id, [(6, 12)])
+        client.post(f"/api/entries/{entry.id}/verify-doubts")
+
+        # GET detail should now show verified + empty spans
+        response = client.get(f"/api/entries/{entry.id}")
+        data = response.json()
+        assert data["doubts_verified"] is True
+        assert data["uncertain_spans"] == []
+
+    def test_verify_doubts_zeroes_list_count(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        entry = repo.create_entry("2026-03-22", "ocr", "Hello Ritsya.", 2)
+        repo.add_uncertain_spans(entry.id, [(6, 12)])
+
+        # Before: count is 1
+        response = client.get("/api/entries")
+        item = [i for i in response.json()["items"] if i["id"] == entry.id][0]
+        assert item["uncertain_span_count"] == 1
+
+        client.post(f"/api/entries/{entry.id}/verify-doubts")
+
+        # After: count is 0
+        response = client.get("/api/entries")
+        item = [i for i in response.json()["items"] if i["id"] == entry.id][0]
+        assert item["uncertain_span_count"] == 0
+        assert item["doubts_verified"] is True
+
+
 class TestDeleteEntry:
     def test_delete_entry_removes_row(
         self,
