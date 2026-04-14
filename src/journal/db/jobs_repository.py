@@ -23,6 +23,7 @@ across server restarts.
 import json
 import logging
 import sqlite3
+import threading
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -54,21 +55,31 @@ def _row_to_job(row: sqlite3.Row) -> Job:
 
 
 class SQLiteJobRepository:
+    """Repository for async batch jobs backed by SQLite.
+
+    All methods are thread-safe: a `threading.Lock` serialises access
+    to the shared ``sqlite3.Connection`` so callers on different threads
+    (API handler vs. ``JobRunner`` executor) never issue concurrent
+    writes that trigger ``OperationalError: not an error``.
+    """
+
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
+        self._lock = threading.Lock()
 
     def create(self, job_type: str, params: dict[str, Any]) -> Job:
         job_id = str(uuid.uuid4())
         created_at = _now_iso()
         params_json = json.dumps(params)
-        self._conn.execute(
-            "INSERT INTO jobs ("
-            "id, type, status, params_json, progress_current, progress_total, "
-            "result_json, error_message, status_detail, created_at, started_at, finished_at"
-            ") VALUES (?, ?, 'queued', ?, 0, 0, NULL, NULL, NULL, ?, NULL, NULL)",
-            (job_id, job_type, params_json, created_at),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO jobs ("
+                "id, type, status, params_json, progress_current, progress_total, "
+                "result_json, error_message, status_detail, created_at, started_at, finished_at"
+                ") VALUES (?, ?, 'queued', ?, 0, 0, NULL, NULL, NULL, ?, NULL, NULL)",
+                (job_id, job_type, params_json, created_at),
+            )
+            self._conn.commit()
         log.info("Created job %s of type %s", job_id, job_type)
         job = self.get(job_id)
         assert job is not None  # row was just inserted
@@ -76,52 +87,58 @@ class SQLiteJobRepository:
 
     def mark_running(self, job_id: str) -> None:
         started_at = _now_iso()
-        self._conn.execute(
-            "UPDATE jobs SET status = 'running', started_at = ? WHERE id = ?",
-            (started_at, job_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE jobs SET status = 'running', started_at = ? WHERE id = ?",
+                (started_at, job_id),
+            )
+            self._conn.commit()
         log.info("Job %s -> running", job_id)
 
     def update_progress(self, job_id: str, current: int, total: int) -> None:
-        self._conn.execute(
-            "UPDATE jobs SET progress_current = ?, progress_total = ? WHERE id = ?",
-            (current, total, job_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE jobs SET progress_current = ?, progress_total = ? WHERE id = ?",
+                (current, total, job_id),
+            )
+            self._conn.commit()
 
     def update_status_detail(self, job_id: str, detail: str | None) -> None:
-        self._conn.execute(
-            "UPDATE jobs SET status_detail = ? WHERE id = ?",
-            (detail, job_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE jobs SET status_detail = ? WHERE id = ?",
+                (detail, job_id),
+            )
+            self._conn.commit()
 
     def mark_succeeded(self, job_id: str, result: dict[str, Any]) -> None:
         finished_at = _now_iso()
         result_json = json.dumps(result)
-        self._conn.execute(
-            "UPDATE jobs SET status = 'succeeded', result_json = ?, "
-            "status_detail = NULL, finished_at = ? WHERE id = ?",
-            (result_json, finished_at, job_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE jobs SET status = 'succeeded', result_json = ?, "
+                "status_detail = NULL, finished_at = ? WHERE id = ?",
+                (result_json, finished_at, job_id),
+            )
+            self._conn.commit()
         log.info("Job %s -> succeeded", job_id)
 
     def mark_failed(self, job_id: str, error_message: str) -> None:
         finished_at = _now_iso()
-        self._conn.execute(
-            "UPDATE jobs SET status = 'failed', error_message = ?, "
-            "status_detail = NULL, finished_at = ? WHERE id = ?",
-            (error_message, finished_at, job_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE jobs SET status = 'failed', error_message = ?, "
+                "status_detail = NULL, finished_at = ? WHERE id = ?",
+                (error_message, finished_at, job_id),
+            )
+            self._conn.commit()
         log.warning("Job %s -> failed: %s", job_id, error_message)
 
     def get(self, job_id: str) -> Job | None:
-        row = self._conn.execute(
-            "SELECT * FROM jobs WHERE id = ?", (job_id,)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
         return _row_to_job(row) if row else None
 
     def list_jobs(
@@ -148,15 +165,16 @@ class SQLiteJobRepository:
 
         where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-        total_row = self._conn.execute(
-            f"SELECT COUNT(*) FROM jobs{where_sql}", params,
-        ).fetchone()
-        total: int = total_row[0] if total_row else 0
+        with self._lock:
+            total_row = self._conn.execute(
+                f"SELECT COUNT(*) FROM jobs{where_sql}", params,
+            ).fetchone()
+            total: int = total_row[0] if total_row else 0
 
-        rows = self._conn.execute(
-            f"SELECT * FROM jobs{where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            [*params, limit, offset],
-        ).fetchall()
+            rows = self._conn.execute(
+                f"SELECT * FROM jobs{where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                [*params, limit, offset],
+            ).fetchall()
 
         return [_row_to_job(r) for r in rows], total
 
@@ -170,15 +188,16 @@ class SQLiteJobRepository:
         touched.
         """
         finished_at = _now_iso()
-        cursor = self._conn.execute(
-            "UPDATE jobs SET status = 'failed', "
-            "error_message = 'server restarted before job completed', "
-            "finished_at = ? "
-            "WHERE status IN ('queued', 'running')",
-            (finished_at,),
-        )
-        self._conn.commit()
-        count = cursor.rowcount
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE jobs SET status = 'failed', "
+                "error_message = 'server restarted before job completed', "
+                "finished_at = ? "
+                "WHERE status IN ('queued', 'running')",
+                (finished_at,),
+            )
+            self._conn.commit()
+            count = cursor.rowcount
         if count:
             log.warning("Reconciled %d stuck job(s) to failed", count)
         return count

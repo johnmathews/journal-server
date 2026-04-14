@@ -33,6 +33,16 @@ preserving `\n\n+` paragraph breaks. Applied after sentinel parsing in
 `GeminiOCRProvider.extract()`. The 1-for-1 character swap keeps uncertain span
 offsets valid. 11 new tests (9 unit + 2 integration).
 
+### Fix SQLite threading race in job repository
+
+The `SQLiteJobRepository` shared a single `sqlite3.Connection` across the API
+handler thread and the `JobRunner` executor thread without synchronization.
+When the API handler called `create()` (INSERT + COMMIT) while the executor
+thread was calling `mark_running()` or `mark_succeeded()` (UPDATE + COMMIT),
+the concurrent commits caused `sqlite3.OperationalError: not an error` — a
+known SQLite threading issue. Added a `threading.Lock` to all repository
+methods. Reproduced at ~20% failure rate before the fix; 50/50 passes after.
+
 ### Impact
 
 OCR accuracy for proper nouns (family names, place names, recurring topics) should
