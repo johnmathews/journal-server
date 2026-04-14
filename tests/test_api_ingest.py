@@ -73,6 +73,7 @@ def services(
     job_repo = SQLiteJobRepository(api_db_conn)
     mock_extraction = MagicMock()
     mock_mood_scoring = MagicMock()
+    mock_mood_scoring.score_entry = MagicMock(return_value=5)
     job_runner = JobRunner(
         job_repository=job_repo,
         entity_extraction_service=mock_extraction,
