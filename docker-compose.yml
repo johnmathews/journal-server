@@ -29,7 +29,11 @@ services:
       - MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS:-127.0.0.1,localhost}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
+      # OCR provider: "anthropic" (default) or "gemini"
+      - OCR_PROVIDER=${OCR_PROVIDER:-anthropic}
+      - OCR_MODEL=${OCR_MODEL:-}
       # Bearer token required on every /api/* and /mcp request. The
       # server refuses to start if this is unset.
       - JOURNAL_API_TOKEN=${JOURNAL_API_TOKEN}
