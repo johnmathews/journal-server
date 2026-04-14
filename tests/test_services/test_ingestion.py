@@ -105,6 +105,105 @@ class TestIngestVoice:
             ingestion_service.ingest_voice(b"same audio", "audio/mp3", "2026-03-23")
 
 
+class TestIngestMultiVoice:
+    def test_single_recording_delegates(
+        self, ingestion_service, mock_transcription, mock_embeddings,
+    ):
+        """A single recording should delegate to ingest_voice."""
+        entry = ingestion_service.ingest_multi_voice(
+            [(b"audio data", "audio/webm")], "2026-03-22",
+        )
+        assert entry.source_type == "voice"
+        mock_transcription.transcribe.assert_called_once()
+
+    def test_multiple_recordings(
+        self, ingestion_service, mock_transcription, mock_embeddings,
+    ):
+        mock_transcription.transcribe.side_effect = [
+            "First recording text.",
+            "Second recording text.",
+        ]
+        entry = ingestion_service.ingest_multi_voice(
+            [(b"audio1", "audio/webm"), (b"audio2", "audio/webm")],
+            "2026-03-22",
+        )
+        assert entry.source_type == "voice"
+        assert "First recording text." in entry.raw_text
+        assert "Second recording text." in entry.raw_text
+        assert mock_transcription.transcribe.call_count == 2
+
+    def test_multiple_recordings_joined_with_newline(
+        self, ingestion_service, mock_transcription, mock_embeddings,
+    ):
+        mock_transcription.transcribe.side_effect = [
+            "  Part one.  ",
+            "  Part two.  ",
+        ]
+        entry = ingestion_service.ingest_multi_voice(
+            [(b"a1", "audio/webm"), (b"a2", "audio/mp3")],
+            "2026-03-22",
+        )
+        assert entry.raw_text == "Part one.\nPart two."
+
+    def test_duplicate_recording_rejected(self, ingestion_service, mock_transcription):
+        mock_transcription.transcribe.return_value = "text"
+        ingestion_service.ingest_voice(b"same audio", "audio/mp3", "2026-03-20")
+        with pytest.raises(ValueError, match="already been uploaded"):
+            ingestion_service.ingest_multi_voice(
+                [(b"same audio", "audio/mp3")], "2026-03-22",
+            )
+
+    def test_empty_transcription_rejected(
+        self, ingestion_service, mock_transcription,
+    ):
+        mock_transcription.transcribe.return_value = "   "
+        with pytest.raises(ValueError, match="no text"):
+            ingestion_service.ingest_multi_voice(
+                [(b"silent audio", "audio/webm")], "2026-03-22",
+            )
+
+    def test_empty_transcription_multi_rejected(
+        self, ingestion_service, mock_transcription,
+    ):
+        mock_transcription.transcribe.side_effect = ["Good text.", "   "]
+        with pytest.raises(ValueError, match="no text from recording 2"):
+            ingestion_service.ingest_multi_voice(
+                [(b"audio1", "audio/webm"), (b"audio2", "audio/webm")],
+                "2026-03-22",
+            )
+
+    def test_empty_recordings_rejected(self, ingestion_service):
+        with pytest.raises(ValueError, match="At least one"):
+            ingestion_service.ingest_multi_voice([], "2026-03-22")
+
+    def test_progress_callback(
+        self, ingestion_service, mock_transcription, mock_embeddings,
+    ):
+        mock_transcription.transcribe.side_effect = ["Text one.", "Text two."]
+        calls: list[tuple[int, int]] = []
+        ingestion_service.ingest_multi_voice(
+            [(b"a1", "audio/webm"), (b"a2", "audio/webm")],
+            "2026-03-22",
+            on_progress=lambda c, t: calls.append((c, t)),
+        )
+        assert calls == [(1, 2), (2, 2)]
+
+    def test_persists_chunks(
+        self, ingestion_service, mock_transcription, mock_embeddings,
+    ):
+        mock_transcription.transcribe.side_effect = [
+            "First recording text about the day.",
+            "Second recording text about the evening.",
+        ]
+        entry = ingestion_service.ingest_multi_voice(
+            [(b"a1", "audio/webm"), (b"a2", "audio/webm")],
+            "2026-03-22",
+        )
+        stored = ingestion_service._repo.get_chunks(entry.id)
+        assert len(stored) == entry.chunk_count
+        assert len(stored) > 0
+
+
 class TestIngestImageUpdates:
     def test_ingest_image_sets_final_text(self, ingestion_service):
         entry = ingestion_service.ingest_image(b"page data", "image/jpeg", "2026-03-22")

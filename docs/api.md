@@ -628,6 +628,38 @@ Poll `GET /api/jobs/{job_id}` for progress. On success, `result.entry_id` contai
 
 ---
 
+### POST /api/entries/ingest/audio
+
+Upload one or more audio recordings for transcription. Asynchronous — returns a job ID immediately. The job transcribes
+each recording via OpenAI Whisper, concatenates the texts into a single entry, chunks, embeds, and stores.
+
+Multiple recordings are joined with a single newline separator and stored as one voice entry. This supports the workflow
+of recording a journal entry in multiple segments (e.g., start, pause, continue).
+
+**Request body (multipart/form-data):**
+
+| Field        | Type    | Required | Default | Description                                                     |
+| ------------ | ------- | -------- | ------- | --------------------------------------------------------------- |
+| `audio`      | file(s) | yes      |         | One or more audio files (MP3, MP4, WAV, WebM, OGG, FLAC, M4A)  |
+| `entry_date` | string  | no       | today   | ISO 8601 date                                                   |
+
+**Limits:** 100 MB per file, 500 MB total.
+
+**Response (202):**
+
+```json
+{
+ "job_id": "uuid",
+ "status": "queued"
+}
+```
+
+Poll `GET /api/jobs/{job_id}` for progress. On success, `result.entry_id` contains the new entry's ID.
+
+**Errors:** 400 (no audio, unsupported type), 413 (total size exceeded).
+
+---
+
 ---
 
 ## Entity endpoints

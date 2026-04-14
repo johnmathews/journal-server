@@ -203,11 +203,12 @@ scoring:
 | `POST /api/entries/ingest/text`   |  yes (async job)  | yes (async)  |          —           |
 | `POST /api/entries/ingest/file`   |  yes (async job)  | yes (async)  |          —           |
 | `POST /api/entries/ingest/images` |  yes (follow-up)  |    inline    |          —           |
+| `POST /api/entries/ingest/audio`  |  yes (follow-up)  |    inline    |          —           |
 | `PATCH /api/entries/{id}` (text)  |  yes (async job)  | yes (async)  |   yes (async job)    |
 
-For image ingestion, mood scoring runs inline inside the ingestion worker (via `IngestionService._process_text`). Entity
-extraction is submitted as a follow-up job after the image ingestion job succeeds — it runs on the same single-worker
-executor, so it starts once the ingestion job marks itself complete.
+For image and audio ingestion, mood scoring runs inline inside the ingestion worker (via
+`IngestionService._process_text`). Entity extraction is submitted as a follow-up job after the ingestion job succeeds —
+it runs on the same single-worker executor, so it starts once the ingestion job marks itself complete.
 
 For text/file ingestion, both mood scoring and entity extraction are submitted as separate background jobs immediately
 after the entry is created. Both are best-effort — failures are logged but don't fail the ingest response.

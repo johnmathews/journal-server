@@ -123,6 +123,10 @@ _REPROCESS_EMBEDDINGS_KEYS: dict[str, type | tuple[type, ...]] = {
     "entry_id": int,
 }
 
+_INGEST_AUDIO_KEYS: dict[str, type | tuple[type, ...]] = {
+    "entry_date": str,
+}
+
 
 def _validate_params(
     params: dict[str, Any],
@@ -207,6 +211,8 @@ class JobRunner:
         # jobs table params_json column. They are popped from the dict
         # when the worker starts so memory is released promptly.
         self._pending_images: dict[str, list[tuple[bytes, str, str]]] = {}
+        # Same pattern for audio recordings: (data, media_type, filename).
+        self._pending_audio: dict[str, list[tuple[bytes, str, str]]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -294,6 +300,28 @@ class JobRunner:
         _validate_params(params, _REPROCESS_EMBEDDINGS_KEYS, job_type="reprocess_embeddings")
         job = self._jobs.create("reprocess_embeddings", params)
         self._executor.submit(self._run_reprocess_embeddings, job.id, params)
+        return job
+
+    def submit_audio_ingestion(
+        self,
+        recordings: list[tuple[bytes, str, str]],  # (data, media_type, filename)
+        entry_date: str,
+    ) -> Job:
+        """Queue an audio-ingestion job.
+
+        Audio recordings are held in memory until the worker starts.
+        The params stored in the jobs table contain only the entry_date
+        and recording count (audio bytes are too large for the JSON column).
+        """
+        if not recordings:
+            raise ValueError("At least one audio recording is required")
+        params = {"entry_date": entry_date}
+        _validate_params(params, _INGEST_AUDIO_KEYS, job_type="ingest_audio")
+        job = self._jobs.create(
+            "ingest_audio", {**params, "recording_count": len(recordings)}
+        )
+        self._pending_audio[job.id] = recordings
+        self._executor.submit(self._run_audio_ingestion, job.id, params)
         return job
 
     def shutdown(self, wait: bool = False) -> None:
@@ -568,3 +596,98 @@ class JobRunner:
                 log.exception(
                     "Failed to record failure for job %s", job_id
                 )
+
+    def _run_audio_ingestion(
+        self, job_id: str, params: dict[str, Any]
+    ) -> None:
+        """Execute one audio-ingestion job from start to terminal state.
+
+        Transient API errors (429 rate limit) trigger automatic retries
+        with exponential backoff, mirroring ``_run_image_ingestion``.
+        """
+        try:
+            self._jobs.mark_running(job_id)
+            recordings_with_names = self._pending_audio.pop(job_id, [])
+            if not recordings_with_names:
+                self._jobs.mark_failed(job_id, "No audio data found for job")
+                return
+            if self._ingestion is None:
+                self._jobs.mark_failed(job_id, "Ingestion service not available")
+                return
+
+            # Strip filenames — IngestionService expects (bytes, media_type)
+            recordings: list[tuple[bytes, str]] = [
+                (data, media_type)
+                for data, media_type, _filename in recordings_with_names
+            ]
+            entry_date = params["entry_date"]
+            total = len(recordings)
+
+            def progress_callback(current: int, total_recs: int) -> None:
+                self._jobs.update_progress(job_id, current, total)
+
+            last_exc: Exception | None = None
+            for attempt in range(len(_RETRY_DELAYS_SECONDS) + 1):
+                try:
+                    if attempt > 0:
+                        self._jobs.update_status_detail(job_id, None)
+                        log.info(
+                            "Audio ingestion job %s — retry attempt %d",
+                            job_id, attempt,
+                        )
+
+                    self._jobs.update_progress(job_id, 0, total)
+                    entry = self._ingestion.ingest_multi_voice(
+                        recordings, entry_date,
+                        on_progress=progress_callback,
+                    )
+                    last_exc = None
+                    break  # success
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    if not _is_transient(exc) or attempt >= len(_RETRY_DELAYS_SECONDS):
+                        break  # non-transient or out of retries
+                    delay = _RETRY_DELAYS_SECONDS[attempt]
+                    delay_minutes = delay // 60
+                    retry_at_local = datetime.now().astimezone() + timedelta(seconds=delay)
+                    retry_time = retry_at_local.strftime("%H:%M")
+                    friendly = _friendly_error(exc)
+                    detail = f"{friendly}, retrying in {delay_minutes} minutes at {retry_time}"
+                    log.warning(
+                        "Audio ingestion job %s — transient error, "
+                        "retrying in %ds (attempt %d): %s",
+                        job_id, delay, attempt + 1, exc,
+                    )
+                    self._jobs.update_status_detail(job_id, detail)
+                    time.sleep(delay)
+
+            if last_exc is not None:
+                raise last_exc
+
+            self._jobs.update_progress(job_id, total, total)
+            self._jobs.mark_succeeded(job_id, {"entry_id": entry.id})
+
+            # Queue entity extraction as a follow-up job.
+            try:
+                ej = self.submit_entity_extraction({"entry_id": entry.id})
+                log.info(
+                    "Audio ingestion job %s — queued entity extraction %s for entry %d",
+                    job_id, ej.id, entry.id,
+                )
+            except Exception:  # noqa: BLE001 — best-effort enrichment
+                log.warning(
+                    "Audio ingestion job %s — failed to queue entity extraction",
+                    job_id,
+                    exc_info=True,
+                )
+        except Exception as exc:  # noqa: BLE001 — terminal-state guard
+            log.exception("Audio ingestion job %s failed", job_id)
+            # Clean up any remaining audio data
+            self._pending_audio.pop(job_id, None)
+            try:
+                friendly = _friendly_error(exc)
+                if _is_transient(exc):
+                    friendly += " — please try again later"
+                self._jobs.mark_failed(job_id, friendly)
+            except Exception:  # noqa: BLE001 — last-resort bookkeeping
+                log.exception("Failed to record failure for job %s", job_id)

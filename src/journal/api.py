@@ -1404,6 +1404,96 @@ def register_api_routes(
             status_code=202,
         )
 
+    @mcp.custom_route(
+        "/api/entries/ingest/audio",
+        methods=["POST"],
+        name="api_ingest_audio",
+    )
+    async def ingest_audio(request: Request) -> JSONResponse:
+        """Upload one or more audio recordings for transcription ingestion.
+
+        Expects multipart/form-data with:
+            audio: one or more audio files (mp3, mp4, wav, webm, ogg, flac, m4a)
+            entry_date (optional): ISO-8601 date, defaults to today.
+
+        Returns 202 with a job_id for async processing.
+        """
+        from journal.api_utils import parse_multipart_request
+
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+
+        try:
+            fields, files = await parse_multipart_request(request)
+        except Exception as e:
+            log.warning("POST /api/entries/ingest/audio — parse error: %s", e)
+            return JSONResponse(
+                {"error": f"Failed to parse multipart request: {e}"},
+                status_code=400,
+            )
+
+        audio_list = files.get("audio", [])
+        if not audio_list:
+            return JSONResponse(
+                {"error": "At least one audio file is required in the 'audio' field"},
+                status_code=400,
+            )
+
+        allowed_types = {
+            "audio/mpeg", "audio/mp3", "audio/mp4", "audio/wav",
+            "audio/x-wav", "audio/webm", "audio/ogg", "audio/flac",
+            "audio/x-m4a", "audio/m4a",
+        }
+        max_file_size = 100 * 1024 * 1024  # 100 MB per file (recordings can be long)
+        max_total_size = 500 * 1024 * 1024  # 500 MB total
+
+        total_size = 0
+        recordings: list[tuple[bytes, str, str]] = []
+        for uploaded in audio_list:
+            if uploaded.content_type not in allowed_types:
+                return JSONResponse(
+                    {
+                        "error": f"File '{uploaded.filename}' has unsupported type "
+                        f"'{uploaded.content_type}'. Allowed: MP3, MP4, WAV, WebM, OGG, FLAC, M4A."
+                    },
+                    status_code=400,
+                )
+            if len(uploaded.data) > max_file_size:
+                return JSONResponse(
+                    {
+                        "error": f"File '{uploaded.filename}' exceeds 100 MB limit"
+                    },
+                    status_code=400,
+                )
+            total_size += len(uploaded.data)
+            if total_size > max_total_size:
+                return JSONResponse(
+                    {"error": "Total upload size exceeds 500 MB limit"},
+                    status_code=413,
+                )
+            recordings.append((uploaded.data, uploaded.content_type, uploaded.filename))
+
+        entry_date = fields.get("entry_date") or datetime.now(UTC).strftime("%Y-%m-%d")
+
+        job_runner: JobRunner = services["job_runner"]
+        try:
+            job = job_runner.submit_audio_ingestion(recordings, entry_date)
+        except ValueError as e:
+            log.warning("POST /api/entries/ingest/audio — %s", e)
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+        log.info(
+            "POST /api/entries/ingest/audio — queued job %s (%d recordings)",
+            job.id, len(recordings),
+        )
+        return JSONResponse(
+            {"job_id": job.id, "status": job.status},
+            status_code=202,
+        )
+
     # -----------------------------------------------------------------
     # Entity routes
     # -----------------------------------------------------------------

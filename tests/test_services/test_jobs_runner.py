@@ -631,6 +631,7 @@ class FakeIngestionService:
         )
         self.ingest_image_calls: list[tuple[bytes, str, str]] = []
         self.multi_page_calls: list[int] = []
+        self.multi_voice_calls: list[int] = []
         self.reprocess_calls: list[int] = []
 
     def ingest_image(
@@ -650,6 +651,20 @@ class FakeIngestionService:
         for i in range(len(images)):
             if on_progress is not None:
                 on_progress(i + 1, len(images))
+        return self._entry
+
+    def ingest_multi_voice(
+        self,
+        recordings: list[tuple[bytes, str]],
+        date: str,
+        language: str = "en",
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> Any:
+        self.multi_voice_calls.append(len(recordings))
+        for i in range(len(recordings)):
+            if on_progress is not None:
+                on_progress(i + 1, len(recordings))
         return self._entry
 
     def reprocess_embeddings(self, entry_id: int) -> int:
@@ -741,6 +756,89 @@ class TestImageIngestionProgress:
         assert final is not None
         assert final.progress_current == 2
         assert final.progress_total == 2
+
+
+# --------------------------------------------------------------------
+# Audio ingestion
+# --------------------------------------------------------------------
+
+
+class TestAudioIngestion:
+    """Tests for submit_audio_ingestion and _run_audio_ingestion."""
+
+    def test_single_recording_succeeds(self, runner_factory, jobs_repo):
+        ingestion = FakeIngestionService()
+        runner = runner_factory()
+        runner._ingestion = ingestion
+
+        recordings = [(b"audio1", "audio/webm", "rec1.webm")]
+        job = runner.submit_audio_ingestion(recordings, "2026-04-14")
+        runner.shutdown(wait=True)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "succeeded"
+        assert final.result == {"entry_id": 1}
+
+    def test_multiple_recordings_succeeds(self, runner_factory, jobs_repo):
+        ingestion = FakeIngestionService()
+        runner = runner_factory()
+        runner._ingestion = ingestion
+
+        recordings = [
+            (b"audio1", "audio/webm", "rec1.webm"),
+            (b"audio2", "audio/webm", "rec2.webm"),
+        ]
+        job = runner.submit_audio_ingestion(recordings, "2026-04-14")
+        runner.shutdown(wait=True)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "succeeded"
+        assert final.progress_total == 2
+        assert final.progress_current == 2
+
+    def test_empty_recordings_raises(self, runner_factory):
+        runner = runner_factory()
+        with pytest.raises(ValueError, match="At least one"):
+            runner.submit_audio_ingestion([], "2026-04-14")
+        runner.shutdown()
+
+    def test_job_type_is_ingest_audio(self, runner_factory, jobs_repo):
+        ingestion = FakeIngestionService()
+        runner = runner_factory()
+        runner._ingestion = ingestion
+
+        recordings = [(b"audio1", "audio/webm", "rec.webm")]
+        job = runner.submit_audio_ingestion(recordings, "2026-04-14")
+        assert job.type == "ingest_audio"
+        runner.shutdown(wait=True)
+
+    def test_recording_count_in_params(self, runner_factory, jobs_repo):
+        ingestion = FakeIngestionService()
+        runner = runner_factory()
+        runner._ingestion = ingestion
+
+        recordings = [
+            (b"a1", "audio/webm", "r1.webm"),
+            (b"a2", "audio/mp3", "r2.mp3"),
+        ]
+        job = runner.submit_audio_ingestion(recordings, "2026-04-14")
+        assert job.params["recording_count"] == 2
+        runner.shutdown(wait=True)
+
+    def test_no_ingestion_service_fails(self, runner_factory, jobs_repo):
+        runner = runner_factory()
+        runner._ingestion = None
+
+        recordings = [(b"audio1", "audio/webm", "rec.webm")]
+        job = runner.submit_audio_ingestion(recordings, "2026-04-14")
+        runner.shutdown(wait=True)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "failed"
+        assert "not available" in final.error_message
 
 
 # --------------------------------------------------------------------

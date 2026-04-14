@@ -229,6 +229,86 @@ class IngestionService:
         log.info("Ingested voice entry %d: %d words, date %s", entry.id, word_count, date)
         return self._repo.get_entry(entry.id)  # type: ignore[return-value]
 
+    def ingest_multi_voice(
+        self,
+        recordings: list[tuple[bytes, str]],
+        date: str,
+        language: str = "en",
+        *,
+        on_progress: "Callable[[int, int], None] | None" = None,
+    ) -> Entry:
+        """Ingest multiple voice recordings as a single journal entry.
+
+        Each recording is transcribed separately, then texts are
+        concatenated with newline separators. Mirrors the
+        ``ingest_multi_page_entry`` pattern for images.
+
+        Args:
+            recordings: List of (audio_data, media_type) tuples.
+            date: Journal entry date (ISO 8601).
+            language: Language code for transcription.
+            on_progress: Optional callback ``(current, total)`` called
+                after each recording is transcribed.
+        """
+        if not recordings:
+            raise ValueError("At least one audio recording is required")
+
+        if len(recordings) == 1:
+            return self.ingest_voice(
+                recordings[0][0], recordings[0][1], date, language
+            )
+
+        log.info(
+            "Ingesting multi-voice entry for date %s (%d recordings)",
+            date, len(recordings),
+        )
+
+        # Transcribe each recording and check for duplicates
+        transcripts: list[str] = []
+        file_hashes: list[str] = []
+        file_media_types: list[str] = []
+        for i, (audio_data, media_type) in enumerate(recordings):
+            file_hash = hashlib.sha256(audio_data).hexdigest()
+            if self._is_duplicate(file_hash):
+                raise ValueError(
+                    f"Recording {i + 1} has already been uploaded in another entry. "
+                    f"Delete the existing entry first if you want to re-upload."
+                )
+            text = self._transcription.transcribe(audio_data, media_type, language)
+            if not text.strip():
+                raise ValueError(f"Transcription produced no text from recording {i + 1}")
+            transcripts.append(text.strip())
+            file_hashes.append(file_hash)
+            file_media_types.append(media_type)
+            if on_progress is not None:
+                on_progress(i + 1, len(recordings))
+
+        # Combine transcripts with single newline (same rationale as
+        # multi-page images — keeps paragraph splitter blind to recording
+        # boundaries so the chunker can pack efficiently).
+        raw_text = "\n".join(transcripts)
+
+        word_count = len(raw_text.split())
+        entry = self._repo.create_entry(date, "voice", raw_text, word_count)
+
+        # Store source file records for each recording
+        for i, (file_hash, media_type) in enumerate(
+            zip(file_hashes, file_media_types, strict=True)
+        ):
+            self._store_source_file(
+                entry.id, f"voice_{date}_part{i + 1}", media_type, file_hash
+            )
+
+        # Chunk, embed, and store in vector DB
+        chunk_count = self._process_text(entry.id, entry.final_text, date)
+        self._repo.update_chunk_count(entry.id, chunk_count)
+
+        log.info(
+            "Ingested multi-voice entry %d: %d recordings, %d words, date %s",
+            entry.id, len(recordings), word_count, date,
+        )
+        return self._repo.get_entry(entry.id)  # type: ignore[return-value]
+
     def ingest_text(
         self, text: str, date: str, source_type: str = "manual", *, skip_mood: bool = False,
     ) -> Entry:

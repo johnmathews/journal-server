@@ -233,6 +233,58 @@ class TestIngestImages:
         assert "10 MB" in response.json()["error"]
 
 
+class TestIngestAudio:
+    def test_single_recording(self, client: TestClient) -> None:
+        files = {"audio": ("rec.webm", io.BytesIO(b"fake webm data"), "audio/webm")}
+        response = client.post("/api/entries/ingest/audio", files=files)
+        assert response.status_code == 202
+        data = response.json()
+        assert "job_id" in data
+        assert data["status"] == "queued"
+
+    def test_multiple_recordings(self, client: TestClient) -> None:
+        files = [
+            ("audio", ("rec1.webm", io.BytesIO(b"fake recording 1"), "audio/webm")),
+            ("audio", ("rec2.webm", io.BytesIO(b"fake recording 2"), "audio/webm")),
+        ]
+        response = client.post("/api/entries/ingest/audio", files=files)
+        assert response.status_code == 202
+        assert "job_id" in response.json()
+
+    def test_no_audio(self, client: TestClient) -> None:
+        response = client.post("/api/entries/ingest/audio", data={})
+        assert response.status_code == 400
+
+    def test_wrong_file_type(self, client: TestClient) -> None:
+        files = {"audio": ("doc.pdf", io.BytesIO(b"pdf content"), "application/pdf")}
+        response = client.post("/api/entries/ingest/audio", files=files)
+        assert response.status_code == 400
+        assert "unsupported type" in response.json()["error"].lower()
+
+    def test_file_too_large(self, client: TestClient) -> None:
+        big_data = b"x" * (101 * 1024 * 1024)
+        files = {"audio": ("big.webm", io.BytesIO(big_data), "audio/webm")}
+        response = client.post("/api/entries/ingest/audio", files=files)
+        assert response.status_code == 400
+        assert "100 MB" in response.json()["error"]
+
+    def test_custom_entry_date(self, client: TestClient) -> None:
+        files = {"audio": ("rec.webm", io.BytesIO(b"audio data"), "audio/webm")}
+        data = {"entry_date": "2026-03-15"}
+        response = client.post("/api/entries/ingest/audio", files=files, data=data)
+        assert response.status_code == 202
+
+    def test_mp3_accepted(self, client: TestClient) -> None:
+        files = {"audio": ("rec.mp3", io.BytesIO(b"fake mp3"), "audio/mpeg")}
+        response = client.post("/api/entries/ingest/audio", files=files)
+        assert response.status_code == 202
+
+    def test_wav_accepted(self, client: TestClient) -> None:
+        files = {"audio": ("rec.wav", io.BytesIO(b"fake wav"), "audio/wav")}
+        response = client.post("/api/entries/ingest/audio", files=files)
+        assert response.status_code == 202
+
+
 class TestAutoEntityExtraction:
     """Entity extraction should be queued on every ingestion path."""
 

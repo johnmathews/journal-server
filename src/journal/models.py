@@ -243,6 +243,7 @@ JobType = Literal[
     "entity_extraction",
     "mood_backfill",
     "ingest_images",
+    "ingest_audio",
     "mood_score_entry",
     "reprocess_embeddings",
 ]
