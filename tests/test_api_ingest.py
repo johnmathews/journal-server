@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from starlette.testclient import TestClient
 
+from journal.db.connection import get_connection
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
@@ -21,10 +22,7 @@ from journal.services.query import QueryService
 @pytest.fixture
 def api_db_conn(tmp_path: Path) -> Generator[sqlite3.Connection]:
     db_path = tmp_path / "test_api_ingest.db"
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    conn = get_connection(db_path, check_same_thread=False)
     run_migrations(conn)
     yield conn
     conn.close()

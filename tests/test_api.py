@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from starlette.testclient import TestClient
 
+from journal.db.connection import get_connection
 from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
 from journal.entitystore.store import SQLiteEntityStore
@@ -20,13 +21,11 @@ def api_db_conn(tmp_path: Path) -> Generator[sqlite3.Connection]:
     """Provide a migrated SQLite connection that works across threads.
 
     The Starlette TestClient runs the ASGI app in a separate thread,
-    so we need check_same_thread=False.
+    so we need check_same_thread=False. Uses get_connection() to
+    mirror production PRAGMAs (especially busy_timeout).
     """
     db_path = tmp_path / "test_api.db"
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    conn = get_connection(db_path, check_same_thread=False)
     run_migrations(conn)
     yield conn
     conn.close()

@@ -26,6 +26,7 @@ from typing import Any
 import pytest
 from starlette.testclient import TestClient
 
+from journal.db.connection import get_connection
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
 from journal.models import ExtractionResult
@@ -115,11 +116,7 @@ def api_jobs_db(tmp_path: Path) -> Generator[sqlite3.Connection]:
     # The Starlette TestClient runs in a worker thread; the JobRunner
     # runs in its own worker thread. Both must share this connection,
     # so `check_same_thread=False` matches production wiring.
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    conn = get_connection(db_path, check_same_thread=False)
     run_migrations(conn)
     yield conn
     conn.close()

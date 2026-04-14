@@ -177,8 +177,7 @@ class TestBatchJobTools:
 
     @pytest.fixture
     def job_context(self, tmp_path):
-        import sqlite3
-
+        from journal.db.connection import get_connection
         from journal.db.jobs_repository import SQLiteJobRepository
         from journal.db.migrations import run_migrations
         from journal.models import ExtractionResult
@@ -190,12 +189,7 @@ class TestBatchJobTools:
         )
 
         db_path = tmp_path / "mcp-jobs.db"
-        conn = sqlite3.connect(
-            str(db_path), check_same_thread=False
-        )
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
+        conn = get_connection(db_path, check_same_thread=False)
         run_migrations(conn)
         repo = SQLiteJobRepository(conn)
 
