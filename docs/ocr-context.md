@@ -1,8 +1,9 @@
 # OCR Context Priming
 
-The OCR provider can be primed with a static set of "context files" that tell Claude about known proper nouns in the
+The OCR provider can be primed with a static set of "context files" that tell the model about known proper nouns in the
 author's life — family names, places, recurring topics — so that handwritten tokens that match those names are
-transcribed correctly. This document explains the mechanism, the cost profile, the failure modes, and how to enable it.
+transcribed correctly. Both the Anthropic (Claude) and Gemini providers support context priming. This document explains
+the mechanism, the cost profile, the failure modes, and how to enable it.
 
 ## Why
 
@@ -52,9 +53,9 @@ pick descriptive names. Files are loaded in alphabetical order for determinism.
 
 ### Loading
 
-The provider reads `context/` **once at startup** in `AnthropicOCRProvider.__init__`. Editing a file requires a server
-restart. Hot-reload was considered and rejected: a single-user tool has near-zero restart cost, and deterministic cache
-behaviour (cache key = process lifetime) is easier to reason about than "restart-sometimes" semantics.
+Both providers read `context/` **once at startup** in their `__init__`. Editing a file requires a server restart.
+Hot-reload was considered and rejected: a single-user tool has near-zero restart cost, and deterministic cache behaviour
+(cache key = process lifetime) is easier to reason about than "restart-sometimes" semantics.
 
 ### Enabling it
 

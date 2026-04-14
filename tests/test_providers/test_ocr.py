@@ -459,11 +459,15 @@ class TestParseUncertainMarkers:
 class TestGeminiOCRProvider:
     """Tests for GeminiOCRProvider."""
 
-    def _make_provider(self) -> GeminiOCRProvider:
+    def _make_provider(
+        self,
+        context_dir: Path | None = None,
+    ) -> GeminiOCRProvider:
         with patch("journal.providers.ocr.genai.Client"):
             provider = GeminiOCRProvider(
                 api_key="test-google-key",
                 model="gemini-2.5-pro",
+                context_dir=context_dir,
             )
         return provider
 
@@ -515,6 +519,66 @@ class TestGeminiOCRProvider:
 
         assert provider.extract_text(b"data", "image/png") == "plain text"
 
+    def test_context_dir_composes_into_system_text(
+        self, tmp_path: Path
+    ) -> None:
+        context = tmp_path / "context"
+        context.mkdir()
+        (context / "people.md").write_text(
+            "- Ritsya — daughter\n- Atlas — dog\n"
+        )
+        (context / "places.md").write_text(
+            "- Vienna — first met Atlas here\n"
+        )
+
+        provider = self._make_provider(context_dir=context)
+        mock_response = MagicMock()
+        mock_response.text = "extracted"
+        provider._client.models.generate_content.return_value = mock_response
+
+        provider.extract(b"data", "image/png")
+
+        call_kwargs = provider._client.models.generate_content.call_args.kwargs
+        system_text = call_kwargs["config"].system_instruction
+        assert system_text.startswith(SYSTEM_PROMPT)
+        assert CONTEXT_USAGE_INSTRUCTIONS.strip() in system_text
+        # Both context files present, in alphabetical order.
+        people_idx = system_text.find("people")
+        places_idx = system_text.find("places")
+        assert people_idx != -1 and places_idx != -1
+        assert people_idx < places_idx
+        # Content from the files is verbatim.
+        assert "Ritsya" in system_text
+        assert "Atlas" in system_text
+        assert "Vienna" in system_text
+
+    def test_context_dir_missing_falls_back_to_system_prompt(
+        self, tmp_path: Path
+    ) -> None:
+        missing = tmp_path / "nope"
+        provider = self._make_provider(context_dir=missing)
+        mock_response = MagicMock()
+        mock_response.text = "extracted"
+        provider._client.models.generate_content.return_value = mock_response
+        provider.extract(b"data", "image/png")
+
+        call_kwargs = provider._client.models.generate_content.call_args.kwargs
+        assert call_kwargs["config"].system_instruction == SYSTEM_PROMPT
+
+    def test_context_dir_empty_falls_back_to_system_prompt(
+        self, tmp_path: Path
+    ) -> None:
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        provider = self._make_provider(context_dir=empty)
+        mock_response = MagicMock()
+        mock_response.text = "extracted"
+        provider._client.models.generate_content.return_value = mock_response
+        provider.extract(b"data", "image/png")
+
+        call_kwargs = provider._client.models.generate_content.call_args.kwargs
+        assert call_kwargs["config"].system_instruction == SYSTEM_PROMPT
+
 
 class TestBuildOcrProvider:
     """Tests for the build_ocr_provider factory."""
@@ -546,6 +610,19 @@ class TestBuildOcrProvider:
         config = self._make_config(ocr_provider="gemini")
         provider = build_ocr_provider(config)
         assert isinstance(provider, GeminiOCRProvider)
+
+    @patch("journal.providers.ocr.genai.Client")
+    def test_builds_gemini_with_context_dir(
+        self, _mock_genai: MagicMock, tmp_path: Path
+    ) -> None:
+        context = tmp_path / "context"
+        context.mkdir()
+        (context / "people.md").write_text("- Ritsya\n")
+        config = self._make_config(ocr_provider="gemini")
+        config.ocr_context_dir = context
+        provider = build_ocr_provider(config)
+        assert isinstance(provider, GeminiOCRProvider)
+        assert "Ritsya" in provider._system_text
 
     @patch("journal.providers.ocr.anthropic.Anthropic")
     def test_default_model_anthropic(self, _mock: MagicMock) -> None:

@@ -378,16 +378,31 @@ class GeminiOCRProvider:
         self,
         api_key: str,
         model: str = "gemini-2.5-pro",
+        context_dir: Path | None = None,
     ) -> None:
         self._client = genai.Client(api_key=api_key)
         self._model = model
 
+        context_text = load_context_files(context_dir)
+        if context_text:
+            self._system_text = (
+                SYSTEM_PROMPT + CONTEXT_USAGE_INSTRUCTIONS + "\n\n" + context_text
+            )
+            logger.info(
+                "Gemini OCR context loaded from %s (%d chars)",
+                context_dir,
+                len(context_text),
+            )
+        else:
+            self._system_text = SYSTEM_PROMPT
+
     def extract(self, image_data: bytes, media_type: str) -> OCRResult:
         """Extract text from an image via Google's Gemini vision API.
 
-        Uses the same system prompt and ⟪/⟫ uncertainty sentinels as the
-        Anthropic provider so the downstream pipeline (sentinel parser,
-        uncertain_spans, webapp Review toggle) works identically.
+        Uses the same system prompt, context glossary, and ⟪/⟫ uncertainty
+        sentinels as the Anthropic provider so the downstream pipeline
+        (sentinel parser, uncertain_spans, webapp Review toggle) works
+        identically.
         """
         logger.info("Extracting text via Gemini OCR (model=%s)", self._model)
 
@@ -398,7 +413,7 @@ class GeminiOCRProvider:
                 "Extract all handwritten text from this image.",
             ],
             config=genai_types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
+                system_instruction=self._system_text,
             ),
         )
 
@@ -438,6 +453,7 @@ def build_ocr_provider(config: Config) -> OCRProvider:
         return GeminiOCRProvider(
             api_key=config.google_api_key,
             model=model,
+            context_dir=config.ocr_context_dir,
         )
     raise ValueError(
         f"Unknown OCR provider {provider_name!r} — must be 'anthropic' or 'gemini'"

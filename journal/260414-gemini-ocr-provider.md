@@ -25,8 +25,9 @@ real-world A/B comparison without code changes.
   call this instead of constructing `AnthropicOCRProvider` directly.
 - **Config changes**: `OCR_PROVIDER` (`anthropic`|`gemini`), `GOOGLE_API_KEY`,
   `OCR_MODEL` (optional override, defaults per-provider).
-- **Limitation**: Gemini provider does not use the context-priming glossary
-  (`OCR_CONTEXT_DIR`) — only the base system prompt is sent.
+- ~~**Limitation**: Gemini provider does not use the context-priming glossary
+  (`OCR_CONTEXT_DIR`) — only the base system prompt is sent.~~ **Resolved 2026-04-14**: Gemini
+  now receives the full context glossary + anti-hallucination instructions, identical to Anthropic.
 
 ### Testing
 
