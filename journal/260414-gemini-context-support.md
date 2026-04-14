@@ -25,8 +25,17 @@ API limitation prevented it — it was simply not implemented.
 - Added 4 new tests mirroring Anthropic's context tests (composition, missing dir,
   empty dir, factory passthrough)
 
+### Gemini line-break reflow
+
+Gemini preserves physical line breaks from handwritten pages, producing many short
+lines. Added `reflow_paragraphs()` — replaces single `\n` with a space while
+preserving `\n\n+` paragraph breaks. Applied after sentinel parsing in
+`GeminiOCRProvider.extract()`. The 1-for-1 character swap keeps uncertain span
+offsets valid. 11 new tests (9 unit + 2 integration).
+
 ### Impact
 
 OCR accuracy for proper nouns (family names, place names, recurring topics) should
 improve immediately when using the Gemini provider. No configuration changes needed —
-`OCR_CONTEXT_DIR` is already set in the deployment environment.
+`OCR_CONTEXT_DIR` is already set in the deployment environment. OCR output is also
+now naturally reflowed into paragraphs instead of preserving hard line breaks.

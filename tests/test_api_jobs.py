@@ -375,7 +375,8 @@ class TestListJobsRoute:
     def test_filters_by_status(
         self, client: TestClient, job_runner: JobRunner
     ) -> None:
-        client.post("/api/entities/extract", json={"stale_only": True})
+        r1 = client.post("/api/entities/extract", json={"stale_only": True})
+        assert r1.status_code in (200, 202), r1.text
         job_runner.shutdown(wait=True)
 
         resp = client.get("/api/jobs?status=succeeded")
@@ -385,8 +386,10 @@ class TestListJobsRoute:
     def test_filters_by_type(
         self, client: TestClient, job_runner: JobRunner
     ) -> None:
-        client.post("/api/entities/extract", json={"stale_only": True})
-        client.post("/api/mood/backfill", json={"mode": "stale-only"})
+        r1 = client.post("/api/entities/extract", json={"stale_only": True})
+        assert r1.status_code in (200, 202), r1.text
+        r2 = client.post("/api/mood/backfill", json={"mode": "stale-only"})
+        assert r2.status_code in (200, 202), r2.text
         job_runner.shutdown(wait=True)
 
         resp = client.get("/api/jobs?type=entity_extraction")
@@ -398,8 +401,10 @@ class TestListJobsRoute:
     def test_pagination(
         self, client: TestClient, job_runner: JobRunner
     ) -> None:
-        client.post("/api/entities/extract", json={"stale_only": True})
-        client.post("/api/mood/backfill", json={"mode": "stale-only"})
+        r1 = client.post("/api/entities/extract", json={"stale_only": True})
+        assert r1.status_code in (200, 202), r1.text
+        r2 = client.post("/api/mood/backfill", json={"mode": "stale-only"})
+        assert r2.status_code in (200, 202), r2.text
         job_runner.shutdown(wait=True)
 
         resp = client.get("/api/jobs?limit=1&offset=0")
