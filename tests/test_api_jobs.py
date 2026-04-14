@@ -440,6 +440,7 @@ class TestJobDetailRoute:
             "progress_total",
             "result",
             "error_message",
+            "status_detail",
             "created_at",
             "started_at",
             "finished_at",

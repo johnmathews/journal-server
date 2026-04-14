@@ -30,6 +30,18 @@ Covers: Google 503 (overload), 429 (rate limit), 404 (model not found), OpenAI r
 and Anthropic overloaded errors. Unknown errors still pass through unchanged. The raw
 exception is always logged server-side for debugging.
 
+## Automatic retry with exponential backoff
+
+Transient API errors (503 overload, 429 rate limit) during image ingestion now trigger
+automatic retries with exponential backoff: 3 minutes, 6 minutes, 12 minutes. The job
+stays in `running` status during waits, and a new `status_detail` field communicates the
+retry schedule to the UI (e.g. "Google's OCR service is temporarily overloaded. Retrying
+at 14:05 UTC.").
+
+Added `status_detail` column to the jobs table (migration 0010), updated the Job model,
+repository, API response, and webapp types. The webapp shows `status_detail` in amber text
+in both the notifications panel and the image upload progress view.
+
 ## Deployment notes
 
 - `gemini-2.5-pro` requires paid billing on the Google AI project — the free tier has a

@@ -268,6 +268,7 @@ class Job:
     progress_total: int
     result: dict[str, Any] | None
     error_message: str | None
+    status_detail: str | None
     created_at: str
     started_at: str | None
     finished_at: str | None

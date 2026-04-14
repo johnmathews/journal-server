@@ -162,6 +162,7 @@ def _job_to_dict(job: Job) -> dict[str, Any]:
         "progress_total": job.progress_total,
         "result": job.result,
         "error_message": job.error_message,
+        "status_detail": job.status_detail,
         "created_at": job.created_at,
         "started_at": job.started_at,
         "finished_at": job.finished_at,

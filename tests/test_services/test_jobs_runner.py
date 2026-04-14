@@ -14,7 +14,7 @@ from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
 from journal.models import ExtractionResult
 from journal.services.backfill import MoodBackfillResult
-from journal.services.jobs import JobRunner, _friendly_error
+from journal.services.jobs import JobRunner, _friendly_error, _is_transient
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -283,6 +283,26 @@ class TestFriendlyError:
     def test_unknown_error_passes_through(self) -> None:
         exc = Exception("something completely unexpected")
         assert _friendly_error(exc) == "something completely unexpected"
+
+
+class TestIsTransient:
+    """Tests for _is_transient — identifies retryable API errors."""
+
+    def test_google_503(self) -> None:
+        exc = Exception("503 UNAVAILABLE. high demand")
+        assert _is_transient(exc) is True
+
+    def test_google_429(self) -> None:
+        exc = Exception("429 RESOURCE_EXHAUSTED. quota exceeded")
+        assert _is_transient(exc) is True
+
+    def test_not_transient(self) -> None:
+        exc = Exception("404 NOT_FOUND. model not found")
+        assert _is_transient(exc) is False
+
+    def test_unknown_not_transient(self) -> None:
+        exc = Exception("something unexpected")
+        assert _is_transient(exc) is False
 
 
 # Happy path — entity extraction

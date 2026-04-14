@@ -32,7 +32,9 @@ the schema access pattern must be redesigned first.
 from __future__ import annotations
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -86,6 +88,20 @@ def _friendly_error(exc: Exception) -> str:
         )
     # Fall through — return the raw message for unexpected errors
     return msg
+
+
+def _is_transient(exc: Exception) -> bool:
+    """Return True if the exception looks like a temporary API issue worth retrying."""
+    msg = str(exc)
+    if "503" in msg and ("UNAVAILABLE" in msg or "high demand" in msg):
+        return True
+    if "429" in msg and ("RESOURCE_EXHAUSTED" in msg or "rate_limit" in msg.lower()):
+        return True
+    return "overloaded" in msg.lower() and ("529" in msg or "anthropic" in msg.lower())
+
+
+# Retry schedule: 3 min, 6 min, 12 min (exponential backoff)
+_RETRY_DELAYS_SECONDS = [180, 360, 720]
 
 
 # --------------------------------------------------------------------
@@ -372,7 +388,14 @@ class JobRunner:
     def _run_image_ingestion(
         self, job_id: str, params: dict[str, Any]
     ) -> None:
-        """Execute one image-ingestion job from start to terminal state."""
+        """Execute one image-ingestion job from start to terminal state.
+
+        Transient API errors (503 overload, 429 rate limit) trigger
+        automatic retries with exponential backoff (3 min, 6 min, 12 min).
+        The job stays in ``running`` state during waits and
+        ``status_detail`` shows the next retry time so the webapp can
+        display it.
+        """
         try:
             self._jobs.mark_running(job_id)
             images_with_names = self._pending_images.pop(job_id, [])
@@ -393,15 +416,48 @@ class JobRunner:
             def progress_callback(current: int, total_pages: int) -> None:
                 self._jobs.update_progress(job_id, current, total)
 
-            if len(images) == 1:
-                self._jobs.update_progress(job_id, 0, total)
-                entry = self._ingestion.ingest_image(images[0][0], images[0][1], entry_date)
-                self._jobs.update_progress(job_id, 1, total)
-            else:
-                self._jobs.update_progress(job_id, 0, total)
-                entry = self._ingestion.ingest_multi_page_entry(
-                    images, entry_date, on_progress=progress_callback,
-                )
+            last_exc: Exception | None = None
+            for attempt in range(len(_RETRY_DELAYS_SECONDS) + 1):
+                try:
+                    if attempt > 0:
+                        self._jobs.update_status_detail(job_id, None)
+                        log.info(
+                            "Image ingestion job %s — retry attempt %d",
+                            job_id, attempt,
+                        )
+
+                    if len(images) == 1:
+                        self._jobs.update_progress(job_id, 0, total)
+                        entry = self._ingestion.ingest_image(
+                            images[0][0], images[0][1], entry_date,
+                        )
+                        self._jobs.update_progress(job_id, 1, total)
+                    else:
+                        self._jobs.update_progress(job_id, 0, total)
+                        entry = self._ingestion.ingest_multi_page_entry(
+                            images, entry_date, on_progress=progress_callback,
+                        )
+                    last_exc = None
+                    break  # success
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    if not _is_transient(exc) or attempt >= len(_RETRY_DELAYS_SECONDS):
+                        break  # non-transient or out of retries
+                    delay = _RETRY_DELAYS_SECONDS[attempt]
+                    retry_at = datetime.now(UTC) + timedelta(seconds=delay)
+                    retry_time = retry_at.strftime("%H:%M")
+                    friendly = _friendly_error(exc)
+                    detail = f"{friendly} Retrying at {retry_time} UTC."
+                    log.warning(
+                        "Image ingestion job %s — transient error, "
+                        "retrying in %ds (attempt %d): %s",
+                        job_id, delay, attempt + 1, exc,
+                    )
+                    self._jobs.update_status_detail(job_id, detail)
+                    time.sleep(delay)
+
+            if last_exc is not None:
+                raise last_exc
 
             self._jobs.update_progress(job_id, total, total)
             self._jobs.mark_succeeded(job_id, {"entry_id": entry.id})

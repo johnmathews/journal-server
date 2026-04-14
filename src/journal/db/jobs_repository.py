@@ -46,6 +46,7 @@ def _row_to_job(row: sqlite3.Row) -> Job:
         progress_total=row["progress_total"],
         result=json.loads(row["result_json"]) if row["result_json"] is not None else None,
         error_message=row["error_message"],
+        status_detail=row["status_detail"],
         created_at=row["created_at"],
         started_at=row["started_at"],
         finished_at=row["finished_at"],
@@ -63,8 +64,8 @@ class SQLiteJobRepository:
         self._conn.execute(
             "INSERT INTO jobs ("
             "id, type, status, params_json, progress_current, progress_total, "
-            "result_json, error_message, created_at, started_at, finished_at"
-            ") VALUES (?, ?, 'queued', ?, 0, 0, NULL, NULL, ?, NULL, NULL)",
+            "result_json, error_message, status_detail, created_at, started_at, finished_at"
+            ") VALUES (?, ?, 'queued', ?, 0, 0, NULL, NULL, NULL, ?, NULL, NULL)",
             (job_id, job_type, params_json, created_at),
         )
         self._conn.commit()
@@ -89,12 +90,19 @@ class SQLiteJobRepository:
         )
         self._conn.commit()
 
+    def update_status_detail(self, job_id: str, detail: str | None) -> None:
+        self._conn.execute(
+            "UPDATE jobs SET status_detail = ? WHERE id = ?",
+            (detail, job_id),
+        )
+        self._conn.commit()
+
     def mark_succeeded(self, job_id: str, result: dict[str, Any]) -> None:
         finished_at = _now_iso()
         result_json = json.dumps(result)
         self._conn.execute(
             "UPDATE jobs SET status = 'succeeded', result_json = ?, "
-            "finished_at = ? WHERE id = ?",
+            "status_detail = NULL, finished_at = ? WHERE id = ?",
             (result_json, finished_at, job_id),
         )
         self._conn.commit()
@@ -104,7 +112,7 @@ class SQLiteJobRepository:
         finished_at = _now_iso()
         self._conn.execute(
             "UPDATE jobs SET status = 'failed', error_message = ?, "
-            "finished_at = ? WHERE id = ?",
+            "status_detail = NULL, finished_at = ? WHERE id = ?",
             (error_message, finished_at, job_id),
         )
         self._conn.commit()
