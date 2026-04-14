@@ -96,37 +96,43 @@ npm run dev
 
 ### What needs API keys and what doesn't
 
-| Feature              | Needs API keys? | Which key?     |
-|----------------------|-----------------|----------------|
-| List / browse entries | No              |                |
-| Edit final_text      | No              |                |
-| View statistics      | No              |                |
-| Ingest image (OCR)   | Yes             | ANTHROPIC      |
-| Ingest voice         | Yes             | OPENAI         |
-| Semantic search      | Yes             | OPENAI         |
-| Keyword search (FTS) | No              |                |
-| Seed sample data     | No              |                |
+| Feature               | Needs API keys? | Which key? |
+| --------------------- | --------------- | ---------- |
+| List / browse entries | No              |            |
+| Edit final_text       | No              |            |
+| View statistics       | No              |            |
+| Ingest image (OCR)    | Yes             | ANTHROPIC  |
+| Ingest voice          | Yes             | OPENAI     |
+| Semantic search       | Yes             | OPENAI     |
+| Keyword search (FTS)  | No              |            |
+| Seed sample data      | No              |            |
 
 ### Seed data
 
-The `seed` command creates 5 sample journal entries with realistic text. No API keys, no ChromaDB, no embeddings needed — just SQLite:
+The `seed` command creates 5 sample journal entries with realistic text. No API keys, no ChromaDB, no embeddings needed —
+just SQLite:
 
 ```bash
 uv run journal seed              # all 5 samples
 uv run journal seed --count 2    # just 2
 ```
 
-Seeded entries won't have embeddings, so semantic search won't find them. To add embeddings, re-ingest with API keys. The `seed` command does compute `chunk_count` correctly from the chunker, so the webapp's "chunks" column shows the right value even without embeddings.
+Seeded entries won't have embeddings, so semantic search won't find them. To add embeddings, re-ingest with API keys. The
+`seed` command does compute `chunk_count` correctly from the chunker, so the webapp's "chunks" column shows the right
+value even without embeddings.
 
 ### Backfilling chunk_count
 
-If entries exist with a stale `chunk_count = 0` — e.g. from seed data predating the chunk-count fix, or from database rows created before migration 0002 added the column — run:
+If entries exist with a stale `chunk_count = 0` — e.g. from seed data predating the chunk-count fix, or from database
+rows created before migration 0002 added the column — run:
 
 ```bash
 uv run journal backfill-chunks
 ```
 
-This re-runs the tokenizer/chunker over every entry's `final_text || raw_text` and updates the stored column. It does **not** regenerate embeddings (so no API keys are required) and it's idempotent — re-running reports everything as `Unchanged`.
+This re-runs the tokenizer/chunker over every entry's `final_text || raw_text` and updates the stored column. It does
+**not** regenerate embeddings (so no API keys are required) and it's idempotent — re-running reports everything as
+`Unchanged`.
 
 ```
 Updated:   0
@@ -134,11 +140,14 @@ Unchanged: 5
 Skipped:   0 (no text)
 ```
 
-If you need to rebuild embeddings as well, re-ingest the entry via the REST API or CLI — the PATCH path in `update_entry_text()` re-chunks and re-embeds in one call.
+If you need to rebuild embeddings as well, re-ingest the entry via the REST API or CLI — the PATCH path in
+`update_entry_text()` re-chunks and re-embeds in one call.
 
 #### Running the backfill in production (media VM)
 
-The production image (`ghcr.io/johnmathews/journal-server:latest`) runs the MCP server as its main process via `uv run python -m journal.mcp_server`. The `journal` CLI script is installed inside the venv at `/app/.venv/bin/journal` but is **not** on `PATH`, so `docker exec <container> journal ...` will fail with `executable file not found in $PATH`.
+The production image (`ghcr.io/johnmathews/journal-server:latest`) runs the MCP server as its main process via
+`uv run python -m journal.mcp_server`. The `journal` CLI script is installed inside the venv at `/app/.venv/bin/journal`
+but is **not** on `PATH`, so `docker exec <container> journal ...` will fail with `executable file not found in $PATH`.
 
 Use `uv run` to invoke it through the venv resolver:
 
@@ -154,13 +163,18 @@ If `uv run` is unavailable for some reason, the direct-binary form also works:
 docker exec journal-server /app/.venv/bin/journal backfill-chunks
 ```
 
-Either command is safe to run against a live container — the backfill only issues one-row `UPDATE entries SET chunk_count = ?` statements on SQLite in WAL mode and never touches ChromaDB, so the MCP server keeps serving requests throughout.
+Either command is safe to run against a live container — the backfill only issues one-row
+`UPDATE entries SET chunk_count = ?` statements on SQLite in WAL mode and never touches ChromaDB, so the MCP server keeps
+serving requests throughout.
 
-After running, hard-refresh the webapp — the entry list is cached in the Pinia store for the session, so the column may still show stale values until you reload.
+After running, hard-refresh the webapp — the entry list is cached in the Pinia store for the session, so the column may
+still show stale values until you reload.
 
 ### Rechunking (full pipeline, regenerates embeddings)
 
-Unlike `backfill-chunks`, which only updates the `chunk_count` column, `rechunk` deletes each entry's existing vectors from ChromaDB and regenerates them using the currently-configured strategy. Use this when you've changed `CHUNKING_STRATEGY` or any semantic chunker parameter and want the stored chunks to match.
+Unlike `backfill-chunks`, which only updates the `chunk_count` column, `rechunk` deletes each entry's existing vectors
+from ChromaDB and regenerates them using the currently-configured strategy. Use this when you've changed
+`CHUNKING_STRATEGY` or any semantic chunker parameter and want the stored chunks to match.
 
 ```bash
 # Re-chunk every entry using the current config.
@@ -170,7 +184,8 @@ uv run journal rechunk
 uv run journal rechunk --dry-run
 ```
 
-**Rechunk costs embeddings API calls** (one batched call per entry). For a corpus of 50 entries, that's ~50 OpenAI calls. Cheap but not free.
+**Rechunk costs embeddings API calls** (one batched call per entry). For a corpus of 50 entries, that's ~50 OpenAI calls.
+Cheap but not free.
 
 In production (media VM):
 
@@ -195,7 +210,8 @@ uv run journal eval-chunking
 uv run journal eval-chunking --json
 ```
 
-No ground-truth labels needed. Re-run after a `rechunk` to compare chunking configurations — higher ratio means better chunks for your corpus.
+No ground-truth labels needed. Re-run after a `rechunk` to compare chunking configurations — higher ratio means better
+chunks for your corpus.
 
 ### Tuning the semantic chunker
 
@@ -211,19 +227,20 @@ for pct in 15 20 25 30 35; do
 done
 ```
 
-Pick the value with the highest ratio, then update `chunking_boundary_percentile` in `config.py` (or set the env var on the production container).
+Pick the value with the highest ratio, then update `chunking_boundary_percentile` in `config.py` (or set the env var on
+the production container).
 
 ### Configuration reference
 
-| Env var                             | Default    | Applies to      | Description |
-|-------------------------------------|------------|-----------------|-------------|
-| `CHUNKING_STRATEGY`                 | `semantic` | both            | `"fixed"` or `"semantic"` |
-| `CHUNKING_MAX_TOKENS`               | `150`      | both            | Upper bound for chunk size |
-| `CHUNKING_OVERLAP_TOKENS`           | `40`       | fixed only      | Tokens carried between adjacent chunks |
-| `CHUNKING_MIN_TOKENS`               | `30`       | semantic only   | Minimum chunk size; smaller segments are merged |
-| `CHUNKING_BOUNDARY_PERCENTILE`      | `25`       | semantic only   | Adjacent similarities at/below this percentile are cut positions |
-| `CHUNKING_DECISIVE_PERCENTILE`      | `10`       | semantic only   | Cuts at/below this are clean (no overlap); between 10 and 25 are weak cuts (adaptive tail overlap) |
-| `CHUNKING_EMBED_METADATA_PREFIX`    | `true`     | both            | Prepend `"Date: YYYY-MM-DD. Weekday."` to each chunk before embedding (stored document stays un-prefixed) |
+| Env var                          | Default    | Applies to    | Description                                                                                               |
+| -------------------------------- | ---------- | ------------- | --------------------------------------------------------------------------------------------------------- |
+| `CHUNKING_STRATEGY`              | `semantic` | both          | `"fixed"` or `"semantic"`                                                                                 |
+| `CHUNKING_MAX_TOKENS`            | `150`      | both          | Upper bound for chunk size                                                                                |
+| `CHUNKING_OVERLAP_TOKENS`        | `40`       | fixed only    | Tokens carried between adjacent chunks                                                                    |
+| `CHUNKING_MIN_TOKENS`            | `30`       | semantic only | Minimum chunk size; smaller segments are merged                                                           |
+| `CHUNKING_BOUNDARY_PERCENTILE`   | `25`       | semantic only | Adjacent similarities at/below this percentile are cut positions                                          |
+| `CHUNKING_DECISIVE_PERCENTILE`   | `10`       | semantic only | Cuts at/below this are clean (no overlap); between 10 and 25 are weak cuts (adaptive tail overlap)        |
+| `CHUNKING_EMBED_METADATA_PREFIX` | `true`     | both          | Prepend `"Date: YYYY-MM-DD. Weekday."` to each chunk before embedding (stored document stays un-prefixed) |
 
 ## Local ChromaDB
 
