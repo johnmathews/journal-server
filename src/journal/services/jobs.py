@@ -34,7 +34,7 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -60,15 +60,9 @@ def _friendly_error(exc: Exception) -> str:
     msg = str(exc)
     # Google Gemini API errors
     if "503" in msg and ("UNAVAILABLE" in msg or "high demand" in msg):
-        return (
-            "Google's OCR service is temporarily overloaded. "
-            "Please wait a minute and try again."
-        )
+        return "OCR service overloaded"
     if "429" in msg and "RESOURCE_EXHAUSTED" in msg:
-        return (
-            "Google API rate limit exceeded. "
-            "Please wait a minute and try again."
-        )
+        return "Google API rate limit exceeded"
     if "404" in msg and "is not found for API version" in msg:
         return (
             "The configured OCR model was not found. "
@@ -76,16 +70,10 @@ def _friendly_error(exc: Exception) -> str:
         )
     # OpenAI API errors
     if "openai" in msg.lower() and ("rate_limit" in msg.lower() or "429" in msg):
-        return (
-            "OpenAI rate limit exceeded. "
-            "Please wait a moment and try again."
-        )
+        return "OpenAI rate limit exceeded"
     # Anthropic API errors
     if "overloaded" in msg.lower() and ("anthropic" in msg.lower() or "529" in msg):
-        return (
-            "Anthropic's API is temporarily overloaded. "
-            "Please wait a moment and try again."
-        )
+        return "Anthropic API overloaded"
     # Fall through — return the raw message for unexpected errors
     return msg
 
@@ -444,10 +432,11 @@ class JobRunner:
                     if not _is_transient(exc) or attempt >= len(_RETRY_DELAYS_SECONDS):
                         break  # non-transient or out of retries
                     delay = _RETRY_DELAYS_SECONDS[attempt]
-                    retry_at = datetime.now(UTC) + timedelta(seconds=delay)
-                    retry_time = retry_at.strftime("%H:%M")
+                    delay_minutes = delay // 60
+                    retry_at_local = datetime.now().astimezone() + timedelta(seconds=delay)
+                    retry_time = retry_at_local.strftime("%H:%M")
                     friendly = _friendly_error(exc)
-                    detail = f"{friendly} Retrying at {retry_time} UTC."
+                    detail = f"{friendly}, retrying in {delay_minutes} minutes at {retry_time}"
                     log.warning(
                         "Image ingestion job %s — transient error, "
                         "retrying in %ds (attempt %d): %s",
@@ -481,7 +470,10 @@ class JobRunner:
             # Clean up any remaining image data
             self._pending_images.pop(job_id, None)
             try:
-                self._jobs.mark_failed(job_id, _friendly_error(exc))
+                friendly = _friendly_error(exc)
+                if _is_transient(exc):
+                    friendly += " — please try again later"
+                self._jobs.mark_failed(job_id, friendly)
             except Exception:  # noqa: BLE001 — last-resort bookkeeping
                 log.exception("Failed to record failure for job %s", job_id)
 

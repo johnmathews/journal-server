@@ -260,8 +260,7 @@ class TestFriendlyError:
             "experiencing high demand.'}}"
         )
         msg = _friendly_error(exc)
-        assert "temporarily overloaded" in msg
-        assert "wait" in msg.lower()
+        assert msg == "OCR service overloaded"
 
     def test_google_429_rate_limit(self) -> None:
         exc = Exception(
@@ -269,8 +268,7 @@ class TestFriendlyError:
             "current quota'}}"
         )
         msg = _friendly_error(exc)
-        assert "rate limit" in msg.lower()
-        assert "wait" in msg.lower()
+        assert msg == "Google API rate limit exceeded"
 
     def test_google_404_model_not_found(self) -> None:
         exc = Exception(
