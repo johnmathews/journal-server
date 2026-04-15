@@ -99,6 +99,7 @@ class EntityExtractionService:
         if entry is None:
             raise ValueError(f"Entry {entry_id} not found")
 
+        user_id = entry.user_id or None
         run_id = str(uuid.uuid4())
         log.info(
             "Extracting entities from entry %d (run=%s)", entry_id, run_id
@@ -143,6 +144,7 @@ class EntityExtractionService:
                 description=description,
                 aliases=aliases,
                 first_seen=entry.entry_date,
+                user_id=user_id,
             )
             if created:
                 entities_created += 1
@@ -211,6 +213,7 @@ class EntityExtractionService:
                 resolved,
                 entry_date=entry.entry_date,
                 author_entity_id=author_entity_id,
+                user_id=user_id,
             )
             # Refresh the cached author id in case the relationship
             # step was what created the author entity.
@@ -222,6 +225,7 @@ class EntityExtractionService:
                 resolved,
                 entry_date=entry.entry_date,
                 author_entity_id=author_entity_id,
+                user_id=user_id,
             )
             if obj.lower() == self._author_name.lower():
                 author_entity_id = object_id
@@ -372,6 +376,7 @@ class EntityExtractionService:
         description: str,
         aliases: list[str],
         first_seen: str,
+        user_id: int | None = None,
     ) -> tuple[int, bool, str | None, tuple[int, float] | None]:
         """Resolve an extracted entity against the store.
 
@@ -383,17 +388,23 @@ class EntityExtractionService:
         should persist this as a merge candidate for user review.
         """
         # Stage a: exact canonical name match.
-        existing = self._store.get_entity_by_name(canonical, entity_type)
+        existing = self._store.get_entity_by_name(
+            canonical, entity_type, user_id=user_id,
+        )
         if existing is not None:
             return existing.id, False, None, None
 
         # Stage b: alias match on the canonical name itself, then on
         # each provided alias.
-        by_alias = self._store.find_by_alias(canonical, entity_type)
+        by_alias = self._store.find_by_alias(
+            canonical, entity_type, user_id=user_id,
+        )
         if by_alias is not None:
             return by_alias.id, False, None, None
         for alias in aliases:
-            by_alias = self._store.find_by_alias(alias, entity_type)
+            by_alias = self._store.find_by_alias(
+                alias, entity_type, user_id=user_id,
+            )
             if by_alias is not None:
                 return by_alias.id, False, None, None
 
@@ -402,7 +413,7 @@ class EntityExtractionService:
             f"{canonical} {description}".strip()
         )
         candidates = self._store.list_entities_of_type_with_embeddings(
-            entity_type
+            entity_type, user_id=user_id,
         )
         best_id: int | None = None
         best_score = 0.0
@@ -427,6 +438,7 @@ class EntityExtractionService:
             canonical_name=canonical,
             description=description,
             first_seen=first_seen,
+            user_id=user_id or 1,
         )
         self._store.set_entity_embedding(entity.id, new_embedding)
 
@@ -445,6 +457,7 @@ class EntityExtractionService:
         resolved: dict[str, int],
         entry_date: str,
         author_entity_id: int | None,
+        user_id: int | None = None,
     ) -> tuple[int | None, str | None]:
         """Look up a subject/object name for a relationship row.
 
@@ -463,7 +476,7 @@ class EntityExtractionService:
                 return author_entity_id, None
             # Author wasn't in the extracted entity list — create one.
             existing = self._store.get_entity_by_name(
-                self._author_name, "person"
+                self._author_name, "person", user_id=user_id,
             )
             if existing is not None:
                 return existing.id, None
@@ -472,6 +485,7 @@ class EntityExtractionService:
                 canonical_name=self._author_name,
                 description="Journal author",
                 first_seen=entry_date,
+                user_id=user_id or 1,
             )
             return author.id, None
 
