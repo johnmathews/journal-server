@@ -51,6 +51,7 @@ def _row_to_job(row: sqlite3.Row) -> Job:
         created_at=row["created_at"],
         started_at=row["started_at"],
         finished_at=row["finished_at"],
+        user_id=row["user_id"],
     )
 
 
@@ -67,7 +68,12 @@ class SQLiteJobRepository:
         self._conn = conn
         self._lock = threading.Lock()
 
-    def create(self, job_type: str, params: dict[str, Any]) -> Job:
+    def create(
+        self,
+        job_type: str,
+        params: dict[str, Any],
+        user_id: int | None = None,
+    ) -> Job:
         job_id = str(uuid.uuid4())
         created_at = _now_iso()
         params_json = json.dumps(params)
@@ -75,9 +81,10 @@ class SQLiteJobRepository:
             self._conn.execute(
                 "INSERT INTO jobs ("
                 "id, type, status, params_json, progress_current, progress_total, "
-                "result_json, error_message, status_detail, created_at, started_at, finished_at"
-                ") VALUES (?, ?, 'queued', ?, 0, 0, NULL, NULL, NULL, ?, NULL, NULL)",
-                (job_id, job_type, params_json, created_at),
+                "result_json, error_message, status_detail, created_at, started_at, "
+                "finished_at, user_id"
+                ") VALUES (?, ?, 'queued', ?, 0, 0, NULL, NULL, NULL, ?, NULL, NULL, ?)",
+                (job_id, job_type, params_json, created_at, user_id),
             )
             self._conn.commit()
         log.info("Created job %s of type %s", job_id, job_type)
@@ -134,11 +141,14 @@ class SQLiteJobRepository:
             self._conn.commit()
         log.warning("Job %s -> failed: %s", job_id, error_message)
 
-    def get(self, job_id: str) -> Job | None:
+    def get(self, job_id: str, user_id: int | None = None) -> Job | None:
+        sql = "SELECT * FROM jobs WHERE id = ?"
+        params: list[str | int] = [job_id]
+        if user_id is not None:
+            sql += " AND user_id = ?"
+            params.append(user_id)
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM jobs WHERE id = ?", (job_id,)
-            ).fetchone()
+            row = self._conn.execute(sql, params).fetchone()
         return _row_to_job(row) if row else None
 
     def list_jobs(
@@ -148,6 +158,7 @@ class SQLiteJobRepository:
         job_type: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        user_id: int | None = None,
     ) -> tuple[list[Job], int]:
         """Return jobs ordered by created_at DESC with optional filters.
 
@@ -162,6 +173,9 @@ class SQLiteJobRepository:
         if job_type is not None:
             where_clauses.append("type = ?")
             params.append(job_type)
+        if user_id is not None:
+            where_clauses.append("user_id = ?")
+            params.append(user_id)
 
         where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 

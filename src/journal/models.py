@@ -10,6 +10,7 @@ class Entry:
     entry_date: str
     source_type: str
     raw_text: str
+    user_id: int = 0
     final_text: str = ""
     word_count: int = 0
     chunk_count: int = 0
@@ -176,6 +177,7 @@ class Entity:
     id: int
     entity_type: EntityType
     canonical_name: str
+    user_id: int = 0
     description: str = ""
     aliases: list[str] = field(default_factory=list)
     first_seen: str = ""
@@ -273,6 +275,7 @@ class Job:
     created_at: str
     started_at: str | None
     finished_at: str | None
+    user_id: int | None = None
 
 
 @dataclass

@@ -4,9 +4,18 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from journal.auth import _current_user_id
 from journal.db.repository import SQLiteEntryRepository
 from journal.services.query import QueryService
 from journal.vectorstore.store import InMemoryVectorStore
+
+
+@pytest.fixture(autouse=True)
+def _set_test_user():
+    """Set the contextvar so get_current_user_id() works in MCP tools."""
+    token = _current_user_id.set(1)
+    yield
+    _current_user_id.reset(token)
 
 # Test the tool functions directly by calling the underlying service logic
 # (The MCP framework handles routing; we test the business logic)
@@ -261,7 +270,7 @@ class TestBatchJobTools:
         runner = ctx.request_context.lifespan_context["job_runner"]
         original = runner.submit_entity_extraction
 
-        def raise_invalid(params):
+        def raise_invalid(params, **kwargs):
             raise ValueError("bad params")
 
         runner.submit_entity_extraction = raise_invalid  # type: ignore[assignment]

@@ -218,7 +218,9 @@ class JobRunner:
     # Public API
     # ------------------------------------------------------------------
 
-    def submit_entity_extraction(self, params: dict[str, Any]) -> Job:
+    def submit_entity_extraction(
+        self, params: dict[str, Any], *, user_id: int | None = None,
+    ) -> Job:
         """Queue an entity-extraction batch job.
 
         Accepts any subset of `entry_id`, `start_date`, `end_date`,
@@ -228,11 +230,13 @@ class JobRunner:
         _validate_params(
             params, _ENTITY_EXTRACTION_KEYS, job_type="entity_extraction"
         )
-        job = self._jobs.create("entity_extraction", params)
+        job = self._jobs.create("entity_extraction", params, user_id=user_id)
         self._executor.submit(self._run_entity_extraction, job.id, params)
         return job
 
-    def submit_mood_backfill(self, params: dict[str, Any]) -> Job:
+    def submit_mood_backfill(
+        self, params: dict[str, Any], *, user_id: int | None = None,
+    ) -> Job:
         """Queue a mood-backfill batch job.
 
         Requires `mode` to be present and set to either
@@ -252,7 +256,7 @@ class JobRunner:
                 f"Param 'mode' must be one of "
                 f"{sorted(_MOOD_BACKFILL_MODES)}, got {params['mode']!r}"
             )
-        job = self._jobs.create("mood_backfill", params)
+        job = self._jobs.create("mood_backfill", params, user_id=user_id)
         self._executor.submit(self._run_mood_backfill, job.id, params)
         return job
 
@@ -260,6 +264,8 @@ class JobRunner:
         self,
         images: list[tuple[bytes, str, str]],  # (data, media_type, filename)
         entry_date: str,
+        *,
+        user_id: int | None = None,
     ) -> Job:
         """Queue an image-ingestion job.
 
@@ -271,7 +277,9 @@ class JobRunner:
             raise ValueError("At least one image is required")
         params = {"entry_date": entry_date}
         _validate_params(params, _INGEST_IMAGES_KEYS, job_type="ingest_images")
-        job = self._jobs.create("ingest_images", {**params, "page_count": len(images)})
+        job = self._jobs.create(
+            "ingest_images", {**params, "page_count": len(images)}, user_id=user_id,
+        )
         self._pending_images[job.id] = images
         self._executor.submit(self._run_image_ingestion, job.id, params)
         return job
@@ -306,6 +314,8 @@ class JobRunner:
         self,
         recordings: list[tuple[bytes, str, str]],  # (data, media_type, filename)
         entry_date: str,
+        *,
+        user_id: int | None = None,
     ) -> Job:
         """Queue an audio-ingestion job.
 
@@ -318,7 +328,8 @@ class JobRunner:
         params = {"entry_date": entry_date}
         _validate_params(params, _INGEST_AUDIO_KEYS, job_type="ingest_audio")
         job = self._jobs.create(
-            "ingest_audio", {**params, "recording_count": len(recordings)}
+            "ingest_audio", {**params, "recording_count": len(recordings)},
+            user_id=user_id,
         )
         self._pending_audio[job.id] = recordings
         self._executor.submit(self._run_audio_ingestion, job.id, params)

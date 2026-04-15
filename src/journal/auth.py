@@ -10,6 +10,7 @@ Public paths (login, register, health) are exempt.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,13 @@ if TYPE_CHECKING:
     from journal.services.auth import AuthService
 
 log = logging.getLogger(__name__)
+
+# ContextVar holding the authenticated user_id for the current request.
+# Set by RequireAuthMiddleware after successful auth, read by MCP tool
+# helpers via get_current_user_id(). Defaults to None (unauthenticated).
+_current_user_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "_current_user_id", default=None
+)
 
 # ---------------------------------------------------------------------------
 # Exempt path sets
@@ -266,13 +274,31 @@ class RequireAuthMiddleware:
             await response(scope, receive, send)
             return
 
-        # 6. All checks passed
-        await self.app(scope, receive, send)
+        # 6. All checks passed — propagate user_id via contextvar so
+        # MCP tool functions (which lack a Request object) can read it.
+        token = _current_user_id.set(getattr(user, "user_id", None))
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _current_user_id.reset(token)
 
 
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
+
+
+def get_current_user_id() -> int:
+    """Return the user_id for the current request (set by auth middleware).
+
+    Raises :class:`RuntimeError` if called outside an authenticated request.
+    Intended for MCP tool functions that receive a ``Context`` instead of a
+    ``Request``.
+    """
+    uid = _current_user_id.get()
+    if uid is None:
+        raise RuntimeError("No authenticated user in current context")
+    return uid
 
 
 def get_authenticated_user(request: Request) -> AuthenticatedUser:

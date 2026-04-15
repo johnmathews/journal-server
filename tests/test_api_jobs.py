@@ -26,12 +26,40 @@ from typing import Any
 import pytest
 from starlette.testclient import TestClient
 
+from journal.auth import AuthenticatedUser, _current_user_id
 from journal.db.connection import get_connection
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
 from journal.models import ExtractionResult
 from journal.services.backfill import MoodBackfillResult
 from journal.services.jobs import JobRunner
+
+_TEST_USER_ID = 1
+
+
+class _FakeAuthMiddleware:
+    """ASGI middleware that injects a test user for API tests."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            scope["user"] = AuthenticatedUser(
+                user_id=_TEST_USER_ID,
+                email="test@example.com",
+                display_name="Test User",
+                is_admin=True,
+                is_active=True,
+                email_verified=True,
+            )
+            token = _current_user_id.set(_TEST_USER_ID)
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                _current_user_id.reset(token)
+        else:
+            await self.app(scope, receive, send)
 
 # --------------------------------------------------------------------
 # Fakes — the routes don't touch the extraction or backfill code
@@ -192,7 +220,7 @@ def client(services: dict) -> Generator[TestClient]:
 
     test_mcp = FastMCP("test-journal-jobs")
     register_api_routes(test_mcp, lambda: services)
-    app = test_mcp.streamable_http_app()
+    app = _FakeAuthMiddleware(test_mcp.streamable_http_app())
     with TestClient(app, raise_server_exceptions=False) as tc:
         yield tc
 

@@ -31,11 +31,11 @@ class EntityStore(Protocol):
     """
 
     def get_entity_by_name(
-        self, canonical_name: str, entity_type: str
+        self, canonical_name: str, entity_type: str, user_id: int | None = None
     ) -> Entity | None: ...
 
     def find_by_alias(
-        self, alias: str, entity_type: str
+        self, alias: str, entity_type: str, user_id: int | None = None
     ) -> Entity | None: ...
 
     def create_entity(
@@ -60,6 +60,7 @@ class EntityStore(Protocol):
         entity_type: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        user_id: int | None = None,
     ) -> list[Entity]: ...
 
     def list_entities_with_mention_counts(
@@ -67,14 +68,15 @@ class EntityStore(Protocol):
         entity_type: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        user_id: int | None = None,
     ) -> list[tuple[Entity, int, str]]: ...
 
-    def count_entities(self, entity_type: str | None = None) -> int: ...
+    def count_entities(self, entity_type: str | None = None, user_id: int | None = None) -> int: ...
 
-    def get_entity(self, entity_id: int) -> Entity | None: ...
+    def get_entity(self, entity_id: int, user_id: int | None = None) -> Entity | None: ...
 
     def list_entities_of_type_with_embeddings(
-        self, entity_type: str
+        self, entity_type: str, user_id: int | None = None
     ) -> list[tuple[Entity, list[float]]]: ...
 
     def create_mention(
@@ -130,9 +132,10 @@ class EntityStore(Protocol):
         canonical_name: str | None = None,
         entity_type: str | None = None,
         description: str | None = None,
+        user_id: int | None = None,
     ) -> Entity: ...
 
-    def delete_entity(self, entity_id: int) -> None: ...
+    def delete_entity(self, entity_id: int, user_id: int | None = None) -> None: ...
 
     def merge_entities(
         self, survivor_id: int, absorbed_ids: list[int]
@@ -172,6 +175,7 @@ def _row_to_entity(row: sqlite3.Row, aliases: list[str]) -> Entity:
         id=row["id"],
         entity_type=row["entity_type"],
         canonical_name=row["canonical_name"],
+        user_id=row["user_id"],
         description=row["description"] or "",
         aliases=aliases,
         first_seen=row["first_seen"] or "",
@@ -200,32 +204,43 @@ class SQLiteEntityStore:
         aliases = self._load_aliases(row["id"])
         return _row_to_entity(row, aliases)
 
-    def get_entity(self, entity_id: int) -> Entity | None:
-        row = self._conn.execute(
-            "SELECT * FROM entities WHERE id = ?", (entity_id,)
-        ).fetchone()
+    def get_entity(self, entity_id: int, user_id: int | None = None) -> Entity | None:
+        sql = "SELECT * FROM entities WHERE id = ?"
+        params: list[object] = [entity_id]
+        if user_id is not None:
+            sql += " AND user_id = ?"
+            params.append(user_id)
+        row = self._conn.execute(sql, params).fetchone()
         return self._hydrate(row) if row else None
 
     def get_entity_by_name(
-        self, canonical_name: str, entity_type: str
+        self, canonical_name: str, entity_type: str, user_id: int | None = None
     ) -> Entity | None:
-        row = self._conn.execute(
+        sql = (
             "SELECT * FROM entities"
-            " WHERE entity_type = ? AND LOWER(canonical_name) = LOWER(?)",
-            (entity_type, canonical_name.strip()),
-        ).fetchone()
+            " WHERE entity_type = ? AND LOWER(canonical_name) = LOWER(?)"
+        )
+        params: list[object] = [entity_type, canonical_name.strip()]
+        if user_id is not None:
+            sql += " AND user_id = ?"
+            params.append(user_id)
+        row = self._conn.execute(sql, params).fetchone()
         return self._hydrate(row) if row else None
 
     def find_by_alias(
-        self, alias: str, entity_type: str
+        self, alias: str, entity_type: str, user_id: int | None = None
     ) -> Entity | None:
-        row = self._conn.execute(
+        sql = (
             "SELECT e.* FROM entities e"
             " JOIN entity_aliases a ON a.entity_id = e.id"
             " WHERE e.entity_type = ? AND a.alias_normalised = ?"
-            " LIMIT 1",
-            (entity_type, _normalise(alias)),
-        ).fetchone()
+        )
+        params: list[object] = [entity_type, _normalise(alias)]
+        if user_id is not None:
+            sql += " AND e.user_id = ?"
+            params.append(user_id)
+        sql += " LIMIT 1"
+        row = self._conn.execute(sql, params).fetchone()
         return self._hydrate(row) if row else None
 
     def create_entity(
@@ -287,13 +302,17 @@ class SQLiteEntityStore:
         self._conn.commit()
 
     def list_entities_of_type_with_embeddings(
-        self, entity_type: str
+        self, entity_type: str, user_id: int | None = None
     ) -> list[tuple[Entity, list[float]]]:
-        rows = self._conn.execute(
+        sql = (
             "SELECT * FROM entities"
-            " WHERE entity_type = ? AND embedding_json IS NOT NULL",
-            (entity_type,),
-        ).fetchall()
+            " WHERE entity_type = ? AND embedding_json IS NOT NULL"
+        )
+        params: list[object] = [entity_type]
+        if user_id is not None:
+            sql += " AND user_id = ?"
+            params.append(user_id)
+        rows = self._conn.execute(sql, params).fetchall()
         result: list[tuple[Entity, list[float]]] = []
         for row in rows:
             entity = self._hydrate(row)
@@ -309,12 +328,19 @@ class SQLiteEntityStore:
         entity_type: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        user_id: int | None = None,
     ) -> list[Entity]:
         sql = "SELECT * FROM entities"
         params: list[object] = []
+        conditions: list[str] = []
         if entity_type:
-            sql += " WHERE entity_type = ?"
+            conditions.append("entity_type = ?")
             params.append(entity_type)
+        if user_id is not None:
+            conditions.append("user_id = ?")
+            params.append(user_id)
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY entity_type, canonical_name LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         rows = self._conn.execute(sql, params).fetchall()
@@ -325,6 +351,7 @@ class SQLiteEntityStore:
         entity_type: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        user_id: int | None = None,
     ) -> list[tuple[Entity, int, str]]:
         sql = (
             "SELECT e.*, COUNT(m.id) AS mention_count,"
@@ -334,9 +361,15 @@ class SQLiteEntityStore:
             " LEFT JOIN entries ent ON m.entry_id = ent.id"
         )
         params: list[object] = []
+        conditions: list[str] = []
         if entity_type:
-            sql += " WHERE e.entity_type = ?"
+            conditions.append("e.entity_type = ?")
             params.append(entity_type)
+        if user_id is not None:
+            conditions.append("e.user_id = ?")
+            params.append(user_id)
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
         sql += (
             " GROUP BY e.id"
             " ORDER BY e.entity_type, e.canonical_name"
@@ -349,12 +382,18 @@ class SQLiteEntityStore:
             for r in rows
         ]
 
-    def count_entities(self, entity_type: str | None = None) -> int:
+    def count_entities(self, entity_type: str | None = None, user_id: int | None = None) -> int:
         sql = "SELECT COUNT(*) AS cnt FROM entities"
         params: list[object] = []
+        conditions: list[str] = []
         if entity_type:
-            sql += " WHERE entity_type = ?"
+            conditions.append("entity_type = ?")
             params.append(entity_type)
+        if user_id is not None:
+            conditions.append("user_id = ?")
+            params.append(user_id)
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
         row = self._conn.execute(sql, params).fetchone()
         return int(row["cnt"])
 
@@ -508,8 +547,9 @@ class SQLiteEntityStore:
         canonical_name: str | None = None,
         entity_type: str | None = None,
         description: str | None = None,
+        user_id: int | None = None,
     ) -> Entity:
-        entity = self.get_entity(entity_id)
+        entity = self.get_entity(entity_id, user_id=user_id)
         if entity is None:
             raise ValueError(f"Entity {entity_id} not found")
         sets: list[str] = []
@@ -537,11 +577,16 @@ class SQLiteEntityStore:
         log.info("Updated entity %d: %s", entity_id, updated.canonical_name)
         return updated
 
-    def delete_entity(self, entity_id: int) -> None:
-        entity = self.get_entity(entity_id)
+    def delete_entity(self, entity_id: int, user_id: int | None = None) -> None:
+        entity = self.get_entity(entity_id, user_id=user_id)
         if entity is None:
             raise ValueError(f"Entity {entity_id} not found")
-        self._conn.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
+        sql = "DELETE FROM entities WHERE id = ?"
+        params: list[object] = [entity_id]
+        if user_id is not None:
+            sql += " AND user_id = ?"
+            params.append(user_id)
+        self._conn.execute(sql, params)
         self._conn.commit()
         log.info(
             "Deleted entity %d: %s (%s)",

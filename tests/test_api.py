@@ -8,12 +8,40 @@ from unittest.mock import MagicMock
 import pytest
 from starlette.testclient import TestClient
 
+from journal.auth import AuthenticatedUser, _current_user_id
 from journal.db.connection import get_connection
 from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
 from journal.entitystore.store import SQLiteEntityStore
 from journal.services.ingestion import IngestionService
 from journal.services.query import QueryService
+
+_TEST_USER_ID = 1
+
+
+class _FakeAuthMiddleware:
+    """ASGI middleware that injects a test user for API tests."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            scope["user"] = AuthenticatedUser(
+                user_id=_TEST_USER_ID,
+                email="test@example.com",
+                display_name="Test User",
+                is_admin=True,
+                is_active=True,
+                email_verified=True,
+            )
+            token = _current_user_id.set(_TEST_USER_ID)
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                _current_user_id.reset(token)
+        else:
+            await self.app(scope, receive, send)
 
 
 @pytest.fixture
@@ -100,7 +128,7 @@ def client(services: dict) -> Generator[TestClient]:
     register_api_routes(test_mcp, lambda: services)
 
     # Build the Starlette app
-    app = test_mcp.streamable_http_app()
+    app = _FakeAuthMiddleware(test_mcp.streamable_http_app())
 
     with TestClient(app, raise_server_exceptions=False) as tc:
         yield tc
@@ -757,7 +785,7 @@ class TestSearch:
 
         test_mcp = FastMCP("test-journal")
         register_api_routes(test_mcp, lambda: services)
-        app = test_mcp.streamable_http_app()
+        app = _FakeAuthMiddleware(test_mcp.streamable_http_app())
         with TestClient(app, raise_server_exceptions=False) as tc:
             yield tc, real_vector_store
 
@@ -897,7 +925,7 @@ class TestSearch:
             entry_id=entry.id,
             chunks=[entry_text],
             embeddings=[[0.1] * 1024],
-            metadata={"entry_date": "2026-03-22"},
+            metadata={"entry_date": "2026-03-22", "user_id": _TEST_USER_ID},
         )
 
         response = client.get("/api/search?q=vienna&mode=semantic")
@@ -925,7 +953,7 @@ class TestSearch:
             entry_id=1,
             chunks=["Vienna trip"],
             embeddings=[[0.1] * 1024],
-            metadata={"entry_date": "2026-03-22"},
+            metadata={"entry_date": "2026-03-22", "user_id": _TEST_USER_ID},
         )
         response = client.get("/api/search?q=vienna")
         assert response.status_code == 200
@@ -984,7 +1012,7 @@ class TestDashboardMoodDimensions:
         }
         test_mcp = FastMCP("test-journal")
         register_api_routes(test_mcp, lambda: services)
-        app = test_mcp.streamable_http_app()
+        app = _FakeAuthMiddleware(test_mcp.streamable_http_app())
         with TestClient(app, raise_server_exceptions=False) as tc:
             yield tc, services
 
@@ -1044,7 +1072,8 @@ class TestDashboardMoodDimensions:
         test_mcp = FastMCP("test-journal")
         register_api_routes(test_mcp, lambda: services)
         with TestClient(
-            test_mcp.streamable_http_app(), raise_server_exceptions=False
+            _FakeAuthMiddleware(test_mcp.streamable_http_app()),
+            raise_server_exceptions=False,
         ) as tc:
             resp = tc.get("/api/dashboard/mood-dimensions")
             assert resp.status_code == 200
@@ -1108,7 +1137,8 @@ class TestDashboardMoodTrends:
         test_mcp = FastMCP("test-journal")
         register_api_routes(test_mcp, lambda: None)
         with TestClient(
-            test_mcp.streamable_http_app(), raise_server_exceptions=False
+            _FakeAuthMiddleware(test_mcp.streamable_http_app()),
+            raise_server_exceptions=False,
         ) as tc:
             assert tc.get("/api/dashboard/mood-trends").status_code == 503
             assert (
@@ -1166,7 +1196,7 @@ class TestHealth:
         }
         test_mcp = FastMCP("test-journal")
         register_api_routes(test_mcp, lambda: services)
-        app = test_mcp.streamable_http_app()
+        app = _FakeAuthMiddleware(test_mcp.streamable_http_app())
         with TestClient(app, raise_server_exceptions=False) as tc:
             yield tc, services
 
@@ -1255,7 +1285,7 @@ class TestHealth:
         }
         test_mcp = FastMCP("test-journal")
         register_api_routes(test_mcp, lambda: services)
-        app = test_mcp.streamable_http_app()
+        app = _FakeAuthMiddleware(test_mcp.streamable_http_app())
         with TestClient(app, raise_server_exceptions=False) as tc:
             resp = tc.get("/health")
             assert resp.status_code == 200
@@ -1273,7 +1303,8 @@ class TestHealth:
         test_mcp = FastMCP("test-journal")
         register_api_routes(test_mcp, lambda: None)
         with TestClient(
-            test_mcp.streamable_http_app(), raise_server_exceptions=False
+            _FakeAuthMiddleware(test_mcp.streamable_http_app()),
+            raise_server_exceptions=False,
         ) as tc:
             resp = tc.get("/health")
             assert resp.status_code == 503
@@ -1429,7 +1460,8 @@ class TestDashboardWritingStats:
         test_mcp = FastMCP("test-journal")
         register_api_routes(test_mcp, lambda: None)
         with TestClient(
-            test_mcp.streamable_http_app(), raise_server_exceptions=False
+            _FakeAuthMiddleware(test_mcp.streamable_http_app()),
+            raise_server_exceptions=False,
         ) as tc:
             resp = tc.get("/api/dashboard/writing-stats")
             assert resp.status_code == 503
@@ -1646,7 +1678,8 @@ class TestMergeEntities:
             "/api/entities/merge",
             json={"survivor_id": a.id, "absorbed_ids": [9999]},
         )
-        assert resp.status_code == 400
+        # Ownership check returns 404 (entity not found for this user)
+        assert resp.status_code == 404
 
 
 class TestMergeCandidates:

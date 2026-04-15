@@ -148,7 +148,7 @@ class IngestionService:
         self._mood_scoring = mood_scoring
 
     def ingest_image(
-        self, image_data: bytes, media_type: str, date: str
+        self, image_data: bytes, media_type: str, date: str, *, user_id: int = 1,
     ) -> Entry:
         """Ingest a journal page image: OCR -> chunk -> embed -> store."""
         log.info("Ingesting image for date %s (%s, %d bytes)", date, media_type, len(image_data))
@@ -179,7 +179,7 @@ class IngestionService:
 
         # Store entry (final_text defaults to raw_text)
         word_count = len(raw_text.split())
-        entry = self._repo.create_entry(date, "ocr", raw_text, word_count)
+        entry = self._repo.create_entry(date, "ocr", raw_text, word_count, user_id=user_id)
         source_file_id = self._store_source_file(
             entry.id, f"image_{date}", media_type, file_hash,
         )
@@ -191,14 +191,15 @@ class IngestionService:
         self._repo.add_uncertain_spans(entry.id, ocr_result.uncertain_spans)
 
         # Chunk, embed, and store in vector DB
-        chunk_count = self._process_text(entry.id, entry.final_text, date)
+        chunk_count = self._process_text(entry.id, entry.final_text, date, user_id=user_id)
         self._repo.update_chunk_count(entry.id, chunk_count)
 
         log.info("Ingested image entry %d: %d words, date %s", entry.id, word_count, date)
         return self._repo.get_entry(entry.id)  # type: ignore[return-value]
 
     def ingest_voice(
-        self, audio_data: bytes, media_type: str, date: str, language: str = "en"
+        self, audio_data: bytes, media_type: str, date: str, language: str = "en",
+        *, user_id: int = 1,
     ) -> Entry:
         """Ingest a voice note: transcribe -> chunk -> embed -> store."""
         log.info(
@@ -219,11 +220,11 @@ class IngestionService:
 
         # Store entry (final_text defaults to raw_text)
         word_count = len(raw_text.split())
-        entry = self._repo.create_entry(date, "voice", raw_text, word_count)
+        entry = self._repo.create_entry(date, "voice", raw_text, word_count, user_id=user_id)
         self._store_source_file(entry.id, f"voice_{date}", media_type, file_hash)
 
         # Chunk, embed, and store in vector DB
-        chunk_count = self._process_text(entry.id, entry.final_text, date)
+        chunk_count = self._process_text(entry.id, entry.final_text, date, user_id=user_id)
         self._repo.update_chunk_count(entry.id, chunk_count)
 
         log.info("Ingested voice entry %d: %d words, date %s", entry.id, word_count, date)
@@ -236,6 +237,7 @@ class IngestionService:
         language: str = "en",
         *,
         on_progress: "Callable[[int, int], None] | None" = None,
+        user_id: int = 1,
     ) -> Entry:
         """Ingest multiple voice recordings as a single journal entry.
 
@@ -255,7 +257,8 @@ class IngestionService:
 
         if len(recordings) == 1:
             return self.ingest_voice(
-                recordings[0][0], recordings[0][1], date, language
+                recordings[0][0], recordings[0][1], date, language,
+                user_id=user_id,
             )
 
         log.info(
@@ -289,7 +292,7 @@ class IngestionService:
         raw_text = "\n".join(transcripts)
 
         word_count = len(raw_text.split())
-        entry = self._repo.create_entry(date, "voice", raw_text, word_count)
+        entry = self._repo.create_entry(date, "voice", raw_text, word_count, user_id=user_id)
 
         # Store source file records for each recording
         for i, (file_hash, media_type) in enumerate(
@@ -300,7 +303,7 @@ class IngestionService:
             )
 
         # Chunk, embed, and store in vector DB
-        chunk_count = self._process_text(entry.id, entry.final_text, date)
+        chunk_count = self._process_text(entry.id, entry.final_text, date, user_id=user_id)
         self._repo.update_chunk_count(entry.id, chunk_count)
 
         log.info(
@@ -311,6 +314,7 @@ class IngestionService:
 
     def ingest_text(
         self, text: str, date: str, source_type: str = "manual", *, skip_mood: bool = False,
+        user_id: int = 1,
     ) -> Entry:
         """Ingest a plain-text entry (no OCR, no transcription).
 
@@ -335,9 +339,14 @@ class IngestionService:
         )
 
         word_count = len(text.split())
-        entry = self._repo.create_entry(date, source_type, text, word_count)
+        entry = self._repo.create_entry(
+            date, source_type, text, word_count, user_id=user_id,
+        )
 
-        chunk_count = self._process_text(entry.id, entry.final_text, date, skip_mood=skip_mood)
+        chunk_count = self._process_text(
+            entry.id, entry.final_text, date, skip_mood=skip_mood,
+            user_id=user_id,
+        )
         self._repo.update_chunk_count(entry.id, chunk_count)
 
         log.info("Ingested text entry %d: %d words, date %s", entry.id, word_count, date)
@@ -348,16 +357,20 @@ class IngestionService:
         url: str,
         date: str,
         media_type: str | None = None,
+        *,
+        user_id: int = 1,
     ) -> Entry:
         """Download an image from a URL and ingest it."""
         data, resolved_type = self._download(url, media_type)
-        return self.ingest_image(data, resolved_type, date)
+        return self.ingest_image(data, resolved_type, date, user_id=user_id)
 
     def ingest_multi_page_entry_from_urls(
         self,
         urls: list[str],
         date: str,
         media_types: list[str | None] | None = None,
+        *,
+        user_id: int = 1,
     ) -> Entry:
         """Download a list of page images from URLs and ingest them as one entry.
 
@@ -387,7 +400,7 @@ class IngestionService:
             data, resolved_type = self._download(url, override)
             images.append((data, resolved_type))
 
-        return self.ingest_multi_page_entry(images, date)
+        return self.ingest_multi_page_entry(images, date, user_id=user_id)
 
     def ingest_voice_from_url(
         self,
@@ -395,10 +408,12 @@ class IngestionService:
         date: str,
         media_type: str | None = None,
         language: str = "en",
+        *,
+        user_id: int = 1,
     ) -> Entry:
         """Download audio from a URL and ingest it."""
         data, resolved_type = self._download(url, media_type)
-        return self.ingest_voice(data, resolved_type, date, language)
+        return self.ingest_voice(data, resolved_type, date, language, user_id=user_id)
 
     def _download(
         self, url: str, media_type: str | None = None
@@ -440,7 +455,10 @@ class IngestionService:
         log.info("Downloaded %d bytes (type: %s)", len(data), media_type)
         return data, media_type
 
-    def _process_text(self, entry_id: int, text: str, date: str, *, skip_mood: bool = False) -> int:
+    def _process_text(
+        self, entry_id: int, text: str, date: str, *, skip_mood: bool = False,
+        user_id: int = 1,
+    ) -> int:
         """Chunk text, persist chunks, generate embeddings, store vectors.
 
         Returns the number of chunks produced.
@@ -491,7 +509,7 @@ class IngestionService:
             entry_id=entry_id,
             chunks=chunk_texts,  # store un-prefixed text
             embeddings=embeddings,  # computed from prefixed text
-            metadata={"entry_date": date},
+            metadata={"entry_date": date, "user_id": user_id},
         )
         log.info("Stored %d chunks with embeddings for entry %d", len(chunks), entry_id)
 
@@ -518,6 +536,7 @@ class IngestionService:
         date: str,
         *,
         on_progress: "Callable[[int, int], None] | None" = None,
+        user_id: int = 1,
     ) -> Entry:
         """Ingest multiple page images as a single journal entry.
 
@@ -593,7 +612,7 @@ class IngestionService:
             date = extracted
 
         # Create single entry
-        entry = self._repo.create_entry(date, "ocr", combined_text, word_count)
+        entry = self._repo.create_entry(date, "ocr", combined_text, word_count, user_id=user_id)
 
         # Store source files and pages
         for i, (_image_data, _) in enumerate(images):
@@ -611,7 +630,7 @@ class IngestionService:
         self._repo.add_uncertain_spans(entry.id, combined_spans)
 
         # Chunk, embed, and store
-        chunk_count = self._process_text(entry.id, entry.final_text, date)
+        chunk_count = self._process_text(entry.id, entry.final_text, date, user_id=user_id)
         self._repo.update_chunk_count(entry.id, chunk_count)
 
         log.info(
@@ -647,24 +666,26 @@ class IngestionService:
         log.info("Updated entry %d: %d words, %d chunks", entry_id, word_count, chunk_count)
         return updated  # type: ignore[return-value]
 
-    def save_final_text(self, entry_id: int, final_text: str) -> Entry:
+    def save_final_text(
+        self, entry_id: int, final_text: str, *, user_id: int | None = None,
+    ) -> Entry:
         """Update an entry's final_text in SQLite only (fast).
 
         Does NOT re-chunk or re-embed. Call ``reprocess_embeddings``
         separately for the slow embedding pipeline.
         """
-        entry = self._repo.get_entry(entry_id)
+        entry = self._repo.get_entry(entry_id, user_id=user_id)
         if entry is None:
             raise ValueError(f"Entry {entry_id} not found")
 
         word_count = len(final_text.split())
         updated = self._repo.update_final_text(
-            entry_id, final_text, word_count, entry.chunk_count
+            entry_id, final_text, word_count, entry.chunk_count, user_id=user_id,
         )
         log.info("Saved final_text for entry %d (%d words)", entry_id, word_count)
         return updated  # type: ignore[return-value]
 
-    def reprocess_embeddings(self, entry_id: int) -> int:
+    def reprocess_embeddings(self, entry_id: int, *, user_id: int = 1) -> int:
         """Re-chunk and re-embed an entry's text (slow).
 
         Deletes old vectors, re-chunks, calls the embedding provider,
@@ -680,27 +701,27 @@ class IngestionService:
             raise ValueError(f"Entry {entry_id} has no text to embed")
 
         self._vector_store.delete_entry(entry_id)
-        chunk_count = self._process_text(entry_id, text, entry.entry_date)
+        chunk_count = self._process_text(entry_id, text, entry.entry_date, user_id=user_id)
         self._repo.update_chunk_count(entry_id, chunk_count)
         log.info("Reprocessed embeddings for entry %d: %d chunks", entry_id, chunk_count)
         return chunk_count
 
-    def delete_entry(self, entry_id: int) -> bool:
+    def delete_entry(self, entry_id: int, *, user_id: int | None = None) -> bool:
         """Delete an entry from both SQLite and the vector store.
 
         Returns True if the entry existed and was removed, False if it
         was not found. Vector chunks are removed first so that a failure
         to clean up ChromaDB surfaces before we drop the SQLite row.
         """
-        entry = self._repo.get_entry(entry_id)
+        entry = self._repo.get_entry(entry_id, user_id=user_id)
         if entry is None:
             return False
 
         log.info("Deleting entry %d", entry_id)
         self._vector_store.delete_entry(entry_id)
-        return self._repo.delete_entry(entry_id)
+        return self._repo.delete_entry(entry_id, user_id=user_id)
 
-    def rechunk_entry(self, entry_id: int, *, dry_run: bool = False) -> int:
+    def rechunk_entry(self, entry_id: int, *, dry_run: bool = False, user_id: int = 1) -> int:
         """Re-chunk and re-embed an existing entry in place.
 
         Used by the `journal rechunk` CLI and by future tuning scripts.
@@ -731,7 +752,7 @@ class IngestionService:
         # have zero chunks in ChromaDB — callers should handle this and
         # (re-)retry.
         self._vector_store.delete_entry(entry_id)
-        chunk_count = self._process_text(entry_id, text, entry.entry_date)
+        chunk_count = self._process_text(entry_id, text, entry.entry_date, user_id=user_id)
         self._repo.update_chunk_count(entry_id, chunk_count)
         return chunk_count
 

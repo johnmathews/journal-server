@@ -88,15 +88,18 @@ class EntryRepository(Protocol):
         user_id: int = 1,
     ) -> Entry: ...
 
-    def get_entry(self, entry_id: int) -> Entry | None: ...
+    def get_entry(self, entry_id: int, user_id: int | None = None) -> Entry | None: ...
 
     def update_final_text(
-        self, entry_id: int, final_text: str, word_count: int, chunk_count: int
+        self, entry_id: int, final_text: str, word_count: int, chunk_count: int,
+        user_id: int | None = None,
     ) -> Entry | None: ...
 
-    def update_entry_date(self, entry_id: int, entry_date: str) -> Entry | None: ...
+    def update_entry_date(
+        self, entry_id: int, entry_date: str, user_id: int | None = None,
+    ) -> Entry | None: ...
 
-    def delete_entry(self, entry_id: int) -> bool: ...
+    def delete_entry(self, entry_id: int, user_id: int | None = None) -> bool: ...
 
     def add_entry_page(
         self, entry_id: int, page_number: int, raw_text: str, source_file_id: int | None = None
@@ -118,9 +121,9 @@ class EntryRepository(Protocol):
 
     def get_uncertain_span_count(self, entry_id: int) -> int: ...
 
-    def verify_doubts(self, entry_id: int) -> bool: ...
+    def verify_doubts(self, entry_id: int, user_id: int | None = None) -> bool: ...
 
-    def get_entries_by_date(self, date: str) -> list[Entry]: ...
+    def get_entries_by_date(self, date: str, user_id: int | None = None) -> list[Entry]: ...
 
     def list_entries(
         self,
@@ -128,10 +131,12 @@ class EntryRepository(Protocol):
         end_date: str | None = None,
         limit: int = 20,
         offset: int = 0,
+        user_id: int | None = None,
     ) -> list[Entry]: ...
 
     def search_text(
-        self, query: str, start_date: str | None = None, end_date: str | None = None
+        self, query: str, start_date: str | None = None, end_date: str | None = None,
+        user_id: int | None = None,
     ) -> list[Entry]: ...
 
     def search_text_with_snippets(
@@ -141,6 +146,7 @@ class EntryRepository(Protocol):
         end_date: str | None = None,
         limit: int = 10,
         offset: int = 0,
+        user_id: int | None = None,
     ) -> list[tuple[Entry, str]]: ...
 
     def count_text_matches(
@@ -148,10 +154,12 @@ class EntryRepository(Protocol):
         query: str,
         start_date: str | None = None,
         end_date: str | None = None,
+        user_id: int | None = None,
     ) -> int: ...
 
     def get_statistics(
-        self, start_date: str | None = None, end_date: str | None = None
+        self, start_date: str | None = None, end_date: str | None = None,
+        user_id: int | None = None,
     ) -> Statistics: ...
 
     def add_people(self, entry_id: int, names: list[str]) -> None: ...
@@ -173,7 +181,7 @@ class EntryRepository(Protocol):
     def get_mood_scores(self, entry_id: int) -> list[MoodScore]: ...
 
     def get_entries_missing_mood_scores(
-        self, dimension_names: list[str]
+        self, dimension_names: list[str], user_id: int | None = None,
     ) -> list[int]: ...
 
     def prune_retired_mood_scores(
@@ -185,25 +193,29 @@ class EntryRepository(Protocol):
         start_date: str | None = None,
         end_date: str | None = None,
         granularity: str = "week",
+        user_id: int | None = None,
     ) -> list[MoodTrend]: ...
 
     def count_entries(
-        self, start_date: str | None = None, end_date: str | None = None
+        self, start_date: str | None = None, end_date: str | None = None,
+        user_id: int | None = None,
     ) -> int: ...
 
-    def get_ingestion_stats(self, now: datetime) -> IngestionStats: ...
+    def get_ingestion_stats(self, now: datetime, user_id: int | None = None) -> IngestionStats: ...
 
     def get_writing_frequency(
         self,
         start_date: str | None,
         end_date: str | None,
         granularity: str,
+        user_id: int | None = None,
     ) -> list[WritingFrequencyBin]: ...
 
     def get_page_count(self, entry_id: int) -> int: ...
 
     def get_topic_frequency(
-        self, topic: str, start_date: str | None = None, end_date: str | None = None
+        self, topic: str, start_date: str | None = None, end_date: str | None = None,
+        user_id: int | None = None,
     ) -> TopicFrequency: ...
 
 
@@ -213,6 +225,7 @@ def _row_to_entry(row: sqlite3.Row) -> Entry:
         entry_date=row["entry_date"],
         source_type=row["source_type"],
         raw_text=row["raw_text"],
+        user_id=row["user_id"],
         final_text=row["final_text"] or row["raw_text"],
         word_count=row["word_count"],
         chunk_count=row["chunk_count"],
@@ -245,14 +258,27 @@ class SQLiteEntryRepository:
         log.info("Created entry %d for date %s", entry_id, entry_date)
         return self.get_entry(entry_id)  # type: ignore[return-value]
 
-    def get_entry(self, entry_id: int) -> Entry | None:
-        row = self._conn.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    def get_entry(self, entry_id: int, user_id: int | None = None) -> Entry | None:
+        if user_id is not None:
+            row = self._conn.execute(
+                "SELECT * FROM entries WHERE id = ? AND user_id = ?", (entry_id, user_id)
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT * FROM entries WHERE id = ?", (entry_id,)
+            ).fetchone()
         return _row_to_entry(row) if row else None
 
-    def get_entries_by_date(self, date: str) -> list[Entry]:
-        rows = self._conn.execute(
-            "SELECT * FROM entries WHERE entry_date = ? ORDER BY created_at", (date,)
-        ).fetchall()
+    def get_entries_by_date(self, date: str, user_id: int | None = None) -> list[Entry]:
+        if user_id is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM entries WHERE entry_date = ? AND user_id = ? ORDER BY created_at",
+                (date, user_id),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM entries WHERE entry_date = ? ORDER BY created_at", (date,)
+            ).fetchall()
         return [_row_to_entry(r) for r in rows]
 
     def list_entries(
@@ -261,9 +287,13 @@ class SQLiteEntryRepository:
         end_date: str | None = None,
         limit: int = 20,
         offset: int = 0,
+        user_id: int | None = None,
     ) -> list[Entry]:
         query = "SELECT * FROM entries WHERE 1=1"
         params: list[str | int] = []
+        if user_id is not None:
+            query += " AND user_id = ?"
+            params.append(user_id)
         if start_date:
             query += " AND entry_date >= ?"
             params.append(start_date)
@@ -276,14 +306,18 @@ class SQLiteEntryRepository:
         return [_row_to_entry(r) for r in rows]
 
     def search_text(
-        self, query: str, start_date: str | None = None, end_date: str | None = None
+        self, query: str, start_date: str | None = None, end_date: str | None = None,
+        user_id: int | None = None,
     ) -> list[Entry]:
         sql = """
             SELECT e.* FROM entries_fts
             JOIN entries e ON e.id = entries_fts.rowid
             WHERE entries_fts MATCH ?
         """
-        params: list[str] = [query]
+        params: list[str | int] = [query]
+        if user_id is not None:
+            sql += " AND e.user_id = ?"
+            params.append(user_id)
         if start_date:
             sql += " AND e.entry_date >= ?"
             params.append(start_date)
@@ -301,6 +335,7 @@ class SQLiteEntryRepository:
         end_date: str | None = None,
         limit: int = 10,
         offset: int = 0,
+        user_id: int | None = None,
     ) -> list[tuple[Entry, str]]:
         """FTS5 keyword search that returns a highlighted snippet per hit.
 
@@ -324,6 +359,9 @@ class SQLiteEntryRepository:
             WHERE entries_fts MATCH ?
         """
         params: list[str | int] = [query]
+        if user_id is not None:
+            sql += " AND e.user_id = ?"
+            params.append(user_id)
         if start_date:
             sql += " AND e.entry_date >= ?"
             params.append(start_date)
@@ -340,13 +378,17 @@ class SQLiteEntryRepository:
         query: str,
         start_date: str | None = None,
         end_date: str | None = None,
+        user_id: int | None = None,
     ) -> int:
         sql = """
             SELECT COUNT(*) AS cnt FROM entries_fts
             JOIN entries e ON e.id = entries_fts.rowid
             WHERE entries_fts MATCH ?
         """
-        params: list[str] = [query]
+        params: list[str | int] = [query]
+        if user_id is not None:
+            sql += " AND e.user_id = ?"
+            params.append(user_id)
         if start_date:
             sql += " AND e.entry_date >= ?"
             params.append(start_date)
@@ -357,30 +399,52 @@ class SQLiteEntryRepository:
         return row["cnt"]
 
     def update_final_text(
-        self, entry_id: int, final_text: str, word_count: int, chunk_count: int
+        self, entry_id: int, final_text: str, word_count: int, chunk_count: int,
+        user_id: int | None = None,
     ) -> Entry | None:
-        self._conn.execute(
-            "UPDATE entries SET final_text = ?, word_count = ?, chunk_count = ?,"
-            " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
-            (final_text, word_count, chunk_count, entry_id),
-        )
+        if user_id is not None:
+            self._conn.execute(
+                "UPDATE entries SET final_text = ?, word_count = ?, chunk_count = ?,"
+                " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ? AND user_id = ?",
+                (final_text, word_count, chunk_count, entry_id, user_id),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE entries SET final_text = ?, word_count = ?, chunk_count = ?,"
+                " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+                (final_text, word_count, chunk_count, entry_id),
+            )
         self._conn.commit()
         log.info("Updated final_text for entry %d", entry_id)
-        return self.get_entry(entry_id)
+        return self.get_entry(entry_id, user_id)
 
-    def update_entry_date(self, entry_id: int, entry_date: str) -> Entry | None:
-        self._conn.execute(
-            "UPDATE entries SET entry_date = ?,"
-            " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
-            (entry_date, entry_id),
-        )
+    def update_entry_date(
+        self, entry_id: int, entry_date: str, user_id: int | None = None,
+    ) -> Entry | None:
+        if user_id is not None:
+            self._conn.execute(
+                "UPDATE entries SET entry_date = ?,"
+                " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ? AND user_id = ?",
+                (entry_date, entry_id, user_id),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE entries SET entry_date = ?,"
+                " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+                (entry_date, entry_id),
+            )
         self._conn.commit()
         log.info("Updated entry_date for entry %d to %s", entry_id, entry_date)
-        return self.get_entry(entry_id)
+        return self.get_entry(entry_id, user_id)
 
-    def delete_entry(self, entry_id: int) -> bool:
+    def delete_entry(self, entry_id: int, user_id: int | None = None) -> bool:
         """Delete an entry and all cascading rows. Returns True if a row was deleted."""
-        cursor = self._conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
+        if user_id is not None:
+            cursor = self._conn.execute(
+                "DELETE FROM entries WHERE id = ? AND user_id = ?", (entry_id, user_id)
+            )
+        else:
+            cursor = self._conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
         self._conn.commit()
         deleted = cursor.rowcount > 0
         if deleted:
@@ -539,7 +603,7 @@ class SQLiteEntryRepository:
         ).fetchone()
         return row["cnt"]
 
-    def verify_doubts(self, entry_id: int) -> bool:
+    def verify_doubts(self, entry_id: int, user_id: int | None = None) -> bool:
         """Mark all doubts on an entry as verified.
 
         Sets ``doubts_verified = 1`` on the entry row. The underlying
@@ -547,14 +611,21 @@ class SQLiteEntryRepository:
         ``True`` if the entry exists, ``False`` otherwise.
         """
         with self._conn:
-            cursor = self._conn.execute(
-                "UPDATE entries SET doubts_verified = 1 WHERE id = ?",
-                (entry_id,),
-            )
+            if user_id is not None:
+                cursor = self._conn.execute(
+                    "UPDATE entries SET doubts_verified = 1 WHERE id = ? AND user_id = ?",
+                    (entry_id, user_id),
+                )
+            else:
+                cursor = self._conn.execute(
+                    "UPDATE entries SET doubts_verified = 1 WHERE id = ?",
+                    (entry_id,),
+                )
         return cursor.rowcount > 0
 
     def get_statistics(
-        self, start_date: str | None = None, end_date: str | None = None
+        self, start_date: str | None = None, end_date: str | None = None,
+        user_id: int | None = None,
     ) -> Statistics:
         query = """
             SELECT
@@ -565,7 +636,10 @@ class SQLiteEntryRepository:
                 COALESCE(AVG(word_count), 0) as avg_words_per_entry
             FROM entries WHERE 1=1
         """
-        params: list[str] = []
+        params: list[str | int] = []
+        if user_id is not None:
+            query += " AND user_id = ?"
+            params.append(user_id)
         if start_date:
             query += " AND entry_date >= ?"
             params.append(start_date)
@@ -582,7 +656,10 @@ class SQLiteEntryRepository:
                 SELECT COUNT(DISTINCT strftime('%Y-%m', entry_date)) as months
                 FROM entries WHERE 1=1
             """
-            months_params: list[str] = []
+            months_params: list[str | int] = []
+            if user_id is not None:
+                months_query += " AND user_id = ?"
+                months_params.append(user_id)
             if start_date:
                 months_query += " AND entry_date >= ?"
                 months_params.append(start_date)
@@ -716,7 +793,7 @@ class SQLiteEntryRepository:
         ]
 
     def get_entries_missing_mood_scores(
-        self, dimension_names: list[str]
+        self, dimension_names: list[str], user_id: int | None = None,
     ) -> list[int]:
         """Return entry ids that are missing at least one of the
         listed dimensions in `mood_scores`. Drives the backfill
@@ -730,6 +807,11 @@ class SQLiteEntryRepository:
         if not dimension_names:
             return []
         placeholders = ",".join("?" for _ in dimension_names)
+        user_filter = ""
+        user_params: tuple[int, ...] = ()
+        if user_id is not None:
+            user_filter = " AND e.user_id = ?"
+            user_params = (user_id,)
         rows = self._conn.execute(
             f"""
             SELECT e.id AS id
@@ -739,10 +821,10 @@ class SQLiteEntryRepository:
                 FROM mood_scores m
                 WHERE m.entry_id = e.id
                   AND m.dimension IN ({placeholders})
-            ) < ?
+            ) < ?{user_filter}
             ORDER BY e.entry_date ASC, e.id ASC
             """,
-            (*dimension_names, len(dimension_names)),
+            (*dimension_names, len(dimension_names), *user_params),
         ).fetchall()
         return [int(r["id"]) for r in rows]
 
@@ -785,6 +867,7 @@ class SQLiteEntryRepository:
         start_date: str | None = None,
         end_date: str | None = None,
         granularity: str = "week",
+        user_id: int | None = None,
     ) -> list[MoodTrend]:
         # Delegates bin-start computation to `_bin_start_sql` so the
         # supported granularity set and the SQL expression stay in
@@ -806,7 +889,10 @@ class SQLiteEntryRepository:
             JOIN entries e ON e.id = m.entry_id
             WHERE 1=1
         """
-        params: list[str] = []
+        params: list[str | int] = []
+        if user_id is not None:
+            query += " AND e.user_id = ?"
+            params.append(user_id)
         if start_date:
             query += " AND e.entry_date >= ?"
             params.append(start_date)
@@ -826,10 +912,14 @@ class SQLiteEntryRepository:
         ]
 
     def count_entries(
-        self, start_date: str | None = None, end_date: str | None = None
+        self, start_date: str | None = None, end_date: str | None = None,
+        user_id: int | None = None,
     ) -> int:
         query = "SELECT COUNT(*) as cnt FROM entries WHERE 1=1"
-        params: list[str] = []
+        params: list[str | int] = []
+        if user_id is not None:
+            query += " AND user_id = ?"
+            params.append(user_id)
         if start_date:
             query += " AND entry_date >= ?"
             params.append(start_date)
@@ -862,7 +952,7 @@ class SQLiteEntryRepository:
         "entity_relationships",
     )
 
-    def get_ingestion_stats(self, now: datetime) -> IngestionStats:
+    def get_ingestion_stats(self, now: datetime, user_id: int | None = None) -> IngestionStats:
         """Aggregate corpus stats for the `/health` endpoint.
 
         `now` is injected rather than read from `datetime.now()` so
@@ -877,29 +967,56 @@ class SQLiteEntryRepository:
         cutoff_7d = (now.date() - timedelta(days=7)).isoformat()
         cutoff_30d = (now.date() - timedelta(days=30)).isoformat()
 
-        total_row = self._conn.execute(
-            "SELECT COUNT(*) AS cnt, "
-            "COALESCE(AVG(word_count), 0.0) AS avg_words, "
-            "COALESCE(AVG(chunk_count), 0.0) AS avg_chunks, "
-            "MAX(created_at) AS last_ingest "
-            "FROM entries"
-        ).fetchone()
+        if user_id is not None:
+            total_row = self._conn.execute(
+                "SELECT COUNT(*) AS cnt, "
+                "COALESCE(AVG(word_count), 0.0) AS avg_words, "
+                "COALESCE(AVG(chunk_count), 0.0) AS avg_chunks, "
+                "MAX(created_at) AS last_ingest "
+                "FROM entries WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
 
-        last_7d = self._conn.execute(
-            "SELECT COUNT(*) AS cnt FROM entries WHERE entry_date >= ?",
-            (cutoff_7d,),
-        ).fetchone()["cnt"]
-        last_30d = self._conn.execute(
-            "SELECT COUNT(*) AS cnt FROM entries WHERE entry_date >= ?",
-            (cutoff_30d,),
-        ).fetchone()["cnt"]
+            last_7d = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM entries WHERE user_id = ? AND entry_date >= ?",
+                (user_id, cutoff_7d),
+            ).fetchone()["cnt"]
+            last_30d = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM entries WHERE user_id = ? AND entry_date >= ?",
+                (user_id, cutoff_30d),
+            ).fetchone()["cnt"]
 
-        by_source: dict[str, int] = {}
-        for row in self._conn.execute(
-            "SELECT source_type, COUNT(*) AS cnt FROM entries "
-            "GROUP BY source_type"
-        ).fetchall():
-            by_source[row["source_type"]] = row["cnt"]
+            by_source: dict[str, int] = {}
+            for row in self._conn.execute(
+                "SELECT source_type, COUNT(*) AS cnt FROM entries "
+                "WHERE user_id = ? GROUP BY source_type",
+                (user_id,),
+            ).fetchall():
+                by_source[row["source_type"]] = row["cnt"]
+        else:
+            total_row = self._conn.execute(
+                "SELECT COUNT(*) AS cnt, "
+                "COALESCE(AVG(word_count), 0.0) AS avg_words, "
+                "COALESCE(AVG(chunk_count), 0.0) AS avg_chunks, "
+                "MAX(created_at) AS last_ingest "
+                "FROM entries"
+            ).fetchone()
+
+            last_7d = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM entries WHERE entry_date >= ?",
+                (cutoff_7d,),
+            ).fetchone()["cnt"]
+            last_30d = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM entries WHERE entry_date >= ?",
+                (cutoff_30d,),
+            ).fetchone()["cnt"]
+
+            by_source = {}
+            for row in self._conn.execute(
+                "SELECT source_type, COUNT(*) AS cnt FROM entries "
+                "GROUP BY source_type"
+            ).fetchall():
+                by_source[row["source_type"]] = row["cnt"]
 
         total_chunks_row = self._conn.execute(
             "SELECT COALESCE(SUM(chunk_count), 0) AS total FROM entries"
@@ -934,6 +1051,7 @@ class SQLiteEntryRepository:
         start_date: str | None,
         end_date: str | None,
         granularity: str,
+        user_id: int | None = None,
     ) -> list[WritingFrequencyBin]:
         """Aggregate entries per time bucket for the dashboard charts.
 
@@ -973,7 +1091,10 @@ class SQLiteEntryRepository:
             FROM entries
             WHERE 1=1
         """
-        params: list[str] = []
+        params: list[str | int] = []
+        if user_id is not None:
+            sql += " AND user_id = ?"
+            params.append(user_id)
         if start_date:
             sql += " AND entry_date >= ?"
             params.append(start_date)
@@ -993,7 +1114,8 @@ class SQLiteEntryRepository:
         ]
 
     def get_topic_frequency(
-        self, topic: str, start_date: str | None = None, end_date: str | None = None
+        self, topic: str, start_date: str | None = None, end_date: str | None = None,
+        user_id: int | None = None,
     ) -> TopicFrequency:
-        entries = self.search_text(topic, start_date, end_date)
+        entries = self.search_text(topic, start_date, end_date, user_id=user_id)
         return TopicFrequency(topic=topic, count=len(entries), entries=entries)

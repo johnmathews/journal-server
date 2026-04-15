@@ -71,6 +71,7 @@ class QueryService:
         end_date: str | None = None,
         limit: int = 10,
         offset: int = 0,
+        user_id: int | None = None,
     ) -> list[SearchResult]:
         """Semantic search across journal entries.
 
@@ -82,7 +83,7 @@ class QueryService:
         return self._timed(
             "semantic_search",
             lambda: self._search_entries_impl(
-                query, start_date, end_date, limit, offset
+                query, start_date, end_date, limit, offset, user_id
             ),
         )
 
@@ -93,24 +94,25 @@ class QueryService:
         end_date: str | None,
         limit: int,
         offset: int,
+        user_id: int | None = None,
     ) -> list[SearchResult]:
         log.info("Semantic search: '%s' (limit=%d, offset=%d)", query, limit, offset)
 
         query_embedding = self._embeddings.embed_query(query)
 
-        where = {}
+        conditions: list[dict] = []
+        if user_id is not None:
+            conditions.append({"user_id": user_id})
         if start_date:
-            where["entry_date"] = {"$gte": start_date}
+            conditions.append({"entry_date": {"$gte": start_date}})
         if end_date:
-            if "entry_date" in where:
-                where = {
-                    "$and": [
-                        {"entry_date": {"$gte": start_date}},
-                        {"entry_date": {"$lte": end_date}},
-                    ]
-                }
-            else:
-                where["entry_date"] = {"$lte": end_date}
+            conditions.append({"entry_date": {"$lte": end_date}})
+
+        where: dict = {}
+        if len(conditions) == 1:
+            where = conditions[0]
+        elif len(conditions) > 1:
+            where = {"$and": conditions}
 
         # Over-fetch chunks so we can aggregate multiple matches per entry.
         vector_limit = (limit + offset) * self._VECTOR_OVERFETCH_FACTOR
@@ -144,7 +146,7 @@ class QueryService:
         # char_start/char_end as None on each ChunkMatch.
         results: list[SearchResult] = []
         for entry_id, chunks in chunks_by_entry.items():
-            entry = self._repo.get_entry(entry_id)
+            entry = self._repo.get_entry(entry_id, user_id=user_id)
             if entry is None:
                 continue
 
@@ -182,6 +184,7 @@ class QueryService:
         end_date: str | None = None,
         limit: int = 10,
         offset: int = 0,
+        user_id: int | None = None,
     ) -> list[SearchResult]:
         """FTS5 keyword search across journal entries.
 
@@ -200,7 +203,7 @@ class QueryService:
         return self._timed(
             "keyword_search",
             lambda: self._keyword_search_impl(
-                query, start_date, end_date, limit, offset
+                query, start_date, end_date, limit, offset, user_id
             ),
         )
 
@@ -211,6 +214,7 @@ class QueryService:
         end_date: str | None,
         limit: int,
         offset: int,
+        user_id: int | None = None,
     ) -> list[SearchResult]:
         log.info(
             "Keyword search: '%s' (limit=%d, offset=%d)", query, limit, offset
@@ -222,6 +226,7 @@ class QueryService:
             end_date=end_date,
             limit=limit,
             offset=offset,
+            user_id=user_id,
         )
 
         results: list[SearchResult] = []
@@ -242,8 +247,10 @@ class QueryService:
             )
         return results
 
-    def get_entries_by_date(self, date: str) -> list[Entry]:
-        return self._repo.get_entries_by_date(date)
+    def get_entries_by_date(
+        self, date: str, user_id: int | None = None
+    ) -> list[Entry]:
+        return self._repo.get_entries_by_date(date, user_id=user_id)
 
     def list_entries(
         self,
@@ -251,15 +258,21 @@ class QueryService:
         end_date: str | None = None,
         limit: int = 20,
         offset: int = 0,
+        user_id: int | None = None,
     ) -> list[Entry]:
-        return self._repo.list_entries(start_date, end_date, limit, offset)
+        return self._repo.list_entries(
+            start_date, end_date, limit, offset, user_id=user_id
+        )
 
     def get_statistics(
-        self, start_date: str | None = None, end_date: str | None = None
+        self, start_date: str | None = None, end_date: str | None = None,
+        user_id: int | None = None,
     ) -> Statistics:
         return self._timed(
             "statistics",
-            lambda: self._repo.get_statistics(start_date, end_date),
+            lambda: self._repo.get_statistics(
+                start_date, end_date, user_id=user_id
+            ),
         )
 
     def get_mood_trends(
@@ -267,18 +280,24 @@ class QueryService:
         start_date: str | None = None,
         end_date: str | None = None,
         granularity: str = "week",
+        user_id: int | None = None,
     ) -> list[MoodTrend]:
         return self._timed(
             "mood_trends",
-            lambda: self._repo.get_mood_trends(start_date, end_date, granularity),
+            lambda: self._repo.get_mood_trends(
+                start_date, end_date, granularity, user_id=user_id
+            ),
         )
 
     def get_topic_frequency(
-        self, topic: str, start_date: str | None = None, end_date: str | None = None
+        self, topic: str, start_date: str | None = None, end_date: str | None = None,
+        user_id: int | None = None,
     ) -> TopicFrequency:
         return self._timed(
             "topic_frequency",
-            lambda: self._repo.get_topic_frequency(topic, start_date, end_date),
+            lambda: self._repo.get_topic_frequency(
+                topic, start_date, end_date, user_id=user_id
+            ),
         )
 
     def get_entry_pages(self, entry_id: int) -> list[EntryPage]:

@@ -11,6 +11,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from journal.api import register_api_routes
+from journal.auth import get_current_user_id
 from journal.auth_api import register_admin_routes, register_auth_routes
 from journal.config import load_config
 from journal.db.connection import get_connection
@@ -292,6 +293,11 @@ def _get_job_repository(ctx: Context) -> SQLiteJobRepository:
     return ctx.request_context.lifespan_context["job_repository"]
 
 
+def _user_id(ctx: Context) -> int:
+    """Return the authenticated user_id for the current MCP request."""
+    return get_current_user_id()
+
+
 @mcp.tool()
 def journal_search_entries(
     query: str,
@@ -315,7 +321,10 @@ def journal_search_entries(
         query, start_date, end_date,
     )
     service = _get_query(ctx)
-    results = service.search_entries(query, start_date, end_date, min(limit, 50), offset)
+    user_id = _user_id(ctx)
+    results = service.search_entries(
+        query, start_date, end_date, min(limit, 50), offset, user_id=user_id,
+    )
 
     if not results:
         return f"No journal entries found matching '{query}'."
@@ -354,7 +363,8 @@ def journal_get_entries_by_date(
     """
     log.info("Tool call: journal_get_entries_by_date(date=%s)", date)
     service = _get_query(ctx)
-    entries = service.get_entries_by_date(date)
+    user_id = _user_id(ctx)
+    entries = service.get_entries_by_date(date, user_id=user_id)
 
     if not entries:
         return f"No journal entries found for {date}."
@@ -388,7 +398,8 @@ def journal_list_entries(
         start_date, end_date, limit,
     )
     service = _get_query(ctx)
-    entries = service.list_entries(start_date, end_date, min(limit, 50), offset)
+    user_id = _user_id(ctx)
+    entries = service.list_entries(start_date, end_date, min(limit, 50), offset, user_id=user_id)
 
     if not entries:
         return "No journal entries found."
@@ -414,7 +425,8 @@ def journal_get_statistics(
     """
     log.info("Tool call: journal_get_statistics(start_date=%s, end_date=%s)", start_date, end_date)
     service = _get_query(ctx)
-    stats = service.get_statistics(start_date, end_date)
+    user_id = _user_id(ctx)
+    stats = service.get_statistics(start_date, end_date, user_id=user_id)
 
     lines = ["Journal Statistics:"]
     lines.append(f"  Total entries: {stats.total_entries}")
@@ -446,7 +458,8 @@ def journal_get_mood_trends(
         start_date, end_date, granularity,
     )
     service = _get_query(ctx)
-    trends = service.get_mood_trends(start_date, end_date, granularity)
+    user_id = _user_id(ctx)
+    trends = service.get_mood_trends(start_date, end_date, granularity, user_id=user_id)
 
     if not trends:
         return "No mood data available for the specified period."
@@ -478,7 +491,8 @@ def journal_get_topic_frequency(
         topic, start_date, end_date,
     )
     service = _get_query(ctx)
-    freq = service.get_topic_frequency(topic, start_date, end_date)
+    user_id = _user_id(ctx)
+    freq = service.get_topic_frequency(topic, start_date, end_date, user_id=user_id)
 
     if freq.count == 0:
         return f"'{topic}' was not found in any journal entries."
@@ -526,13 +540,14 @@ def journal_ingest_from_url(
         source_type, url, date,
     )
     service = _get_ingestion(ctx)
+    user_id = _user_id(ctx)
     entry_date = date or date_type.today().isoformat()
 
     if source_type == "image":
-        entry = service.ingest_image_from_url(url, entry_date, media_type)
+        entry = service.ingest_image_from_url(url, entry_date, media_type, user_id=user_id)
     elif source_type == "voice":
         entry = service.ingest_voice_from_url(
-            url, entry_date, media_type, language,
+            url, entry_date, media_type, language, user_id=user_id,
         )
     else:
         return f"Invalid source_type '{source_type}'. Must be 'image' or 'voice'."
@@ -574,13 +589,14 @@ def journal_ingest_entry(
         source_type, media_type, date, len(data_base64),
     )
     service = _get_ingestion(ctx)
+    user_id = _user_id(ctx)
     data = base64.b64decode(data_base64)
     entry_date = date or date_type.today().isoformat()
 
     if source_type == "image":
-        entry = service.ingest_image(data, media_type, entry_date)
+        entry = service.ingest_image(data, media_type, entry_date, user_id=user_id)
     elif source_type == "voice":
-        entry = service.ingest_voice(data, media_type, entry_date, language)
+        entry = service.ingest_voice(data, media_type, entry_date, language, user_id=user_id)
     else:
         return f"Invalid source_type '{source_type}'. Must be 'image' or 'voice'."
 
@@ -617,6 +633,7 @@ def journal_ingest_multi_page(
         len(images_base64), date,
     )
     service = _get_ingestion(ctx)
+    user_id = _user_id(ctx)
     entry_date = date or date_type.today().isoformat()
 
     if len(images_base64) != len(media_types):
@@ -627,7 +644,7 @@ def journal_ingest_multi_page(
         for img, mt in zip(images_base64, media_types, strict=True)
     ]
 
-    entry = service.ingest_multi_page_entry(images, entry_date)
+    entry = service.ingest_multi_page_entry(images, entry_date, user_id=user_id)
 
     return (
         f"Multi-page entry ingested successfully.\n"
@@ -675,6 +692,7 @@ def journal_ingest_multi_page_from_url(
         len(urls), date,
     )
     service = _get_ingestion(ctx)
+    user_id = _user_id(ctx)
     entry_date = date or date_type.today().isoformat()
 
     if media_types is not None and len(media_types) != len(urls):
@@ -684,7 +702,7 @@ def journal_ingest_multi_page_from_url(
     # instance of that type, so no conversion is needed.
     try:
         entry = service.ingest_multi_page_entry_from_urls(
-            urls, entry_date, media_types,  # type: ignore[arg-type]
+            urls, entry_date, media_types, user_id=user_id,  # type: ignore[arg-type]
         )
     except ValueError as e:
         return f"Error: {e}"
@@ -718,8 +736,9 @@ def journal_update_entry_text(
     """
     log.info("Tool call: journal_update_entry_text(entry_id=%d)", entry_id)
     service = _get_ingestion(ctx)
+    user_id = _user_id(ctx)
     try:
-        entry = service.update_entry_text(entry_id, final_text)
+        entry = service.update_entry_text(entry_id, final_text, user_id=user_id)
     except ValueError as e:
         return f"Error: {e}"
 
@@ -754,14 +773,16 @@ def journal_extract_entities(
         entry_id, start_date, end_date, stale_only,
     )
     service = _get_entity_extraction(ctx)
+    user_id = _user_id(ctx)
     try:
         if entry_id is not None:
-            results = [service.extract_from_entry(entry_id)]
+            results = [service.extract_from_entry(entry_id, user_id=user_id)]
         else:
             results = service.extract_batch(
                 start_date=start_date,
                 end_date=end_date,
                 stale_only=stale_only,
+                user_id=user_id,
             )
     except ValueError as e:
         return f"Error: {e}"
@@ -903,6 +924,7 @@ def journal_extract_entities_batch(
     )
     runner = _get_job_runner(ctx)
     job_repository = _get_job_repository(ctx)
+    user_id = _user_id(ctx)
 
     params: dict[str, Any] = {}
     if entry_id is not None:
@@ -915,7 +937,7 @@ def journal_extract_entities_batch(
         params["stale_only"] = True
 
     try:
-        job = runner.submit_entity_extraction(params)
+        job = runner.submit_entity_extraction(params, user_id=user_id)
     except ValueError as exc:
         return {
             "status": "failed",
@@ -966,6 +988,7 @@ def journal_backfill_mood_scores_batch(
     )
     runner = _get_job_runner(ctx)
     job_repository = _get_job_repository(ctx)
+    user_id = _user_id(ctx)
 
     params: dict[str, Any] = {"mode": mode}
     if start_date is not None:
@@ -974,7 +997,7 @@ def journal_backfill_mood_scores_batch(
         params["end_date"] = end_date
 
     try:
-        job = runner.submit_mood_backfill(params)
+        job = runner.submit_mood_backfill(params, user_id=user_id)
     except ValueError as exc:
         return {
             "status": "failed",
@@ -1009,7 +1032,8 @@ def journal_get_job_status(
     """
     log.info("Tool call: journal_get_job_status(job_id=%s)", job_id)
     job_repository = _get_job_repository(ctx)
-    job = job_repository.get(job_id)
+    user_id = _user_id(ctx)
+    job = job_repository.get(job_id, user_id=user_id)
     if job is None:
         return {"error": "Job not found", "job_id": job_id}
     return _job_to_tool_dict(job)
@@ -1033,8 +1057,9 @@ def journal_list_entities(
         entity_type, limit,
     )
     store = _get_entity_store(ctx)
+    user_id = _user_id(ctx)
     rows = store.list_entities_with_mention_counts(
-        entity_type=entity_type, limit=min(limit, 200), offset=0
+        entity_type=entity_type, limit=min(limit, 200), offset=0, user_id=user_id,
     )
     if not rows:
         return "No entities found."
@@ -1065,10 +1090,11 @@ def journal_get_entity_mentions(
         entity_id, limit,
     )
     store = _get_entity_store(ctx)
-    entity = store.get_entity(entity_id)
+    user_id = _user_id(ctx)
+    entity = store.get_entity(entity_id, user_id=user_id)
     if entity is None:
         return f"Entity {entity_id} not found."
-    mentions = store.get_mentions_for_entity(entity_id, limit=limit)
+    mentions = store.get_mentions_for_entity(entity_id, limit=limit, user_id=user_id)
     if not mentions:
         return f"No mentions recorded for {entity.canonical_name}."
     lines = [f"{len(mentions)} mentions of {entity.canonical_name}:"]
@@ -1094,17 +1120,18 @@ def journal_get_entity_relationships(
         entity_id,
     )
     store = _get_entity_store(ctx)
-    entity = store.get_entity(entity_id)
+    user_id = _user_id(ctx)
+    entity = store.get_entity(entity_id, user_id=user_id)
     if entity is None:
         return f"Entity {entity_id} not found."
-    outgoing, incoming = store.get_relationships_for_entity(entity_id)
+    outgoing, incoming = store.get_relationships_for_entity(entity_id, user_id=user_id)
     if not outgoing and not incoming:
         return f"No relationships recorded for {entity.canonical_name}."
     lines = [f"Relationships for {entity.canonical_name}:"]
     if outgoing:
         lines.append(f"  Outgoing ({len(outgoing)}):")
         for r in outgoing:
-            other = store.get_entity(r.object_entity_id)
+            other = store.get_entity(r.object_entity_id, user_id=user_id)
             other_name = other.canonical_name if other else f"#{r.object_entity_id}"
             lines.append(
                 f"    -> {r.predicate} -> {other_name} "
@@ -1113,7 +1140,7 @@ def journal_get_entity_relationships(
     if incoming:
         lines.append(f"  Incoming ({len(incoming)}):")
         for r in incoming:
-            other = store.get_entity(r.subject_entity_id)
+            other = store.get_entity(r.subject_entity_id, user_id=user_id)
             other_name = other.canonical_name if other else f"#{r.subject_entity_id}"
             lines.append(
                 f"    <- {r.predicate} <- {other_name} "
