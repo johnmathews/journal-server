@@ -1,7 +1,7 @@
 # Security Hardening Roadmap
 
 **Created:** 2026-04-14
-**Last updated:** 2026-04-14
+**Last updated:** 2026-04-15
 
 Prioritized security improvements for the multi-user authentication system. Items are grouped
 into tiers based on urgency. Each tier should be completed before the one below it.
@@ -21,11 +21,11 @@ Security audit performed 2026-04-14. Fixes already applied:
 
 ---
 
-## Tier 1 — Critical (do before inviting users)
+## Tier 1 — Critical (do before inviting users) — COMPLETED 2026-04-15
 
-### 1. Complete per-user data isolation on all read queries
+### 1. ~~Complete per-user data isolation on all read queries~~ DONE
 
-The single most important gap. `create_entry` and `create_entity` pass `user_id`, but every read
+~~The single most important gap.~~ `create_entry` and `create_entity` pass `user_id`, but every read
 query (`list_entries`, `get_entry`, `search_text`, `get_statistics`, `get_mood_trends`, `delete_entry`,
 etc.) has no `WHERE user_id = ?` filter. Any authenticated user can read/modify/delete every other
 user's data.
@@ -40,9 +40,9 @@ user's data.
 - Update every MCP tool in `mcp_server.py` to extract user from context
 - Write integration tests: create 2 users, verify complete data separation
 
-### 2. Hash session tokens before storage
+### 2. ~~Hash session tokens before storage~~ DONE
 
-Session tokens are stored in plaintext in `user_sessions.id`. If the SQLite file is ever exposed
+~~Session tokens are stored in plaintext in `user_sessions.id`.~~ If the SQLite file is ever exposed
 (backup leak, file access), an attacker can impersonate any active user.
 
 **Work required:**
