@@ -659,6 +659,7 @@ class FakeIngestionService:
         date: str,
         language: str = "en",
         *,
+        source_type: str = "voice",
         on_progress: Callable[[int, int], None] | None = None,
     ) -> Any:
         self.multi_voice_calls.append(len(recordings))

@@ -1141,7 +1141,7 @@ def register_api_routes(
         Request body (JSON):
             text (str, required): The entry content.
             entry_date (str, optional): ISO-8601 date, defaults to today.
-            source_type (str, optional): defaults to "manual".
+            source_type (str, optional): defaults to "text_entry".
 
         Returns 201 with the created entry and an optional mood_job_id.
         """
@@ -1181,7 +1181,7 @@ def register_api_routes(
             )
 
         entry_date = body.get("entry_date") or datetime.now(UTC).strftime("%Y-%m-%d")
-        source_type = body.get("source_type", "manual")
+        source_type = body.get("source_type", "text_entry")
 
         try:
             entry = ingestion_svc.ingest_text(
@@ -1296,7 +1296,7 @@ def register_api_routes(
 
         try:
             entry = ingestion_svc.ingest_text(
-                content, entry_date, "import", skip_mood=True, user_id=user_id,
+                content, entry_date, "imported_text_file", skip_mood=True, user_id=user_id,
             )
         except ValueError as e:
             log.warning("POST /api/entries/ingest/file — %s", e)
@@ -1444,6 +1444,8 @@ def register_api_routes(
         Expects multipart/form-data with:
             audio: one or more audio files (mp3, mp4, wav, webm, ogg, flac, m4a)
             entry_date (optional): ISO-8601 date, defaults to today.
+            source_type (optional): defaults to "voice" (live recording).
+                Use "imported_audio_file" for uploaded audio files.
 
         Returns 202 with a job_id for async processing.
         """
@@ -1508,10 +1510,13 @@ def register_api_routes(
             recordings.append((uploaded.data, uploaded.content_type, uploaded.filename))
 
         entry_date = fields.get("entry_date") or datetime.now(UTC).strftime("%Y-%m-%d")
+        source_type = fields.get("source_type", "voice")
 
         job_runner: JobRunner = services["job_runner"]
         try:
-            job = job_runner.submit_audio_ingestion(recordings, entry_date, user_id=user_id)
+            job = job_runner.submit_audio_ingestion(
+                recordings, entry_date, source_type=source_type, user_id=user_id,
+            )
         except ValueError as e:
             log.warning("POST /api/entries/ingest/audio — %s", e)
             return JSONResponse({"error": str(e)}, status_code=400)

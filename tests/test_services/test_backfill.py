@@ -26,7 +26,7 @@ def chunker():
 
 def _insert(repo: SQLiteEntryRepository, text: str, *, final_text: str | None = None):
     """Helper: insert an entry and (optionally) set final_text, always with chunk_count=0."""
-    entry = repo.create_entry("2026-03-01", "ocr", text, len(text.split()))
+    entry = repo.create_entry("2026-03-01", "photo", text, len(text.split()))
     if final_text is not None:
         repo.update_final_text(entry.id, final_text, len(final_text.split()), 0)
     # Force stale chunk_count so backfill has something to do.
@@ -76,7 +76,7 @@ class TestBackfillChunkCounts:
         assert refreshed.chunk_count >= 1
 
     def test_skips_entries_with_no_text(self, repo, chunker):
-        entry = repo.create_entry("2026-03-02", "ocr", "", 0)
+        entry = repo.create_entry("2026-03-02", "photo", "", 0)
         repo.update_chunk_count(entry.id, 0)
 
         result = backfill_chunk_counts(repo, chunker)
@@ -187,7 +187,7 @@ class TestRechunkEntries:
 
     def test_skips_entries_with_no_text(self, repo):
         _insert(repo, "Has text.")
-        empty = repo.create_entry("2026-03-03", "ocr", "", 0)
+        empty = repo.create_entry("2026-03-03", "photo", "", 0)
         repo.update_chunk_count(empty.id, 0)
 
         mock_ingestion = MagicMock()
@@ -297,9 +297,9 @@ class TestBackfillMoodScores:
         from journal.services.backfill import backfill_mood_scores
 
         # Three entries, one already fully scored, one partially, one bare.
-        e1 = repo.create_entry("2026-04-01", "ocr", "already scored", 2)
-        e2 = repo.create_entry("2026-04-02", "ocr", "partial", 1)
-        repo.create_entry("2026-04-03", "ocr", "bare", 1)
+        e1 = repo.create_entry("2026-04-01", "photo", "already scored", 2)
+        e2 = repo.create_entry("2026-04-02", "photo", "partial", 1)
+        repo.create_entry("2026-04-03", "photo", "bare", 1)
         repo.replace_mood_scores(
             e1.id, [("joy_sadness", 0.5, None), ("agency", 0.6, None)]
         )
@@ -321,7 +321,7 @@ class TestBackfillMoodScores:
     ):
         from journal.services.backfill import backfill_mood_scores
 
-        e1 = repo.create_entry("2026-04-01", "ocr", "already scored", 2)
+        e1 = repo.create_entry("2026-04-01", "photo", "already scored", 2)
         repo.replace_mood_scores(
             e1.id, [("joy_sadness", 0.5, None), ("agency", 0.6, None)]
         )
@@ -343,7 +343,7 @@ class TestBackfillMoodScores:
     def test_dry_run_does_not_call_scorer(self, repo, dims):
         from journal.services.backfill import backfill_mood_scores
 
-        repo.create_entry("2026-04-01", "ocr", "x", 1)
+        repo.create_entry("2026-04-01", "photo", "x", 1)
         svc, scorer = self._make_service(repo, dims)
 
         result = backfill_mood_scores(
@@ -361,7 +361,7 @@ class TestBackfillMoodScores:
     def test_prune_retired_removes_off_config_dims(self, repo, dims):
         from journal.services.backfill import backfill_mood_scores
 
-        e = repo.create_entry("2026-04-01", "ocr", "x", 1)
+        e = repo.create_entry("2026-04-01", "photo", "x", 1)
         # Write two current + one retired dimension.
         repo.replace_mood_scores(
             e.id,
@@ -387,7 +387,7 @@ class TestBackfillMoodScores:
     ):
         from journal.services.backfill import backfill_mood_scores
 
-        e = repo.create_entry("2026-04-01", "ocr", "x", 1)
+        e = repo.create_entry("2026-04-01", "photo", "x", 1)
         repo.replace_mood_scores(
             e.id,
             [("joy_sadness", 0.5, None), ("retired_dim", 0.1, None)],
@@ -408,9 +408,9 @@ class TestBackfillMoodScores:
     def test_date_filter_stale_only(self, repo, dims):
         from journal.services.backfill import backfill_mood_scores
 
-        repo.create_entry("2026-02-15", "ocr", "feb", 1)
-        repo.create_entry("2026-03-15", "ocr", "mar", 1)
-        repo.create_entry("2026-04-15", "ocr", "apr", 1)
+        repo.create_entry("2026-02-15", "photo", "feb", 1)
+        repo.create_entry("2026-03-15", "photo", "mar", 1)
+        repo.create_entry("2026-04-15", "photo", "apr", 1)
 
         svc, scorer = self._make_service(repo, dims)
         result = backfill_mood_scores(
@@ -426,8 +426,8 @@ class TestBackfillMoodScores:
     def test_scorer_exception_captured_per_entry(self, repo, dims):
         from journal.services.backfill import backfill_mood_scores
 
-        repo.create_entry("2026-04-01", "ocr", "one", 1)
-        repo.create_entry("2026-04-02", "ocr", "two", 1)
+        repo.create_entry("2026-04-01", "photo", "one", 1)
+        repo.create_entry("2026-04-02", "photo", "two", 1)
         # The MoodScoringService swallows exceptions internally and
         # returns 0 — so the service itself never raises at the
         # backfill layer. But we still want to verify that a
@@ -458,7 +458,7 @@ class TestBackfillMoodScores:
         from journal.services.backfill import backfill_mood_scores
         from journal.services.mood_scoring import MoodScoringService
 
-        repo.create_entry("2026-04-01", "ocr", "x", 1)
+        repo.create_entry("2026-04-01", "photo", "x", 1)
         svc = MoodScoringService(MagicMock(), repo, ())
         result = backfill_mood_scores(
             repository=repo, mood_scoring=svc, mode="stale-only"
@@ -479,9 +479,9 @@ class TestBackfillMoodScores:
     ):
         from journal.services.backfill import backfill_mood_scores
 
-        repo.create_entry("2026-04-01", "ocr", "one", 1)
-        repo.create_entry("2026-04-02", "ocr", "two", 1)
-        repo.create_entry("2026-04-03", "ocr", "three", 1)
+        repo.create_entry("2026-04-01", "photo", "one", 1)
+        repo.create_entry("2026-04-02", "photo", "two", 1)
+        repo.create_entry("2026-04-03", "photo", "three", 1)
 
         svc, _ = self._make_service(repo, dims)
 
@@ -499,8 +499,8 @@ class TestBackfillMoodScores:
         """Dry-run still advances through the entry set; progress must fire."""
         from journal.services.backfill import backfill_mood_scores
 
-        repo.create_entry("2026-04-01", "ocr", "one", 1)
-        repo.create_entry("2026-04-02", "ocr", "two", 1)
+        repo.create_entry("2026-04-01", "photo", "one", 1)
+        repo.create_entry("2026-04-02", "photo", "two", 1)
 
         svc, scorer = self._make_service(repo, dims)
 
@@ -520,8 +520,8 @@ class TestBackfillMoodScores:
     ):
         from journal.services.backfill import backfill_mood_scores
 
-        repo.create_entry("2026-04-01", "ocr", "one", 1)
-        repo.create_entry("2026-04-02", "ocr", "two", 1)
+        repo.create_entry("2026-04-01", "photo", "one", 1)
+        repo.create_entry("2026-04-02", "photo", "two", 1)
 
         svc, _ = self._make_service(repo, dims)
 

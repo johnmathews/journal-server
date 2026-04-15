@@ -46,7 +46,7 @@ def query_service(repo, vector_store, mock_embeddings):
 
 @pytest.fixture
 def seeded_query(repo, vector_store, mock_embeddings):
-    e1 = repo.create_entry("2026-03-22", "ocr", "Met Atlas in Vienna for coffee", 6)
+    e1 = repo.create_entry("2026-03-22", "photo", "Met Atlas in Vienna for coffee", 6)
     e2 = repo.create_entry("2026-03-23", "voice", "Quiet day reading at home", 5)
     repo.add_mood_score(e1.id, "overall", 0.7)
     repo.add_mood_score(e2.id, "overall", 0.3)
@@ -126,12 +126,12 @@ class TestFinalTextUsage:
 
     def test_entry_has_final_text(self, repo):
         """Entries have final_text populated from raw_text by default."""
-        entry = repo.create_entry("2026-04-01", "ocr", "Some OCR text", 3)
+        entry = repo.create_entry("2026-04-01", "photo", "Some OCR text", 3)
         assert entry.final_text == "Some OCR text"
 
     def test_list_entries_uses_final_text(self, repo):
         """list_entries returns entries with final_text for previews."""
-        entry = repo.create_entry("2026-04-01", "ocr", "Original OCR text", 3)
+        entry = repo.create_entry("2026-04-01", "photo", "Original OCR text", 3)
         # Simulate corrected text
         repo.update_final_text(entry.id, "Corrected text", 2, 1)
         updated = repo.get_entry(entry.id)

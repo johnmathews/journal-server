@@ -45,7 +45,7 @@ class TestScoreEntry:
             RawMoodScore("agency", 0.7, None),
         ]
         service = MoodScoringService(scorer, repo, dims)
-        entry = repo.create_entry("2026-04-01", "ocr", "test", 1)
+        entry = repo.create_entry("2026-04-01", "photo", "test", 1)
 
         n = service.score_entry(entry.id, "test text")
 
@@ -61,7 +61,7 @@ class TestScoreEntry:
     def test_empty_dimensions_is_noop(self, repo) -> None:
         scorer = MagicMock()
         service = MoodScoringService(scorer, repo, ())
-        entry = repo.create_entry("2026-04-01", "ocr", "test", 1)
+        entry = repo.create_entry("2026-04-01", "photo", "test", 1)
 
         n = service.score_entry(entry.id, "text")
 
@@ -72,7 +72,7 @@ class TestScoreEntry:
     def test_empty_text_is_noop(self, repo, dims) -> None:
         scorer = MagicMock()
         service = MoodScoringService(scorer, repo, dims)
-        entry = repo.create_entry("2026-04-01", "ocr", "test", 1)
+        entry = repo.create_entry("2026-04-01", "photo", "test", 1)
 
         assert service.score_entry(entry.id, "") == 0
         assert service.score_entry(entry.id, "   \n  ") == 0
@@ -86,7 +86,7 @@ class TestScoreEntry:
         scorer = MagicMock()
         scorer.score.side_effect = RuntimeError("anthropic is down")
         service = MoodScoringService(scorer, repo, dims)
-        entry = repo.create_entry("2026-04-01", "ocr", "test", 1)
+        entry = repo.create_entry("2026-04-01", "photo", "test", 1)
 
         with caplog.at_level("WARNING"):
             n = service.score_entry(entry.id, "some text")
@@ -101,7 +101,7 @@ class TestScoreEntry:
         scorer = MagicMock()
         scorer.score.return_value = []
         service = MoodScoringService(scorer, repo, dims)
-        entry = repo.create_entry("2026-04-01", "ocr", "test", 1)
+        entry = repo.create_entry("2026-04-01", "photo", "test", 1)
 
         with caplog.at_level("WARNING"):
             assert service.score_entry(entry.id, "text") == 0
@@ -116,7 +116,7 @@ class TestScoreEntry:
             RawMoodScore("agency", 0.7, None),
         ]
         service = MoodScoringService(scorer, repo, dims)
-        entry = repo.create_entry("2026-04-01", "ocr", "test", 1)
+        entry = repo.create_entry("2026-04-01", "photo", "test", 1)
 
         service.score_entry(entry.id, "first pass")
 

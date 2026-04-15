@@ -296,7 +296,7 @@ def cmd_seed(args, config):
     samples = [
         {
             "date": "2026-03-15",
-            "source_type": "ocr",
+            "source_type": "photo",
             "text": (
                 "Woke up early today and went for a long walk through the park. "
                 "The cherry blossoms are starting to bloom and the air smelled "
@@ -308,7 +308,7 @@ def cmd_seed(args, config):
         },
         {
             "date": "2026-03-16",
-            "source_type": "ocr",
+            "source_type": "photo",
             "text": (
                 "Rainy day. Spent most of it inside reading and working on the "
                 "journal analysis tool. Made good progress on the chunking "
@@ -331,7 +331,7 @@ def cmd_seed(args, config):
         },
         {
             "date": "2026-03-20",
-            "source_type": "ocr",
+            "source_type": "photo",
             "text": (
                 "Took the train to Amsterdam for the day. Visited the "
                 "Rijksmuseum — the Vermeer room was as stunning as ever. Had "
@@ -344,7 +344,7 @@ def cmd_seed(args, config):
         },
         {
             "date": "2026-03-22",
-            "source_type": "ocr",
+            "source_type": "photo",
             "text": (
                 "Saturday morning journaling. This week flew by. Highlights: "
                 "the Amsterdam trip, solving that production bug, and the long "
@@ -373,8 +373,8 @@ def cmd_seed(args, config):
         entry = repo.create_entry(
             sample["date"], sample["source_type"], sample["text"], word_count,
         )
-        # Add a page record for OCR entries
-        if sample["source_type"] == "ocr":
+        # Add a page record for photo entries
+        if sample["source_type"] == "photo":
             repo.add_entry_page(entry.id, 1, sample["text"])
         # Compute and store chunks (with offsets) so the UI shows the
         # real value and the overlay works even though we don't

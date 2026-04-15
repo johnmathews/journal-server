@@ -57,14 +57,14 @@ class TestIngestText:
     def test_creates_entry_with_correct_fields(self, ingestion_service):
         entry = ingestion_service.ingest_text("Hello world today", "2026-04-12")
         assert entry.entry_date == "2026-04-12"
-        assert entry.source_type == "manual"
+        assert entry.source_type == "text_entry"
         assert entry.raw_text == "Hello world today"
         assert entry.final_text == "Hello world today"
         assert entry.word_count == 3
 
     def test_custom_source_type(self, ingestion_service):
-        entry = ingestion_service.ingest_text("Some text", "2026-04-12", "import")
-        assert entry.source_type == "import"
+        entry = ingestion_service.ingest_text("Some text", "2026-04-12", "imported_text_file")
+        assert entry.source_type == "imported_text_file"
 
     def test_chunks_and_embeds(self, ingestion_service, mock_embeddings):
         entry = ingestion_service.ingest_text(

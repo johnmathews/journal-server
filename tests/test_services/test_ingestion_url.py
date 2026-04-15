@@ -106,7 +106,7 @@ class TestIngestImageFromUrl:
         )
 
         assert entry.entry_date == "2026-03-22"
-        assert entry.source_type == "ocr"
+        assert entry.source_type == "photo"
         mock_ocr.extract.assert_called_once_with(b"fake image bytes", "image/jpeg")
 
     @patch("journal.services.ingestion.urlopen")
@@ -245,7 +245,7 @@ class TestIngestMultiPageFromUrls:
         )
 
         assert entry.entry_date == "2026-04-10"
-        assert entry.source_type == "ocr"
+        assert entry.source_type == "photo"
         # Both page texts should be present in the combined entry.
         assert "First page text about Vienna." in entry.raw_text
         assert "Second page text about Atlas." in entry.raw_text

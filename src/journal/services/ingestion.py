@@ -179,7 +179,7 @@ class IngestionService:
 
         # Store entry (final_text defaults to raw_text)
         word_count = len(raw_text.split())
-        entry = self._repo.create_entry(date, "ocr", raw_text, word_count, user_id=user_id)
+        entry = self._repo.create_entry(date, "photo", raw_text, word_count, user_id=user_id)
         source_file_id = self._store_source_file(
             entry.id, f"image_{date}", media_type, file_hash,
         )
@@ -199,7 +199,7 @@ class IngestionService:
 
     def ingest_voice(
         self, audio_data: bytes, media_type: str, date: str, language: str = "en",
-        *, user_id: int = 1,
+        *, source_type: str = "voice", user_id: int = 1,
     ) -> Entry:
         """Ingest a voice note: transcribe -> chunk -> embed -> store."""
         log.info(
@@ -220,7 +220,7 @@ class IngestionService:
 
         # Store entry (final_text defaults to raw_text)
         word_count = len(raw_text.split())
-        entry = self._repo.create_entry(date, "voice", raw_text, word_count, user_id=user_id)
+        entry = self._repo.create_entry(date, source_type, raw_text, word_count, user_id=user_id)
         self._store_source_file(entry.id, f"voice_{date}", media_type, file_hash)
 
         # Chunk, embed, and store in vector DB
@@ -236,6 +236,7 @@ class IngestionService:
         date: str,
         language: str = "en",
         *,
+        source_type: str = "voice",
         on_progress: "Callable[[int, int], None] | None" = None,
         user_id: int = 1,
     ) -> Entry:
@@ -258,7 +259,7 @@ class IngestionService:
         if len(recordings) == 1:
             return self.ingest_voice(
                 recordings[0][0], recordings[0][1], date, language,
-                user_id=user_id,
+                source_type=source_type, user_id=user_id,
             )
 
         log.info(
@@ -292,7 +293,7 @@ class IngestionService:
         raw_text = "\n".join(transcripts)
 
         word_count = len(raw_text.split())
-        entry = self._repo.create_entry(date, "voice", raw_text, word_count, user_id=user_id)
+        entry = self._repo.create_entry(date, source_type, raw_text, word_count, user_id=user_id)
 
         # Store source file records for each recording
         for i, (file_hash, media_type) in enumerate(
@@ -313,7 +314,7 @@ class IngestionService:
         return self._repo.get_entry(entry.id)  # type: ignore[return-value]
 
     def ingest_text(
-        self, text: str, date: str, source_type: str = "manual", *, skip_mood: bool = False,
+        self, text: str, date: str, source_type: str = "text_entry", *, skip_mood: bool = False,
         user_id: int = 1,
     ) -> Entry:
         """Ingest a plain-text entry (no OCR, no transcription).
@@ -325,7 +326,8 @@ class IngestionService:
         Args:
             text: The entry text content.
             date: Journal entry date (ISO 8601).
-            source_type: Entry source type (e.g. "manual", "import").
+            source_type: Entry source type (e.g. "text_entry",
+                "imported_text_file", "imported_audio_file").
             skip_mood: When True, skip inline mood scoring (caller will
                 handle it separately, e.g. via an async job).
         """
@@ -612,7 +614,7 @@ class IngestionService:
             date = extracted
 
         # Create single entry
-        entry = self._repo.create_entry(date, "ocr", combined_text, word_count, user_id=user_id)
+        entry = self._repo.create_entry(date, "photo", combined_text, word_count, user_id=user_id)
 
         # Store source files and pages
         for i, (_image_data, _) in enumerate(images):

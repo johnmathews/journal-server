@@ -91,7 +91,7 @@ class TestEvaluateChunking:
         self, repo, vector_store
     ):
         # One entry, one chunk with 2 sentences about the same topic.
-        entry = repo.create_entry("2026-03-01", "ocr", "raw", 3)
+        entry = repo.create_entry("2026-03-01", "photo", "raw", 3)
         vector_store.add_entry(
             entry_id=entry.id,
             chunks=["Vienna was beautiful. The spring flowers bloomed."],
@@ -112,7 +112,7 @@ class TestEvaluateChunking:
         assert result.n_pairs_evaluated == 0
 
     def test_two_chunks_distinct_topics_high_separation(self, repo, vector_store):
-        entry = repo.create_entry("2026-03-02", "ocr", "raw", 4)
+        entry = repo.create_entry("2026-03-02", "photo", "raw", 4)
         vector_store.add_entry(
             entry_id=entry.id,
             chunks=[
@@ -136,7 +136,7 @@ class TestEvaluateChunking:
     def test_cohesion_separation_ratio_math(self, repo, vector_store):
         # Craft a two-chunk entry where cohesion = 0.8, separation = 0.5
         # so ratio = 0.8 / 0.5 = 1.6.
-        entry = repo.create_entry("2026-03-03", "ocr", "raw", 6)
+        entry = repo.create_entry("2026-03-03", "photo", "raw", 6)
         # Chunk A: 2 sentences with cosine sim = 0.8.
         # Chunk B: 2 sentences with cosine sim = 0.8 (same cohesion).
         # Chunk centroids at 60 degrees apart → sim = 0.5 → separation = 0.5.
@@ -166,7 +166,7 @@ class TestEvaluateChunking:
         """Single-sentence chunks are trivially cohesive (can't be pairwise
         incoherent with zero other sentences). They should count with
         cohesion=1.0 rather than being ignored."""
-        entry = repo.create_entry("2026-03-04", "ocr", "raw", 2)
+        entry = repo.create_entry("2026-03-04", "photo", "raw", 2)
         vector_store.add_entry(
             entry_id=entry.id,
             chunks=["One sentence.", "Another sentence."],
@@ -184,13 +184,13 @@ class TestEvaluateChunking:
 
     def test_entry_with_no_chunks_is_skipped(self, repo, vector_store):
         # Entry exists but has no vectors in the store.
-        repo.create_entry("2026-03-05", "ocr", "raw", 1)
+        repo.create_entry("2026-03-05", "photo", "raw", 1)
         result = evaluate_chunking(repo, vector_store, StubEmbeddings())
         assert result.n_entries_evaluated == 0
 
     def test_ratio_is_comparable_across_runs(self, repo, vector_store):
         """Same corpus evaluated twice should produce the same numbers."""
-        entry = repo.create_entry("2026-03-06", "ocr", "raw", 4)
+        entry = repo.create_entry("2026-03-06", "photo", "raw", 4)
         vector_store.add_entry(
             entry_id=entry.id,
             chunks=["First. Second.", "Third. Fourth."],

@@ -170,8 +170,8 @@ def test_cmd_backfill_mood_dry_run(tmp_path, capsys):
     conn = get_connection(db_path)
     run_migrations(conn)
     repo = SQLiteEntryRepository(conn)
-    repo.create_entry("2026-04-01", "ocr", "first", 1)
-    repo.create_entry("2026-04-02", "ocr", "second", 1)
+    repo.create_entry("2026-04-01", "photo", "first", 1)
+    repo.create_entry("2026-04-02", "photo", "second", 1)
     conn.close()
 
     # Point the config at a minimal valid mood-dimensions file.

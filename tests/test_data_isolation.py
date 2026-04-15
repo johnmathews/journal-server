@@ -58,18 +58,18 @@ class TestEntryGetIsolation:
     """get_entry must be scoped by user_id."""
 
     def test_owner_can_fetch_own_entry(self, repo: SQLiteEntryRepository) -> None:
-        entry = repo.create_entry("2026-04-01", "ocr", "User 1 text", 3, user_id=USER_1)
+        entry = repo.create_entry("2026-04-01", "photo", "User 1 text", 3, user_id=USER_1)
         fetched = repo.get_entry(entry.id, user_id=USER_1)
         assert fetched is not None
         assert fetched.id == entry.id
 
     def test_other_user_cannot_fetch_entry(self, repo: SQLiteEntryRepository) -> None:
-        entry = repo.create_entry("2026-04-01", "ocr", "User 1 text", 3, user_id=USER_1)
+        entry = repo.create_entry("2026-04-01", "photo", "User 1 text", 3, user_id=USER_1)
         fetched = repo.get_entry(entry.id, user_id=USER_2)
         assert fetched is None
 
     def test_no_user_id_bypasses_filter(self, repo: SQLiteEntryRepository) -> None:
-        entry = repo.create_entry("2026-04-01", "ocr", "User 1 text", 3, user_id=USER_1)
+        entry = repo.create_entry("2026-04-01", "photo", "User 1 text", 3, user_id=USER_1)
         fetched = repo.get_entry(entry.id, user_id=None)
         assert fetched is not None
 
@@ -78,9 +78,9 @@ class TestEntryListIsolation:
     """list_entries must be scoped by user_id."""
 
     def test_list_entries_only_shows_own(self, repo: SQLiteEntryRepository) -> None:
-        repo.create_entry("2026-04-01", "ocr", "User 1 first", 3, user_id=USER_1)
-        repo.create_entry("2026-04-02", "ocr", "User 1 second", 3, user_id=USER_1)
-        repo.create_entry("2026-04-01", "ocr", "User 2 first", 3, user_id=USER_2)
+        repo.create_entry("2026-04-01", "photo", "User 1 first", 3, user_id=USER_1)
+        repo.create_entry("2026-04-02", "photo", "User 1 second", 3, user_id=USER_1)
+        repo.create_entry("2026-04-01", "photo", "User 2 first", 3, user_id=USER_2)
 
         u1_entries = repo.list_entries(user_id=USER_1)
         u2_entries = repo.list_entries(user_id=USER_2)
@@ -91,8 +91,8 @@ class TestEntryListIsolation:
         assert u2_entries[0].user_id == USER_2
 
     def test_list_entries_no_user_id_returns_all(self, repo: SQLiteEntryRepository) -> None:
-        repo.create_entry("2026-04-01", "ocr", "User 1", 2, user_id=USER_1)
-        repo.create_entry("2026-04-01", "ocr", "User 2", 2, user_id=USER_2)
+        repo.create_entry("2026-04-01", "photo", "User 1", 2, user_id=USER_1)
+        repo.create_entry("2026-04-01", "photo", "User 2", 2, user_id=USER_2)
 
         all_entries = repo.list_entries(user_id=None)
         assert len(all_entries) == 2
@@ -103,7 +103,7 @@ class TestEntryDateIsolation:
 
     def test_entries_by_date_scoped(self, repo: SQLiteEntryRepository) -> None:
         date = "2026-04-10"
-        repo.create_entry(date, "ocr", "User 1 diary", 3, user_id=USER_1)
+        repo.create_entry(date, "photo", "User 1 diary", 3, user_id=USER_1)
         repo.create_entry(date, "voice", "User 2 diary", 3, user_id=USER_2)
 
         u1 = repo.get_entries_by_date(date, user_id=USER_1)
@@ -119,8 +119,8 @@ class TestEntrySearchIsolation:
     """FTS5 search must be scoped by user_id."""
 
     def test_search_text_scoped(self, repo: SQLiteEntryRepository) -> None:
-        repo.create_entry("2026-04-01", "ocr", "Vienna trip was great", 5, user_id=USER_1)
-        repo.create_entry("2026-04-01", "ocr", "Vienna is beautiful", 3, user_id=USER_2)
+        repo.create_entry("2026-04-01", "photo", "Vienna trip was great", 5, user_id=USER_1)
+        repo.create_entry("2026-04-01", "photo", "Vienna is beautiful", 3, user_id=USER_2)
 
         u1_results = repo.search_text("Vienna", user_id=USER_1)
         u2_results = repo.search_text("Vienna", user_id=USER_2)
@@ -131,8 +131,8 @@ class TestEntrySearchIsolation:
         assert u2_results[0].user_id == USER_2
 
     def test_search_text_with_snippets_scoped(self, repo: SQLiteEntryRepository) -> None:
-        repo.create_entry("2026-04-01", "ocr", "Coffee in Prague morning", 4, user_id=USER_1)
-        repo.create_entry("2026-04-01", "ocr", "Coffee in London afternoon", 4, user_id=USER_2)
+        repo.create_entry("2026-04-01", "photo", "Coffee in Prague morning", 4, user_id=USER_1)
+        repo.create_entry("2026-04-01", "photo", "Coffee in London afternoon", 4, user_id=USER_2)
 
         u1_results = repo.search_text_with_snippets("Coffee", user_id=USER_1)
         u2_results = repo.search_text_with_snippets("Coffee", user_id=USER_2)
@@ -143,9 +143,9 @@ class TestEntrySearchIsolation:
         assert u2_results[0][0].user_id == USER_2
 
     def test_count_text_matches_scoped(self, repo: SQLiteEntryRepository) -> None:
-        repo.create_entry("2026-04-01", "ocr", "Running in the park", 5, user_id=USER_1)
-        repo.create_entry("2026-04-02", "ocr", "Running on the beach", 5, user_id=USER_1)
-        repo.create_entry("2026-04-01", "ocr", "Running errands today", 3, user_id=USER_2)
+        repo.create_entry("2026-04-01", "photo", "Running in the park", 5, user_id=USER_1)
+        repo.create_entry("2026-04-02", "photo", "Running on the beach", 5, user_id=USER_1)
+        repo.create_entry("2026-04-01", "photo", "Running errands today", 3, user_id=USER_2)
 
         assert repo.count_text_matches("Running", user_id=USER_1) == 2
         assert repo.count_text_matches("Running", user_id=USER_2) == 1
@@ -155,8 +155,8 @@ class TestEntryStatisticsIsolation:
     """get_statistics and count_entries must be scoped by user_id."""
 
     def test_statistics_scoped(self, repo: SQLiteEntryRepository) -> None:
-        repo.create_entry("2026-04-01", "ocr", "Short entry", 2, user_id=USER_1)
-        repo.create_entry("2026-04-02", "ocr", "Another entry here", 3, user_id=USER_1)
+        repo.create_entry("2026-04-01", "photo", "Short entry", 2, user_id=USER_1)
+        repo.create_entry("2026-04-02", "photo", "Another entry here", 3, user_id=USER_1)
         repo.create_entry("2026-04-01", "voice", "Voice note from user two", 5, user_id=USER_2)
 
         stats_1 = repo.get_statistics(user_id=USER_1)
@@ -168,10 +168,10 @@ class TestEntryStatisticsIsolation:
         assert stats_2.total_words == 5
 
     def test_count_entries_scoped(self, repo: SQLiteEntryRepository) -> None:
-        repo.create_entry("2026-04-01", "ocr", "One", 1, user_id=USER_1)
-        repo.create_entry("2026-04-02", "ocr", "Two", 1, user_id=USER_1)
-        repo.create_entry("2026-04-03", "ocr", "Three", 1, user_id=USER_1)
-        repo.create_entry("2026-04-01", "ocr", "Uno", 1, user_id=USER_2)
+        repo.create_entry("2026-04-01", "photo", "One", 1, user_id=USER_1)
+        repo.create_entry("2026-04-02", "photo", "Two", 1, user_id=USER_1)
+        repo.create_entry("2026-04-03", "photo", "Three", 1, user_id=USER_1)
+        repo.create_entry("2026-04-01", "photo", "Uno", 1, user_id=USER_2)
 
         assert repo.count_entries(user_id=USER_1) == 3
         assert repo.count_entries(user_id=USER_2) == 1
@@ -181,14 +181,14 @@ class TestEntryMutationIsolation:
     """delete_entry, update_final_text, verify_doubts must not cross user boundaries."""
 
     def test_delete_entry_blocked_for_other_user(self, repo: SQLiteEntryRepository) -> None:
-        entry = repo.create_entry("2026-04-01", "ocr", "Private data", 2, user_id=USER_1)
+        entry = repo.create_entry("2026-04-01", "photo", "Private data", 2, user_id=USER_1)
         deleted = repo.delete_entry(entry.id, user_id=USER_2)
         assert deleted is False
         # Entry must still exist for user 1
         assert repo.get_entry(entry.id, user_id=USER_1) is not None
 
     def test_delete_entry_succeeds_for_owner(self, repo: SQLiteEntryRepository) -> None:
-        entry = repo.create_entry("2026-04-01", "ocr", "Delete me", 2, user_id=USER_1)
+        entry = repo.create_entry("2026-04-01", "photo", "Delete me", 2, user_id=USER_1)
         deleted = repo.delete_entry(entry.id, user_id=USER_1)
         assert deleted is True
         assert repo.get_entry(entry.id) is None
@@ -196,7 +196,7 @@ class TestEntryMutationIsolation:
     def test_update_final_text_blocked_for_other_user(
         self, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-04-01", "ocr", "Original text", 2, user_id=USER_1)
+        entry = repo.create_entry("2026-04-01", "photo", "Original text", 2, user_id=USER_1)
         result = repo.update_final_text(entry.id, "Hacked text", 2, 0, user_id=USER_2)
         assert result is None
         # Original text must remain intact
@@ -207,7 +207,7 @@ class TestEntryMutationIsolation:
     def test_update_final_text_succeeds_for_owner(
         self, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-04-01", "ocr", "Original text", 2, user_id=USER_1)
+        entry = repo.create_entry("2026-04-01", "photo", "Original text", 2, user_id=USER_1)
         result = repo.update_final_text(entry.id, "Corrected text", 2, 1, user_id=USER_1)
         assert result is not None
         assert result.final_text == "Corrected text"
@@ -215,7 +215,7 @@ class TestEntryMutationIsolation:
     def test_verify_doubts_blocked_for_other_user(
         self, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-04-01", "ocr", "Doubtful text", 2, user_id=USER_1)
+        entry = repo.create_entry("2026-04-01", "photo", "Doubtful text", 2, user_id=USER_1)
         result = repo.verify_doubts(entry.id, user_id=USER_2)
         assert result is False
         # doubts_verified must remain False for the entry
@@ -226,7 +226,7 @@ class TestEntryMutationIsolation:
     def test_verify_doubts_succeeds_for_owner(
         self, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-04-01", "ocr", "Doubtful text", 2, user_id=USER_1)
+        entry = repo.create_entry("2026-04-01", "photo", "Doubtful text", 2, user_id=USER_1)
         result = repo.verify_doubts(entry.id, user_id=USER_1)
         assert result is True
         fetched = repo.get_entry(entry.id, user_id=USER_1)
@@ -467,8 +467,8 @@ class TestUserIdPersistence:
     """Verify that user_id is round-tripped correctly through creation and read."""
 
     def test_entry_user_id_persisted(self, repo: SQLiteEntryRepository) -> None:
-        e1 = repo.create_entry("2026-04-01", "ocr", "Text", 1, user_id=USER_1)
-        e2 = repo.create_entry("2026-04-01", "ocr", "Text", 1, user_id=USER_2)
+        e1 = repo.create_entry("2026-04-01", "photo", "Text", 1, user_id=USER_1)
+        e2 = repo.create_entry("2026-04-01", "photo", "Text", 1, user_id=USER_2)
         assert e1.user_id == USER_1
         assert e2.user_id == USER_2
 

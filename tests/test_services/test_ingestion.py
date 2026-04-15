@@ -63,7 +63,7 @@ class TestIngestImage:
         )
 
         assert entry.entry_date == "2026-03-22"
-        assert entry.source_type == "ocr"
+        assert entry.source_type == "photo"
         assert "Vienna" in entry.raw_text
         assert entry.word_count == 10
 
@@ -441,7 +441,7 @@ class TestMultiPageIngestion:
         )
 
         assert entry.entry_date == "2026-03-22"
-        assert entry.source_type == "ocr"
+        assert entry.source_type == "photo"
         assert "Page one text." in entry.raw_text
         assert "Page two text." in entry.raw_text
         # Pages are joined with a single newline (not "\n\n") so page
@@ -733,7 +733,7 @@ class TestRechunkEntry:
     def test_rechunk_empty_text_returns_zero(self, ingestion_service):
         # Manually create an entry with no text (bypasses ingest_image
         # which would have rejected empty OCR output).
-        entry = ingestion_service._repo.create_entry("2026-03-22", "ocr", "", 0)
+        entry = ingestion_service._repo.create_entry("2026-03-22", "photo", "", 0)
         ingestion_service._repo.update_chunk_count(entry.id, 0)
 
         result = ingestion_service.rechunk_entry(entry.id)

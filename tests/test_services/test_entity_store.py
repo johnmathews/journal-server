@@ -21,7 +21,7 @@ def repo(db_conn: sqlite3.Connection) -> SQLiteEntryRepository:
 @pytest.fixture
 def sample_entry_id(repo: SQLiteEntryRepository) -> int:
     entry = repo.create_entry(
-        "2026-03-22", "ocr", "Atlas and I went to Vienna.", 6,
+        "2026-03-22", "photo", "Atlas and I went to Vienna.", 6,
     )
     return entry.id
 
@@ -228,8 +228,8 @@ class TestMentions:
         store: SQLiteEntityStore,
         repo: SQLiteEntryRepository,
     ) -> None:
-        e1 = repo.create_entry("2026-03-22", "ocr", "first", 1).id
-        e2 = repo.create_entry("2026-03-23", "ocr", "second", 1).id
+        e1 = repo.create_entry("2026-03-22", "photo", "first", 1).id
+        e2 = repo.create_entry("2026-03-23", "photo", "second", 1).id
         atlas = store.create_entity("person", "Atlas", "", "2026-03-22")
         store.create_mention(atlas.id, e1, "Atlas", 0.9, "run1")
         store.create_mention(atlas.id, e2, "Atlas", 0.9, "run1")
@@ -294,7 +294,7 @@ class TestStaleFlag:
         repo: SQLiteEntryRepository,
         db_conn: sqlite3.Connection,
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "text", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "text", 1)
         row = db_conn.execute(
             "SELECT entity_extraction_stale FROM entries WHERE id = ?",
             (entry.id,),
@@ -314,7 +314,7 @@ class TestStaleFlag:
         repo: SQLiteEntryRepository,
         db_conn: sqlite3.Connection,
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "first", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "first", 1)
         store.mark_entry_extracted(entry.id)
 
         repo.update_final_text(entry.id, "corrected text", 2, 0)

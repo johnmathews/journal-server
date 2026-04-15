@@ -28,7 +28,7 @@ List entries with pagination and optional date filtering.
   {
    "id": 1,
    "entry_date": "2026-04-09",
-   "source_type": "image",
+   "source_type": "photo",
    "page_count": 2,
    "word_count": 450,
    "chunk_count": 5,
@@ -53,7 +53,7 @@ Get a single entry with full text.
 {
  "id": 1,
  "entry_date": "2026-04-09",
- "source_type": "image",
+ "source_type": "photo",
  "raw_text": "original OCR output...",
  "final_text": "corrected text...",
  "page_count": 2,
@@ -289,7 +289,7 @@ If you ever front this server with a reverse proxy, exclude `/health` from the p
   "total_entries": 42,
   "entries_last_7d": 3,
   "entries_last_30d": 12,
-  "by_source_type": { "ocr": 30, "voice": 12 },
+  "by_source_type": { "photo": 30, "voice": 12 },
   "avg_words_per_entry": 187.5,
   "avg_chunks_per_entry": 2.3,
   "last_ingestion_at": "2026-04-11T08:12:33Z",
@@ -556,13 +556,13 @@ Create a journal entry from plain text (no OCR). Synchronous.
 | ------------- | ------ | -------- | ---------- | ----------------- |
 | `text`        | string | yes      |            | Entry content     |
 | `entry_date`  | string | no       | today      | ISO 8601 date     |
-| `source_type` | string | no       | `"manual"` | Source type label |
+| `source_type` | string | no       | `"text_entry"` | Source type label (e.g. `text_entry`, `imported_text_file`) |
 
 **Response (201):**
 
 ```json
 {
- "entry": { "id": 1, "entry_date": "2026-04-12", "source_type": "manual", "...": "..." },
+ "entry": { "id": 1, "entry_date": "2026-04-12", "source_type": "text_entry", "...": "..." },
  "mood_job_id": "uuid-or-null",
  "entity_extraction_job_id": "uuid-or-null"
 }
@@ -638,10 +638,11 @@ of recording a journal entry in multiple segments (e.g., start, pause, continue)
 
 **Request body (multipart/form-data):**
 
-| Field        | Type    | Required | Default | Description                                                     |
-| ------------ | ------- | -------- | ------- | --------------------------------------------------------------- |
-| `audio`      | file(s) | yes      |         | One or more audio files (MP3, MP4, WAV, WebM, OGG, FLAC, M4A)  |
-| `entry_date` | string  | no       | today   | ISO 8601 date                                                   |
+| Field         | Type    | Required | Default   | Description                                                     |
+| ------------- | ------- | -------- | --------- | --------------------------------------------------------------- |
+| `audio`       | file(s) | yes      |           | One or more audio files (MP3, MP4, WAV, WebM, OGG, FLAC, M4A)  |
+| `entry_date`  | string  | no       | today     | ISO 8601 date                                                   |
+| `source_type` | string  | no       | `"voice"` | `"voice"` (live recording) or `"imported_audio_file"`           |
 
 **Limits:** 100 MB per file, 500 MB total.
 

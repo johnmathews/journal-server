@@ -125,6 +125,7 @@ _REPROCESS_EMBEDDINGS_KEYS: dict[str, type | tuple[type, ...]] = {
 
 _INGEST_AUDIO_KEYS: dict[str, type | tuple[type, ...]] = {
     "entry_date": str,
+    "source_type": str,
 }
 
 
@@ -315,17 +316,19 @@ class JobRunner:
         recordings: list[tuple[bytes, str, str]],  # (data, media_type, filename)
         entry_date: str,
         *,
+        source_type: str = "voice",
         user_id: int | None = None,
     ) -> Job:
         """Queue an audio-ingestion job.
 
         Audio recordings are held in memory until the worker starts.
-        The params stored in the jobs table contain only the entry_date
-        and recording count (audio bytes are too large for the JSON column).
+        The params stored in the jobs table contain only the entry_date,
+        recording count, and source_type (audio bytes are too large for
+        the JSON column).
         """
         if not recordings:
             raise ValueError("At least one audio recording is required")
-        params = {"entry_date": entry_date}
+        params = {"entry_date": entry_date, "source_type": source_type}
         _validate_params(params, _INGEST_AUDIO_KEYS, job_type="ingest_audio")
         job = self._jobs.create(
             "ingest_audio", {**params, "recording_count": len(recordings)},
@@ -650,6 +653,7 @@ class JobRunner:
                     self._jobs.update_progress(job_id, 0, total)
                     entry = self._ingestion.ingest_multi_voice(
                         recordings, entry_date,
+                        source_type=params.get("source_type", "voice"),
                         on_progress=progress_callback,
                     )
                     last_exc = None

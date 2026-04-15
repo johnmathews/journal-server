@@ -153,7 +153,7 @@ class TestIngestText:
         assert response.status_code == 201
         data = response.json()
         assert "entry" in data
-        assert data["entry"]["source_type"] == "manual"
+        assert data["entry"]["source_type"] == "text_entry"
         assert "walk" in data["entry"]["final_text"]
         assert data["mood_job_id"] is None
 
@@ -168,10 +168,10 @@ class TestIngestText:
     def test_custom_source_type(self, client: TestClient) -> None:
         response = client.post(
             "/api/entries/ingest/text",
-            json={"text": "Imported text.", "source_type": "import"},
+            json={"text": "Imported text.", "source_type": "imported_text_file"},
         )
         assert response.status_code == 201
-        assert response.json()["entry"]["source_type"] == "import"
+        assert response.json()["entry"]["source_type"] == "imported_text_file"
 
     def test_missing_text(self, client: TestClient) -> None:
         response = client.post("/api/entries/ingest/text", json={})
@@ -208,7 +208,7 @@ class TestIngestFile:
         response = self._upload(client, "My exported journal entry.")
         assert response.status_code == 201
         data = response.json()
-        assert data["entry"]["source_type"] == "import"
+        assert data["entry"]["source_type"] == "imported_text_file"
         assert "exported" in data["entry"]["final_text"]
 
     def test_md_upload(self, client: TestClient) -> None:
@@ -362,7 +362,7 @@ class TestPatchMoodScoring:
         config = Config(enable_mood_scoring=True)
         services["config"] = config
 
-        entry = repo.create_entry("2026-04-01", "ocr", "raw text", 2)
+        entry = repo.create_entry("2026-04-01", "photo", "raw text", 2)
         response = client.patch(
             f"/api/entries/{entry.id}",
             json={"final_text": "corrected text"},
@@ -375,7 +375,7 @@ class TestPatchMoodScoring:
         self, client: TestClient, repo: SQLiteEntryRepository,
     ) -> None:
         """Without config, no mood job should be queued."""
-        entry = repo.create_entry("2026-04-02", "ocr", "raw text", 2)
+        entry = repo.create_entry("2026-04-02", "photo", "raw text", 2)
         response = client.patch(
             f"/api/entries/{entry.id}",
             json={"final_text": "corrected text"},
@@ -391,7 +391,7 @@ class TestListEntriesUncertainSpanCount:
     def test_entries_include_uncertain_span_count(
         self, client: TestClient, repo: SQLiteEntryRepository,
     ) -> None:
-        entry = repo.create_entry("2026-04-01", "ocr", "Hello Ritsya.", 2)
+        entry = repo.create_entry("2026-04-01", "photo", "Hello Ritsya.", 2)
         repo.add_uncertain_spans(entry.id, [(6, 12)])
 
         response = client.get("/api/entries")
@@ -404,7 +404,7 @@ class TestListEntriesUncertainSpanCount:
     def test_zero_spans_returns_zero(
         self, client: TestClient, repo: SQLiteEntryRepository,
     ) -> None:
-        repo.create_entry("2026-04-02", "manual", "Clear text.", 2)
+        repo.create_entry("2026-04-02", "text_entry", "Clear text.", 2)
 
         response = client.get("/api/entries")
         assert response.status_code == 200

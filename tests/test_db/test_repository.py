@@ -15,15 +15,15 @@ def repo(db_conn):
 
 class TestCreateAndGetEntry:
     def test_create_entry(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "Today was a good day.", 5)
+        entry = repo.create_entry("2026-03-22", "photo", "Today was a good day.", 5)
         assert entry.id == 1
         assert entry.entry_date == "2026-03-22"
-        assert entry.source_type == "ocr"
+        assert entry.source_type == "photo"
         assert entry.raw_text == "Today was a good day."
         assert entry.word_count == 5
 
     def test_get_entry(self, repo):
-        created = repo.create_entry("2026-03-22", "ocr", "Hello world", 2)
+        created = repo.create_entry("2026-03-22", "photo", "Hello world", 2)
         fetched = repo.get_entry(created.id)
         assert fetched is not None
         assert fetched.id == created.id
@@ -33,9 +33,9 @@ class TestCreateAndGetEntry:
         assert repo.get_entry(999) is None
 
     def test_get_entries_by_date(self, repo):
-        repo.create_entry("2026-03-22", "ocr", "Entry one", 2)
+        repo.create_entry("2026-03-22", "photo", "Entry one", 2)
         repo.create_entry("2026-03-22", "voice", "Entry two", 2)
-        repo.create_entry("2026-03-23", "ocr", "Entry three", 2)
+        repo.create_entry("2026-03-23", "photo", "Entry three", 2)
 
         entries = repo.get_entries_by_date("2026-03-22")
         assert len(entries) == 2
@@ -44,14 +44,14 @@ class TestCreateAndGetEntry:
 class TestListEntries:
     def test_list_entries_all(self, repo):
         for i in range(5):
-            repo.create_entry(f"2026-03-{20 + i:02d}", "ocr", f"Entry {i}", 2)
+            repo.create_entry(f"2026-03-{20 + i:02d}", "photo", f"Entry {i}", 2)
         entries = repo.list_entries()
         assert len(entries) == 5
 
     def test_list_entries_with_date_filter(self, repo):
-        repo.create_entry("2026-03-01", "ocr", "March start", 2)
-        repo.create_entry("2026-03-15", "ocr", "March mid", 2)
-        repo.create_entry("2026-03-31", "ocr", "March end", 2)
+        repo.create_entry("2026-03-01", "photo", "March start", 2)
+        repo.create_entry("2026-03-15", "photo", "March mid", 2)
+        repo.create_entry("2026-03-31", "photo", "March end", 2)
 
         entries = repo.list_entries(start_date="2026-03-10", end_date="2026-03-20")
         assert len(entries) == 1
@@ -59,7 +59,7 @@ class TestListEntries:
 
     def test_list_entries_pagination(self, repo):
         for i in range(10):
-            repo.create_entry(f"2026-03-{i + 1:02d}", "ocr", f"Entry {i}", 2)
+            repo.create_entry(f"2026-03-{i + 1:02d}", "photo", f"Entry {i}", 2)
         page1 = repo.list_entries(limit=3, offset=0)
         page2 = repo.list_entries(limit=3, offset=3)
         assert len(page1) == 3
@@ -69,23 +69,23 @@ class TestListEntries:
 
 class TestFTS:
     def test_search_text(self, repo):
-        repo.create_entry("2026-03-22", "ocr", "Walked through Vienna today", 4)
-        repo.create_entry("2026-03-23", "ocr", "Stayed home and read a book", 6)
+        repo.create_entry("2026-03-22", "photo", "Walked through Vienna today", 4)
+        repo.create_entry("2026-03-23", "photo", "Stayed home and read a book", 6)
 
         results = repo.search_text("Vienna")
         assert len(results) == 1
         assert "Vienna" in results[0].raw_text
 
     def test_search_text_with_date_filter(self, repo):
-        repo.create_entry("2026-01-15", "ocr", "Vienna in January", 3)
-        repo.create_entry("2026-03-15", "ocr", "Vienna in March", 3)
+        repo.create_entry("2026-01-15", "photo", "Vienna in January", 3)
+        repo.create_entry("2026-03-15", "photo", "Vienna in March", 3)
 
         results = repo.search_text("Vienna", start_date="2026-03-01")
         assert len(results) == 1
         assert results[0].entry_date == "2026-03-15"
 
     def test_search_text_no_results(self, repo):
-        repo.create_entry("2026-03-22", "ocr", "Nothing relevant here", 3)
+        repo.create_entry("2026-03-22", "photo", "Nothing relevant here", 3)
         results = repo.search_text("Vienna")
         assert len(results) == 0
 
@@ -94,7 +94,7 @@ class TestFTSSnippets:
     def test_search_text_with_snippets_wraps_matches(self, repo):
         repo.create_entry(
             "2026-03-22",
-            "ocr",
+            "photo",
             "Walked through Vienna with Atlas and later met Robyn.",
             10,
         )
@@ -111,8 +111,8 @@ class TestFTSSnippets:
         assert snippet[start + 1 : end].lower() == "vienna"
 
     def test_search_text_with_snippets_date_filter(self, repo):
-        repo.create_entry("2026-01-15", "ocr", "Vienna in January", 3)
-        repo.create_entry("2026-03-15", "ocr", "Vienna in March", 3)
+        repo.create_entry("2026-01-15", "photo", "Vienna in January", 3)
+        repo.create_entry("2026-03-15", "photo", "Vienna in March", 3)
 
         results = repo.search_text_with_snippets(
             "Vienna", start_date="2026-03-01"
@@ -125,7 +125,7 @@ class TestFTSSnippets:
         for i in range(5):
             repo.create_entry(
                 f"2026-03-{10 + i:02d}",
-                "ocr",
+                "photo",
                 f"Entry number {i} mentions Atlas in some form.",
                 8,
             )
@@ -138,19 +138,19 @@ class TestFTSSnippets:
         assert ids_one.isdisjoint(ids_two)
 
     def test_search_text_with_snippets_no_match(self, repo):
-        repo.create_entry("2026-03-22", "ocr", "Nothing relevant here", 3)
+        repo.create_entry("2026-03-22", "photo", "Nothing relevant here", 3)
         results = repo.search_text_with_snippets("Vienna")
         assert results == []
 
     def test_count_text_matches(self, repo):
-        repo.create_entry("2026-03-01", "ocr", "Atlas the dog", 3)
-        repo.create_entry("2026-03-02", "ocr", "Atlas again", 2)
-        repo.create_entry("2026-03-03", "ocr", "No match here", 3)
+        repo.create_entry("2026-03-01", "photo", "Atlas the dog", 3)
+        repo.create_entry("2026-03-02", "photo", "Atlas again", 2)
+        repo.create_entry("2026-03-03", "photo", "No match here", 3)
         assert repo.count_text_matches("Atlas") == 2
 
     def test_count_text_matches_with_date_filter(self, repo):
-        repo.create_entry("2026-01-15", "ocr", "Vienna visit", 2)
-        repo.create_entry("2026-03-15", "ocr", "Vienna trip", 2)
+        repo.create_entry("2026-01-15", "photo", "Vienna visit", 2)
+        repo.create_entry("2026-03-15", "photo", "Vienna trip", 2)
         assert (
             repo.count_text_matches("Vienna", start_date="2026-03-01") == 1
         )
@@ -174,10 +174,10 @@ class TestWritingFrequency:
         # week starting Monday 2026-03-23 — except the Sunday
         # entry, which belongs to the PREVIOUS week starting
         # 2026-03-16. Verify both.
-        repo.create_entry("2026-03-22", "ocr", "Sunday entry", 2)
-        repo.create_entry("2026-03-23", "ocr", "Monday entry", 2)
-        repo.create_entry("2026-03-24", "ocr", "Tuesday entry", 2)
-        repo.create_entry("2026-03-30", "ocr", "Next Monday", 2)
+        repo.create_entry("2026-03-22", "photo", "Sunday entry", 2)
+        repo.create_entry("2026-03-23", "photo", "Monday entry", 2)
+        repo.create_entry("2026-03-24", "photo", "Tuesday entry", 2)
+        repo.create_entry("2026-03-30", "photo", "Next Monday", 2)
 
         bins = repo.get_writing_frequency(None, None, "week")
         by_start = {b.bin_start: b for b in bins}
@@ -190,10 +190,10 @@ class TestWritingFrequency:
         assert by_start["2026-03-30"].entry_count == 1
 
     def test_month_bins_start_on_first_of_month(self, repo):
-        repo.create_entry("2026-03-01", "ocr", "march start", 2)
-        repo.create_entry("2026-03-15", "ocr", "march mid", 2)
-        repo.create_entry("2026-03-31", "ocr", "march end", 2)
-        repo.create_entry("2026-04-01", "ocr", "april start", 2)
+        repo.create_entry("2026-03-01", "photo", "march start", 2)
+        repo.create_entry("2026-03-15", "photo", "march mid", 2)
+        repo.create_entry("2026-03-31", "photo", "march end", 2)
+        repo.create_entry("2026-04-01", "photo", "april start", 2)
 
         bins = repo.get_writing_frequency(None, None, "month")
         by_start = {b.bin_start: b for b in bins}
@@ -202,11 +202,11 @@ class TestWritingFrequency:
         assert by_start["2026-04-01"].entry_count == 1
 
     def test_quarter_bins_start_on_jan_apr_jul_oct(self, repo):
-        repo.create_entry("2026-01-15", "ocr", "q1 mid", 2)
-        repo.create_entry("2026-02-28", "ocr", "q1 end", 2)
-        repo.create_entry("2026-04-01", "ocr", "q2 start", 2)
-        repo.create_entry("2026-07-15", "ocr", "q3 mid", 2)
-        repo.create_entry("2026-12-31", "ocr", "q4 end", 2)
+        repo.create_entry("2026-01-15", "photo", "q1 mid", 2)
+        repo.create_entry("2026-02-28", "photo", "q1 end", 2)
+        repo.create_entry("2026-04-01", "photo", "q2 start", 2)
+        repo.create_entry("2026-07-15", "photo", "q3 mid", 2)
+        repo.create_entry("2026-12-31", "photo", "q4 end", 2)
 
         bins = repo.get_writing_frequency(None, None, "quarter")
         by_start = {b.bin_start: b for b in bins}
@@ -217,9 +217,9 @@ class TestWritingFrequency:
         assert by_start["2026-10-01"].entry_count == 1
 
     def test_year_bins_start_on_jan_first(self, repo):
-        repo.create_entry("2025-06-15", "ocr", "2025 entry", 2)
-        repo.create_entry("2026-01-01", "ocr", "2026 start", 2)
-        repo.create_entry("2026-12-31", "ocr", "2026 end", 2)
+        repo.create_entry("2025-06-15", "photo", "2025 entry", 2)
+        repo.create_entry("2026-01-01", "photo", "2026 start", 2)
+        repo.create_entry("2026-12-31", "photo", "2026 end", 2)
 
         bins = repo.get_writing_frequency(None, None, "year")
         by_start = {b.bin_start: b for b in bins}
@@ -230,8 +230,8 @@ class TestWritingFrequency:
     def test_total_words_sums_per_bin(self, repo):
         # 2026-03-02 is a Monday, 2026-03-03 is Tuesday. Both fall
         # in the week starting 2026-03-02.
-        repo.create_entry("2026-03-02", "ocr", "a b c", 3)
-        repo.create_entry("2026-03-03", "ocr", "d e f g", 4)
+        repo.create_entry("2026-03-02", "photo", "a b c", 3)
+        repo.create_entry("2026-03-03", "photo", "d e f g", 4)
         bins = repo.get_writing_frequency(None, None, "week")
         assert len(bins) == 1
         assert bins[0].bin_start == "2026-03-02"
@@ -239,9 +239,9 @@ class TestWritingFrequency:
         assert bins[0].total_words == 7
 
     def test_date_filter_clamps_bins(self, repo):
-        repo.create_entry("2026-01-15", "ocr", "january", 2)
-        repo.create_entry("2026-03-15", "ocr", "march", 2)
-        repo.create_entry("2026-06-15", "ocr", "june", 2)
+        repo.create_entry("2026-01-15", "photo", "january", 2)
+        repo.create_entry("2026-03-15", "photo", "march", 2)
+        repo.create_entry("2026-06-15", "photo", "june", 2)
 
         bins = repo.get_writing_frequency(
             start_date="2026-02-01",
@@ -255,16 +255,16 @@ class TestWritingFrequency:
         """March and May have entries; April has none. April must
         NOT appear as a zero-count bin — callers that need dense
         series fill gaps client-side."""
-        repo.create_entry("2026-03-01", "ocr", "march", 2)
-        repo.create_entry("2026-05-01", "ocr", "may", 2)
+        repo.create_entry("2026-03-01", "photo", "march", 2)
+        repo.create_entry("2026-05-01", "photo", "may", 2)
         bins = repo.get_writing_frequency(None, None, "month")
         starts = {b.bin_start for b in bins}
         assert starts == {"2026-03-01", "2026-05-01"}
 
     def test_results_sorted_ascending(self, repo):
-        repo.create_entry("2026-05-01", "ocr", "may", 2)
-        repo.create_entry("2026-01-01", "ocr", "jan", 2)
-        repo.create_entry("2026-03-01", "ocr", "march", 2)
+        repo.create_entry("2026-05-01", "photo", "may", 2)
+        repo.create_entry("2026-01-01", "photo", "jan", 2)
+        repo.create_entry("2026-03-01", "photo", "march", 2)
         bins = repo.get_writing_frequency(None, None, "month")
         starts = [b.bin_start for b in bins]
         assert starts == sorted(starts)
@@ -304,11 +304,11 @@ class TestIngestionStats:
 
         now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=UTC)
         # Three entries within the last 7 days.
-        repo.create_entry("2026-04-05", "ocr", "recent one two three", 4)
+        repo.create_entry("2026-04-05", "photo", "recent one two three", 4)
         repo.create_entry("2026-04-08", "voice", "recent voice note here", 4)
-        repo.create_entry("2026-04-10", "ocr", "also recent entry body", 4)
+        repo.create_entry("2026-04-10", "photo", "also recent entry body", 4)
         # One entry in last 30 days but NOT last 7.
-        repo.create_entry("2026-03-20", "ocr", "medium age entry text", 4)
+        repo.create_entry("2026-03-20", "photo", "medium age entry text", 4)
         # One entry beyond 30 days.
         repo.create_entry("2026-02-01", "voice", "old voice entry longer text", 5)
 
@@ -317,7 +317,7 @@ class TestIngestionStats:
         assert stats.total_entries == 5
         assert stats.entries_last_7d == 3
         assert stats.entries_last_30d == 4  # 3 recent + 1 March 20
-        assert stats.by_source_type == {"ocr": 3, "voice": 2}
+        assert stats.by_source_type == {"photo": 3, "voice": 2}
         assert stats.avg_words_per_entry == 4.2
         assert stats.row_counts["entries"] == 5
         assert stats.last_ingestion_at is not None
@@ -325,7 +325,7 @@ class TestIngestionStats:
     def test_avg_chunks_reflects_update_chunk_count(self, repo):
         from datetime import UTC, datetime
 
-        e = repo.create_entry("2026-04-01", "ocr", "body body body", 3)
+        e = repo.create_entry("2026-04-01", "photo", "body body body", 3)
         repo.update_chunk_count(e.id, 4)
         stats = repo.get_ingestion_stats(
             now=datetime(2026, 4, 11, tzinfo=UTC)
@@ -347,8 +347,8 @@ class TestIngestionStats:
 
 class TestStatistics:
     def test_get_statistics(self, repo):
-        repo.create_entry("2026-01-15", "ocr", "January entry", 2)
-        repo.create_entry("2026-02-15", "ocr", "February entry with more words", 5)
+        repo.create_entry("2026-01-15", "photo", "January entry", 2)
+        repo.create_entry("2026-02-15", "photo", "February entry with more words", 5)
         repo.create_entry("2026-03-15", "voice", "March entry", 2)
 
         stats = repo.get_statistics()
@@ -365,8 +365,8 @@ class TestStatistics:
         assert stats.total_words == 0
 
     def test_get_statistics_date_filtered(self, repo):
-        repo.create_entry("2026-01-15", "ocr", "Old entry", 2)
-        repo.create_entry("2026-03-15", "ocr", "New entry", 2)
+        repo.create_entry("2026-01-15", "photo", "Old entry", 2)
+        repo.create_entry("2026-03-15", "photo", "New entry", 2)
 
         stats = repo.get_statistics(start_date="2026-03-01")
         assert stats.total_entries == 1
@@ -374,7 +374,7 @@ class TestStatistics:
 
 class TestPeopleAndPlaces:
     def test_add_people(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "Met Atlas and Luna today", 5)
+        entry = repo.create_entry("2026-03-22", "photo", "Met Atlas and Luna today", 5)
         repo.add_people(entry.id, ["Atlas", "Luna"])
 
         sql = (
@@ -386,7 +386,7 @@ class TestPeopleAndPlaces:
         assert names == {"Atlas", "Luna"}
 
     def test_add_places(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "Visited Vienna and Graz", 4)
+        entry = repo.create_entry("2026-03-22", "photo", "Visited Vienna and Graz", 4)
         repo.add_places(entry.id, ["Vienna", "Graz"])
 
         sql = (
@@ -398,7 +398,7 @@ class TestPeopleAndPlaces:
         assert names == {"Vienna", "Graz"}
 
     def test_add_tags(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "Reflection on life", 3)
+        entry = repo.create_entry("2026-03-22", "photo", "Reflection on life", 3)
         repo.add_tags(entry.id, ["reflection", "philosophy"])
 
         sql = (
@@ -412,7 +412,7 @@ class TestPeopleAndPlaces:
 
 class TestMoodScores:
     def test_add_mood_score(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "Feeling great", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Feeling great", 2)
         repo.add_mood_score(entry.id, "overall", 0.8, confidence=0.9)
 
         row = repo._conn.execute(
@@ -423,8 +423,8 @@ class TestMoodScores:
         assert row["confidence"] == 0.9
 
     def test_get_mood_trends(self, repo):
-        e1 = repo.create_entry("2026-03-01", "ocr", "Good day", 2)
-        e2 = repo.create_entry("2026-03-08", "ocr", "Bad day", 2)
+        e1 = repo.create_entry("2026-03-01", "photo", "Good day", 2)
+        e2 = repo.create_entry("2026-03-08", "photo", "Bad day", 2)
         repo.add_mood_score(e1.id, "overall", 0.8)
         repo.add_mood_score(e2.id, "overall", -0.3)
 
@@ -433,8 +433,8 @@ class TestMoodScores:
         assert trends[0].dimension == "overall"
 
     def test_get_mood_trends_by_week(self, repo):
-        e1 = repo.create_entry("2026-03-01", "ocr", "Good day", 2)
-        e2 = repo.create_entry("2026-03-15", "ocr", "Bad day", 2)
+        e1 = repo.create_entry("2026-03-01", "photo", "Good day", 2)
+        e2 = repo.create_entry("2026-03-15", "photo", "Bad day", 2)
         repo.add_mood_score(e1.id, "overall", 0.8)
         repo.add_mood_score(e2.id, "overall", -0.3)
 
@@ -447,7 +447,7 @@ class TestMoodScoresCRUD:
     mood_scores."""
 
     def test_replace_mood_scores_inserts_fresh(self, repo):
-        e = repo.create_entry("2026-04-01", "ocr", "hello", 1)
+        e = repo.create_entry("2026-04-01", "photo", "hello", 1)
         repo.replace_mood_scores(
             e.id,
             [
@@ -464,7 +464,7 @@ class TestMoodScoresCRUD:
         assert by_dim["agency"].confidence is None
 
     def test_replace_mood_scores_is_idempotent(self, repo):
-        e = repo.create_entry("2026-04-01", "ocr", "hello", 1)
+        e = repo.create_entry("2026-04-01", "photo", "hello", 1)
         repo.replace_mood_scores(e.id, [("joy_sadness", 0.5, None)])
         repo.replace_mood_scores(e.id, [("joy_sadness", 0.8, None)])
         scores = repo.get_mood_scores(e.id)
@@ -473,7 +473,7 @@ class TestMoodScoresCRUD:
         assert scores[0].score == 0.8
 
     def test_replace_mood_scores_preserves_untouched_dims(self, repo):
-        e = repo.create_entry("2026-04-01", "ocr", "hello", 1)
+        e = repo.create_entry("2026-04-01", "photo", "hello", 1)
         repo.replace_mood_scores(
             e.id,
             [
@@ -490,29 +490,29 @@ class TestMoodScoresCRUD:
         assert by_dim["agency"] == 0.7
 
     def test_replace_mood_scores_empty_list_is_noop(self, repo):
-        e = repo.create_entry("2026-04-01", "ocr", "hello", 1)
+        e = repo.create_entry("2026-04-01", "photo", "hello", 1)
         repo.replace_mood_scores(e.id, [("joy_sadness", 0.5, None)])
         repo.replace_mood_scores(e.id, [])
         scores = repo.get_mood_scores(e.id)
         assert len(scores) == 1  # unchanged
 
     def test_get_entries_missing_mood_scores_empty_dims(self, repo):
-        e = repo.create_entry("2026-04-01", "ocr", "hello", 1)
+        e = repo.create_entry("2026-04-01", "photo", "hello", 1)
         assert repo.get_entries_missing_mood_scores([]) == []
         # Also doesn't break when entries exist.
         assert e.id
 
     def test_get_entries_missing_mood_scores_all_missing(self, repo):
-        e1 = repo.create_entry("2026-04-01", "ocr", "one", 1)
-        e2 = repo.create_entry("2026-04-02", "ocr", "two", 1)
+        e1 = repo.create_entry("2026-04-01", "photo", "one", 1)
+        e2 = repo.create_entry("2026-04-02", "photo", "two", 1)
         missing = repo.get_entries_missing_mood_scores(
             ["joy_sadness", "agency"]
         )
         assert sorted(missing) == sorted([e1.id, e2.id])
 
     def test_get_entries_missing_mood_scores_partial(self, repo):
-        e1 = repo.create_entry("2026-04-01", "ocr", "one", 1)
-        e2 = repo.create_entry("2026-04-02", "ocr", "two", 1)
+        e1 = repo.create_entry("2026-04-01", "photo", "one", 1)
+        e2 = repo.create_entry("2026-04-02", "photo", "two", 1)
         # e1 has joy_sadness only; e2 has both.
         repo.replace_mood_scores(e1.id, [("joy_sadness", 0.5, None)])
         repo.replace_mood_scores(
@@ -531,13 +531,13 @@ class TestMoodScoresCRUD:
         `dimension_names`) should still count as missing if it's
         missing a current one. `dimension_names` is the current set,
         not the union of all scored dims."""
-        e = repo.create_entry("2026-04-01", "ocr", "x", 1)
+        e = repo.create_entry("2026-04-01", "photo", "x", 1)
         repo.replace_mood_scores(e.id, [("old_dim", 0.5, None)])
         missing = repo.get_entries_missing_mood_scores(["joy_sadness"])
         assert missing == [e.id]
 
     def test_prune_retired_mood_scores(self, repo):
-        e = repo.create_entry("2026-04-01", "ocr", "x", 1)
+        e = repo.create_entry("2026-04-01", "photo", "x", 1)
         repo.replace_mood_scores(
             e.id,
             [
@@ -554,7 +554,7 @@ class TestMoodScoresCRUD:
     def test_prune_retired_mood_scores_empty_current_wipes_all(
         self, repo
     ):
-        e = repo.create_entry("2026-04-01", "ocr", "x", 1)
+        e = repo.create_entry("2026-04-01", "photo", "x", 1)
         repo.replace_mood_scores(
             e.id, [("joy_sadness", 0.5, None), ("agency", 0.3, None)]
         )
@@ -563,7 +563,7 @@ class TestMoodScoresCRUD:
         assert repo.get_mood_scores(e.id) == []
 
     def test_prune_retired_mood_scores_noop_when_all_current(self, repo):
-        e = repo.create_entry("2026-04-01", "ocr", "x", 1)
+        e = repo.create_entry("2026-04-01", "photo", "x", 1)
         repo.replace_mood_scores(
             e.id, [("joy_sadness", 0.5, None)]
         )
@@ -579,8 +579,8 @@ class TestMoodTrendsCanonicalDates:
     def test_week_period_is_monday_iso_date(self, repo):
         # 2026-03-02 is a Monday, 2026-03-04 is Wednesday — same
         # week, bin_start is Monday 2026-03-02.
-        e1 = repo.create_entry("2026-03-02", "ocr", "a", 1)
-        e2 = repo.create_entry("2026-03-04", "ocr", "b", 1)
+        e1 = repo.create_entry("2026-03-02", "photo", "a", 1)
+        e2 = repo.create_entry("2026-03-04", "photo", "b", 1)
         repo.add_mood_score(e1.id, "joy_sadness", 0.5)
         repo.add_mood_score(e2.id, "joy_sadness", 0.7)
         trends = repo.get_mood_trends(granularity="week")
@@ -588,26 +588,26 @@ class TestMoodTrendsCanonicalDates:
         assert trends[0].period == "2026-03-02"
 
     def test_month_period_is_first_of_month(self, repo):
-        e = repo.create_entry("2026-03-15", "ocr", "a", 1)
+        e = repo.create_entry("2026-03-15", "photo", "a", 1)
         repo.add_mood_score(e.id, "joy_sadness", 0.5)
         trends = repo.get_mood_trends(granularity="month")
         assert trends[0].period == "2026-03-01"
 
     def test_quarter_period_is_jan_apr_jul_oct(self, repo):
-        e = repo.create_entry("2026-08-15", "ocr", "a", 1)  # Q3
+        e = repo.create_entry("2026-08-15", "photo", "a", 1)  # Q3
         repo.add_mood_score(e.id, "joy_sadness", 0.5)
         trends = repo.get_mood_trends(granularity="quarter")
         assert trends[0].period == "2026-07-01"
 
     def test_year_period_is_jan_first(self, repo):
-        e = repo.create_entry("2026-06-15", "ocr", "a", 1)
+        e = repo.create_entry("2026-06-15", "photo", "a", 1)
         repo.add_mood_score(e.id, "joy_sadness", 0.5)
         trends = repo.get_mood_trends(granularity="year")
         assert trends[0].period == "2026-01-01"
 
     def test_day_granularity_still_works(self, repo):
         """Backward compat for the LLM-facing MCP tool."""
-        e = repo.create_entry("2026-03-15", "ocr", "a", 1)
+        e = repo.create_entry("2026-03-15", "photo", "a", 1)
         repo.add_mood_score(e.id, "joy_sadness", 0.5)
         trends = repo.get_mood_trends(granularity="day")
         assert trends[0].period == "2026-03-15"
@@ -621,9 +621,9 @@ class TestMoodTrendsCanonicalDates:
 
 class TestTopicFrequency:
     def test_get_topic_frequency(self, repo):
-        repo.create_entry("2026-03-01", "ocr", "Walked through Vienna", 3)
-        repo.create_entry("2026-03-02", "ocr", "More time in Vienna", 4)
-        repo.create_entry("2026-03-03", "ocr", "Stayed home", 2)
+        repo.create_entry("2026-03-01", "photo", "Walked through Vienna", 3)
+        repo.create_entry("2026-03-02", "photo", "More time in Vienna", 4)
+        repo.create_entry("2026-03-03", "photo", "Stayed home", 2)
 
         freq = repo.get_topic_frequency("Vienna")
         assert freq.topic == "Vienna"
@@ -633,19 +633,19 @@ class TestTopicFrequency:
 
 class TestFinalText:
     def test_create_entry_defaults_final_text_to_raw_text(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "Hello world", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Hello world", 2)
         assert entry.final_text == "Hello world"
         assert entry.raw_text == "Hello world"
 
     def test_create_entry_with_explicit_final_text(self, repo):
         entry = repo.create_entry(
-            "2026-03-22", "ocr", "raw OCR output", 3, final_text="corrected text"
+            "2026-03-22", "photo", "raw OCR output", 3, final_text="corrected text"
         )
         assert entry.raw_text == "raw OCR output"
         assert entry.final_text == "corrected text"
 
     def test_update_final_text(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "raw text", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "raw text", 2)
         assert entry.final_text == "raw text"
 
         updated = repo.update_final_text(entry.id, "corrected text", 2, 3)
@@ -661,11 +661,11 @@ class TestFinalText:
         assert result is None
 
     def test_chunk_count_default(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "Hello", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "Hello", 1)
         assert entry.chunk_count == 0
 
     def test_update_chunk_count(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "Hello world", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Hello world", 2)
         repo.update_chunk_count(entry.id, 5)
         updated = repo.get_entry(entry.id)
         assert updated is not None
@@ -674,7 +674,7 @@ class TestFinalText:
     def test_fts_indexes_final_text(self, repo):
         """FTS should index final_text, not raw_text."""
         repo.create_entry(
-            "2026-03-22", "ocr", "raw OCR garbled",
+            "2026-03-22", "photo", "raw OCR garbled",
             3, final_text="corrected Vienna text"
         )
         # Should find via final_text
@@ -687,7 +687,7 @@ class TestFinalText:
 
 class TestEntryPages:
     def test_add_and_get_entry_pages(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "Combined text", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Combined text", 2)
         repo.add_entry_page(entry.id, 1, "Page one text")
         repo.add_entry_page(entry.id, 2, "Page two text")
 
@@ -704,7 +704,7 @@ class TestEntryPages:
         assert pages == []
 
     def test_add_entry_page_with_source_file(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "Text", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "Text", 1)
         # Create a source file first
         repo._conn.execute(
             "INSERT INTO source_files (entry_id, file_path, file_type, file_hash)"
@@ -723,7 +723,7 @@ class TestEntryPages:
         assert pages[0].source_file_id == sf_id
 
     def test_pages_ordered_by_page_number(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "Combined", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "Combined", 1)
         # Insert in reverse order
         repo.add_entry_page(entry.id, 3, "Third")
         repo.add_entry_page(entry.id, 1, "First")
@@ -734,7 +734,7 @@ class TestEntryPages:
         assert [p.raw_text for p in pages] == ["First", "Second", "Third"]
 
     def test_unique_page_number_per_entry(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "Text", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "Text", 1)
         repo.add_entry_page(entry.id, 1, "Page one")
 
         with pytest.raises(sqlite3.IntegrityError):
@@ -746,7 +746,7 @@ class TestEntryChunks:
         return ChunkSpan(text=text, char_start=start, char_end=end, token_count=tokens)
 
     def test_replace_chunks_inserts_rows(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "Chunk me.", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Chunk me.", 2)
         spans = [
             self._span("First chunk.", 0, 12),
             self._span("Second chunk.", 14, 27),
@@ -763,7 +763,7 @@ class TestEntryChunks:
         assert result[1].char_start == 14
 
     def test_replace_chunks_clears_previous_rows(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "Some text", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Some text", 2)
         repo.replace_chunks(entry.id, [self._span("old one", 0, 7)])
         repo.replace_chunks(entry.id, [self._span("new one", 0, 7), self._span("new two", 8, 15)])
 
@@ -771,17 +771,17 @@ class TestEntryChunks:
         assert [c.text for c in result] == ["new one", "new two"]
 
     def test_replace_chunks_with_empty_list_clears_table(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "Text", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "Text", 1)
         repo.replace_chunks(entry.id, [self._span("only chunk", 0, 10)])
         repo.replace_chunks(entry.id, [])
         assert repo.get_chunks(entry.id) == []
 
     def test_get_chunks_empty_for_entry_without_chunks(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "Text", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "Text", 1)
         assert repo.get_chunks(entry.id) == []
 
     def test_get_chunks_returns_insertion_order(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "Text", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "Text", 1)
         spans = [self._span(f"chunk {i}", i * 10, i * 10 + 7) for i in range(5)]
         repo.replace_chunks(entry.id, spans)
 
@@ -789,7 +789,7 @@ class TestEntryChunks:
         assert [c.text for c in result] == [f"chunk {i}" for i in range(5)]
 
     def test_delete_entry_cascades_to_chunks(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "Text", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "Text", 1)
         repo.replace_chunks(entry.id, [self._span("to be deleted", 0, 13)])
         repo.delete_entry(entry.id)
         assert repo.get_chunks(entry.id) == []
@@ -797,54 +797,54 @@ class TestEntryChunks:
 
 class TestUncertainSpans:
     def test_get_uncertain_spans_empty_for_new_entry(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "hello world", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "hello world", 2)
         assert repo.get_uncertain_spans(entry.id) == []
 
     def test_add_and_get_uncertain_spans_round_trip(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "hello beautiful world", 3)
+        entry = repo.create_entry("2026-03-22", "photo", "hello beautiful world", 3)
         repo.add_uncertain_spans(entry.id, [(0, 5), (6, 15)])
         spans = repo.get_uncertain_spans(entry.id)
         assert spans == [(0, 5), (6, 15)]
 
     def test_get_uncertain_spans_sorted_by_start(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "a b c d e f g", 7)
+        entry = repo.create_entry("2026-03-22", "photo", "a b c d e f g", 7)
         # Insert out of order on purpose; the getter sorts by char_start.
         repo.add_uncertain_spans(entry.id, [(10, 11), (0, 1), (4, 5)])
         assert repo.get_uncertain_spans(entry.id) == [(0, 1), (4, 5), (10, 11)]
 
     def test_add_uncertain_spans_empty_list_is_noop(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "hello", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "hello", 1)
         repo.add_uncertain_spans(entry.id, [])
         assert repo.get_uncertain_spans(entry.id) == []
 
     def test_get_uncertain_spans_isolated_per_entry(self, repo):
-        e1 = repo.create_entry("2026-03-22", "ocr", "first entry", 2)
-        e2 = repo.create_entry("2026-03-23", "ocr", "second entry", 2)
+        e1 = repo.create_entry("2026-03-22", "photo", "first entry", 2)
+        e2 = repo.create_entry("2026-03-23", "photo", "second entry", 2)
         repo.add_uncertain_spans(e1.id, [(0, 5)])
         repo.add_uncertain_spans(e2.id, [(7, 12)])
         assert repo.get_uncertain_spans(e1.id) == [(0, 5)]
         assert repo.get_uncertain_spans(e2.id) == [(7, 12)]
 
     def test_delete_entry_cascades_to_uncertain_spans(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "hello world", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "hello world", 2)
         repo.add_uncertain_spans(entry.id, [(0, 5), (6, 11)])
         repo.delete_entry(entry.id)
         assert repo.get_uncertain_spans(entry.id) == []
 
     def test_add_uncertain_spans_rejects_invalid_range(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "hello", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "hello", 1)
         with pytest.raises(sqlite3.IntegrityError):
             repo.add_uncertain_spans(entry.id, [(5, 5)])  # char_end > char_start
 
     def test_add_uncertain_spans_rejects_negative_start(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "hello", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "hello", 1)
         with pytest.raises(sqlite3.IntegrityError):
             repo.add_uncertain_spans(entry.id, [(-1, 5)])
 
 
 class TestVerifyDoubts:
     def test_verify_doubts_sets_flag(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "hello world", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "hello world", 2)
         assert entry.doubts_verified is False
         assert repo.verify_doubts(entry.id) is True
         refreshed = repo.get_entry(entry.id)
@@ -854,7 +854,7 @@ class TestVerifyDoubts:
         assert repo.verify_doubts(999) is False
 
     def test_get_uncertain_span_count_returns_zero_when_verified(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "hello world", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "hello world", 2)
         repo.add_uncertain_spans(entry.id, [(0, 5), (6, 11)])
         assert repo.get_uncertain_span_count(entry.id) == 2
         repo.verify_doubts(entry.id)
@@ -862,7 +862,7 @@ class TestVerifyDoubts:
 
     def test_get_uncertain_spans_still_returns_rows_when_verified(self, repo):
         """Span rows are preserved for future analysis even after verification."""
-        entry = repo.create_entry("2026-03-22", "ocr", "hello world", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "hello world", 2)
         repo.add_uncertain_spans(entry.id, [(0, 5)])
         repo.verify_doubts(entry.id)
         # Raw spans are still in the DB
@@ -870,7 +870,7 @@ class TestVerifyDoubts:
         assert spans == [(0, 5)]
 
     def test_verify_doubts_is_idempotent(self, repo):
-        entry = repo.create_entry("2026-03-22", "ocr", "hello", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "hello", 1)
         repo.verify_doubts(entry.id)
         assert repo.verify_doubts(entry.id) is True
         assert repo.get_entry(entry.id).doubts_verified is True

@@ -140,7 +140,7 @@ def _seed_entries(repo: SQLiteEntryRepository, count: int = 5) -> list[int]:
     for i in range(count):
         entry = repo.create_entry(
             f"2026-03-{i + 1:02d}",
-            "ocr" if i % 2 == 0 else "voice",
+            "photo" if i % 2 == 0 else "voice",
             f"This is entry number {i + 1} with some words to count.",
             10,
         )
@@ -185,9 +185,9 @@ class TestListEntries:
     def test_list_entries_with_date_filters(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        repo.create_entry("2026-01-15", "ocr", "January entry", 2)
-        repo.create_entry("2026-03-15", "ocr", "March entry", 2)
-        repo.create_entry("2026-05-15", "ocr", "May entry", 2)
+        repo.create_entry("2026-01-15", "photo", "January entry", 2)
+        repo.create_entry("2026-03-15", "photo", "March entry", 2)
+        repo.create_entry("2026-05-15", "photo", "May entry", 2)
 
         response = client.get(
             "/api/entries?start_date=2026-02-01&end_date=2026-04-01"
@@ -225,7 +225,7 @@ class TestListEntries:
     def test_list_entries_includes_page_count(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "Combined text", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Combined text", 2)
         repo.add_entry_page(entry.id, 1, "Page one text")
         repo.add_entry_page(entry.id, 2, "Page two text")
 
@@ -238,13 +238,13 @@ class TestGetEntry:
     def test_get_entry_returns_detail(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "Hello world", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Hello world", 2)
         response = client.get(f"/api/entries/{entry.id}")
         assert response.status_code == 200
         data = response.json()
         assert data["id"] == entry.id
         assert data["entry_date"] == "2026-03-22"
-        assert data["source_type"] == "ocr"
+        assert data["source_type"] == "photo"
         assert data["raw_text"] == "Hello world"
         assert data["final_text"] == "Hello world"
         assert data["word_count"] == 2
@@ -261,7 +261,7 @@ class TestGetEntry:
     def test_get_entry_with_pages(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "Combined text", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Combined text", 2)
         repo.add_entry_page(entry.id, 1, "Page one")
         repo.add_entry_page(entry.id, 2, "Page two")
 
@@ -272,7 +272,7 @@ class TestGetEntry:
     def test_get_entry_includes_empty_uncertain_spans_by_default(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "Hello world", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Hello world", 2)
         response = client.get(f"/api/entries/{entry.id}")
         data = response.json()
         # The field is always present, even for entries with no spans —
@@ -285,7 +285,7 @@ class TestGetEntry:
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
         entry = repo.create_entry(
-            "2026-03-22", "ocr", "Hello Ritsya from Vienna.", 4
+            "2026-03-22", "photo", "Hello Ritsya from Vienna.", 4
         )
         repo.add_uncertain_spans(entry.id, [(6, 12), (18, 24)])
         response = client.get(f"/api/entries/{entry.id}")
@@ -305,7 +305,7 @@ class TestGetEntry:
         belong on the detail endpoint only, so we don't pay the extra
         query per row."""
         entry = repo.create_entry(
-            "2026-03-22", "ocr", "Hello Ritsya", 2
+            "2026-03-22", "photo", "Hello Ritsya", 2
         )
         repo.add_uncertain_spans(entry.id, [(6, 12)])
         response = client.get("/api/entries")
@@ -318,7 +318,7 @@ class TestUpdateEntry:
     def test_patch_entry_updates_final_text(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "raw OCR output", 3)
+        entry = repo.create_entry("2026-03-22", "photo", "raw OCR output", 3)
         response = client.patch(
             f"/api/entries/{entry.id}",
             json={"final_text": "corrected text"},
@@ -335,7 +335,7 @@ class TestUpdateEntry:
         """Uncertainty is anchored to raw_text, which PATCH never
         touches — so the PATCH response must still carry the spans
         the entry was ingested with."""
-        entry = repo.create_entry("2026-03-22", "ocr", "Hello Ritsya.", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Hello Ritsya.", 2)
         repo.add_uncertain_spans(entry.id, [(6, 12)])
 
         response = client.patch(
@@ -356,7 +356,7 @@ class TestUpdateEntry:
         assert response.status_code == 404
 
     def test_patch_entry_empty_body(self, client: TestClient, repo: SQLiteEntryRepository) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "Hello", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "Hello", 1)
         response = client.patch(
             f"/api/entries/{entry.id}",
             content=b"",
@@ -367,7 +367,7 @@ class TestUpdateEntry:
     def test_patch_entry_missing_both_fields(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "Hello", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "Hello", 1)
         response = client.patch(
             f"/api/entries/{entry.id}",
             json={"other_field": "value"},
@@ -378,7 +378,7 @@ class TestUpdateEntry:
     def test_patch_entry_date_only(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "Hello world", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Hello world", 2)
         response = client.patch(
             f"/api/entries/{entry.id}",
             json={"entry_date": "2026-02-17"},
@@ -391,7 +391,7 @@ class TestUpdateEntry:
     def test_patch_entry_date_invalid_format(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "Hello", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "Hello", 1)
         response = client.patch(
             f"/api/entries/{entry.id}",
             json={"entry_date": "not-a-date"},
@@ -402,7 +402,7 @@ class TestUpdateEntry:
     def test_patch_entry_date_and_text(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "raw text", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "raw text", 2)
         response = client.patch(
             f"/api/entries/{entry.id}",
             json={"entry_date": "2026-01-01", "final_text": "corrected"},
@@ -415,7 +415,7 @@ class TestUpdateEntry:
     def test_patch_entry_empty_final_text(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "Hello", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "Hello", 1)
         response = client.patch(
             f"/api/entries/{entry.id}",
             json={"final_text": "  "},
@@ -426,7 +426,7 @@ class TestUpdateEntry:
     def test_patch_entry_non_string_final_text(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "Hello", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "Hello", 1)
         response = client.patch(
             f"/api/entries/{entry.id}",
             json={"final_text": 123},
@@ -438,7 +438,7 @@ class TestUpdateEntry:
     ) -> None:
         """Entity re-extraction is best-effort — PATCH must succeed even
         when the services dict has no job_runner (e.g. in test setups)."""
-        entry = repo.create_entry("2026-03-22", "ocr", "raw text", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "raw text", 2)
         response = client.patch(
             f"/api/entries/{entry.id}",
             json={"final_text": "corrected text"},
@@ -465,7 +465,7 @@ class TestUpdateEntry:
         mock_runner.submit_mood_score_entry = MagicMock(return_value=mock_job)
         services["job_runner"] = mock_runner
 
-        entry = repo.create_entry("2026-03-22", "ocr", "raw text", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "raw text", 2)
 
         response = client.patch(
             f"/api/entries/{entry.id}",
@@ -489,7 +489,7 @@ class TestUpdateEntry:
         mock_runner = MagicMock()
         services["job_runner"] = mock_runner
 
-        entry = repo.create_entry("2026-03-22", "ocr", "Hello world", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Hello world", 2)
 
         response = client.patch(
             f"/api/entries/{entry.id}",
@@ -505,7 +505,7 @@ class TestVerifyDoubts:
     def test_verify_doubts_clears_spans_in_response(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "Hello Ritsya.", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Hello Ritsya.", 2)
         repo.add_uncertain_spans(entry.id, [(6, 12)])
         response = client.post(f"/api/entries/{entry.id}/verify-doubts")
         assert response.status_code == 200
@@ -520,7 +520,7 @@ class TestVerifyDoubts:
     def test_verify_doubts_persists_across_get(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "Hello Ritsya.", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Hello Ritsya.", 2)
         repo.add_uncertain_spans(entry.id, [(6, 12)])
         client.post(f"/api/entries/{entry.id}/verify-doubts")
 
@@ -533,7 +533,7 @@ class TestVerifyDoubts:
     def test_verify_doubts_zeroes_list_count(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "Hello Ritsya.", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Hello Ritsya.", 2)
         repo.add_uncertain_spans(entry.id, [(6, 12)])
 
         # Before: count is 1
@@ -557,7 +557,7 @@ class TestDeleteEntry:
         repo: SQLiteEntryRepository,
         mock_vector_store: MagicMock,
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "Hello", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "Hello", 1)
         response = client.delete(f"/api/entries/{entry.id}")
         assert response.status_code == 200
         data = response.json()
@@ -576,7 +576,7 @@ class TestDeleteEntry:
     def test_delete_entry_cascades_pages(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "Combined", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "Combined", 1)
         repo.add_entry_page(entry.id, 1, "Page one")
         repo.add_entry_page(entry.id, 2, "Page two")
 
@@ -602,7 +602,7 @@ class TestGetEntryChunks:
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
         from journal.models import ChunkSpan
-        entry = repo.create_entry("2026-03-22", "ocr", "Entry text", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Entry text", 2)
         repo.replace_chunks(
             entry.id,
             [
@@ -627,7 +627,7 @@ class TestGetEntryChunks:
     def test_returns_404_chunks_not_backfilled(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "Unchunked entry", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Unchunked entry", 2)
         response = client.get(f"/api/entries/{entry.id}/chunks")
         assert response.status_code == 404
         data = response.json()
@@ -646,7 +646,7 @@ class TestGetEntryTokens:
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
         entry = repo.create_entry(
-            "2026-03-22", "ocr", "Hello world this is a test.", 6,
+            "2026-03-22", "photo", "Hello world this is a test.", 6,
         )
         response = client.get(f"/api/entries/{entry.id}/tokens")
         assert response.status_code == 200
@@ -668,7 +668,7 @@ class TestGetEntryTokens:
     ) -> None:
         """Concatenating each token's text by char_start must equal final_text."""
         text = "The quick brown fox jumps over the lazy dog."
-        entry = repo.create_entry("2026-03-22", "ocr", text, 9)
+        entry = repo.create_entry("2026-03-22", "photo", text, 9)
         response = client.get(f"/api/entries/{entry.id}/tokens")
         data = response.json()
         # Slicing by offsets reconstructs the original text.
@@ -681,7 +681,7 @@ class TestGetEntryTokens:
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
         text = "Café résumé — naïve façade."
-        entry = repo.create_entry("2026-03-22", "ocr", text, 4)
+        entry = repo.create_entry("2026-03-22", "photo", text, 4)
         response = client.get(f"/api/entries/{entry.id}/tokens")
         data = response.json()
         reconstructed = "".join(
@@ -699,7 +699,7 @@ class TestGetEntryTokens:
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
         raw = "raw has a typo"
-        entry = repo.create_entry("2026-03-22", "ocr", raw, 4)
+        entry = repo.create_entry("2026-03-22", "photo", raw, 4)
         # Simulate a correction by updating final_text directly on the row.
         repo._conn.execute(
             "UPDATE entries SET final_text = ? WHERE id = ?",
@@ -716,8 +716,8 @@ class TestGetStats:
     def test_get_stats(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        repo.create_entry("2026-01-15", "ocr", "January entry words here", 4)
-        repo.create_entry("2026-02-15", "ocr", "February entry", 2)
+        repo.create_entry("2026-01-15", "photo", "January entry words here", 4)
+        repo.create_entry("2026-02-15", "photo", "February entry", 2)
         repo.create_entry("2026-03-15", "voice", "March entry", 2)
 
         response = client.get("/api/stats")
@@ -733,8 +733,8 @@ class TestGetStats:
     def test_get_stats_with_date_filter(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        repo.create_entry("2026-01-15", "ocr", "Old entry", 2)
-        repo.create_entry("2026-03-15", "ocr", "New entry", 2)
+        repo.create_entry("2026-01-15", "photo", "Old entry", 2)
+        repo.create_entry("2026-03-15", "photo", "New entry", 2)
 
         response = client.get("/api/stats?start_date=2026-03-01")
         assert response.status_code == 200
@@ -809,7 +809,7 @@ class TestSearch:
     ) -> None:
         repo.create_entry(
             "2026-03-22",
-            "ocr",
+            "photo",
             "Walked through Vienna with Atlas today.",
             7,
         )
@@ -832,8 +832,8 @@ class TestSearch:
     def test_search_keyword_date_filter(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        repo.create_entry("2026-01-15", "ocr", "Vienna in January", 3)
-        repo.create_entry("2026-03-15", "ocr", "Vienna in March", 3)
+        repo.create_entry("2026-01-15", "photo", "Vienna in January", 3)
+        repo.create_entry("2026-03-15", "photo", "Vienna in March", 3)
         response = client.get(
             "/api/search?q=Vienna&mode=keyword&start_date=2026-03-01"
         )
@@ -848,7 +848,7 @@ class TestSearch:
         for i in range(5):
             repo.create_entry(
                 f"2026-03-{10 + i:02d}",
-                "ocr",
+                "photo",
                 f"Entry {i} mentions Atlas directly.",
                 5,
             )
@@ -877,7 +877,7 @@ class TestSearch:
     ) -> None:
         """FTS5 parse errors (unterminated quote, bare operators) must
         surface as a 400, not a 500."""
-        repo.create_entry("2026-03-22", "ocr", "Anything at all", 3)
+        repo.create_entry("2026-03-22", "photo", "Anything at all", 3)
         response = client.get('/api/search?q="&mode=keyword')
         assert response.status_code == 400
         assert response.json()["error"] == "invalid_query"
@@ -885,7 +885,7 @@ class TestSearch:
     def test_search_limit_clamped(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        repo.create_entry("2026-03-22", "ocr", "Vienna entry", 2)
+        repo.create_entry("2026-03-22", "photo", "Vienna entry", 2)
         # limit=500 should be clamped to 50; bad ints should fall back to 10.
         response = client.get("/api/search?q=Vienna&mode=keyword&limit=500")
         assert response.status_code == 200
@@ -908,7 +908,7 @@ class TestSearch:
         client, vector_store = search_client
 
         entry_text = "Walked through Vienna with Atlas today."
-        entry = repo.create_entry("2026-03-22", "ocr", entry_text, 7)
+        entry = repo.create_entry("2026-03-22", "photo", entry_text, 7)
         repo.replace_chunks(
             entry.id,
             [
@@ -948,7 +948,7 @@ class TestSearch:
         mock_embeddings: MagicMock,
     ) -> None:
         client, vector_store = search_client
-        repo.create_entry("2026-03-22", "ocr", "Vienna trip", 2)
+        repo.create_entry("2026-03-22", "photo", "Vienna trip", 2)
         vector_store.add_entry(  # type: ignore[attr-defined]
             entry_id=1,
             chunks=["Vienna trip"],
@@ -1086,7 +1086,7 @@ class TestDashboardMoodTrends:
     def test_happy_path_returns_trends(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        e = repo.create_entry("2026-03-02", "ocr", "mon entry", 2)
+        e = repo.create_entry("2026-03-02", "photo", "mon entry", 2)
         repo.add_mood_score(e.id, "joy_sadness", 0.5)
         repo.add_mood_score(e.id, "agency", 0.7)
 
@@ -1104,7 +1104,7 @@ class TestDashboardMoodTrends:
     def test_dimension_filter(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        e = repo.create_entry("2026-03-02", "ocr", "x", 1)
+        e = repo.create_entry("2026-03-02", "photo", "x", 1)
         repo.add_mood_score(e.id, "joy_sadness", 0.5)
         repo.add_mood_score(e.id, "agency", 0.7)
 
@@ -1220,11 +1220,11 @@ class TestHealth:
         repo: SQLiteEntryRepository,
     ) -> None:
         client, _ = health_client
-        repo.create_entry("2026-03-22", "ocr", "Vienna today", 2)
+        repo.create_entry("2026-03-22", "photo", "Vienna today", 2)
         repo.create_entry("2026-03-23", "voice", "a voice note", 3)
         data = client.get("/health").json()
         assert data["ingestion"]["total_entries"] == 2
-        assert data["ingestion"]["by_source_type"] == {"ocr": 1, "voice": 1}
+        assert data["ingestion"]["by_source_type"] == {"photo": 1, "voice": 1}
         assert data["ingestion"]["row_counts"]["entries"] == 2
 
     def test_health_reflects_query_stats_after_searches(
@@ -1234,7 +1234,7 @@ class TestHealth:
     ) -> None:
         client, services = health_client
         query_svc: QueryService = services["query"]
-        repo.create_entry("2026-03-22", "ocr", "Vienna today", 2)
+        repo.create_entry("2026-03-22", "photo", "Vienna today", 2)
 
         # Fire a semantic + keyword search, then snapshot via /health.
         query_svc.search_entries("vienna")
@@ -1320,7 +1320,7 @@ class TestHealth:
 
         client, services = health_client
         query_svc: QueryService = services["query"]
-        repo.create_entry("2026-03-22", "ocr", "sensitive marker word", 3)
+        repo.create_entry("2026-03-22", "photo", "sensitive marker word", 3)
         query_svc.keyword_search("sensitive")
         data = client.get("/health").json()
         dumped = _json.dumps(data)
@@ -1380,7 +1380,7 @@ class TestDashboardWritingStats:
     def test_default_bin_is_week(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        repo.create_entry("2026-03-02", "ocr", "hello world", 2)
+        repo.create_entry("2026-03-02", "photo", "hello world", 2)
         resp = client.get("/api/dashboard/writing-stats")
         assert resp.status_code == 200
         data = resp.json()
@@ -1393,8 +1393,8 @@ class TestDashboardWritingStats:
     def test_month_bin(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        repo.create_entry("2026-03-15", "ocr", "march entry", 2)
-        repo.create_entry("2026-04-15", "ocr", "april entry", 2)
+        repo.create_entry("2026-03-15", "photo", "march entry", 2)
+        repo.create_entry("2026-04-15", "photo", "april entry", 2)
         resp = client.get("/api/dashboard/writing-stats?bin=month")
         data = resp.json()
         starts = [b["bin_start"] for b in data["bins"]]
@@ -1404,8 +1404,8 @@ class TestDashboardWritingStats:
     def test_quarter_bin(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        repo.create_entry("2026-02-15", "ocr", "q1", 2)
-        repo.create_entry("2026-08-15", "ocr", "q3", 2)
+        repo.create_entry("2026-02-15", "photo", "q1", 2)
+        repo.create_entry("2026-08-15", "photo", "q3", 2)
         resp = client.get("/api/dashboard/writing-stats?bin=quarter")
         data = resp.json()
         starts = [b["bin_start"] for b in data["bins"]]
@@ -1414,8 +1414,8 @@ class TestDashboardWritingStats:
     def test_year_bin(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        repo.create_entry("2025-06-15", "ocr", "2025", 2)
-        repo.create_entry("2026-06-15", "ocr", "2026", 2)
+        repo.create_entry("2025-06-15", "photo", "2025", 2)
+        repo.create_entry("2026-06-15", "photo", "2026", 2)
         resp = client.get("/api/dashboard/writing-stats?bin=year")
         data = resp.json()
         starts = [b["bin_start"] for b in data["bins"]]
@@ -1432,9 +1432,9 @@ class TestDashboardWritingStats:
     def test_date_filter(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        repo.create_entry("2026-01-15", "ocr", "january", 2)
-        repo.create_entry("2026-03-15", "ocr", "march", 2)
-        repo.create_entry("2026-06-15", "ocr", "june", 2)
+        repo.create_entry("2026-01-15", "photo", "january", 2)
+        repo.create_entry("2026-03-15", "photo", "march", 2)
+        repo.create_entry("2026-06-15", "photo", "june", 2)
         resp = client.get(
             "/api/dashboard/writing-stats"
             "?bin=month&from=2026-02-01&to=2026-04-30"
@@ -1472,17 +1472,17 @@ class TestRepositoryHelpers:
 
     def test_count_entries(self, repo: SQLiteEntryRepository) -> None:
         assert repo.count_entries() == 0
-        repo.create_entry("2026-03-01", "ocr", "One", 1)
-        repo.create_entry("2026-03-15", "ocr", "Two", 1)
-        repo.create_entry("2026-04-01", "ocr", "Three", 1)
+        repo.create_entry("2026-03-01", "photo", "One", 1)
+        repo.create_entry("2026-03-15", "photo", "Two", 1)
+        repo.create_entry("2026-04-01", "photo", "Three", 1)
         assert repo.count_entries() == 3
 
     def test_count_entries_with_date_filter(
         self, repo: SQLiteEntryRepository
     ) -> None:
-        repo.create_entry("2026-01-01", "ocr", "Jan", 1)
-        repo.create_entry("2026-03-01", "ocr", "Mar", 1)
-        repo.create_entry("2026-05-01", "ocr", "May", 1)
+        repo.create_entry("2026-01-01", "photo", "Jan", 1)
+        repo.create_entry("2026-03-01", "photo", "Mar", 1)
+        repo.create_entry("2026-05-01", "photo", "May", 1)
         assert repo.count_entries(start_date="2026-02-01") == 2
         assert repo.count_entries(end_date="2026-02-01") == 1
         assert repo.count_entries(
@@ -1490,7 +1490,7 @@ class TestRepositoryHelpers:
         ) == 1
 
     def test_get_page_count(self, repo: SQLiteEntryRepository) -> None:
-        entry = repo.create_entry("2026-03-22", "ocr", "Text", 1)
+        entry = repo.create_entry("2026-03-22", "photo", "Text", 1)
         assert repo.get_page_count(entry.id) == 0
         repo.add_entry_page(entry.id, 1, "Page one")
         assert repo.get_page_count(entry.id) == 1
@@ -1510,7 +1510,7 @@ class TestEntryEntities:
         repo: SQLiteEntryRepository,
         services: dict,
     ) -> None:
-        entry = repo.create_entry("2026-04-01", "ocr", "I met Alice at the park.", 5)
+        entry = repo.create_entry("2026-04-01", "photo", "I met Alice at the park.", 5)
         entity_store: SQLiteEntityStore = services["entity_store"]
         entity = entity_store.create_entity("person", "Alice", "A friend", "2026-04-01")
         entity_store.create_mention(
@@ -1542,7 +1542,7 @@ class TestEntryEntities:
         repo: SQLiteEntryRepository,
         services: dict,
     ) -> None:
-        entry = repo.create_entry("2026-04-01", "ocr", "Alice Alice", 2)
+        entry = repo.create_entry("2026-04-01", "photo", "Alice Alice", 2)
         entity_store: SQLiteEntityStore = services["entity_store"]
         entity = entity_store.create_entity("person", "Alice", "", "2026-04-01")
         entity_store.create_mention(
@@ -1648,7 +1648,7 @@ class TestMergeEntities:
         services: dict,
     ) -> None:
         entity_store: SQLiteEntityStore = services["entity_store"]
-        entry = repo.create_entry("2026-01-01", "ocr", "text", 1)
+        entry = repo.create_entry("2026-01-01", "photo", "text", 1)
         a = entity_store.create_entity("person", "Vienna's aunt", "", "2026-01-01")
         b = entity_store.create_entity("person", "Lizzie Extance", "", "2026-01-01")
         entity_store.create_mention(a.id, entry.id, "aunt", 0.9, "r1")
@@ -1731,7 +1731,7 @@ class TestMergeHistory:
         services: dict,
     ) -> None:
         entity_store: SQLiteEntityStore = services["entity_store"]
-        entry = repo.create_entry("2026-01-01", "ocr", "text", 1)
+        entry = repo.create_entry("2026-01-01", "photo", "text", 1)
         a = entity_store.create_entity("person", "Old Name", "desc", "2026-01-01")
         b = entity_store.create_entity("person", "New Name", "", "2026-01-01")
         entity_store.create_mention(a.id, entry.id, "old", 0.9, "r1")

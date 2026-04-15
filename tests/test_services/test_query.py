@@ -40,7 +40,7 @@ def query_service(repo, vector_store, mock_embeddings):
 @pytest.fixture
 def seeded_service(repo, vector_store, mock_embeddings):
     """A query service with some test data."""
-    e1 = repo.create_entry("2026-03-22", "ocr", "Walked through Vienna with Atlas", 5)
+    e1 = repo.create_entry("2026-03-22", "photo", "Walked through Vienna with Atlas", 5)
     e2 = repo.create_entry("2026-03-23", "voice", "Stayed home and read a book", 6)
 
     vector_store.add_entry(
@@ -84,7 +84,7 @@ def test_search_aggregates_multiple_chunks_per_entry(repo, vector_store, mock_em
     with 3 ChunkMatch objects, not 3 separate results."""
     entry = repo.create_entry(
         "2026-03-24",
-        "ocr",
+        "photo",
         "Long entry with many thoughts about Vienna and Atlas and Robyn.",
         11,
     )
@@ -120,8 +120,8 @@ def test_search_aggregates_multiple_chunks_per_entry(repo, vector_store, mock_em
 def test_search_sorts_entries_by_top_score(repo, vector_store, mock_embeddings):
     """Two entries, one with a strong match, one with a weak match —
     the strong-match entry should come first."""
-    e_weak = repo.create_entry("2026-03-25", "ocr", "weak match entry", 3)
-    e_strong = repo.create_entry("2026-03-26", "ocr", "strong match entry", 3)
+    e_weak = repo.create_entry("2026-03-25", "photo", "weak match entry", 3)
+    e_strong = repo.create_entry("2026-03-26", "photo", "strong match entry", 3)
 
     vector_store.add_entry(
         entry_id=e_weak.id,
@@ -203,7 +203,7 @@ class TestSearchEntriesChunkOffsets:
         """When the entry has persisted chunks, every ChunkMatch gets
         char_start/char_end/chunk_index filled in from entry_chunks."""
         entry_text = "Walked through Vienna with Atlas. Then we met Robyn."
-        entry = repo.create_entry("2026-03-22", "ocr", entry_text, 10)
+        entry = repo.create_entry("2026-03-22", "photo", entry_text, 10)
 
         # Persist two chunks with realistic offsets.
         repo.replace_chunks(
@@ -262,7 +262,7 @@ class TestSearchEntriesChunkOffsets:
     ):
         """Entries ingested before chunk persistence get None offsets,
         not a crash."""
-        entry = repo.create_entry("2026-03-22", "ocr", "Legacy text", 2)
+        entry = repo.create_entry("2026-03-22", "photo", "Legacy text", 2)
         # Deliberately skip repo.replace_chunks() to simulate pre-0003.
         vector_store.add_entry(
             entry_id=entry.id,
@@ -303,8 +303,8 @@ class TestKeywordSearch:
         assert r.score > 0
 
     def test_keyword_search_date_filter(self, repo, vector_store, mock_embeddings):
-        repo.create_entry("2026-01-15", "ocr", "Vienna in January", 3)
-        repo.create_entry("2026-03-15", "ocr", "Vienna in March", 3)
+        repo.create_entry("2026-01-15", "photo", "Vienna in January", 3)
+        repo.create_entry("2026-03-15", "photo", "Vienna in March", 3)
         svc = QueryService(
             repository=repo,
             vector_store=vector_store,
@@ -318,7 +318,7 @@ class TestKeywordSearch:
         for i in range(5):
             repo.create_entry(
                 f"2026-03-{10 + i:02d}",
-                "ocr",
+                "photo",
                 f"Entry {i} mentions Atlas directly.",
                 5,
             )
@@ -345,7 +345,7 @@ class TestKeywordSearch:
         clients that sort by score preserve FTS5 rank order."""
         for i in range(3):
             repo.create_entry(
-                f"2026-03-{10 + i:02d}", "ocr", f"Atlas entry {i}", 3
+                f"2026-03-{10 + i:02d}", "photo", f"Atlas entry {i}", 3
             )
         svc = QueryService(
             repository=repo,
@@ -366,7 +366,7 @@ class TestStatsCollectorIntegration:
         from journal.services.stats import InMemoryStatsCollector
 
         stats = InMemoryStatsCollector()
-        repo.create_entry("2026-03-22", "ocr", "Vienna trip", 2)
+        repo.create_entry("2026-03-22", "photo", "Vienna trip", 2)
         svc = QueryService(
             repository=repo,
             vector_store=vector_store,
@@ -385,7 +385,7 @@ class TestStatsCollectorIntegration:
         from journal.services.stats import InMemoryStatsCollector
 
         stats = InMemoryStatsCollector()
-        repo.create_entry("2026-03-22", "ocr", "Vienna trip", 2)
+        repo.create_entry("2026-03-22", "photo", "Vienna trip", 2)
         svc = QueryService(
             repository=repo,
             vector_store=vector_store,
@@ -402,7 +402,7 @@ class TestStatsCollectorIntegration:
         from journal.services.stats import InMemoryStatsCollector
 
         stats = InMemoryStatsCollector()
-        repo.create_entry("2026-03-22", "ocr", "Vienna trip", 2)
+        repo.create_entry("2026-03-22", "photo", "Vienna trip", 2)
         svc = QueryService(
             repository=repo,
             vector_store=vector_store,

@@ -74,7 +74,7 @@ def _rel(
 def sample_entry(repo: SQLiteEntryRepository) -> int:
     entry = repo.create_entry(
         "2026-03-22",
-        "ocr",
+        "photo",
         "I went to Vienna with Atlas today.",
         8,
     )
@@ -161,8 +161,8 @@ class TestDedupExactName:
         repo: SQLiteEntryRepository,
         entity_store: SQLiteEntityStore,
     ) -> None:
-        e1 = repo.create_entry("2026-03-22", "ocr", "one", 1).id
-        e2 = repo.create_entry("2026-03-23", "ocr", "two", 1).id
+        e1 = repo.create_entry("2026-03-22", "photo", "one", 1).id
+        e2 = repo.create_entry("2026-03-23", "photo", "two", 1).id
 
         extractor = MagicMock()
         extractor.extract_entities.side_effect = [
@@ -191,7 +191,7 @@ class TestDedupAliasMatch:
         )
         entity_store.add_alias(existing.id, "Atty")
 
-        e1 = repo.create_entry("2026-03-22", "ocr", "one", 1).id
+        e1 = repo.create_entry("2026-03-22", "photo", "one", 1).id
         extractor = MagicMock()
         extractor.extract_entities.return_value = _raw(
             entities=[_entity("Atty", "person")],
@@ -215,7 +215,7 @@ class TestDedupEmbeddingSimilarity:
         )
         entity_store.set_entity_embedding(existing.id, [1.0, 0.0, 0.0])
 
-        e1 = repo.create_entry("2026-03-22", "ocr", "one", 1).id
+        e1 = repo.create_entry("2026-03-22", "photo", "one", 1).id
         extractor = MagicMock()
         extractor.extract_entities.return_value = _raw(
             entities=[_entity("Atlas W.", "person")],
@@ -242,7 +242,7 @@ class TestDedupEmbeddingSimilarity:
         )
         entity_store.set_entity_embedding(existing.id, [1.0, 0.0, 0.0])
 
-        e1 = repo.create_entry("2026-03-22", "ocr", "one", 1).id
+        e1 = repo.create_entry("2026-03-22", "photo", "one", 1).id
         extractor = MagicMock()
         extractor.extract_entities.return_value = _raw(
             entities=[_entity("Atlas", "person")],
@@ -325,8 +325,8 @@ class TestBatchExtraction:
         repo: SQLiteEntryRepository,
         entity_store: SQLiteEntityStore,
     ) -> None:
-        e1 = repo.create_entry("2026-03-22", "ocr", "first", 1).id
-        e2 = repo.create_entry("2026-03-23", "ocr", "second", 1).id
+        e1 = repo.create_entry("2026-03-22", "photo", "first", 1).id
+        e2 = repo.create_entry("2026-03-23", "photo", "second", 1).id
 
         extractor = MagicMock()
 
@@ -347,8 +347,8 @@ class TestBatchExtraction:
         repo: SQLiteEntryRepository,
         entity_store: SQLiteEntityStore,
     ) -> None:
-        e1 = repo.create_entry("2026-03-22", "ocr", "first", 1).id
-        e2 = repo.create_entry("2026-03-23", "ocr", "second", 1).id
+        e1 = repo.create_entry("2026-03-22", "photo", "first", 1).id
+        e2 = repo.create_entry("2026-03-23", "photo", "second", 1).id
         # Mark e1 as already extracted so stale_only should skip it.
         entity_store.mark_entry_extracted(e1)
 
@@ -380,9 +380,9 @@ class TestBatchProgressCallback:
         repo: SQLiteEntryRepository,
         entity_store: SQLiteEntityStore,
     ) -> None:
-        e1 = repo.create_entry("2026-03-22", "ocr", "first", 1).id
-        e2 = repo.create_entry("2026-03-23", "ocr", "second", 1).id
-        e3 = repo.create_entry("2026-03-24", "ocr", "third", 1).id
+        e1 = repo.create_entry("2026-03-22", "photo", "first", 1).id
+        e2 = repo.create_entry("2026-03-23", "photo", "second", 1).id
+        e3 = repo.create_entry("2026-03-24", "photo", "third", 1).id
 
         extractor = MagicMock()
         extractor.extract_entities.return_value = _raw()
@@ -403,8 +403,8 @@ class TestBatchProgressCallback:
         entity_store: SQLiteEntityStore,
     ) -> None:
         """Progress must advance even when an entry fails."""
-        e1 = repo.create_entry("2026-03-22", "ocr", "first", 1).id
-        e2 = repo.create_entry("2026-03-23", "ocr", "second", 1).id
+        e1 = repo.create_entry("2026-03-22", "photo", "first", 1).id
+        e2 = repo.create_entry("2026-03-23", "photo", "second", 1).id
 
         extractor = MagicMock()
 
@@ -429,8 +429,8 @@ class TestBatchProgressCallback:
         entity_store: SQLiteEntityStore,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        e1 = repo.create_entry("2026-03-22", "ocr", "first", 1).id
-        e2 = repo.create_entry("2026-03-23", "ocr", "second", 1).id
+        e1 = repo.create_entry("2026-03-22", "photo", "first", 1).id
+        e2 = repo.create_entry("2026-03-23", "photo", "second", 1).id
 
         extractor = MagicMock()
         extractor.extract_entities.return_value = _raw()
