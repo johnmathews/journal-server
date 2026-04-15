@@ -84,6 +84,8 @@ def services(
     mock_embeddings: MagicMock,
     api_db_conn: sqlite3.Connection,
 ) -> Generator[dict]:
+    from journal.models import ExtractionResult
+
     ingestion = IngestionService(
         repository=repo,
         vector_store=mock_vector_store,
@@ -99,7 +101,17 @@ def services(
     )
     # Minimal job infrastructure for the image endpoint
     job_repo = SQLiteJobRepository(api_db_conn)
+    # Return a proper ExtractionResult so background jobs can JSON-serialize
+    # their result dict. A bare MagicMock causes TypeError in json.dumps()
+    # which triggers lock contention with subsequent job submissions.
     mock_extraction = MagicMock()
+    mock_extraction.extract_from_entry = MagicMock(
+        return_value=ExtractionResult(
+            entry_id=0, extraction_run_id="test",
+            entities_created=0, entities_matched=0,
+            mentions_created=0, relationships_created=0,
+        )
+    )
     mock_mood_scoring = MagicMock()
     mock_mood_scoring.score_entry = MagicMock(return_value=5)
     job_runner = JobRunner(
