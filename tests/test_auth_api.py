@@ -249,6 +249,94 @@ class TestMe:
 
 
 # ---------------------------------------------------------------------------
+# Update me tests
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateMe:
+    def test_update_display_name(
+        self,
+        client: TestClient,
+        auth_service: AuthService,
+    ) -> None:
+        _user, session_id = _register_user(auth_service)
+        resp = client.patch(
+            "/api/auth/me",
+            json={"display_name": "Alice Wonderland"},
+            cookies={"session_id": session_id},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["user"]["display_name"] == "Alice Wonderland"
+
+    def test_update_display_name_persists(
+        self,
+        client: TestClient,
+        auth_service: AuthService,
+    ) -> None:
+        _user, session_id = _register_user(auth_service)
+        client.patch(
+            "/api/auth/me",
+            json={"display_name": "New Name"},
+            cookies={"session_id": session_id},
+        )
+        resp = client.get(
+            "/api/auth/me",
+            cookies={"session_id": session_id},
+        )
+        assert resp.json()["user"]["display_name"] == "New Name"
+
+    def test_update_display_name_empty_rejected(
+        self,
+        client: TestClient,
+        auth_service: AuthService,
+    ) -> None:
+        _user, session_id = _register_user(auth_service)
+        resp = client.patch(
+            "/api/auth/me",
+            json={"display_name": "  "},
+            cookies={"session_id": session_id},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "missing_fields"
+
+    def test_update_display_name_missing_field(
+        self,
+        client: TestClient,
+        auth_service: AuthService,
+    ) -> None:
+        _user, session_id = _register_user(auth_service)
+        resp = client.patch(
+            "/api/auth/me",
+            json={},
+            cookies={"session_id": session_id},
+        )
+        assert resp.status_code == 400
+
+    def test_update_display_name_invalid_json(
+        self,
+        client: TestClient,
+        auth_service: AuthService,
+    ) -> None:
+        _user, session_id = _register_user(auth_service)
+        resp = client.patch(
+            "/api/auth/me",
+            content=b"not json",
+            headers={"content-type": "application/json"},
+            cookies={"session_id": session_id},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "invalid_body"
+
+    def test_update_display_name_unauthenticated(self, client: TestClient) -> None:
+        resp = client.patch(
+            "/api/auth/me",
+            json={"display_name": "Hacker"},
+        )
+        assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
 # Registration tests
 # ---------------------------------------------------------------------------
 

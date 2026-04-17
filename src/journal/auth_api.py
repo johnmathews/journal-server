@@ -165,6 +165,44 @@ def register_auth_routes(
         user = get_authenticated_user(request)
         return JSONResponse({"user": _user_to_dict(user)})
 
+    # ── PATCH /api/auth/me ────────────────────────────────────────────
+
+    @mcp.custom_route("/api/auth/me", methods=["PATCH"], name="api_auth_me_update")
+    async def auth_me_update(request: Request) -> JSONResponse:
+        """Update the currently authenticated user's profile (display_name)."""
+        result = _services_or_503(services_getter)
+        if isinstance(result, JSONResponse):
+            return result
+        services = result
+
+        user_repo: SQLiteUserRepository = services["user_repo"]
+        user = get_authenticated_user(request)
+
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            return JSONResponse(
+                {"error": "invalid_body", "message": "Invalid JSON body"},
+                status_code=400,
+            )
+
+        display_name = body.get("display_name", "").strip() if isinstance(body.get("display_name"), str) else ""
+        if not display_name:
+            return JSONResponse(
+                {"error": "missing_fields", "message": "display_name is required and must be non-empty"},
+                status_code=400,
+            )
+
+        updated = user_repo.update_user(user.user_id, display_name=display_name)
+        if updated is None:
+            return JSONResponse(
+                {"error": "not_found", "message": "User not found"},
+                status_code=404,
+            )
+
+        log.info("User %d updated display_name to %r", user.user_id, display_name)
+        return JSONResponse({"user": _user_to_dict(updated)})
+
     # ── POST /api/auth/register ────────────────────────────────────────
 
     @mcp.custom_route("/api/auth/register", methods=["POST"], name="api_auth_register")
