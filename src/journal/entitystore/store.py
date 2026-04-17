@@ -142,6 +142,12 @@ class EntityStore(Protocol):
         self, survivor_id: int, absorbed_ids: list[int]
     ) -> MergeResult: ...
 
+    def delete_orphaned_entities(self, entity_ids: list[int]) -> int:
+        """Delete entities from *entity_ids* that have zero remaining mentions.
+
+        Returns the number of entities deleted."""
+        ...
+
     # ---- merge candidates -----------------------------------------------
 
     def create_merge_candidate(
@@ -717,6 +723,21 @@ class SQLiteEntityStore:
             relationships_reassigned=total_relationships,
             aliases_added=total_aliases,
         )
+
+    def delete_orphaned_entities(self, entity_ids: list[int]) -> int:
+        if not entity_ids:
+            return 0
+        placeholders = ", ".join("?" for _ in entity_ids)
+        cursor = self._conn.execute(
+            f"DELETE FROM entities WHERE id IN ({placeholders})"
+            f" AND id NOT IN (SELECT DISTINCT entity_id FROM entity_mentions)",
+            entity_ids,
+        )
+        self._conn.commit()
+        deleted = cursor.rowcount
+        if deleted:
+            log.info("Deleted %d orphaned entities (zero mentions)", deleted)
+        return deleted
 
     # ---- merge candidates -----------------------------------------------
 

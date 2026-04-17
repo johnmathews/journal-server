@@ -428,6 +428,60 @@ class TestDeleteEntity:
             store.delete_entity(9999)
 
 
+class TestDeleteOrphanedEntities:
+    def test_deletes_entity_with_no_mentions(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        entity = store.create_entity("person", "Ghost", "", "2026-01-01")
+        deleted = store.delete_orphaned_entities([entity.id])
+        assert deleted == 1
+        assert store.get_entity(entity.id) is None
+
+    def test_keeps_entity_with_mentions(
+        self, store: SQLiteEntityStore, sample_entry_id: int
+    ) -> None:
+        entity = store.create_entity("person", "Atlas", "", "2026-01-01")
+        store.create_mention(entity.id, sample_entry_id, "Atlas", 0.9, "r1")
+        deleted = store.delete_orphaned_entities([entity.id])
+        assert deleted == 0
+        assert store.get_entity(entity.id) is not None
+
+    def test_mixed_orphans_and_mentioned(
+        self, store: SQLiteEntityStore, sample_entry_id: int
+    ) -> None:
+        orphan = store.create_entity("person", "Ghost", "", "2026-01-01")
+        alive = store.create_entity("place", "Vienna", "", "2026-01-01")
+        store.create_mention(alive.id, sample_entry_id, "Vienna", 0.9, "r1")
+        deleted = store.delete_orphaned_entities([orphan.id, alive.id])
+        assert deleted == 1
+        assert store.get_entity(orphan.id) is None
+        assert store.get_entity(alive.id) is not None
+
+    def test_empty_list_is_noop(self, store: SQLiteEntityStore) -> None:
+        deleted = store.delete_orphaned_entities([])
+        assert deleted == 0
+
+    def test_cascades_aliases_and_relationships(
+        self, store: SQLiteEntityStore, sample_entry_id: int,
+        db_conn: sqlite3.Connection,
+    ) -> None:
+        orphan = store.create_entity("person", "Ghost", "", "2026-01-01")
+        other = store.create_entity("place", "Nowhere", "", "2026-01-01")
+        store.add_alias(orphan.id, "phantom")
+        store.create_mention(other.id, sample_entry_id, "Nowhere", 0.9, "r1")
+        store.create_relationship(
+            orphan.id, "visited", other.id, "q", sample_entry_id, 0.9, "r1",
+        )
+        store.delete_orphaned_entities([orphan.id])
+        alias_count = db_conn.execute(
+            "SELECT COUNT(*) AS cnt FROM entity_aliases WHERE entity_id = ?",
+            (orphan.id,),
+        ).fetchone()["cnt"]
+        assert alias_count == 0
+        rels = store.get_relationships_for_entry(sample_entry_id)
+        assert rels == []
+
+
 class TestMergeEntities:
     def test_basic_merge(
         self, store: SQLiteEntityStore, sample_entry_id: int

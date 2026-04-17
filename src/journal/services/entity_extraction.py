@@ -129,6 +129,11 @@ class EntityExtractionService:
         # Idempotency: clear any prior extraction results for this
         # entry before writing the new ones. A re-run must never
         # produce duplicate mentions or relationships.
+        # Snapshot the entity ids that currently have mentions for this
+        # entry so we can prune any that become orphans after re-extraction.
+        prior_entity_ids = [
+            m.entity_id for m in self._store.get_mentions_for_entry(entry_id)
+        ]
         self._store.delete_mentions_for_entry(entry_id)
         self._store.delete_relationships_for_entry(entry_id)
 
@@ -266,6 +271,14 @@ class EntityExtractionService:
             )
             relationships_created += 1
 
+        # Prune entities that lost all their mentions after re-extraction.
+        if prior_entity_ids:
+            orphans_deleted = self._store.delete_orphaned_entities(
+                list(set(prior_entity_ids))
+            )
+        else:
+            orphans_deleted = 0
+
         self._store.mark_entry_extracted(entry_id)
 
         result = ExtractionResult(
@@ -279,12 +292,13 @@ class EntityExtractionService:
         )
         log.info(
             "Extraction complete for entry %d: %d new / %d matched,"
-            " %d mentions, %d relationships, %d warnings",
+            " %d mentions, %d relationships, %d orphans pruned, %d warnings",
             entry_id,
             entities_created,
             entities_matched,
             mentions_created,
             relationships_created,
+            orphans_deleted,
             len(warnings),
         )
         return result

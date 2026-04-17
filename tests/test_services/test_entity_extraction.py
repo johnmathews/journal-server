@@ -299,6 +299,69 @@ class TestIdempotency:
         rels = entity_store.get_relationships_for_entry(sample_entry)
         assert len(rels) == 1
 
+    def test_rerun_deletes_orphaned_entities(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+        sample_entry: int,
+    ) -> None:
+        """When re-extraction no longer finds an entity that was only
+        mentioned in this entry, the entity should be deleted."""
+        extractor = MagicMock()
+        extractor.extract_entities.side_effect = [
+            _raw(entities=[
+                _entity("Atlas", "person", quote="Atlas"),
+                _entity("Vienna", "place", quote="Vienna"),
+            ]),
+            # Second run: Atlas is no longer mentioned.
+            _raw(entities=[
+                _entity("Vienna", "place", quote="Vienna"),
+            ]),
+        ]
+        service = _make_service(repo, entity_store, extractor)
+        service.extract_from_entry(sample_entry)
+        assert entity_store.count_entities() == 2
+
+        service.extract_from_entry(sample_entry)
+        assert entity_store.count_entities() == 1
+        assert entity_store.get_entity_by_name("Atlas", "person") is None
+        assert entity_store.get_entity_by_name("Vienna", "place") is not None
+
+    def test_rerun_keeps_entity_mentioned_in_other_entries(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+        sample_entry: int,
+    ) -> None:
+        """An entity that disappears from one entry but is still
+        mentioned in another should NOT be deleted."""
+        e2 = repo.create_entry("2026-03-23", "photo", "Other entry", 5).id
+        extractor = MagicMock()
+        extractor.extract_entities.side_effect = [
+            # Entry 1: Atlas + Vienna
+            _raw(entities=[
+                _entity("Atlas", "person", quote="Atlas"),
+                _entity("Vienna", "place", quote="Vienna"),
+            ]),
+            # Entry 2: Atlas only
+            _raw(entities=[
+                _entity("Atlas", "person", quote="Atlas"),
+            ]),
+            # Re-run entry 1: Vienna only (Atlas gone from this entry)
+            _raw(entities=[
+                _entity("Vienna", "place", quote="Vienna"),
+            ]),
+        ]
+        service = _make_service(repo, entity_store, extractor)
+        service.extract_from_entry(sample_entry)
+        service.extract_from_entry(e2)
+        assert entity_store.count_entities() == 2
+
+        service.extract_from_entry(sample_entry)
+        # Atlas should survive — still mentioned in e2.
+        assert entity_store.count_entities() == 2
+        assert entity_store.get_entity_by_name("Atlas", "person") is not None
+
 
 class TestAuthorPronoun:
     def test_author_created_lazily_via_relationship(
