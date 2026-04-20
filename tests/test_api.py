@@ -98,6 +98,7 @@ def services(
         transcription_provider=mock_transcription,
         embeddings_provider=mock_embeddings,
         chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+        preprocess_images=False,
     )
     query = QueryService(
         repository=repo,
@@ -813,6 +814,7 @@ class TestSearch:
             transcription_provider=mock_transcription,
             embeddings_provider=mock_embeddings,
             chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+            preprocess_images=False,
         )
         query = QueryService(
             repository=repo,
@@ -1037,6 +1039,7 @@ class TestDashboardMoodDimensions:
             transcription_provider=mock_transcription,
             embeddings_provider=mock_embeddings,
             chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+            preprocess_images=False,
         )
         query = QueryService(
             repository=repo,
@@ -1100,6 +1103,7 @@ class TestDashboardMoodDimensions:
             transcription_provider=MagicMock(),
             embeddings_provider=mock_embeddings,
             chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+            preprocess_images=False,
         )
         query = QueryService(
             repository=repo,
@@ -1213,6 +1217,7 @@ class TestHealth:
             transcription_provider=mock_transcription,
             embeddings_provider=mock_embeddings,
             chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+            preprocess_images=False,
         )
         query = QueryService(
             repository=repo,
@@ -1307,6 +1312,7 @@ class TestHealth:
             transcription_provider=MagicMock(),
             embeddings_provider=mock_embeddings,
             chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+            preprocess_images=False,
         )
         query = QueryService(
             repository=repo,

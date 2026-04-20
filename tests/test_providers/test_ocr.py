@@ -13,6 +13,7 @@ from journal.providers.ocr import (
     UNCERTAIN_CLOSE,
     UNCERTAIN_OPEN,
     AnthropicOCRProvider,
+    DualPassOCRProvider,
     GeminiOCRProvider,
     OCRProvider,
     OCRResult,
@@ -20,6 +21,7 @@ from journal.providers.ocr import (
     build_ocr_provider,
     load_context_files,
     parse_uncertain_markers,
+    reconcile_ocr_results,
     reflow_paragraphs,
 )
 
@@ -661,6 +663,7 @@ class TestBuildOcrProvider:
             "ocr_max_tokens": 4096,
             "ocr_context_dir": None,
             "ocr_context_cache_ttl": "5m",
+            "ocr_dual_pass": False,
         }
         defaults.update(overrides)
         config = MagicMock()
@@ -717,3 +720,168 @@ class TestBuildOcrProvider:
         config = self._make_config(ocr_provider="openai")
         with pytest.raises(ValueError, match="Unknown OCR provider"):
             build_ocr_provider(config)
+
+    @patch("journal.providers.ocr.genai.Client")
+    @patch("journal.providers.ocr.anthropic.Anthropic")
+    def test_dual_pass_returns_dual_provider(
+        self, _anth: MagicMock, _gem: MagicMock,
+    ) -> None:
+        config = self._make_config(ocr_dual_pass=True)
+        provider = build_ocr_provider(config)
+        assert isinstance(provider, DualPassOCRProvider)
+
+    @patch("journal.providers.ocr.genai.Client")
+    @patch("journal.providers.ocr.anthropic.Anthropic")
+    def test_dual_pass_creates_both_clients(
+        self, mock_anth: MagicMock, mock_gem: MagicMock,
+    ) -> None:
+        config = self._make_config(ocr_dual_pass=True)
+        build_ocr_provider(config)
+        mock_anth.assert_called_once()
+        mock_gem.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation
+# ---------------------------------------------------------------------------
+
+
+class TestReconcileOcrResults:
+    def test_identical_texts_no_new_spans(self) -> None:
+        primary = OCRResult(text="Hello world", uncertain_spans=[])
+        secondary = OCRResult(text="Hello world", uncertain_spans=[])
+        result = reconcile_ocr_results(primary, secondary)
+        assert result.text == "Hello world"
+        assert result.uncertain_spans == []
+
+    def test_identical_texts_preserves_primary_spans(self) -> None:
+        primary = OCRResult(text="Hello world", uncertain_spans=[(0, 5)])
+        secondary = OCRResult(text="Hello world", uncertain_spans=[])
+        result = reconcile_ocr_results(primary, secondary)
+        assert (0, 5) in result.uncertain_spans
+
+    def test_single_word_disagreement(self) -> None:
+        primary = OCRResult(text="The cat sat", uncertain_spans=[])
+        secondary = OCRResult(text="The car sat", uncertain_spans=[])
+        result = reconcile_ocr_results(primary, secondary)
+        assert result.text == "The cat sat"
+        # "cat" at positions 4-7 should be flagged
+        assert any(s <= 4 and e >= 7 for s, e in result.uncertain_spans)
+
+    def test_multiple_disagreements(self) -> None:
+        primary = OCRResult(text="The cat sat on the mat", uncertain_spans=[])
+        secondary = OCRResult(text="The car sat on the hat", uncertain_spans=[])
+        result = reconcile_ocr_results(primary, secondary)
+        # Both "cat" and "mat" should be flagged
+        assert len(result.uncertain_spans) >= 2
+
+    def test_insertion_in_secondary(self) -> None:
+        """Secondary has extra words — should not crash."""
+        primary = OCRResult(text="Hello world", uncertain_spans=[])
+        secondary = OCRResult(text="Hello beautiful world", uncertain_spans=[])
+        result = reconcile_ocr_results(primary, secondary)
+        assert result.text == "Hello world"
+        # "world" may be flagged as the diff sees it shifted
+        assert isinstance(result.uncertain_spans, list)
+
+    def test_deletion_in_secondary(self) -> None:
+        """Secondary is missing words — should not crash."""
+        primary = OCRResult(text="Hello beautiful world", uncertain_spans=[])
+        secondary = OCRResult(text="Hello world", uncertain_spans=[])
+        result = reconcile_ocr_results(primary, secondary)
+        assert result.text == "Hello beautiful world"
+
+    def test_secondary_spans_mapped_to_primary(self) -> None:
+        """When texts agree, secondary spans should map to primary coords."""
+        primary = OCRResult(text="The cat sat", uncertain_spans=[])
+        secondary = OCRResult(text="The cat sat", uncertain_spans=[(4, 7)])
+        result = reconcile_ocr_results(primary, secondary)
+        # "cat" at 4-7 in secondary should map to 4-7 in primary
+        assert (4, 7) in result.uncertain_spans
+
+    def test_overlapping_spans_merged(self) -> None:
+        primary = OCRResult(text="The cat sat", uncertain_spans=[(4, 7)])
+        secondary = OCRResult(text="The cat sat", uncertain_spans=[(4, 7)])
+        result = reconcile_ocr_results(primary, secondary)
+        # Should merge to a single span, not duplicate
+        assert result.uncertain_spans.count((4, 7)) == 1
+
+    def test_spans_sorted_by_start(self) -> None:
+        primary = OCRResult(text="one two three four", uncertain_spans=[(14, 18)])
+        secondary = OCRResult(text="one two three four", uncertain_spans=[(0, 3)])
+        result = reconcile_ocr_results(primary, secondary)
+        starts = [s for s, _ in result.uncertain_spans]
+        assert starts == sorted(starts)
+
+    def test_empty_texts(self) -> None:
+        primary = OCRResult(text="", uncertain_spans=[])
+        secondary = OCRResult(text="", uncertain_spans=[])
+        result = reconcile_ocr_results(primary, secondary)
+        assert result.text == ""
+        assert result.uncertain_spans == []
+
+    def test_completely_different_texts(self) -> None:
+        primary = OCRResult(text="alpha beta gamma", uncertain_spans=[])
+        secondary = OCRResult(text="one two three", uncertain_spans=[])
+        result = reconcile_ocr_results(primary, secondary)
+        assert result.text == "alpha beta gamma"
+        # Entire text should be uncertain
+        assert len(result.uncertain_spans) >= 1
+
+
+# ---------------------------------------------------------------------------
+# DualPassOCRProvider
+# ---------------------------------------------------------------------------
+
+
+class TestDualPassOCRProvider:
+    def test_implements_protocol(self) -> None:
+        primary = MagicMock(spec=OCRProvider)
+        secondary = MagicMock(spec=OCRProvider)
+        provider = DualPassOCRProvider(primary, secondary)
+        assert hasattr(provider, "extract")
+
+    def test_calls_both_providers(self) -> None:
+        primary = MagicMock()
+        primary.extract.return_value = OCRResult(text="Hello world", uncertain_spans=[])
+        secondary = MagicMock()
+        secondary.extract.return_value = OCRResult(text="Hello world", uncertain_spans=[])
+
+        provider = DualPassOCRProvider(primary, secondary)
+        provider.extract(b"image", "image/jpeg")
+
+        primary.extract.assert_called_once_with(b"image", "image/jpeg")
+        secondary.extract.assert_called_once_with(b"image", "image/jpeg")
+
+    def test_returns_reconciled_result(self) -> None:
+        primary = MagicMock()
+        primary.extract.return_value = OCRResult(text="The cat sat", uncertain_spans=[])
+        secondary = MagicMock()
+        secondary.extract.return_value = OCRResult(text="The car sat", uncertain_spans=[])
+
+        provider = DualPassOCRProvider(primary, secondary)
+        result = provider.extract(b"image", "image/jpeg")
+
+        assert result.text == "The cat sat"
+        # "cat" vs "car" disagreement should produce an uncertain span
+        assert len(result.uncertain_spans) >= 1
+
+    def test_primary_failure_propagates(self) -> None:
+        primary = MagicMock()
+        primary.extract.side_effect = RuntimeError("API down")
+        secondary = MagicMock()
+        secondary.extract.return_value = OCRResult(text="ok", uncertain_spans=[])
+
+        provider = DualPassOCRProvider(primary, secondary)
+        with pytest.raises(RuntimeError, match="API down"):
+            provider.extract(b"image", "image/jpeg")
+
+    def test_secondary_failure_propagates(self) -> None:
+        primary = MagicMock()
+        primary.extract.return_value = OCRResult(text="ok", uncertain_spans=[])
+        secondary = MagicMock()
+        secondary.extract.side_effect = RuntimeError("quota exceeded")
+
+        provider = DualPassOCRProvider(primary, secondary)
+        with pytest.raises(RuntimeError, match="quota exceeded"):
+            provider.extract(b"image", "image/jpeg")

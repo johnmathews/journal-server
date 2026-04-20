@@ -93,6 +93,7 @@ def services(
         transcription_provider=MagicMock(),
         embeddings_provider=mock_embeddings,
         chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+        preprocess_images=False,
     )
     query = QueryService(
         repository=repo,

@@ -56,6 +56,7 @@ def _build_services(config):
         embeddings_provider=embeddings,
         chunker=chunker,
         embed_metadata_prefix=config.chunking_embed_metadata_prefix,
+        preprocess_images=config.preprocess_images,
     )
     query = QueryService(
         repository=repo,

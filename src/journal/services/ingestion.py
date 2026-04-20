@@ -128,6 +128,7 @@ class IngestionService:
         chunker: ChunkingStrategy,
         slack_bot_token: str = "",
         embed_metadata_prefix: bool = True,
+        preprocess_images: bool = True,
         mood_scoring: "MoodScoringService | None" = None,
     ) -> None:
         self._repo = repository
@@ -138,6 +139,7 @@ class IngestionService:
         self._chunker = chunker
         self._slack_bot_token = slack_bot_token
         self._embed_metadata_prefix = embed_metadata_prefix
+        self._preprocess_images = preprocess_images
         # Optional mood scoring. When `None`, ingestion and update
         # paths skip the step entirely — no LLM calls, no DB
         # writes. When set, `_process_text` calls `score_entry` at
@@ -146,6 +148,14 @@ class IngestionService:
         # `final_text`. Scoring failures are logged by the service
         # and never propagate back into the ingestion flow.
         self._mood_scoring = mood_scoring
+
+    def _maybe_preprocess(self, image_data: bytes, media_type: str) -> tuple[bytes, str]:
+        """Apply image preprocessing if enabled."""
+        if not self._preprocess_images:
+            return image_data, media_type
+        from journal.services.preprocessing import preprocess_image
+
+        return preprocess_image(image_data, media_type)
 
     def ingest_image(
         self, image_data: bytes, media_type: str, date: str, *, user_id: int = 1,
@@ -160,6 +170,9 @@ class IngestionService:
                 "This image has already been uploaded in another entry. "
                 "Delete the existing entry first if you want to re-upload."
             )
+
+        # Preprocess before OCR (auto-rotate, crop, downscale, contrast).
+        image_data, media_type = self._maybe_preprocess(image_data, media_type)
 
         # Extract text + uncertainty spans via OCR. Spans are in
         # ocr_result.text coordinates; since we store that text as-is
@@ -562,6 +575,7 @@ class IngestionService:
                     f"Page {i + 1} has already been uploaded in another entry. "
                     f"Delete the existing entry first if you want to re-upload."
                 )
+            image_data, media_type = self._maybe_preprocess(image_data, media_type)
             ocr_result = self._ocr.extract(image_data, media_type)
             if not ocr_result.text.strip():
                 raise ValueError(f"OCR extracted no text from page {i + 1}")

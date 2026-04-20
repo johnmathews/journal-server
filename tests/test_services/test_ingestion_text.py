@@ -35,6 +35,7 @@ def ingestion_service(db_conn, mock_embeddings):
         transcription_provider=MagicMock(),
         embeddings_provider=mock_embeddings,
         chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+        preprocess_images=False,
     )
 
 
@@ -50,6 +51,7 @@ def ingestion_with_mood(db_conn, mock_embeddings, mock_mood_scoring):
         embeddings_provider=mock_embeddings,
         chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
         mood_scoring=mock_mood_scoring,
+        preprocess_images=False,
     )
 
 

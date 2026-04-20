@@ -65,6 +65,7 @@ def ingestion_service(db_conn, mock_ocr, mock_transcription, mock_embeddings):
         transcription_provider=mock_transcription,
         embeddings_provider=mock_embeddings,
         chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+        preprocess_images=False,
     )
 
 
@@ -82,6 +83,7 @@ def ingestion_service_with_slack(
         embeddings_provider=mock_embeddings,
         chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
         slack_bot_token="xoxb-test-token-123",
+        preprocess_images=False,
     )
 
 

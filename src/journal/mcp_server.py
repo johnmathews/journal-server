@@ -91,9 +91,13 @@ def _init_services() -> dict:
         model=config.embedding_model,
         dimensions=config.embedding_dimensions,
     )
-    log.info("  Providers: OCR=%s (%s), transcription=%s, embeddings=%s",
-             config.ocr_provider, config.ocr_model or "default",
+    log.info("  Providers: OCR=%s%s (%s), transcription=%s, embeddings=%s",
+             config.ocr_provider,
+             " [dual-pass]" if config.ocr_dual_pass else "",
+             config.ocr_model or "default",
              config.transcription_model, config.embedding_model)
+    if config.preprocess_images:
+        log.info("  Image preprocessing: enabled")
 
     chunker = build_chunker(config, embeddings)
 
@@ -172,6 +176,7 @@ def _init_services() -> dict:
         chunker=chunker,
         slack_bot_token=config.slack_bot_token,
         embed_metadata_prefix=config.chunking_embed_metadata_prefix,
+        preprocess_images=config.preprocess_images,
         mood_scoring=mood_scoring_service,
     )
 

@@ -55,6 +55,23 @@ class Config:
         default_factory=lambda: os.environ.get("OCR_CONTEXT_CACHE_TTL", "1h")
     )
 
+    # Image preprocessing — auto-rotate, crop to text area, downscale,
+    # contrast enhancement. Applied before OCR to improve accuracy.
+    preprocess_images: bool = field(
+        default_factory=lambda: os.environ.get(
+            "PREPROCESS_IMAGES", "true"
+        ).lower() in ("1", "true", "yes", "on")
+    )
+
+    # Dual-pass OCR — run both Anthropic and Gemini on each page,
+    # reconcile disagreements as uncertain spans ("doubts"). Requires
+    # both ANTHROPIC_API_KEY and GOOGLE_API_KEY.
+    ocr_dual_pass: bool = field(
+        default_factory=lambda: os.environ.get(
+            "OCR_DUAL_PASS", "false"
+        ).lower() in ("1", "true", "yes", "on")
+    )
+
     # OpenAI (Whisper + Embeddings)
     openai_api_key: str = field(default_factory=lambda: os.environ.get("OPENAI_API_KEY", ""))
     transcription_model: str = "gpt-4o-transcribe"

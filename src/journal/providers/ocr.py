@@ -456,8 +456,137 @@ _DEFAULT_MODELS: dict[str, str] = {
 }
 
 
-def build_ocr_provider(config: Config) -> OCRProvider:
-    """Build the OCR provider specified by config.ocr_provider."""
+# ---------------------------------------------------------------------------
+# Dual-pass OCR: reconciliation and composite provider
+# ---------------------------------------------------------------------------
+
+
+def _tokenize_with_positions(text: str) -> list[tuple[str, int, int]]:
+    """Split *text* on whitespace, returning ``(word, char_start, char_end)``."""
+    tokens: list[tuple[str, int, int]] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        # skip whitespace
+        while i < n and text[i].isspace():
+            i += 1
+        if i >= n:
+            break
+        start = i
+        while i < n and not text[i].isspace():
+            i += 1
+        tokens.append((text[start:i], start, i))
+    return tokens
+
+
+def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Sort spans by start and merge overlapping/adjacent ones."""
+    if not spans:
+        return []
+    sorted_spans = sorted(spans)
+    merged: list[tuple[int, int]] = [sorted_spans[0]]
+    for start, end in sorted_spans[1:]:
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end:
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def reconcile_ocr_results(
+    primary: OCRResult,
+    secondary: OCRResult,
+) -> OCRResult:
+    """Reconcile two OCR results, using the primary's text as the base.
+
+    Returns an ``OCRResult`` whose text is ``primary.text`` and whose
+    ``uncertain_spans`` is the union of:
+
+    1. ``primary.uncertain_spans``
+    2. Regions where the two texts disagree (word-level diff)
+
+    Secondary spans that fall inside ``'equal'`` diff blocks are mapped
+    to primary coordinates; those in disagreement regions are subsumed
+    by the disagreement span.
+    """
+    from difflib import SequenceMatcher
+
+    all_spans: list[tuple[int, int]] = list(primary.uncertain_spans)
+
+    primary_tokens = _tokenize_with_positions(primary.text)
+    secondary_tokens = _tokenize_with_positions(secondary.text)
+
+    primary_words = [t[0] for t in primary_tokens]
+    secondary_words = [t[0] for t in secondary_tokens]
+
+    matcher = SequenceMatcher(None, primary_words, secondary_words, autojunk=False)
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            # Map secondary uncertain spans that fall within this equal
+            # block back to primary text coordinates.
+            for sec_span_start, sec_span_end in secondary.uncertain_spans:
+                for sec_idx in range(j1, j2):
+                    _, s_start, s_end = secondary_tokens[sec_idx]
+                    if s_start >= sec_span_end or s_end <= sec_span_start:
+                        continue
+                    # This secondary word overlaps a secondary span.
+                    # Map it to the corresponding primary word.
+                    pri_idx = i1 + (sec_idx - j1)
+                    _, p_start, p_end = primary_tokens[pri_idx]
+                    all_spans.append((p_start, p_end))
+        else:
+            # Disagreement: flag the entire primary region as uncertain.
+            if i1 < i2 and primary_tokens:
+                span_start = primary_tokens[i1][1]
+                span_end = primary_tokens[i2 - 1][2]
+                all_spans.append((span_start, span_end))
+
+    return OCRResult(text=primary.text, uncertain_spans=_merge_spans(all_spans))
+
+
+class DualPassOCRProvider:
+    """OCR provider that runs two providers concurrently and reconciles.
+
+    Implements the ``OCRProvider`` Protocol. The primary provider's text
+    is used as the base; disagreements with the secondary become
+    uncertain spans ("doubts") for human review.
+    """
+
+    def __init__(self, primary: OCRProvider, secondary: OCRProvider) -> None:
+        self._primary = primary
+        self._secondary = secondary
+
+    def extract(self, image_data: bytes, media_type: str) -> OCRResult:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            primary_future = pool.submit(self._primary.extract, image_data, media_type)
+            secondary_future = pool.submit(self._secondary.extract, image_data, media_type)
+            primary_result = primary_future.result()
+            secondary_result = secondary_future.result()
+
+        reconciled = reconcile_ocr_results(primary_result, secondary_result)
+        logger.info(
+            "Dual-pass OCR: primary %d chars / %d spans, "
+            "secondary %d chars / %d spans → reconciled %d spans",
+            len(primary_result.text),
+            len(primary_result.uncertain_spans),
+            len(secondary_result.text),
+            len(secondary_result.uncertain_spans),
+            len(reconciled.uncertain_spans),
+        )
+        return reconciled
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+
+def _build_single_provider(config: Config) -> OCRProvider:
+    """Build the single OCR provider specified by ``config.ocr_provider``."""
     provider_name = config.ocr_provider
     model = config.ocr_model or _DEFAULT_MODELS.get(provider_name, "")
     if provider_name == "anthropic":
@@ -477,3 +606,31 @@ def build_ocr_provider(config: Config) -> OCRProvider:
     raise ValueError(
         f"Unknown OCR provider {provider_name!r} — must be 'anthropic' or 'gemini'"
     )
+
+
+def _build_dual_pass_provider(config: Config) -> DualPassOCRProvider:
+    """Build a dual-pass provider: Anthropic primary, Gemini secondary."""
+    primary = AnthropicOCRProvider(
+        api_key=config.anthropic_api_key,
+        model=config.ocr_model or _DEFAULT_MODELS["anthropic"],
+        max_tokens=config.ocr_max_tokens,
+        context_dir=config.ocr_context_dir,
+        cache_ttl=config.ocr_context_cache_ttl,
+    )
+    secondary = GeminiOCRProvider(
+        api_key=config.google_api_key,
+        model=_DEFAULT_MODELS["gemini"],
+        context_dir=config.ocr_context_dir,
+    )
+    return DualPassOCRProvider(primary=primary, secondary=secondary)
+
+
+def build_ocr_provider(config: Config) -> OCRProvider:
+    """Build the OCR provider specified by config.
+
+    When ``config.ocr_dual_pass`` is true, both Anthropic and Gemini
+    providers are instantiated and wrapped in a ``DualPassOCRProvider``.
+    """
+    if config.ocr_dual_pass:
+        return _build_dual_pass_provider(config)
+    return _build_single_provider(config)

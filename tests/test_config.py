@@ -108,3 +108,31 @@ class TestApiBearerToken:
         monkeypatch.setenv("JOURNAL_API_TOKEN", "")
         config = Config()
         assert config.api_bearer_token is None
+
+
+class TestPreprocessImages:
+    def test_default_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("PREPROCESS_IMAGES", raising=False)
+        assert Config().preprocess_images is True
+
+    def test_env_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PREPROCESS_IMAGES", "false")
+        assert Config().preprocess_images is False
+
+    def test_env_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PREPROCESS_IMAGES", "0")
+        assert Config().preprocess_images is False
+
+
+class TestOcrDualPass:
+    def test_default_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("OCR_DUAL_PASS", raising=False)
+        assert Config().ocr_dual_pass is False
+
+    def test_env_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OCR_DUAL_PASS", "true")
+        assert Config().ocr_dual_pass is True
+
+    def test_env_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OCR_DUAL_PASS", "1")
+        assert Config().ocr_dual_pass is True

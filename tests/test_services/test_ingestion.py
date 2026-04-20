@@ -51,6 +51,7 @@ def ingestion_service(db_conn, mock_ocr, mock_transcription, mock_embeddings):
         transcription_provider=mock_transcription,
         embeddings_provider=mock_embeddings,
         chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+        preprocess_images=False,
     )
 
 
@@ -598,6 +599,7 @@ class TestMetadataPrefix:
             embeddings_provider=mock_embeddings,
             chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
             embed_metadata_prefix=True,
+            preprocess_images=False,
         )
 
     @pytest.fixture
@@ -612,6 +614,7 @@ class TestMetadataPrefix:
             embeddings_provider=mock_embeddings,
             chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
             embed_metadata_prefix=False,
+            preprocess_images=False,
         )
 
     def test_embed_texts_receives_date_prefix_when_enabled(
@@ -738,3 +741,87 @@ class TestRechunkEntry:
 
         result = ingestion_service.rechunk_entry(entry.id)
         assert result == 0
+
+
+class TestPreprocessingIntegration:
+    """Verify preprocessing is called/skipped based on the flag."""
+
+    def test_preprocessing_called_when_enabled(
+        self, db_conn, mock_ocr, mock_transcription, mock_embeddings, monkeypatch,
+    ):
+        from journal.services import preprocessing
+
+        spy = MagicMock(return_value=(b"processed", "image/jpeg"))
+        monkeypatch.setattr(preprocessing, "preprocess_image", spy)
+
+        repo = SQLiteEntryRepository(db_conn)
+        svc = IngestionService(
+            repository=repo,
+            vector_store=InMemoryVectorStore(),
+            ocr_provider=mock_ocr,
+            transcription_provider=mock_transcription,
+            embeddings_provider=mock_embeddings,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+            preprocess_images=True,
+        )
+        svc.ingest_image(b"raw image", "image/jpeg", "2026-04-20")
+        spy.assert_called_once_with(b"raw image", "image/jpeg")
+        # OCR should receive the preprocessed bytes
+        mock_ocr.extract.assert_called_once_with(b"processed", "image/jpeg")
+
+    def test_preprocessing_skipped_when_disabled(
+        self, db_conn, mock_ocr, mock_transcription, mock_embeddings, monkeypatch,
+    ):
+        from journal.services import preprocessing
+
+        spy = MagicMock()
+        monkeypatch.setattr(preprocessing, "preprocess_image", spy)
+
+        repo = SQLiteEntryRepository(db_conn)
+        svc = IngestionService(
+            repository=repo,
+            vector_store=InMemoryVectorStore(),
+            ocr_provider=mock_ocr,
+            transcription_provider=mock_transcription,
+            embeddings_provider=mock_embeddings,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+            preprocess_images=False,
+        )
+        svc.ingest_image(b"raw image", "image/jpeg", "2026-04-20")
+        spy.assert_not_called()
+        # OCR receives original bytes
+        mock_ocr.extract.assert_called_once_with(b"raw image", "image/jpeg")
+
+    def test_multi_page_preprocessing_per_page(
+        self, db_conn, mock_ocr, mock_transcription, mock_embeddings, monkeypatch,
+    ):
+        from journal.services import preprocessing
+
+        spy = MagicMock(side_effect=[
+            (b"processed-1", "image/jpeg"),
+            (b"processed-2", "image/jpeg"),
+        ])
+        monkeypatch.setattr(preprocessing, "preprocess_image", spy)
+
+        mock_ocr.extract.side_effect = [
+            _ocr_result("Page one text."),
+            _ocr_result("Page two text."),
+        ]
+
+        repo = SQLiteEntryRepository(db_conn)
+        svc = IngestionService(
+            repository=repo,
+            vector_store=InMemoryVectorStore(),
+            ocr_provider=mock_ocr,
+            transcription_provider=mock_transcription,
+            embeddings_provider=mock_embeddings,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+            preprocess_images=True,
+        )
+        svc.ingest_multi_page_entry(
+            [(b"page1", "image/jpeg"), (b"page2", "image/png")],
+            "2026-04-20",
+        )
+        assert spy.call_count == 2
+        spy.assert_any_call(b"page1", "image/jpeg")
+        spy.assert_any_call(b"page2", "image/png")
