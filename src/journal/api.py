@@ -58,6 +58,18 @@ def _convert_heic_to_jpeg(data: bytes, quality: int = 92) -> tuple[bytes, str]:
     return buf.getvalue(), "image/jpeg"
 
 
+def _runtime_get(services: dict, key: str) -> Any:
+    """Read a runtime setting, falling back to the frozen Config."""
+    runtime = services.get("runtime_settings")
+    if runtime is not None:
+        try:
+            return runtime.get(key)
+        except KeyError:
+            pass
+    config = services.get("config")
+    return getattr(config, key, None) if config else None
+
+
 def _entry_to_dict(
     entry: Any,
     page_count: int = 0,
@@ -415,8 +427,7 @@ def register_api_routes(
                         exc_info=True,
                     )
 
-                config = services.get("config")
-                if config and config.enable_mood_scoring:
+                if _runtime_get(services, "enable_mood_scoring"):
                     try:
                         mood_job = job_runner.submit_mood_score_entry(entry_id, user_id=user_id)
                         mood_job_id = mood_job.id
@@ -682,12 +693,71 @@ def register_api_routes(
                     "dedup_similarity_threshold": config.entity_dedup_similarity_threshold,
                 },
                 "features": {
-                    "mood_scoring": config.enable_mood_scoring,
+                    "mood_scoring": _runtime_get(services, "enable_mood_scoring"),
                     "mood_scorer_model": config.mood_scorer_model,
                     "journal_author_name": config.journal_author_name,
                 },
+                "runtime": (
+                    runtime.get_all()
+                    if (runtime := services.get("runtime_settings"))
+                    else []
+                ),
             }
         )
+
+    @mcp.custom_route(
+        "/api/settings/runtime", methods=["GET"], name="api_runtime_settings_get",
+    )
+    async def get_runtime_settings(request: Request) -> JSONResponse:
+        """Return all runtime-editable settings with metadata."""
+        services = services_getter()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+        runtime = services.get("runtime_settings")
+        if runtime is None:
+            return JSONResponse({"error": "Runtime settings not available"}, status_code=503)
+        return JSONResponse({"settings": runtime.get_all()})
+
+    @mcp.custom_route(
+        "/api/settings/runtime", methods=["PATCH"], name="api_runtime_settings_patch",
+    )
+    async def patch_runtime_settings(request: Request) -> JSONResponse:
+        """Update one or more runtime settings. Admin-only."""
+        user = get_authenticated_user(request)
+        if not user or not user.is_admin:
+            return JSONResponse({"error": "Admin access required"}, status_code=403)
+        services = services_getter()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+        runtime = services.get("runtime_settings")
+        if runtime is None:
+            return JSONResponse({"error": "Runtime settings not available"}, status_code=503)
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "Request body must be a JSON object"}, status_code=400)
+
+        errors: list[str] = []
+        updated: list[str] = []
+        for key, value in body.items():
+            try:
+                runtime.set(key, value)
+                updated.append(key)
+            except (KeyError, ValueError) as e:
+                errors.append(str(e))
+
+        if errors and not updated:
+            return JSONResponse({"error": "; ".join(errors)}, status_code=400)
+
+        log.info("PATCH /api/settings/runtime — updated %s", updated)
+        result: dict = {"updated": updated, "settings": runtime.get_all()}
+        if errors:
+            result["warnings"] = errors
+        return JSONResponse(result)
 
     @mcp.custom_route("/health", methods=["GET"], name="api_health")
     async def get_health(request: Request) -> JSONResponse:

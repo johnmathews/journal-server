@@ -224,7 +224,9 @@ def register_auth_routes(
         email_service: EmailService | None = services.get("email_service")
         config: Config = services["config"]
 
-        if not config.registration_enabled:
+        from journal.api import _runtime_get
+
+        if not _runtime_get(services, "registration_enabled"):
             return JSONResponse(
                 {"error": "registration_disabled", "message": "Registration is currently disabled"},
                 status_code=403,
@@ -304,8 +306,10 @@ def register_auth_routes(
             return result
         services = result
 
-        config: Config = services["config"]
-        return JSONResponse({"registration_enabled": config.registration_enabled})
+        from journal.api import _runtime_get
+
+        reg = _runtime_get(services, "registration_enabled")
+        return JSONResponse({"registration_enabled": reg})
 
     # ── POST /api/auth/forgot-password ─────────────────────────────────
 

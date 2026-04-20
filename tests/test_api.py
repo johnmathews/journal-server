@@ -109,7 +109,10 @@ def services(
     job_repository = SQLiteJobRepository(repo._conn)
 
     from journal.config import Config
+    from journal.services.runtime_settings import RuntimeSettings
+
     config = Config()
+    runtime = RuntimeSettings(repo._conn, config)
 
     return {
         "ingestion": ingestion,
@@ -117,6 +120,7 @@ def services(
         "entity_store": entity_store,
         "job_repository": job_repository,
         "config": config,
+        "runtime_settings": runtime,
     }
 
 
@@ -2013,3 +2017,59 @@ class TestMoodTrendsIncludesScoreBounds:
         assert b["score_min"] == pytest.approx(0.65)
         assert b["score_max"] == pytest.approx(0.65)
         assert b["avg_score"] == pytest.approx(0.65)
+
+
+class TestRuntimeSettings:
+    def test_get_settings_includes_runtime(self, client: TestClient) -> None:
+        resp = client.get("/api/settings")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "runtime" in data
+        keys = {s["key"] for s in data["runtime"]}
+        assert "preprocess_images" in keys
+        assert "ocr_dual_pass" in keys
+
+    def test_get_runtime_settings(self, client: TestClient) -> None:
+        resp = client.get("/api/settings/runtime")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "settings" in data
+        by_key = {s["key"]: s for s in data["settings"]}
+        assert by_key["preprocess_images"]["type"] == "bool"
+        assert by_key["ocr_provider"]["choices"] == ["anthropic", "gemini"]
+
+    def test_patch_runtime_setting(self, client: TestClient) -> None:
+        resp = client.patch(
+            "/api/settings/runtime",
+            json={"ocr_dual_pass": True},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "ocr_dual_pass" in data["updated"]
+        # Verify it persisted
+        get_resp = client.get("/api/settings/runtime")
+        by_key = {s["key"]: s for s in get_resp.json()["settings"]}
+        assert by_key["ocr_dual_pass"]["value"] is True
+
+    def test_patch_invalid_key(self, client: TestClient) -> None:
+        resp = client.patch(
+            "/api/settings/runtime",
+            json={"nonexistent": True},
+        )
+        assert resp.status_code == 400
+        assert "error" in resp.json()
+
+    def test_patch_invalid_value(self, client: TestClient) -> None:
+        resp = client.patch(
+            "/api/settings/runtime",
+            json={"ocr_provider": "openai"},
+        )
+        assert resp.status_code == 400
+
+    def test_patch_multiple_settings(self, client: TestClient) -> None:
+        resp = client.patch(
+            "/api/settings/runtime",
+            json={"preprocess_images": False, "ocr_dual_pass": True},
+        )
+        assert resp.status_code == 200
+        assert set(resp.json()["updated"]) == {"preprocess_images", "ocr_dual_pass"}

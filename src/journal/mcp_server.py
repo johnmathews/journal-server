@@ -165,6 +165,30 @@ def _init_services() -> dict:
         user_repo=user_repo,
     )
 
+    # Runtime settings — editable from the webapp without restart.
+    from journal.services.runtime_settings import RuntimeSettings
+
+    def _on_runtime_setting_change(key: str, value: Any) -> None:
+        """Side-effect callback: rebuild OCR provider when relevant settings change."""
+        if key in ("ocr_dual_pass", "ocr_provider"):
+            from dataclasses import replace
+
+            # Build a temporary Config with the runtime value overridden
+            # so build_ocr_provider sees the new setting.
+            patched = replace(config, **{key: value})
+            # Also apply the other OCR-related runtime setting
+            other_key = "ocr_dual_pass" if key == "ocr_provider" else "ocr_provider"
+            patched = replace(patched, **{other_key: runtime_settings.get(other_key)})
+            new_ocr = build_ocr_provider(patched)
+            ingestion_service._ocr = new_ocr
+            log.info("OCR provider rebuilt due to runtime setting change: %s=%r", key, value)
+        elif key == "preprocess_images":
+            ingestion_service._preprocess_images = value
+            log.info("Preprocessing %s via runtime settings", "enabled" if value else "disabled")
+
+    runtime_settings = RuntimeSettings(conn, config, on_change=_on_runtime_setting_change)
+    log.info("  Runtime settings loaded")
+
     # Ingestion service — created before the JobRunner so the runner
     # can delegate image-ingestion jobs to it on the background thread.
     ingestion_service = IngestionService(
@@ -176,7 +200,7 @@ def _init_services() -> dict:
         chunker=chunker,
         slack_bot_token=config.slack_bot_token,
         embed_metadata_prefix=config.chunking_embed_metadata_prefix,
-        preprocess_images=config.preprocess_images,
+        preprocess_images=runtime_settings.get("preprocess_images"),
         mood_scoring=mood_scoring_service,
     )
 
@@ -252,6 +276,7 @@ def _init_services() -> dict:
         "job_repository": job_repository,
         "job_runner": job_runner,
         "config": config,
+        "runtime_settings": runtime_settings,
         "stats": stats_collector,
         "mood_dimensions": mood_dimensions,
         "mood_scoring": mood_scoring_service,
