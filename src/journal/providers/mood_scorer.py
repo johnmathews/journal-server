@@ -44,6 +44,7 @@ class RawMoodScore:
     dimension_name: str
     value: float
     confidence: float | None = None
+    rationale: str | None = None
 
 
 def build_system_prompt(dimensions: tuple[MoodDimension, ...]) -> str:
@@ -102,6 +103,13 @@ def build_system_prompt(dimensions: tuple[MoodDimension, ...]) -> str:
         lines.append("")
 
     lines.append(
+        "For every facet, also write a `rationale`: one or two short "
+        "sentences (under 30 words each) explaining the key signal in "
+        "the entry that drove the score. Be concrete — quote or "
+        "paraphrase the entry rather than restating the scale definition."
+    )
+    lines.append("")
+    lines.append(
         "If the entry is too short or uninformative to score a "
         "particular facet, include it anyway with the neutral "
         "value (0.0 for bipolar, 0.0 for unipolar) and a low "
@@ -134,7 +142,7 @@ def build_tool_schema(
                 f"{d.negative_pole} ({d.score_min:+.1f}) → "
                 f"{d.positive_pole} ({d.score_max:+.1f})"
             ),
-            "required": ["value"],
+            "required": ["value", "rationale"],
             "properties": {
                 "value": {
                     "type": "number",
@@ -151,6 +159,13 @@ def build_tool_schema(
                     "maximum": 1.0,
                     "description": (
                         "Optional per-facet confidence in [0, 1]"
+                    ),
+                },
+                "rationale": {
+                    "type": "string",
+                    "description": (
+                        "1-2 sentences explaining what in the entry "
+                        "drove this score."
                     ),
                 },
             },
@@ -316,11 +331,14 @@ def _parse_tool_response(
             confidence = _clamp(float(confidence_raw), 0.0, 1.0)
         else:
             confidence = None
+        rationale_raw = raw.get("rationale")
+        rationale: str | None = rationale_raw if isinstance(rationale_raw, str) else None
         results.append(
             RawMoodScore(
                 dimension_name=d.name,
                 value=clamped,
                 confidence=confidence,
+                rationale=rationale,
             )
         )
 

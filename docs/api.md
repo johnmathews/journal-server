@@ -488,9 +488,9 @@ Aggregate mood scores per time bucket, grouped by dimension. Used by the dashboa
  "to": "2026-04-11",
  "bin": "week",
  "bins": [
-  { "period": "2026-01-05", "dimension": "joy_sadness", "avg_score": 0.3, "entry_count": 4 },
-  { "period": "2026-01-05", "dimension": "agency", "avg_score": 0.6, "entry_count": 4 },
-  { "period": "2026-01-12", "dimension": "joy_sadness", "avg_score": 0.5, "entry_count": 5 }
+  { "period": "2026-01-05", "dimension": "joy_sadness", "avg_score": 0.3, "entry_count": 4, "score_min": -0.1, "score_max": 0.7 },
+  { "period": "2026-01-05", "dimension": "agency", "avg_score": 0.6, "entry_count": 4, "score_min": 0.3, "score_max": 0.9 },
+  { "period": "2026-01-12", "dimension": "joy_sadness", "avg_score": 0.5, "entry_count": 5, "score_min": 0.2, "score_max": 0.8 }
  ]
 }
 ```
@@ -498,11 +498,91 @@ Aggregate mood scores per time bucket, grouped by dimension. Used by the dashboa
 - `period` is the canonical ISO-8601 date of the bucket start (Monday for weeks, first of month/quarter/year for the
   others).
 - `avg_score` is the mean across every scored entry in the bucket.
+- `score_min` / `score_max` are the minimum and maximum individual entry scores in the bucket (used for variance bands on the chart).
 - Empty buckets are omitted.
 
 **Error responses:**
 
 - `400` — `bin` is not one of `week`/`month`/`quarter`/`year`
+- `503` — server not initialised
+
+---
+
+### GET /api/dashboard/mood-drilldown
+
+Return per-entry mood scores for a single dimension within a date window. Used by the Insights page when the user clicks a data point on the mood chart to see which entries contributed to that period's average score.
+
+**Query parameters:**
+
+| Parameter   | Type   | Required | Description                   |
+| ----------- | ------ | -------- | ----------------------------- |
+| `dimension` | string | yes      | The mood dimension name       |
+| `from`      | string | yes      | Inclusive ISO-8601 start date |
+| `to`        | string | yes      | Inclusive ISO-8601 end date   |
+
+**Response (200):**
+
+```json
+{
+ "dimension": "agency",
+ "from": "2026-04-14",
+ "to": "2026-04-20",
+ "entries": [
+  {
+   "entry_id": 42,
+   "entry_date": "2026-04-15",
+   "score": 0.72,
+   "confidence": 0.88,
+   "rationale": "The writer describes taking initiative on the project and feeling capable of driving the outcome."
+  }
+ ]
+}
+```
+
+- `rationale` is `null` for entries scored before migration 0014. Run `journal backfill-mood --force` to populate rationales.
+- Entries are ordered by `entry_date` ascending.
+
+**Error responses:**
+
+- `400` — missing `dimension`, `from`, or `to` parameter
+- `503` — server not initialised
+
+---
+
+### GET /api/dashboard/entity-distribution
+
+Return entity mention counts grouped by entity name, filtered by type and date range. Used by the Insights page for the "What I Write About" doughnut chart.
+
+**Query parameters:**
+
+| Parameter | Type   | Required | Default | Description                                            |
+| --------- | ------ | -------- | ------- | ------------------------------------------------------ |
+| `type`    | string | no       |         | Entity type filter: person, place, activity, etc.      |
+| `from`    | string | no       |         | Inclusive ISO-8601 start date                          |
+| `to`      | string | no       |         | Inclusive ISO-8601 end date                            |
+| `limit`   | int    | no       | 50      | Max items to return (capped at 200)                    |
+
+**Response (200):**
+
+```json
+{
+ "type": "topic",
+ "from": "2026-01-01",
+ "to": "2026-04-20",
+ "total": 2,
+ "items": [
+  { "canonical_name": "meditation", "entity_type": "topic", "mention_count": 14 },
+  { "canonical_name": "running", "entity_type": "topic", "mention_count": 9 }
+ ]
+}
+```
+
+- Items are ordered by `mention_count` descending.
+- `mention_count` counts total mentions (not distinct entries).
+
+**Error responses:**
+
+- `400` — invalid `type` value
 - `503` — server not initialised
 
 ---

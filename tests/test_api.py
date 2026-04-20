@@ -1797,3 +1797,211 @@ class TestEntitySearchFilter:
         data = resp.json()
         assert len(data["items"]) == 1
         assert data["items"][0]["canonical_name"] == "Atlas"
+
+
+class TestDashboardMoodDrilldown:
+    """Tests for GET /api/dashboard/mood-drilldown."""
+
+    def test_happy_path(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        e1 = repo.create_entry("2026-03-02", "photo", "happy day", 2)
+        repo.add_mood_score(e1.id, "joy_sadness", 0.8, confidence=0.9, rationale="Very positive tone")
+        e2 = repo.create_entry("2026-03-04", "photo", "okay day", 2)
+        repo.add_mood_score(e2.id, "joy_sadness", 0.3, confidence=0.7, rationale="Neutral tone")
+
+        resp = client.get(
+            "/api/dashboard/mood-drilldown"
+            "?dimension=joy_sadness&from=2026-03-01&to=2026-03-05"
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["dimension"] == "joy_sadness"
+        assert data["from"] == "2026-03-01"
+        assert data["to"] == "2026-03-05"
+        assert len(data["entries"]) == 2
+        entry_ids = [e["entry_id"] for e in data["entries"]]
+        assert e1.id in entry_ids
+        assert e2.id in entry_ids
+        first = next(e for e in data["entries"] if e["entry_id"] == e1.id)
+        assert first["score"] == pytest.approx(0.8)
+        assert first["entry_date"] == "2026-03-02"
+
+    def test_missing_dimension_returns_400(
+        self, client: TestClient
+    ) -> None:
+        resp = client.get(
+            "/api/dashboard/mood-drilldown?from=2026-03-01&to=2026-03-05"
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "missing_dimension"
+
+    def test_missing_dates_returns_400(
+        self, client: TestClient
+    ) -> None:
+        # Missing both from and to
+        resp = client.get(
+            "/api/dashboard/mood-drilldown?dimension=joy_sadness"
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "missing_dates"
+
+        # Missing only 'to'
+        resp = client.get(
+            "/api/dashboard/mood-drilldown?dimension=joy_sadness&from=2026-03-01"
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "missing_dates"
+
+        # Missing only 'from'
+        resp = client.get(
+            "/api/dashboard/mood-drilldown?dimension=joy_sadness&to=2026-03-05"
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "missing_dates"
+
+    def test_empty_period_returns_empty_entries(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        # Seed an entry outside the query window
+        e = repo.create_entry("2026-01-15", "photo", "old entry", 2)
+        repo.add_mood_score(e.id, "joy_sadness", 0.5)
+
+        resp = client.get(
+            "/api/dashboard/mood-drilldown"
+            "?dimension=joy_sadness&from=2026-03-01&to=2026-03-31"
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["entries"] == []
+
+    def test_includes_rationale_in_response(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        e = repo.create_entry("2026-03-10", "photo", "reflective day", 2)
+        repo.add_mood_score(
+            e.id, "agency", 0.6, confidence=0.85, rationale="Showed initiative"
+        )
+
+        resp = client.get(
+            "/api/dashboard/mood-drilldown"
+            "?dimension=agency&from=2026-03-01&to=2026-03-31"
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["entries"]) == 1
+        entry = data["entries"][0]
+        assert entry["rationale"] == "Showed initiative"
+        assert entry["confidence"] == pytest.approx(0.85)
+
+
+class TestDashboardEntityDistribution:
+    """Tests for GET /api/dashboard/entity-distribution."""
+
+    def test_happy_path(
+        self,
+        client: TestClient,
+        repo: SQLiteEntryRepository,
+        services: dict,
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entry = repo.create_entry("2026-03-15", "photo", "Met Alice in Vienna", 4)
+        alice = entity_store.create_entity("person", "Alice", "", "2026-03-15")
+        vienna = entity_store.create_entity("place", "Vienna", "", "2026-03-15")
+        entity_store.create_mention(alice.id, entry.id, "Alice", 0.9, "run-1")
+        entity_store.create_mention(alice.id, entry.id, "Alice again", 0.8, "run-1")
+        entity_store.create_mention(vienna.id, entry.id, "Vienna", 0.95, "run-1")
+
+        resp = client.get("/api/dashboard/entity-distribution")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] >= 2
+        items = data["items"]
+        # Alice has 2 mentions, Vienna has 1 — Alice should come first
+        names = [item["canonical_name"] for item in items]
+        assert "Alice" in names
+        assert "Vienna" in names
+        alice_item = next(i for i in items if i["canonical_name"] == "Alice")
+        assert alice_item["entity_type"] == "person"
+        assert alice_item["mention_count"] == 2
+        vienna_item = next(i for i in items if i["canonical_name"] == "Vienna")
+        assert vienna_item["entity_type"] == "place"
+        assert vienna_item["mention_count"] == 1
+
+    def test_invalid_type_returns_400(
+        self, client: TestClient
+    ) -> None:
+        resp = client.get("/api/dashboard/entity-distribution?type=invalid_type")
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "invalid_type"
+
+    def test_default_limit(
+        self,
+        client: TestClient,
+        repo: SQLiteEntryRepository,
+        services: dict,
+    ) -> None:
+        """When no limit is specified, the endpoint defaults to 50."""
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entry = repo.create_entry("2026-03-15", "photo", "text", 1)
+        entity = entity_store.create_entity("person", "Someone", "", "2026-03-15")
+        entity_store.create_mention(entity.id, entry.id, "Someone", 0.9, "run-1")
+
+        resp = client.get("/api/dashboard/entity-distribution")
+        assert resp.status_code == 200
+        # With only 1 entity, the result should have 1 item; the default
+        # limit of 50 means it won't truncate a small set.
+        data = resp.json()
+        assert data["total"] == 1
+        assert len(data["items"]) == 1
+
+    def test_empty_returns_empty(
+        self, client: TestClient
+    ) -> None:
+        resp = client.get("/api/dashboard/entity-distribution")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 0
+        assert data["items"] == []
+
+
+class TestMoodTrendsIncludesScoreBounds:
+    """Verify that mood-trends bins include score_min and score_max."""
+
+    def test_bins_include_score_min_and_score_max(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        e1 = repo.create_entry("2026-03-02", "photo", "day one", 2)
+        repo.add_mood_score(e1.id, "joy_sadness", 0.3)
+        e2 = repo.create_entry("2026-03-04", "photo", "day two", 2)
+        repo.add_mood_score(e2.id, "joy_sadness", 0.9)
+
+        resp = client.get("/api/dashboard/mood-trends?bin=week")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["bins"]) >= 1
+        # Find the joy_sadness bin(s)
+        joy_bins = [b for b in data["bins"] if b["dimension"] == "joy_sadness"]
+        assert len(joy_bins) >= 1
+        for b in joy_bins:
+            assert "score_min" in b
+            assert "score_max" in b
+            assert b["score_min"] is not None
+            assert b["score_max"] is not None
+            assert b["score_min"] <= b["avg_score"] <= b["score_max"]
+
+    def test_single_entry_bin_has_equal_min_max(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        """When a bin contains a single entry, score_min == score_max == avg_score."""
+        e = repo.create_entry("2026-03-02", "photo", "solo day", 2)
+        repo.add_mood_score(e.id, "agency", 0.65)
+
+        resp = client.get("/api/dashboard/mood-trends?bin=week&dimension=agency")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["bins"]) == 1
+        b = data["bins"][0]
+        assert b["score_min"] == pytest.approx(0.65)
+        assert b["score_max"] == pytest.approx(0.65)
+        assert b["avg_score"] == pytest.approx(0.65)

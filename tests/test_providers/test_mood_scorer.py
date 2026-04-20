@@ -96,9 +96,10 @@ class TestBuildToolSchema:
     def test_confidence_is_optional(self, dims) -> None:
         tool = build_tool_schema(dims)
         facet = tool["input_schema"]["properties"]["joy_sadness"]
-        # `value` is required, `confidence` is NOT.
-        assert facet["required"] == ["value"]
+        # `value` and `rationale` are required, `confidence` is NOT.
+        assert facet["required"] == ["value", "rationale"]
         assert "confidence" in facet["properties"]
+        assert "rationale" in facet["properties"]
 
 
 class TestScoreHappyPath:
@@ -292,3 +293,97 @@ class TestRawMoodScoreDataclass:
         s = RawMoodScore("x", 0.5, 0.9)
         with pytest.raises(dataclasses.FrozenInstanceError):
             s.value = 0.8  # type: ignore[misc]
+
+
+class TestRationaleParsing:
+    def test_parses_rationale_from_tool_response(self, dims) -> None:
+        """Tool block with rationale in input -> RawMoodScore has rationale."""
+        client = MagicMock()
+        client.messages.create.return_value = MagicMock(
+            content=[
+                _tool_block(
+                    {
+                        "joy_sadness": {
+                            "value": 0.7,
+                            "confidence": 0.9,
+                            "rationale": "Entry mentions feeling great about a promotion.",
+                        },
+                        "agency": {
+                            "value": 0.6,
+                            "confidence": 0.8,
+                            "rationale": "Author describes taking initiative on a project.",
+                        },
+                    }
+                )
+            ]
+        )
+        scorer = AnthropicMoodScorer(api_key="test-key")
+        scorer._client = client
+
+        results = scorer.score("Got a promotion and led a new project.", dims)
+
+        by_name = {r.dimension_name: r for r in results}
+        assert by_name["joy_sadness"].rationale == (
+            "Entry mentions feeling great about a promotion."
+        )
+        assert by_name["agency"].rationale == (
+            "Author describes taking initiative on a project."
+        )
+
+    def test_missing_rationale_yields_none(self, dims) -> None:
+        """Tool response without rationale field -> rationale is None."""
+        client = MagicMock()
+        client.messages.create.return_value = MagicMock(
+            content=[
+                _tool_block(
+                    {
+                        "joy_sadness": {"value": 0.3, "confidence": 0.7},
+                        "agency": {"value": 0.5},
+                    }
+                )
+            ]
+        )
+        scorer = AnthropicMoodScorer(api_key="test-key")
+        scorer._client = client
+
+        results = scorer.score("A normal day.", dims)
+
+        for r in results:
+            assert r.rationale is None
+
+    def test_rationale_in_system_prompt(self, dims) -> None:
+        """build_system_prompt includes rationale instruction text."""
+        prompt = build_system_prompt(dims)
+        assert "rationale" in prompt.lower()
+        assert "one or two short sentences" in prompt.lower()
+
+    def test_rationale_in_tool_schema(self, dims) -> None:
+        """build_tool_schema has rationale as a required property on each facet."""
+        tool = build_tool_schema(dims)
+        for dim_name in ("joy_sadness", "agency"):
+            facet = tool["input_schema"]["properties"][dim_name]
+            assert "rationale" in facet["required"]
+            assert "rationale" in facet["properties"]
+            assert facet["properties"]["rationale"]["type"] == "string"
+
+    def test_json_fallback_extracts_rationale(self, dims) -> None:
+        """JSON text fallback path also extracts rationale."""
+        client = MagicMock()
+        client.messages.create.return_value = MagicMock(
+            content=[
+                _text_block(
+                    'Scores: {"joy_sadness": {"value": 0.5, "rationale": '
+                    '"Mentions a nice walk."}, "agency": {"value": 0.3, '
+                    '"rationale": "No strong agency signals."}}'
+                )
+            ]
+        )
+        scorer = AnthropicMoodScorer(api_key="test-key")
+        scorer._client = client
+
+        results = scorer.score("Went for a walk today.", dims)
+
+        assert len(results) == 2
+        by_name = {r.dimension_name: r for r in results}
+        assert by_name["joy_sadness"].rationale == "Mentions a nice walk."
+        assert by_name["agency"].rationale == "No strong agency signals."

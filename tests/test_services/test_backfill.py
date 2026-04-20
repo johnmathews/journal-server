@@ -301,9 +301,9 @@ class TestBackfillMoodScores:
         e2 = repo.create_entry("2026-04-02", "photo", "partial", 1)
         repo.create_entry("2026-04-03", "photo", "bare", 1)
         repo.replace_mood_scores(
-            e1.id, [("joy_sadness", 0.5, None), ("agency", 0.6, None)]
+            e1.id, [("joy_sadness", 0.5, None, None), ("agency", 0.6, None, None)]
         )
-        repo.replace_mood_scores(e2.id, [("joy_sadness", 0.3, None)])
+        repo.replace_mood_scores(e2.id, [("joy_sadness", 0.3, None, None)])
 
         svc, scorer = self._make_service(repo, dims)
         result = backfill_mood_scores(
@@ -323,7 +323,7 @@ class TestBackfillMoodScores:
 
         e1 = repo.create_entry("2026-04-01", "photo", "already scored", 2)
         repo.replace_mood_scores(
-            e1.id, [("joy_sadness", 0.5, None), ("agency", 0.6, None)]
+            e1.id, [("joy_sadness", 0.5, None, None), ("agency", 0.6, None, None)]
         )
 
         svc, scorer = self._make_service(repo, dims)
@@ -366,9 +366,9 @@ class TestBackfillMoodScores:
         repo.replace_mood_scores(
             e.id,
             [
-                ("joy_sadness", 0.5, None),
-                ("agency", 0.6, None),
-                ("retired_dim", 0.1, None),
+                ("joy_sadness", 0.5, None, None),
+                ("agency", 0.6, None, None),
+                ("retired_dim", 0.1, None, None),
             ],
         )
         svc, _ = self._make_service(repo, dims)
@@ -390,7 +390,7 @@ class TestBackfillMoodScores:
         e = repo.create_entry("2026-04-01", "photo", "x", 1)
         repo.replace_mood_scores(
             e.id,
-            [("joy_sadness", 0.5, None), ("retired_dim", 0.1, None)],
+            [("joy_sadness", 0.5, None, None), ("retired_dim", 0.1, None, None)],
         )
         svc, _ = self._make_service(repo, dims)
         result = backfill_mood_scores(

@@ -84,8 +84,9 @@ class MoodScoringService:
             )
             return 0
 
-        rows: list[tuple[str, float, float | None]] = [
-            (r.dimension_name, r.value, r.confidence) for r in raw_scores
+        rows: list[tuple[str, float, float | None, str | None]] = [
+            (r.dimension_name, r.value, r.confidence, r.rationale)
+            for r in raw_scores
         ]
         self._repo.replace_mood_scores(entry_id, rows)
         log.info(

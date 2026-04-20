@@ -451,8 +451,8 @@ class TestMoodScoresCRUD:
         repo.replace_mood_scores(
             e.id,
             [
-                ("joy_sadness", 0.5, 0.9),
-                ("agency", 0.7, None),
+                ("joy_sadness", 0.5, 0.9, None),
+                ("agency", 0.7, None, None),
             ],
         )
         scores = repo.get_mood_scores(e.id)
@@ -465,8 +465,8 @@ class TestMoodScoresCRUD:
 
     def test_replace_mood_scores_is_idempotent(self, repo):
         e = repo.create_entry("2026-04-01", "photo", "hello", 1)
-        repo.replace_mood_scores(e.id, [("joy_sadness", 0.5, None)])
-        repo.replace_mood_scores(e.id, [("joy_sadness", 0.8, None)])
+        repo.replace_mood_scores(e.id, [("joy_sadness", 0.5, None, None)])
+        repo.replace_mood_scores(e.id, [("joy_sadness", 0.8, None, None)])
         scores = repo.get_mood_scores(e.id)
         # Second call REPLACED the first rather than appending.
         assert len(scores) == 1
@@ -477,12 +477,12 @@ class TestMoodScoresCRUD:
         repo.replace_mood_scores(
             e.id,
             [
-                ("joy_sadness", 0.5, None),
-                ("agency", 0.7, None),
+                ("joy_sadness", 0.5, None, None),
+                ("agency", 0.7, None, None),
             ],
         )
         # Rewrite only joy_sadness — agency row should survive.
-        repo.replace_mood_scores(e.id, [("joy_sadness", 0.2, None)])
+        repo.replace_mood_scores(e.id, [("joy_sadness", 0.2, None, None)])
         scores = repo.get_mood_scores(e.id)
         assert len(scores) == 2
         by_dim = {s.dimension: s.score for s in scores}
@@ -491,7 +491,7 @@ class TestMoodScoresCRUD:
 
     def test_replace_mood_scores_empty_list_is_noop(self, repo):
         e = repo.create_entry("2026-04-01", "photo", "hello", 1)
-        repo.replace_mood_scores(e.id, [("joy_sadness", 0.5, None)])
+        repo.replace_mood_scores(e.id, [("joy_sadness", 0.5, None, None)])
         repo.replace_mood_scores(e.id, [])
         scores = repo.get_mood_scores(e.id)
         assert len(scores) == 1  # unchanged
@@ -514,10 +514,10 @@ class TestMoodScoresCRUD:
         e1 = repo.create_entry("2026-04-01", "photo", "one", 1)
         e2 = repo.create_entry("2026-04-02", "photo", "two", 1)
         # e1 has joy_sadness only; e2 has both.
-        repo.replace_mood_scores(e1.id, [("joy_sadness", 0.5, None)])
+        repo.replace_mood_scores(e1.id, [("joy_sadness", 0.5, None, None)])
         repo.replace_mood_scores(
             e2.id,
-            [("joy_sadness", 0.5, None), ("agency", 0.3, None)],
+            [("joy_sadness", 0.5, None, None), ("agency", 0.3, None, None)],
         )
         missing = repo.get_entries_missing_mood_scores(
             ["joy_sadness", "agency"]
@@ -532,7 +532,7 @@ class TestMoodScoresCRUD:
         missing a current one. `dimension_names` is the current set,
         not the union of all scored dims."""
         e = repo.create_entry("2026-04-01", "photo", "x", 1)
-        repo.replace_mood_scores(e.id, [("old_dim", 0.5, None)])
+        repo.replace_mood_scores(e.id, [("old_dim", 0.5, None, None)])
         missing = repo.get_entries_missing_mood_scores(["joy_sadness"])
         assert missing == [e.id]
 
@@ -541,9 +541,9 @@ class TestMoodScoresCRUD:
         repo.replace_mood_scores(
             e.id,
             [
-                ("joy_sadness", 0.5, None),
-                ("agency", 0.3, None),
-                ("retired_one", 0.1, None),
+                ("joy_sadness", 0.5, None, None),
+                ("agency", 0.3, None, None),
+                ("retired_one", 0.1, None, None),
             ],
         )
         pruned = repo.prune_retired_mood_scores(["joy_sadness", "agency"])
@@ -556,7 +556,7 @@ class TestMoodScoresCRUD:
     ):
         e = repo.create_entry("2026-04-01", "photo", "x", 1)
         repo.replace_mood_scores(
-            e.id, [("joy_sadness", 0.5, None), ("agency", 0.3, None)]
+            e.id, [("joy_sadness", 0.5, None, None), ("agency", 0.3, None, None)]
         )
         pruned = repo.prune_retired_mood_scores([])
         assert pruned == 2
@@ -565,7 +565,7 @@ class TestMoodScoresCRUD:
     def test_prune_retired_mood_scores_noop_when_all_current(self, repo):
         e = repo.create_entry("2026-04-01", "photo", "x", 1)
         repo.replace_mood_scores(
-            e.id, [("joy_sadness", 0.5, None)]
+            e.id, [("joy_sadness", 0.5, None, None)]
         )
         assert repo.prune_retired_mood_scores(["joy_sadness"]) == 0
 
@@ -874,3 +874,173 @@ class TestVerifyDoubts:
         repo.verify_doubts(entry.id)
         assert repo.verify_doubts(entry.id) is True
         assert repo.get_entry(entry.id).doubts_verified is True
+
+
+class TestMoodDrilldown:
+    """Tests for get_mood_drilldown() — per-entry scores for one dimension."""
+
+    def test_returns_entries_in_period(self, repo):
+        e1 = repo.create_entry("2026-04-01", "photo", "day one", 2)
+        e2 = repo.create_entry("2026-04-05", "photo", "day five", 2)
+        repo.add_mood_score(e1.id, "joy_sadness", 0.6, confidence=0.9, rationale="felt good")
+        repo.add_mood_score(e2.id, "joy_sadness", -0.2, confidence=0.8, rationale="rough day")
+
+        results = repo.get_mood_drilldown("joy_sadness", "2026-04-01", "2026-04-30")
+        assert len(results) == 2
+        assert results[0].entry_id == e1.id
+        assert results[0].score == 0.6
+        assert results[1].entry_id == e2.id
+        assert results[1].score == -0.2
+
+    def test_excludes_other_dimensions(self, repo):
+        e = repo.create_entry("2026-04-01", "photo", "mixed day", 2)
+        repo.add_mood_score(e.id, "joy_sadness", 0.5, confidence=0.9, rationale="ok")
+        repo.add_mood_score(e.id, "agency", 0.8, confidence=0.9, rationale="empowered")
+
+        results = repo.get_mood_drilldown("joy_sadness", "2026-04-01", "2026-04-30")
+        assert len(results) == 1
+        assert results[0].score == 0.5
+
+    def test_empty_period_returns_empty(self, repo):
+        e = repo.create_entry("2026-04-01", "photo", "day one", 2)
+        repo.add_mood_score(e.id, "joy_sadness", 0.5, confidence=0.9, rationale="fine")
+
+        results = repo.get_mood_drilldown("joy_sadness", "2026-05-01", "2026-05-31")
+        assert results == []
+
+    def test_includes_rationale(self, repo):
+        e = repo.create_entry("2026-04-01", "photo", "reflective", 1)
+        repo.add_mood_score(e.id, "agency", 0.7, confidence=0.85, rationale="took charge of the day")
+
+        results = repo.get_mood_drilldown("agency", "2026-04-01", "2026-04-30")
+        assert len(results) == 1
+        assert results[0].rationale == "took charge of the day"
+        assert results[0].confidence == 0.85
+
+    def test_null_rationale_handled(self, repo):
+        e = repo.create_entry("2026-04-01", "photo", "quiet day", 2)
+        repo.add_mood_score(e.id, "joy_sadness", 0.3, confidence=0.7)
+
+        results = repo.get_mood_drilldown("joy_sadness", "2026-04-01", "2026-04-30")
+        assert len(results) == 1
+        assert results[0].rationale is None
+
+
+class TestEntityDistribution:
+    """Tests for get_entity_distribution() — mention counts by entity."""
+
+    def _insert_entity(self, conn, entity_type: str, canonical_name: str) -> int:
+        """Insert an entity row and return its id."""
+        conn.execute(
+            "INSERT INTO entities (user_id, entity_type, canonical_name) VALUES (?, ?, ?)",
+            (1, entity_type, canonical_name),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id FROM entities WHERE entity_type = ? AND canonical_name = ?",
+            (entity_type, canonical_name),
+        ).fetchone()
+        return int(row["id"])
+
+    def _insert_mention(
+        self, conn, entity_id: int, entry_id: int, quote: str = "mentioned"
+    ) -> None:
+        """Insert an entity_mentions row."""
+        conn.execute(
+            "INSERT INTO entity_mentions (entity_id, entry_id, quote, confidence, extraction_run_id)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (entity_id, entry_id, quote, 0.9, "test-run-1"),
+        )
+        conn.commit()
+
+    def test_returns_mention_counts(self, repo):
+        e1 = repo.create_entry("2026-04-01", "photo", "met Alice", 2)
+        e2 = repo.create_entry("2026-04-02", "photo", "saw Alice again", 3)
+        alice_id = self._insert_entity(repo._conn, "person", "Alice")
+        self._insert_mention(repo._conn, alice_id, e1.id)
+        self._insert_mention(repo._conn, alice_id, e2.id)
+
+        results = repo.get_entity_distribution()
+        assert len(results) == 1
+        assert results[0].canonical_name == "Alice"
+        assert results[0].mention_count == 2
+
+    def test_filters_by_entity_type(self, repo):
+        e = repo.create_entry("2026-04-01", "photo", "trip to Vienna", 3)
+        alice_id = self._insert_entity(repo._conn, "person", "Alice")
+        vienna_id = self._insert_entity(repo._conn, "place", "Vienna")
+        self._insert_mention(repo._conn, alice_id, e.id)
+        self._insert_mention(repo._conn, vienna_id, e.id)
+
+        results = repo.get_entity_distribution(entity_type="place")
+        assert len(results) == 1
+        assert results[0].canonical_name == "Vienna"
+        assert results[0].entity_type == "place"
+
+    def test_filters_by_date_range(self, repo):
+        e1 = repo.create_entry("2026-03-01", "photo", "old entry", 2)
+        e2 = repo.create_entry("2026-04-15", "photo", "new entry", 2)
+        alice_id = self._insert_entity(repo._conn, "person", "Alice")
+        self._insert_mention(repo._conn, alice_id, e1.id)
+        self._insert_mention(repo._conn, alice_id, e2.id)
+
+        results = repo.get_entity_distribution(start_date="2026-04-01", end_date="2026-04-30")
+        assert len(results) == 1
+        assert results[0].mention_count == 1
+
+    def test_ordered_by_mention_count_descending(self, repo):
+        e1 = repo.create_entry("2026-04-01", "photo", "busy day", 2)
+        e2 = repo.create_entry("2026-04-02", "photo", "another day", 2)
+        alice_id = self._insert_entity(repo._conn, "person", "Alice")
+        bob_id = self._insert_entity(repo._conn, "person", "Bob")
+        # Alice: 2 mentions, Bob: 1 mention
+        self._insert_mention(repo._conn, alice_id, e1.id)
+        self._insert_mention(repo._conn, alice_id, e2.id)
+        self._insert_mention(repo._conn, bob_id, e1.id)
+
+        results = repo.get_entity_distribution()
+        assert len(results) == 2
+        assert results[0].canonical_name == "Alice"
+        assert results[0].mention_count == 2
+        assert results[1].canonical_name == "Bob"
+        assert results[1].mention_count == 1
+
+    def test_respects_limit(self, repo):
+        e = repo.create_entry("2026-04-01", "photo", "lots of people", 3)
+        for name in ["Alice", "Bob", "Charlie"]:
+            eid = self._insert_entity(repo._conn, "person", name)
+            self._insert_mention(repo._conn, eid, e.id)
+
+        results = repo.get_entity_distribution(limit=2)
+        assert len(results) == 2
+
+    def test_empty_returns_empty(self, repo):
+        results = repo.get_entity_distribution()
+        assert results == []
+
+
+class TestMoodTrendsScoreBounds:
+    """Tests for score_min/score_max fields on get_mood_trends()."""
+
+    def test_returns_score_min_max(self, repo):
+        e1 = repo.create_entry("2026-04-01", "photo", "good day", 2)
+        e2 = repo.create_entry("2026-04-02", "photo", "bad day", 2)
+        e3 = repo.create_entry("2026-04-03", "photo", "great day", 2)
+        repo.add_mood_score(e1.id, "joy_sadness", 0.3)
+        repo.add_mood_score(e2.id, "joy_sadness", -0.5)
+        repo.add_mood_score(e3.id, "joy_sadness", 0.9)
+
+        trends = repo.get_mood_trends(granularity="month")
+        assert len(trends) == 1
+        assert trends[0].score_min == -0.5
+        assert trends[0].score_max == 0.9
+
+    def test_single_entry_min_equals_max(self, repo):
+        e = repo.create_entry("2026-04-01", "photo", "only entry", 2)
+        repo.add_mood_score(e.id, "agency", 0.6)
+
+        trends = repo.get_mood_trends(granularity="month")
+        assert len(trends) == 1
+        assert trends[0].score_min == 0.6
+        assert trends[0].score_max == 0.6
+        assert trends[0].avg_score == 0.6

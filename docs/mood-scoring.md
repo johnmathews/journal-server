@@ -50,6 +50,16 @@ Mixing both is deliberate: it lets the schema model your real intuition about ea
 into a single shape. The backend stores all scores in the existing `mood_scores` table whose
 `CHECK(score BETWEEN -1.0 AND 1.0)` constraint accommodates both.
 
+### Rationale
+
+Each score is accompanied by a brief rationale (1-2 sentences) explaining why the LLM assigned that score. The rationale
+is stored in the `mood_scores.rationale` column (added in migration 0014) and surfaced in the Insights page drill-down
+panel. The LLM is instructed to be concrete — quoting or paraphrasing the entry rather than restating the scale
+definition.
+
+Entries scored before migration 0014 have `rationale = NULL`. Run `journal backfill-mood --force` to populate rationales
+for all entries.
+
 ## The 7-facet starting set
 
 The facets shipped in `config/mood-dimensions.toml` at the time of writing are:

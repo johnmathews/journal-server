@@ -986,6 +986,135 @@ def register_api_routes(
             }
         )
 
+    @mcp.custom_route(
+        "/api/dashboard/mood-drilldown",
+        methods=["GET"],
+        name="api_dashboard_mood_drilldown",
+    )
+    async def dashboard_mood_drilldown(request: Request) -> JSONResponse:
+        """Return per-entry scores for one dimension within a date window.
+
+        Query params:
+        - `dimension` (required) — the mood dimension name
+        - `from` (required) — ISO-8601 start date, inclusive
+        - `to` (required) — ISO-8601 end date, inclusive
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+
+        query_svc: QueryService = services["query"]
+        user = get_authenticated_user(request)
+        user_id = user.user_id
+
+        dimension = request.query_params.get("dimension")
+        if not dimension:
+            return JSONResponse(
+                {"error": "missing_dimension", "message": "'dimension' is required"},
+                status_code=400,
+            )
+        period_start = request.query_params.get("from")
+        period_end = request.query_params.get("to")
+        if not period_start or not period_end:
+            return JSONResponse(
+                {"error": "missing_dates", "message": "'from' and 'to' are required"},
+                status_code=400,
+            )
+
+        entries = query_svc._repo.get_mood_drilldown(
+            dimension=dimension,
+            period_start=period_start,
+            period_end=period_end,
+            user_id=user_id,
+        )
+        log.info(
+            "GET /api/dashboard/mood-drilldown — dim=%s from=%s to=%s returned %d entries",
+            dimension,
+            period_start,
+            period_end,
+            len(entries),
+        )
+        return JSONResponse(
+            {
+                "dimension": dimension,
+                "from": period_start,
+                "to": period_end,
+                "entries": [
+                    {
+                        "entry_id": e.entry_id,
+                        "entry_date": e.entry_date,
+                        "score": e.score,
+                        "confidence": e.confidence,
+                        "rationale": e.rationale,
+                    }
+                    for e in entries
+                ],
+            }
+        )
+
+    @mcp.custom_route(
+        "/api/dashboard/entity-distribution",
+        methods=["GET"],
+        name="api_dashboard_entity_distribution",
+    )
+    async def dashboard_entity_distribution(request: Request) -> JSONResponse:
+        """Return entity mention counts grouped by entity name.
+
+        Query params:
+        - `type` (optional) — entity_type filter
+        - `from` (optional) — ISO-8601 start date
+        - `to` (optional) — ISO-8601 end date
+        - `limit` (optional) — max items, default 50, max 200
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+
+        query_svc: QueryService = services["query"]
+        user = get_authenticated_user(request)
+        user_id = user.user_id
+
+        entity_type = request.query_params.get("type")
+        start_date = request.query_params.get("from")
+        end_date = request.query_params.get("to")
+        valid_types = {"person", "place", "activity", "organization", "topic", "other"}
+        if entity_type is not None and entity_type not in valid_types:
+            return JSONResponse(
+                {
+                    "error": "invalid_type",
+                    "message": f"'type' must be one of {sorted(valid_types)}",
+                },
+                status_code=400,
+            )
+        try:
+            limit = min(int(request.query_params.get("limit", "50")), 200)
+        except ValueError:
+            limit = 50
+
+        bins = query_svc._repo.get_entity_distribution(
+            entity_type=entity_type,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit,
+            user_id=user_id,
+        )
+        log.info(
+            "GET /api/dashboard/entity-distribution — type=%s from=%s to=%s returned %d items",
+            entity_type,
+            start_date,
+            end_date,
+            len(bins),
+        )
+        return JSONResponse(
+            {
+                "type": entity_type,
+                "from": start_date,
+                "to": end_date,
+                "total": len(bins),
+                "items": [asdict(b) for b in bins],
+            }
+        )
+
     @mcp.custom_route("/api/search", methods=["GET"], name="api_search")
     async def search(request: Request) -> JSONResponse:
         """Full-text search across journal entries.

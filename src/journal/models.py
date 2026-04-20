@@ -36,6 +36,7 @@ class MoodScore:
     dimension: str
     score: float
     confidence: float | None = None
+    rationale: str | None = None
 
 
 @dataclass
@@ -91,6 +92,28 @@ class MoodTrend:
     dimension: str
     avg_score: float
     entry_count: int
+    score_min: float | None = None
+    score_max: float | None = None
+
+
+@dataclass
+class MoodDrilldownEntry:
+    """One entry's contribution to a mood drill-down result."""
+
+    entry_id: int
+    entry_date: str
+    score: float
+    confidence: float | None
+    rationale: str | None
+
+
+@dataclass
+class EntityDistributionBin:
+    """Mention count for one entity within a date-filtered window."""
+
+    canonical_name: str
+    entity_type: str
+    mention_count: int
 
 
 @dataclass(frozen=True)

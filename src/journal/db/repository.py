@@ -7,9 +7,12 @@ from typing import Protocol, runtime_checkable
 
 from journal.models import (
     ChunkSpan,
+    Entity,
+    EntityDistributionBin,
     Entry,
     EntryPage,
     IngestionStats,
+    MoodDrilldownEntry,
     MoodScore,
     MoodTrend,
     Statistics,
@@ -169,13 +172,14 @@ class EntryRepository(Protocol):
     def add_tags(self, entry_id: int, tags: list[str]) -> None: ...
 
     def add_mood_score(
-        self, entry_id: int, dimension: str, score: float, confidence: float | None = None
+        self, entry_id: int, dimension: str, score: float,
+        confidence: float | None = None, rationale: str | None = None,
     ) -> None: ...
 
     def replace_mood_scores(
         self,
         entry_id: int,
-        scores: list[tuple[str, float, float | None]],
+        scores: list[tuple[str, float, float | None, str | None]],
     ) -> None: ...
 
     def get_mood_scores(self, entry_id: int) -> list[MoodScore]: ...
@@ -195,6 +199,23 @@ class EntryRepository(Protocol):
         granularity: str = "week",
         user_id: int | None = None,
     ) -> list[MoodTrend]: ...
+
+    def get_mood_drilldown(
+        self,
+        dimension: str,
+        period_start: str,
+        period_end: str,
+        user_id: int | None = None,
+    ) -> list[MoodDrilldownEntry]: ...
+
+    def get_entity_distribution(
+        self,
+        entity_type: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        limit: int = 50,
+        user_id: int | None = None,
+    ) -> list[EntityDistributionBin]: ...
 
     def count_entries(
         self, start_date: str | None = None, end_date: str | None = None,
@@ -724,24 +745,26 @@ class SQLiteEntryRepository:
         self._conn.commit()
 
     def add_mood_score(
-        self, entry_id: int, dimension: str, score: float, confidence: float | None = None
+        self, entry_id: int, dimension: str, score: float,
+        confidence: float | None = None, rationale: str | None = None,
     ) -> None:
         self._conn.execute(
-            "INSERT INTO mood_scores (entry_id, dimension, score, confidence) VALUES (?, ?, ?, ?)",
-            (entry_id, dimension, score, confidence),
+            "INSERT INTO mood_scores (entry_id, dimension, score, confidence, rationale)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (entry_id, dimension, score, confidence, rationale),
         )
         self._conn.commit()
 
     def replace_mood_scores(
         self,
         entry_id: int,
-        scores: list[tuple[str, float, float | None]],
+        scores: list[tuple[str, float, float | None, str | None]],
     ) -> None:
         """Idempotently write a set of mood scores for a single entry.
 
-        `scores` is a list of `(dimension, score, confidence)` tuples.
-        Delete-then-insert in a single transaction so a re-score is
-        atomic — concurrent readers never see a partially-updated
+        `scores` is a list of `(dimension, score, confidence, rationale)`
+        tuples. Delete-then-insert in a single transaction so a re-score
+        is atomic — concurrent readers never see a partially-updated
         set. Intended for ingestion and the backfill CLI.
 
         Dimensions NOT included in `scores` but already present in
@@ -762,11 +785,11 @@ class SQLiteEntryRepository:
             )
             self._conn.executemany(
                 "INSERT INTO mood_scores "
-                "(entry_id, dimension, score, confidence) "
-                "VALUES (?, ?, ?, ?)",
+                "(entry_id, dimension, score, confidence, rationale) "
+                "VALUES (?, ?, ?, ?, ?)",
                 [
-                    (entry_id, name, score, confidence)
-                    for name, score, confidence in scores
+                    (entry_id, name, score, confidence, rationale)
+                    for name, score, confidence, rationale in scores
                 ],
             )
         log.debug(
@@ -778,7 +801,7 @@ class SQLiteEntryRepository:
         order. Used by `replace_mood_scores` callers for verification
         and by the backfill's `--stale-only` gate."""
         rows = self._conn.execute(
-            "SELECT entry_id, dimension, score, confidence "
+            "SELECT entry_id, dimension, score, confidence, rationale "
             "FROM mood_scores WHERE entry_id = ? ORDER BY dimension",
             (entry_id,),
         ).fetchall()
@@ -788,6 +811,7 @@ class SQLiteEntryRepository:
                 dimension=row["dimension"],
                 score=row["score"],
                 confidence=row["confidence"],
+                rationale=row["rationale"],
             )
             for row in rows
         ]
@@ -884,7 +908,9 @@ class SQLiteEntryRepository:
                 {period_expr} as period,
                 m.dimension,
                 AVG(m.score) as avg_score,
-                COUNT(DISTINCT e.id) as entry_count
+                COUNT(DISTINCT e.id) as entry_count,
+                MIN(m.score) as score_min,
+                MAX(m.score) as score_max
             FROM mood_scores m
             JOIN entries e ON e.id = m.entry_id
             WHERE 1=1
@@ -907,6 +933,90 @@ class SQLiteEntryRepository:
                 dimension=row["dimension"],
                 avg_score=row["avg_score"],
                 entry_count=row["entry_count"],
+                score_min=row["score_min"],
+                score_max=row["score_max"],
+            )
+            for row in rows
+        ]
+
+    def get_mood_drilldown(
+        self,
+        dimension: str,
+        period_start: str,
+        period_end: str,
+        user_id: int | None = None,
+    ) -> list[MoodDrilldownEntry]:
+        """Return per-entry scores for one dimension within a date window."""
+        sql = """
+            SELECT
+                e.id       AS entry_id,
+                e.entry_date,
+                m.score,
+                m.confidence,
+                m.rationale
+            FROM mood_scores m
+            JOIN entries e ON e.id = m.entry_id
+            WHERE m.dimension = ?
+              AND e.entry_date >= ?
+              AND e.entry_date <= ?
+        """
+        params: list[str | int] = [dimension, period_start, period_end]
+        if user_id is not None:
+            sql += " AND e.user_id = ?"
+            params.append(user_id)
+        sql += " ORDER BY e.entry_date ASC, e.id ASC"
+        rows = self._conn.execute(sql, params).fetchall()
+        return [
+            MoodDrilldownEntry(
+                entry_id=int(row["entry_id"]),
+                entry_date=row["entry_date"],
+                score=float(row["score"]),
+                confidence=float(row["confidence"]) if row["confidence"] is not None else None,
+                rationale=row["rationale"],
+            )
+            for row in rows
+        ]
+
+    def get_entity_distribution(
+        self,
+        entity_type: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        limit: int = 50,
+        user_id: int | None = None,
+    ) -> list[EntityDistributionBin]:
+        """Return mention counts grouped by entity, filtered by type and date."""
+        sql = """
+            SELECT
+                en.canonical_name,
+                en.entity_type,
+                COUNT(m.id) AS mention_count
+            FROM entity_mentions m
+            JOIN entries e  ON e.id  = m.entry_id
+            JOIN entities en ON en.id = m.entity_id
+            WHERE 1=1
+        """
+        params: list[str | int] = []
+        if user_id is not None:
+            sql += " AND e.user_id = ?"
+            params.append(user_id)
+        if entity_type is not None:
+            sql += " AND en.entity_type = ?"
+            params.append(entity_type)
+        if start_date:
+            sql += " AND e.entry_date >= ?"
+            params.append(start_date)
+        if end_date:
+            sql += " AND e.entry_date <= ?"
+            params.append(end_date)
+        sql += " GROUP BY en.id ORDER BY mention_count DESC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [
+            EntityDistributionBin(
+                canonical_name=row["canonical_name"],
+                entity_type=row["entity_type"],
+                mention_count=int(row["mention_count"]),
             )
             for row in rows
         ]
