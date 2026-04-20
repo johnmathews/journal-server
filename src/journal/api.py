@@ -432,9 +432,7 @@ def register_api_routes(
         return JSONResponse(resp)
 
     async def _delete_entry(services: dict, entry_id: int, user_id: int) -> JSONResponse:
-        from journal.db.jobs_repository import SQLiteJobRepository
-
-        job_repo: SQLiteJobRepository = services["job_repository"]
+        job_repo = services["job_repository"]
         active_jobs = job_repo.has_active_jobs_for_entry(entry_id)
         if active_jobs:
             job_ids = [j.id for j in active_jobs]

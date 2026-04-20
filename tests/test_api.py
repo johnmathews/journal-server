@@ -10,8 +10,8 @@ from starlette.testclient import TestClient
 
 from journal.auth import AuthenticatedUser, _current_user_id
 from journal.db.connection import get_connection
-from journal.db.migrations import run_migrations
 from journal.db.jobs_repository import SQLiteJobRepository
+from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
 from journal.entitystore.store import SQLiteEntityStore
 from journal.services.ingestion import IngestionService
