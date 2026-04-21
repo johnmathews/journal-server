@@ -1217,6 +1217,245 @@ def register_api_routes(
             }
         )
 
+    @mcp.custom_route(
+        "/api/dashboard/calendar-heatmap",
+        methods=["GET"],
+        name="api_dashboard_calendar_heatmap",
+    )
+    async def dashboard_calendar_heatmap(request: Request) -> JSONResponse:
+        """Daily entry counts for a calendar heatmap visualization.
+
+        Query params:
+        - `from` (optional) — ISO-8601 start date
+        - `to` (optional) — ISO-8601 end date
+
+        Returns ``{from, to, days: [{date, entry_count, total_words}, ...]}``
+        with one item per day that has at least one entry.
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+
+        query_svc: QueryService = services["query"]
+        user = get_authenticated_user(request)
+        user_id = user.user_id
+
+        start_date = request.query_params.get("from")
+        end_date = request.query_params.get("to")
+
+        days = query_svc._repo.get_calendar_heatmap(
+            start_date=start_date,
+            end_date=end_date,
+            user_id=user_id,
+        )
+        log.info(
+            "GET /api/dashboard/calendar-heatmap — from=%s to=%s returned %d days",
+            start_date,
+            end_date,
+            len(days),
+        )
+        return JSONResponse(
+            {
+                "from": start_date,
+                "to": end_date,
+                "days": [asdict(d) for d in days],
+            }
+        )
+
+    @mcp.custom_route(
+        "/api/dashboard/entity-trends",
+        methods=["GET"],
+        name="api_dashboard_entity_trends",
+    )
+    async def dashboard_entity_trends(request: Request) -> JSONResponse:
+        """Entity mention counts over time, showing how topics wax and wane.
+
+        Query params:
+        - `bin` — `week`, `month` (default), `quarter`, or `year`
+        - `from` (optional) — ISO-8601 start date
+        - `to` (optional) — ISO-8601 end date
+        - `type` (optional) — entity_type filter
+        - `limit` (optional) — top N entities, default 8, max 50
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+
+        query_svc: QueryService = services["query"]
+        user = get_authenticated_user(request)
+        user_id = user.user_id
+
+        bin_param = request.query_params.get("bin", "month")
+        start_date = request.query_params.get("from")
+        end_date = request.query_params.get("to")
+        entity_type = request.query_params.get("type")
+        try:
+            limit = min(int(request.query_params.get("limit", "8")), 50)
+        except ValueError:
+            limit = 8
+
+        try:
+            entity_names, bins = query_svc._repo.get_entity_trends(
+                start_date=start_date,
+                end_date=end_date,
+                granularity=bin_param,
+                entity_type=entity_type,
+                limit=limit,
+                user_id=user_id,
+            )
+        except ValueError as e:
+            log.info(
+                "GET /api/dashboard/entity-trends — invalid bin %r: %s",
+                bin_param,
+                e,
+            )
+            return JSONResponse(
+                {
+                    "error": "invalid_bin",
+                    "message": str(e),
+                },
+                status_code=400,
+            )
+
+        log.info(
+            "GET /api/dashboard/entity-trends — bin=%s from=%s to=%s "
+            "type=%s returned %d bins for %d entities",
+            bin_param,
+            start_date,
+            end_date,
+            entity_type,
+            len(bins),
+            len(entity_names),
+        )
+        return JSONResponse(
+            {
+                "from": start_date,
+                "to": end_date,
+                "bin": bin_param,
+                "entity_type": entity_type,
+                "entities": entity_names,
+                "bins": [asdict(b) for b in bins],
+            }
+        )
+
+    @mcp.custom_route(
+        "/api/dashboard/mood-entity-correlation",
+        methods=["GET"],
+        name="api_dashboard_mood_entity_correlation",
+    )
+    async def dashboard_mood_entity_correlation(request: Request) -> JSONResponse:
+        """Average mood score when a specific entity is mentioned vs overall.
+
+        Query params:
+        - `dimension` (required) — the mood dimension name
+        - `from` (optional) — ISO-8601 start date
+        - `to` (optional) — ISO-8601 end date
+        - `type` (optional) — entity_type filter
+        - `limit` (optional) — top N entities, default 10, max 50
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+
+        query_svc: QueryService = services["query"]
+        user = get_authenticated_user(request)
+        user_id = user.user_id
+
+        dimension = request.query_params.get("dimension")
+        if not dimension:
+            return JSONResponse(
+                {"error": "missing_dimension", "message": "'dimension' is required"},
+                status_code=400,
+            )
+
+        start_date = request.query_params.get("from")
+        end_date = request.query_params.get("to")
+        entity_type = request.query_params.get("type")
+        try:
+            limit = min(int(request.query_params.get("limit", "10")), 50)
+        except ValueError:
+            limit = 10
+
+        overall_avg, items = query_svc._repo.get_mood_entity_correlation(
+            dimension=dimension,
+            start_date=start_date,
+            end_date=end_date,
+            entity_type=entity_type,
+            limit=limit,
+            user_id=user_id,
+        )
+        log.info(
+            "GET /api/dashboard/mood-entity-correlation — "
+            "dim=%s from=%s to=%s type=%s returned %d items",
+            dimension,
+            start_date,
+            end_date,
+            entity_type,
+            len(items),
+        )
+        return JSONResponse(
+            {
+                "dimension": dimension,
+                "from": start_date,
+                "to": end_date,
+                "entity_type": entity_type,
+                "overall_avg": overall_avg,
+                "items": [asdict(i) for i in items],
+            }
+        )
+
+    @mcp.custom_route(
+        "/api/dashboard/word-count-distribution",
+        methods=["GET"],
+        name="api_dashboard_word_count_distribution",
+    )
+    async def dashboard_word_count_distribution(request: Request) -> JSONResponse:
+        """Histogram of entry word counts with summary statistics.
+
+        Query params:
+        - `from` (optional) — ISO-8601 start date
+        - `to` (optional) — ISO-8601 end date
+        - `bucket_size` (optional) — bucket width, default 100, min 10
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+
+        query_svc: QueryService = services["query"]
+        user = get_authenticated_user(request)
+        user_id = user.user_id
+
+        start_date = request.query_params.get("from")
+        end_date = request.query_params.get("to")
+        try:
+            bucket_size = max(int(request.query_params.get("bucket_size", "100")), 10)
+        except ValueError:
+            bucket_size = 100
+
+        buckets, stats = query_svc._repo.get_word_count_distribution(
+            start_date=start_date,
+            end_date=end_date,
+            bucket_size=bucket_size,
+            user_id=user_id,
+        )
+        log.info(
+            "GET /api/dashboard/word-count-distribution — "
+            "from=%s to=%s bucket_size=%d returned %d buckets",
+            start_date,
+            end_date,
+            bucket_size,
+            len(buckets),
+        )
+        return JSONResponse(
+            {
+                "from": start_date,
+                "to": end_date,
+                "bucket_size": bucket_size,
+                "buckets": [asdict(b) for b in buckets],
+                "stats": asdict(stats),
+            }
+        )
+
     @mcp.custom_route("/api/search", methods=["GET"], name="api_search")
     async def search(request: Request) -> JSONResponse:
         """Full-text search across journal entries.

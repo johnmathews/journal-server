@@ -302,6 +302,54 @@ class Job:
 
 
 @dataclass
+class CalendarDay:
+    """One day in the calendar heatmap."""
+
+    date: str
+    entry_count: int
+    total_words: int
+
+
+@dataclass
+class EntityTrendBin:
+    """One time bucket for one entity in the entity-trends series."""
+
+    period: str
+    entity: str
+    mention_count: int
+
+
+@dataclass
+class MoodEntityCorrelation:
+    """Average mood score when a specific entity is mentioned."""
+
+    entity: str
+    entity_type: str
+    avg_score: float
+    entry_count: int
+
+
+@dataclass
+class WordCountBucket:
+    """One bucket in a word-count histogram."""
+
+    range_start: int
+    range_end: int
+    count: int
+
+
+@dataclass
+class WordCountStats:
+    """Aggregate statistics for the word-count distribution."""
+
+    min: int
+    max: int
+    avg: float
+    median: float
+    total_entries: int
+
+
+@dataclass
 class User:
     id: int
     email: str

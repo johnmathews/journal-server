@@ -6,16 +6,21 @@ from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from journal.models import (
+    CalendarDay,
     ChunkSpan,
     EntityDistributionBin,
+    EntityTrendBin,
     Entry,
     EntryPage,
     IngestionStats,
     MoodDrilldownEntry,
+    MoodEntityCorrelation,
     MoodScore,
     MoodTrend,
     Statistics,
     TopicFrequency,
+    WordCountBucket,
+    WordCountStats,
     WritingFrequencyBin,
 )
 
@@ -237,6 +242,41 @@ class EntryRepository(Protocol):
         self, topic: str, start_date: str | None = None, end_date: str | None = None,
         user_id: int | None = None,
     ) -> TopicFrequency: ...
+
+    def get_calendar_heatmap(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        user_id: int | None = None,
+    ) -> list[CalendarDay]: ...
+
+    def get_entity_trends(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        granularity: str = "month",
+        entity_type: str | None = None,
+        limit: int = 8,
+        user_id: int | None = None,
+    ) -> tuple[list[str], list[EntityTrendBin]]: ...
+
+    def get_mood_entity_correlation(
+        self,
+        dimension: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        entity_type: str | None = None,
+        limit: int = 10,
+        user_id: int | None = None,
+    ) -> tuple[float, list[MoodEntityCorrelation]]: ...
+
+    def get_word_count_distribution(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        bucket_size: int = 100,
+        user_id: int | None = None,
+    ) -> tuple[list[WordCountBucket], WordCountStats]: ...
 
 
 def _row_to_entry(row: sqlite3.Row) -> Entry:
@@ -1243,3 +1283,300 @@ class SQLiteEntryRepository:
     ) -> TopicFrequency:
         entries = self.search_text(topic, start_date, end_date, user_id=user_id)
         return TopicFrequency(topic=topic, count=len(entries), entries=entries)
+
+    def get_calendar_heatmap(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        user_id: int | None = None,
+    ) -> list[CalendarDay]:
+        """Daily entry counts and total words for a calendar heatmap."""
+        sql = """
+            SELECT
+                entry_date,
+                COUNT(*) AS entry_count,
+                COALESCE(SUM(word_count), 0) AS total_words
+            FROM entries
+            WHERE 1=1
+        """
+        params: list[str | int] = []
+        if user_id is not None:
+            sql += " AND user_id = ?"
+            params.append(user_id)
+        if start_date:
+            sql += " AND entry_date >= ?"
+            params.append(start_date)
+        if end_date:
+            sql += " AND entry_date <= ?"
+            params.append(end_date)
+        sql += " GROUP BY entry_date ORDER BY entry_date"
+        rows = self._conn.execute(sql, params).fetchall()
+        return [
+            CalendarDay(
+                date=row["entry_date"],
+                entry_count=int(row["entry_count"]),
+                total_words=int(row["total_words"]),
+            )
+            for row in rows
+        ]
+
+    def get_entity_trends(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        granularity: str = "month",
+        entity_type: str | None = None,
+        limit: int = 8,
+        user_id: int | None = None,
+    ) -> tuple[list[str], list[EntityTrendBin]]:
+        """Entity mention counts over time, bucketed by granularity.
+
+        Returns ``(entity_names, bins)`` where ``entity_names`` is the
+        ordered list of top-N entities by total mentions and ``bins``
+        contains per-period counts for those entities only.
+        """
+        if granularity not in _SUPPORTED_BINS:
+            raise ValueError(
+                f"Unsupported granularity {granularity!r}; "
+                f"must be one of {_SUPPORTED_BINS}"
+            )
+
+        # Step 1: find the top N entities by total mention count.
+        top_sql = """
+            SELECT en.canonical_name, COUNT(m.id) AS total
+            FROM entity_mentions m
+            JOIN entries e  ON e.id  = m.entry_id
+            JOIN entities en ON en.id = m.entity_id
+            WHERE 1=1
+        """
+        params: list[str | int] = []
+        if user_id is not None:
+            top_sql += " AND e.user_id = ?"
+            params.append(user_id)
+        if entity_type is not None:
+            top_sql += " AND en.entity_type = ?"
+            params.append(entity_type)
+        if start_date:
+            top_sql += " AND e.entry_date >= ?"
+            params.append(start_date)
+        if end_date:
+            top_sql += " AND e.entry_date <= ?"
+            params.append(end_date)
+        top_sql += " GROUP BY en.id ORDER BY total DESC LIMIT ?"
+        params.append(limit)
+        top_rows = self._conn.execute(top_sql, params).fetchall()
+        entity_names = [row["canonical_name"] for row in top_rows]
+
+        if not entity_names:
+            return entity_names, []
+
+        # Step 2: per-bin counts for the top entities.
+        bin_expr = _bin_start_sql(granularity, column="e.entry_date")
+        placeholders = ",".join("?" for _ in entity_names)
+        bin_sql = f"""
+            SELECT
+                {bin_expr} AS period,
+                en.canonical_name AS entity,
+                COUNT(m.id) AS mention_count
+            FROM entity_mentions m
+            JOIN entries e  ON e.id  = m.entry_id
+            JOIN entities en ON en.id = m.entity_id
+            WHERE en.canonical_name IN ({placeholders})
+        """
+        bin_params: list[str | int] = list(entity_names)
+        if user_id is not None:
+            bin_sql += " AND e.user_id = ?"
+            bin_params.append(user_id)
+        if entity_type is not None:
+            bin_sql += " AND en.entity_type = ?"
+            bin_params.append(entity_type)
+        if start_date:
+            bin_sql += " AND e.entry_date >= ?"
+            bin_params.append(start_date)
+        if end_date:
+            bin_sql += " AND e.entry_date <= ?"
+            bin_params.append(end_date)
+        bin_sql += f" GROUP BY {bin_expr}, en.canonical_name ORDER BY period, entity"
+        bin_rows = self._conn.execute(bin_sql, bin_params).fetchall()
+        bins = [
+            EntityTrendBin(
+                period=row["period"],
+                entity=row["entity"],
+                mention_count=int(row["mention_count"]),
+            )
+            for row in bin_rows
+        ]
+        return entity_names, bins
+
+    def get_mood_entity_correlation(
+        self,
+        dimension: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        entity_type: str | None = None,
+        limit: int = 10,
+        user_id: int | None = None,
+    ) -> tuple[float, list[MoodEntityCorrelation]]:
+        """Average mood when specific entities are mentioned vs overall.
+
+        Returns ``(overall_avg, items)`` where ``overall_avg`` is the
+        global average score for the dimension across all entries and
+        ``items`` lists per-entity averages sorted by entry_count desc.
+        """
+        # Overall average for this dimension.
+        overall_sql = """
+            SELECT COALESCE(AVG(m.score), 0) AS overall_avg
+            FROM mood_scores m
+            JOIN entries e ON e.id = m.entry_id
+            WHERE m.dimension = ?
+        """
+        overall_params: list[str | int] = [dimension]
+        if user_id is not None:
+            overall_sql += " AND e.user_id = ?"
+            overall_params.append(user_id)
+        if start_date:
+            overall_sql += " AND e.entry_date >= ?"
+            overall_params.append(start_date)
+        if end_date:
+            overall_sql += " AND e.entry_date <= ?"
+            overall_params.append(end_date)
+        overall_row = self._conn.execute(overall_sql, overall_params).fetchone()
+        overall_avg = round(float(overall_row["overall_avg"]), 4)
+
+        # Per-entity averages.
+        sql = """
+            SELECT
+                en.canonical_name AS entity,
+                en.entity_type,
+                AVG(ms.score)           AS avg_score,
+                COUNT(DISTINCT e.id)    AS entry_count
+            FROM entity_mentions em
+            JOIN entries  e  ON e.id  = em.entry_id
+            JOIN entities en ON en.id = em.entity_id
+            JOIN mood_scores ms ON ms.entry_id = e.id AND ms.dimension = ?
+            WHERE 1=1
+        """
+        params: list[str | int] = [dimension]
+        if user_id is not None:
+            sql += " AND e.user_id = ?"
+            params.append(user_id)
+        if entity_type is not None:
+            sql += " AND en.entity_type = ?"
+            params.append(entity_type)
+        if start_date:
+            sql += " AND e.entry_date >= ?"
+            params.append(start_date)
+        if end_date:
+            sql += " AND e.entry_date <= ?"
+            params.append(end_date)
+        sql += " GROUP BY en.id ORDER BY entry_count DESC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        items = [
+            MoodEntityCorrelation(
+                entity=row["entity"],
+                entity_type=row["entity_type"],
+                avg_score=round(float(row["avg_score"]), 4),
+                entry_count=int(row["entry_count"]),
+            )
+            for row in rows
+        ]
+        return overall_avg, items
+
+    def get_word_count_distribution(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        bucket_size: int = 100,
+        user_id: int | None = None,
+    ) -> tuple[list[WordCountBucket], WordCountStats]:
+        """Histogram of entry word counts plus summary statistics.
+
+        Returns ``(buckets, stats)``. Each bucket covers a half-open
+        range ``[range_start, range_end)``.
+        """
+        # Histogram buckets.
+        sql = """
+            SELECT
+                (word_count / ?) * ? AS range_start,
+                COUNT(*) AS count
+            FROM entries
+            WHERE 1=1
+        """
+        params: list[str | int] = [bucket_size, bucket_size]
+        if user_id is not None:
+            sql += " AND user_id = ?"
+            params.append(user_id)
+        if start_date:
+            sql += " AND entry_date >= ?"
+            params.append(start_date)
+        if end_date:
+            sql += " AND entry_date <= ?"
+            params.append(end_date)
+        sql += " GROUP BY range_start ORDER BY range_start"
+        rows = self._conn.execute(sql, params).fetchall()
+        buckets = [
+            WordCountBucket(
+                range_start=int(row["range_start"]),
+                range_end=int(row["range_start"]) + bucket_size,
+                count=int(row["count"]),
+            )
+            for row in rows
+        ]
+
+        # Summary statistics.
+        stats_sql = """
+            SELECT
+                COALESCE(MIN(word_count), 0) AS min_wc,
+                COALESCE(MAX(word_count), 0) AS max_wc,
+                COALESCE(AVG(word_count), 0) AS avg_wc,
+                COUNT(*) AS total_entries
+            FROM entries
+            WHERE 1=1
+        """
+        stats_params: list[str | int] = []
+        if user_id is not None:
+            stats_sql += " AND user_id = ?"
+            stats_params.append(user_id)
+        if start_date:
+            stats_sql += " AND entry_date >= ?"
+            stats_params.append(start_date)
+        if end_date:
+            stats_sql += " AND entry_date <= ?"
+            stats_params.append(end_date)
+        stats_row = self._conn.execute(stats_sql, stats_params).fetchone()
+
+        # Median via SQL: order by word_count and take the middle value(s).
+        median_sql = """
+            SELECT word_count FROM entries WHERE 1=1
+        """
+        median_params: list[str | int] = []
+        if user_id is not None:
+            median_sql += " AND user_id = ?"
+            median_params.append(user_id)
+        if start_date:
+            median_sql += " AND entry_date >= ?"
+            median_params.append(start_date)
+        if end_date:
+            median_sql += " AND entry_date <= ?"
+            median_params.append(end_date)
+        median_sql += " ORDER BY word_count"
+        all_wc = self._conn.execute(median_sql, median_params).fetchall()
+        if all_wc:
+            n = len(all_wc)
+            mid = n // 2
+            if n % 2 == 1:
+                median = float(all_wc[mid]["word_count"])
+            else:
+                median = (all_wc[mid - 1]["word_count"] + all_wc[mid]["word_count"]) / 2.0
+        else:
+            median = 0.0
+
+        stats = WordCountStats(
+            min=int(stats_row["min_wc"]),
+            max=int(stats_row["max_wc"]),
+            avg=round(float(stats_row["avg_wc"]), 1),
+            median=round(median, 1),
+            total_entries=int(stats_row["total_entries"]),
+        )
+        return buckets, stats
