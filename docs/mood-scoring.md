@@ -62,8 +62,8 @@ into a single shape. The backend stores all scores in the existing `mood_scores`
 ### Rationale
 
 Each score is accompanied by a brief rationale (1-2 sentences) explaining why the LLM assigned that score. The rationale
-is stored in the `mood_scores.rationale` column (added in migration 0014) and surfaced in the Insights page drill-down
-panel. The LLM is instructed to be concrete — quoting or paraphrasing the entry rather than restating the scale
+is stored in the `mood_scores.rationale` column (added in migration 0014) and surfaced in the drill-down panel on both
+the Dashboard and Insights pages when the user clicks a mood chart data point. The LLM is instructed to be concrete — quoting or paraphrasing the entry rather than restating the scale
 definition.
 
 Entries scored before migration 0014 have `rationale = NULL`. Run `journal backfill-mood --force` to populate rationales

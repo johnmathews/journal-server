@@ -510,7 +510,7 @@ Aggregate mood scores per time bucket, grouped by dimension. Used by the dashboa
 
 ### GET /api/dashboard/mood-drilldown
 
-Return per-entry mood scores for a single dimension within a date window. Used by the Insights page when the user clicks a data point on the mood chart to see which entries contributed to that period's average score.
+Return per-entry mood scores for a single dimension within a date window. Used by both the Dashboard and Insights pages when the user clicks a data point on the mood chart to see which entries contributed to that period's average score.
 
 **Query parameters:**
 
