@@ -208,7 +208,9 @@ scoring:
 
 For image and audio ingestion, mood scoring runs inline inside the ingestion worker (via
 `IngestionService._process_text`). Entity extraction is submitted as a follow-up job after the ingestion job succeeds —
-it runs on the same single-worker executor, so it starts once the ingestion job marks itself complete.
+it runs on the same single-worker executor, so it starts once the ingestion job marks itself complete. The webapp's
+notification bell automatically re-hydrates its active jobs list when any tracked job reaches terminal state, so
+server-spawned follow-up jobs (like entity extraction after ingestion) appear in the bell without a page refresh.
 
 For text/file ingestion, both mood scoring and entity extraction are submitted as separate background jobs immediately
 after the entry is created. Both are best-effort — failures are logged but don't fail the ingest response.

@@ -1,13 +1,22 @@
 # Mood Scoring
 
 Per-entry emotional scoring against a user-configurable set of facets. On by default. Opt out explicitly via
-`JOURNAL_ENABLE_MOOD_SCORING=false`.
+`JOURNAL_ENABLE_MOOD_SCORING=false` at startup, or toggle at runtime from the webapp's Settings page without restarting
+the server.
 
 The pipeline sits at the tail of `IngestionService._process_text`: after chunks + embeddings are persisted, the
 `MoodScoringService` is called with the entry's final text and the currently-loaded dimensions. The scorer (default:
 Claude Sonnet 4.5 via the Anthropic Messages tool-use API) returns one score per facet; the service writes them to the
 `mood_scores` table via `replace_mood_scores`. Scoring failures are logged but never propagate back into ingestion — an
 entry is always saved even if scoring fails.
+
+## Runtime toggle
+
+The `enable_mood_scoring` setting is editable at runtime from the webapp's Settings page. The runtime settings callback
+in `mcp_server.py` creates or clears the `MoodScoringService` on both `IngestionService` and `JobRunner` immediately —
+no server restart required. When disabled, inline mood scoring during image/audio ingestion is skipped and
+`mood_score_entry` jobs will fail with an error. When re-enabled, a new scorer is constructed with the current config
+(model, dimensions, API key) and subsequent ingestions score normally.
 
 ## Facets live in `config/mood-dimensions.toml`
 
