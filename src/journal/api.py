@@ -1942,15 +1942,11 @@ def register_api_routes(
             limit=limit,
             offset=offset,
             user_id=user_id,
+            search=search,
         )
-        if search:
-            needle = search.strip().lower()
-            rows = [
-                (e, c, ls)
-                for e, c, ls in rows
-                if needle in e.canonical_name.lower() or any(needle in a.lower() for a in e.aliases)
-            ]
-        total = entity_store.count_entities(entity_type=entity_type, user_id=user_id)
+        total = entity_store.count_entities(
+            entity_type=entity_type, user_id=user_id, search=search,
+        )
         items = [_entity_summary(e, c, ls) for e, c, ls in rows]
         log.info("GET /api/entities — returned %d/%d entities", len(items), total)
         return JSONResponse(

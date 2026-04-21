@@ -69,9 +69,15 @@ class EntityStore(Protocol):
         limit: int = 100,
         offset: int = 0,
         user_id: int | None = None,
+        search: str | None = None,
     ) -> list[tuple[Entity, int, str]]: ...
 
-    def count_entities(self, entity_type: str | None = None, user_id: int | None = None) -> int: ...
+    def count_entities(
+        self,
+        entity_type: str | None = None,
+        user_id: int | None = None,
+        search: str | None = None,
+    ) -> int: ...
 
     def get_entity(self, entity_id: int, user_id: int | None = None) -> Entity | None: ...
 
@@ -360,6 +366,7 @@ class SQLiteEntityStore:
         limit: int = 100,
         offset: int = 0,
         user_id: int | None = None,
+        search: str | None = None,
     ) -> list[tuple[Entity, int, str]]:
         sql = (
             "SELECT e.*, COUNT(m.id) AS mention_count,"
@@ -376,6 +383,16 @@ class SQLiteEntityStore:
         if user_id is not None:
             conditions.append("e.user_id = ?")
             params.append(user_id)
+        if search:
+            needle = f"%{search.strip().lower()}%"
+            conditions.append(
+                "(LOWER(e.canonical_name) LIKE ?"
+                " OR EXISTS ("
+                "   SELECT 1 FROM entity_aliases a"
+                "   WHERE a.entity_id = e.id AND LOWER(a.alias_normalised) LIKE ?"
+                " ))"
+            )
+            params.extend([needle, needle])
         if conditions:
             sql += " WHERE " + " AND ".join(conditions)
         sql += (
@@ -390,7 +407,12 @@ class SQLiteEntityStore:
             for r in rows
         ]
 
-    def count_entities(self, entity_type: str | None = None, user_id: int | None = None) -> int:
+    def count_entities(
+        self,
+        entity_type: str | None = None,
+        user_id: int | None = None,
+        search: str | None = None,
+    ) -> int:
         sql = "SELECT COUNT(*) AS cnt FROM entities"
         params: list[object] = []
         conditions: list[str] = []
@@ -400,6 +422,16 @@ class SQLiteEntityStore:
         if user_id is not None:
             conditions.append("user_id = ?")
             params.append(user_id)
+        if search:
+            needle = f"%{search.strip().lower()}%"
+            conditions.append(
+                "(LOWER(canonical_name) LIKE ?"
+                " OR EXISTS ("
+                "   SELECT 1 FROM entity_aliases a"
+                "   WHERE a.entity_id = entities.id AND LOWER(a.alias_normalised) LIKE ?"
+                " ))"
+            )
+            params.extend([needle, needle])
         if conditions:
             sql += " WHERE " + " AND ".join(conditions)
         row = self._conn.execute(sql, params).fetchone()
