@@ -778,6 +778,65 @@ def register_api_routes(
             result["warnings"] = errors
         return JSONResponse(result)
 
+    # ── User preferences ─────────────────────────────────────────────
+
+    @mcp.custom_route(
+        "/api/users/me/preferences",
+        methods=["GET"],
+        name="api_preferences_get",
+    )
+    async def get_preferences(request: Request) -> JSONResponse:
+        """Return all preferences for the authenticated user."""
+        user = get_authenticated_user(request)
+        services = services_getter()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+        user_repo = services["user_repo"]
+        prefs = user_repo.get_preferences(user.user_id)
+        return JSONResponse({"preferences": prefs})
+
+    @mcp.custom_route(
+        "/api/users/me/preferences",
+        methods=["PATCH"],
+        name="api_preferences_patch",
+    )
+    async def patch_preferences(request: Request) -> JSONResponse:
+        """Update one or more preferences for the authenticated user.
+
+        Body: ``{"key": value, ...}`` — each key is a preference name,
+        value is any JSON-serialisable object.
+        """
+        user = get_authenticated_user(request)
+        services = services_getter()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+        user_repo = services["user_repo"]
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "Request body must be a JSON object"}, status_code=400,
+            )
+
+        for key, value in body.items():
+            if not isinstance(key, str):
+                return JSONResponse(
+                    {"error": "Preference keys must be strings"}, status_code=400,
+                )
+            user_repo.set_preference(user.user_id, key, value)
+
+        log.info(
+            "PATCH /api/users/me/preferences — updated %s for user %d",
+            list(body.keys()),
+            user.user_id,
+        )
+        prefs = user_repo.get_preferences(user.user_id)
+        return JSONResponse({"preferences": prefs})
+
     @mcp.custom_route("/health", methods=["GET"], name="api_health")
     async def get_health(request: Request) -> JSONResponse:
         """Operational health endpoint. Bypasses bearer auth.

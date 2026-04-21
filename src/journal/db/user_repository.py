@@ -1,5 +1,6 @@
 """Repository interface and SQLite implementation for users, sessions, and API keys."""
 
+import json
 import logging
 import sqlite3
 import threading
@@ -97,6 +98,15 @@ class UserRepository(Protocol):
 
     # Admin queries
     def get_user_stats(self) -> list[dict]: ...
+
+    # Preferences
+    def get_preferences(self, user_id: int) -> dict[str, Any]: ...
+
+    def get_preference(self, user_id: int, key: str) -> Any | None: ...
+
+    def set_preference(self, user_id: int, key: str, value: Any) -> None: ...
+
+    def delete_preference(self, user_id: int, key: str) -> bool: ...
 
 
 class SQLiteUserRepository:
@@ -474,3 +484,44 @@ class SQLiteUserRepository:
             d["cost_this_week"] = round(user_week_costs.get(d["id"], 0.0), 2)
             result.append(d)
         return result
+
+    # ── Preferences ────────────────────────────────────────────────────
+
+    def get_preferences(self, user_id: int) -> dict[str, Any]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key, value FROM user_preferences WHERE user_id = ?",
+                (user_id,),
+            ).fetchall()
+        return {r["key"]: json.loads(r["value"]) for r in rows}
+
+    def get_preference(self, user_id: int, key: str) -> Any | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM user_preferences WHERE user_id = ? AND key = ?",
+                (user_id, key),
+            ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row["value"])
+
+    def set_preference(self, user_id: int, key: str, value: Any) -> None:
+        now = _now_iso()
+        encoded = json.dumps(value)
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO user_preferences (user_id, key, value, updated_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (user_id, key) DO UPDATE SET value = ?, updated_at = ?",
+                (user_id, key, encoded, now, encoded, now),
+            )
+            self._conn.commit()
+
+    def delete_preference(self, user_id: int, key: str) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM user_preferences WHERE user_id = ? AND key = ?",
+                (user_id, key),
+            )
+            self._conn.commit()
+        return cursor.rowcount > 0
