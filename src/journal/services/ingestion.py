@@ -158,7 +158,8 @@ class IngestionService:
         return preprocess_image(image_data, media_type)
 
     def ingest_image(
-        self, image_data: bytes, media_type: str, date: str, *, user_id: int = 1,
+        self, image_data: bytes, media_type: str, date: str, *,
+        skip_mood: bool = False, user_id: int = 1,
     ) -> Entry:
         """Ingest a journal page image: OCR -> chunk -> embed -> store."""
         log.info("Ingesting image for date %s (%s, %d bytes)", date, media_type, len(image_data))
@@ -204,7 +205,9 @@ class IngestionService:
         self._repo.add_uncertain_spans(entry.id, ocr_result.uncertain_spans)
 
         # Chunk, embed, and store in vector DB
-        chunk_count = self._process_text(entry.id, entry.final_text, date, user_id=user_id)
+        chunk_count = self._process_text(
+            entry.id, entry.final_text, date, skip_mood=skip_mood, user_id=user_id,
+        )
         self._repo.update_chunk_count(entry.id, chunk_count)
 
         log.info("Ingested image entry %d: %d words, date %s", entry.id, word_count, date)
@@ -212,7 +215,7 @@ class IngestionService:
 
     def ingest_voice(
         self, audio_data: bytes, media_type: str, date: str, language: str = "en",
-        *, source_type: str = "voice", user_id: int = 1,
+        *, source_type: str = "voice", skip_mood: bool = False, user_id: int = 1,
     ) -> Entry:
         """Ingest a voice note: transcribe -> chunk -> embed -> store."""
         log.info(
@@ -243,7 +246,9 @@ class IngestionService:
             self._repo.add_uncertain_spans(entry.id, uncertain_spans)
 
         # Chunk, embed, and store in vector DB
-        chunk_count = self._process_text(entry.id, entry.final_text, date, user_id=user_id)
+        chunk_count = self._process_text(
+            entry.id, entry.final_text, date, skip_mood=skip_mood, user_id=user_id,
+        )
         self._repo.update_chunk_count(entry.id, chunk_count)
 
         log.info("Ingested voice entry %d: %d words, date %s", entry.id, word_count, date)
@@ -256,6 +261,7 @@ class IngestionService:
         language: str = "en",
         *,
         source_type: str = "voice",
+        skip_mood: bool = False,
         on_progress: "Callable[[int, int], None] | None" = None,
         user_id: int = 1,
     ) -> Entry:
@@ -278,7 +284,7 @@ class IngestionService:
         if len(recordings) == 1:
             return self.ingest_voice(
                 recordings[0][0], recordings[0][1], date, language,
-                source_type=source_type, user_id=user_id,
+                source_type=source_type, skip_mood=skip_mood, user_id=user_id,
             )
 
         log.info(
@@ -357,7 +363,9 @@ class IngestionService:
             self._repo.add_uncertain_spans(entry.id, combined_spans)
 
         # Chunk, embed, and store in vector DB
-        chunk_count = self._process_text(entry.id, entry.final_text, date, user_id=user_id)
+        chunk_count = self._process_text(
+            entry.id, entry.final_text, date, skip_mood=skip_mood, user_id=user_id,
+        )
         self._repo.update_chunk_count(entry.id, chunk_count)
 
         log.info(
@@ -590,6 +598,7 @@ class IngestionService:
         images: list[tuple[bytes, str]],
         date: str,
         *,
+        skip_mood: bool = False,
         on_progress: "Callable[[int, int], None] | None" = None,
         user_id: int = 1,
     ) -> Entry:
@@ -686,7 +695,9 @@ class IngestionService:
         self._repo.add_uncertain_spans(entry.id, combined_spans)
 
         # Chunk, embed, and store
-        chunk_count = self._process_text(entry.id, entry.final_text, date, user_id=user_id)
+        chunk_count = self._process_text(
+            entry.id, entry.final_text, date, skip_mood=skip_mood, user_id=user_id,
+        )
         self._repo.update_chunk_count(entry.id, chunk_count)
 
         log.info(

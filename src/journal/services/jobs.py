@@ -483,13 +483,14 @@ class JobRunner:
                         self._jobs.update_progress(job_id, 0, total)
                         entry = self._ingestion.ingest_image(
                             images[0][0], images[0][1], entry_date,
-                            user_id=job_user_id or 1,
+                            skip_mood=True, user_id=job_user_id or 1,
                         )
                         self._jobs.update_progress(job_id, 1, total)
                     else:
                         self._jobs.update_progress(job_id, 0, total)
                         entry = self._ingestion.ingest_multi_page_entry(
-                            images, entry_date, on_progress=progress_callback,
+                            images, entry_date, skip_mood=True,
+                            on_progress=progress_callback,
                             user_id=job_user_id or 1,
                         )
                     last_exc = None
@@ -518,22 +519,10 @@ class JobRunner:
             self._jobs.update_progress(job_id, total, total)
             self._jobs.mark_succeeded(job_id, {"entry_id": entry.id})
 
-            # Queue entity extraction as a follow-up job. Mood scoring
-            # already happens inline inside ingest_image / ingest_multi_page_entry.
-            try:
-                ej = self.submit_entity_extraction(
-                    {"entry_id": entry.id}, user_id=job_user_id,
-                )
-                log.info(
-                    "Image ingestion job %s — queued entity extraction %s for entry %d",
-                    job_id, ej.id, entry.id,
-                )
-            except Exception:  # noqa: BLE001 — best-effort enrichment
-                log.warning(
-                    "Image ingestion job %s — failed to queue entity extraction",
-                    job_id,
-                    exc_info=True,
-                )
+            # Queue follow-up jobs: mood scoring + entity extraction.
+            self._queue_post_ingestion_jobs(
+                job_id, "Image", entry.id, job_user_id,
+            )
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Image ingestion job %s failed", job_id)
             # Clean up any remaining image data
@@ -545,6 +534,39 @@ class JobRunner:
                 self._jobs.mark_failed(job_id, friendly)
             except Exception:  # noqa: BLE001 — last-resort bookkeeping
                 log.exception("Failed to record failure for job %s", job_id)
+
+    def _queue_post_ingestion_jobs(
+        self,
+        parent_job_id: str,
+        kind: str,
+        entry_id: int,
+        user_id: int | None,
+    ) -> None:
+        """Queue mood scoring + entity extraction after ingestion."""
+        follow_ups: list[tuple[str, Job]] = []
+        for label, submit in [
+            ("mood scoring", lambda: self.submit_mood_score_entry(
+                entry_id, user_id=user_id,
+            )),
+            ("entity extraction", lambda: self.submit_entity_extraction(
+                {"entry_id": entry_id}, user_id=user_id,
+            )),
+        ]:
+            try:
+                fj = submit()
+                follow_ups.append((label, fj))
+                log.info(
+                    "%s ingestion job %s — queued %s %s"
+                    " for entry %d",
+                    kind, parent_job_id, label, fj.id,
+                    entry_id,
+                )
+            except Exception:  # noqa: BLE001
+                log.warning(
+                    "%s ingestion job %s — failed to queue %s",
+                    kind, parent_job_id, label,
+                    exc_info=True,
+                )
 
     def _run_mood_score_entry(
         self, job_id: str, params: dict[str, Any]
@@ -683,6 +705,7 @@ class JobRunner:
                     entry = self._ingestion.ingest_multi_voice(
                         recordings, entry_date,
                         source_type=params.get("source_type", "voice"),
+                        skip_mood=True,
                         on_progress=progress_callback,
                         user_id=job_user_id or 1,
                     )
@@ -712,21 +735,10 @@ class JobRunner:
             self._jobs.update_progress(job_id, total, total)
             self._jobs.mark_succeeded(job_id, {"entry_id": entry.id})
 
-            # Queue entity extraction as a follow-up job.
-            try:
-                ej = self.submit_entity_extraction(
-                    {"entry_id": entry.id}, user_id=job_user_id,
-                )
-                log.info(
-                    "Audio ingestion job %s — queued entity extraction %s for entry %d",
-                    job_id, ej.id, entry.id,
-                )
-            except Exception:  # noqa: BLE001 — best-effort enrichment
-                log.warning(
-                    "Audio ingestion job %s — failed to queue entity extraction",
-                    job_id,
-                    exc_info=True,
-                )
+            # Queue follow-up jobs: mood scoring + entity extraction.
+            self._queue_post_ingestion_jobs(
+                job_id, "Audio", entry.id, job_user_id,
+            )
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Audio ingestion job %s failed", job_id)
             # Clean up any remaining audio data

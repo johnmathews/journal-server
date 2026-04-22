@@ -638,7 +638,7 @@ class FakeIngestionService:
 
     def ingest_image(
         self, image_data: bytes, media_type: str, date: str,
-        *, user_id: int = 1,
+        *, skip_mood: bool = False, user_id: int = 1,
     ) -> Any:
         self.ingest_image_calls.append((image_data, media_type, date))
         return self._entry
@@ -648,6 +648,7 @@ class FakeIngestionService:
         images: list[tuple[bytes, str]],
         date: str,
         *,
+        skip_mood: bool = False,
         on_progress: Callable[[int, int], None] | None = None,
         user_id: int = 1,
     ) -> Any:
@@ -664,6 +665,7 @@ class FakeIngestionService:
         language: str = "en",
         *,
         source_type: str = "voice",
+        skip_mood: bool = False,
         on_progress: Callable[[int, int], None] | None = None,
         user_id: int = 1,
     ) -> Any:
