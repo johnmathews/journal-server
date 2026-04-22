@@ -54,10 +54,14 @@ def _logprobs_to_uncertain_spans(
     ws = frozenset(" \n\t\r")
     raw_spans: list[tuple[int, int]] = []
     char_offset = 0
+    text_len = len(text)
     for entry in logprobs:
         token_text: str = entry.token  # type: ignore[union-attr]
         token_logprob: float = entry.logprob  # type: ignore[union-attr]
         token_len = len(token_text)
+        if char_offset + token_len > text_len:
+            # Token stream overflows text — stop to avoid IndexError.
+            break
         if token_logprob < threshold:
             # Find the content (non-whitespace) portion of the token.
             content_start = char_offset

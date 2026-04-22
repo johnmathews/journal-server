@@ -55,12 +55,13 @@ prompt.
 
 ## Models (defaults, overridable via env vars or config.py)
 
-| Variable / Setting     | Default                              | Description                                      |
-| ---------------------- | ------------------------------------ | ------------------------------------------------ |
-| `OCR_MODEL`            | `claude-opus-4-6` / `gemini-2.5-pro` | Vision model for OCR (depends on `OCR_PROVIDER`) |
-| `transcription_model`  | `gpt-4o-transcribe`                  | OpenAI model for transcription                   |
-| `embedding_model`      | `text-embedding-3-large`             | OpenAI model for embeddings                      |
-| `embedding_dimensions` | `1024`                               | Embedding vector dimensions (reduced from 3072)  |
+| Variable / Setting                   | Default                              | Description                                                                       |
+| ------------------------------------ | ------------------------------------ | --------------------------------------------------------------------------------- |
+| `OCR_MODEL`                          | `claude-opus-4-6` / `gemini-2.5-pro` | Vision model for OCR (depends on `OCR_PROVIDER`)                                  |
+| `transcription_model`                | `gpt-4o-transcribe`                  | OpenAI model for transcription                                                    |
+| `TRANSCRIPTION_CONFIDENCE_THRESHOLD` | `-0.5`                               | Logprob threshold for flagging uncertain words (≈60% confidence). More negative = fewer flags |
+| `embedding_model`                    | `text-embedding-3-large`             | OpenAI model for embeddings                                                       |
+| `embedding_dimensions`               | `1024`                               | Embedding vector dimensions (reduced from 3072)                                   |
 
 ## Docker Compose
 

@@ -302,8 +302,20 @@ class IngestionService:
             text = result.text if hasattr(result, "text") else result  # type: ignore[assignment]
             if not text.strip():
                 raise ValueError(f"Transcription produced no text from recording {i + 1}")
-            transcripts.append(text.strip())
-            per_recording_spans.append(getattr(result, "uncertain_spans", []))
+            stripped = text.strip()
+            # Shift spans from raw-text coords to stripped-text coords
+            # (same issue as _strip_and_shift_page_spans for OCR).
+            leading = len(text) - len(text.lstrip())
+            stripped_len = len(stripped)
+            raw_spans = getattr(result, "uncertain_spans", [])
+            shifted_spans: list[tuple[int, int]] = []
+            for s, e in raw_spans:
+                ns = max(0, s - leading)
+                ne = min(stripped_len, e - leading)
+                if ne > ns:
+                    shifted_spans.append((ns, ne))
+            transcripts.append(stripped)
+            per_recording_spans.append(shifted_spans)
             file_hashes.append(file_hash)
             file_media_types.append(media_type)
             if on_progress is not None:
