@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from journal.providers.formatter import AnthropicFormatter, SYSTEM_PROMPT
+from journal.providers.formatter import SYSTEM_PROMPT, AnthropicFormatter
 
 
 @pytest.fixture

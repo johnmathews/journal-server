@@ -79,7 +79,7 @@ SETTING_DEFS: list[SettingDef] = [
         key="transcript_formatting",
         type="bool",
         label="Transcript Paragraph Formatting",
-        description="Use LLM to add paragraph breaks to voice transcriptions based on topic shifts.",
+        description="Use LLM to add paragraph breaks to voice transcriptions.",
         config_attr="transcript_formatting",
     ),
 ]
