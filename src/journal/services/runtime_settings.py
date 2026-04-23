@@ -75,6 +75,13 @@ SETTING_DEFS: list[SettingDef] = [
         description="Allow new user sign-ups.",
         config_attr="registration_enabled",
     ),
+    SettingDef(
+        key="transcript_formatting",
+        type="bool",
+        label="Transcript Paragraph Formatting",
+        description="Use LLM to add paragraph breaks to voice transcriptions based on topic shifts.",
+        config_attr="transcript_formatting",
+    ),
 ]
 
 SETTING_DEFS_BY_KEY: dict[str, SettingDef] = {d.key: d for d in SETTING_DEFS}

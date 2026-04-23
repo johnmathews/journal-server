@@ -136,7 +136,7 @@ class TestIngestMultiVoice:
         assert "Second recording text." in entry.raw_text
         assert mock_transcription.transcribe.call_count == 2
 
-    def test_multiple_recordings_joined_with_newline(
+    def test_multiple_recordings_joined_with_double_newline(
         self, ingestion_service, mock_transcription, mock_embeddings,
     ):
         mock_transcription.transcribe.side_effect = [
@@ -147,7 +147,7 @@ class TestIngestMultiVoice:
             [(b"a1", "audio/webm"), (b"a2", "audio/mp3")],
             "2026-03-22",
         )
-        assert entry.raw_text == "Part one.\nPart two."
+        assert entry.raw_text == "Part one.\n\nPart two."
 
     def test_duplicate_recording_rejected(self, ingestion_service, mock_transcription):
         mock_transcription.transcribe.return_value = TranscriptionResult(text="text")
@@ -487,14 +487,14 @@ class TestVoiceUncertainSpans:
             [(b"a1", "audio/webm"), (b"a2", "audio/webm")],
             "2026-03-22",
         )
-        # Combined: "First wrld text.\nSecond badd text."
+        # Combined: "First wrld text.\n\nSecond badd text."
         # Recording 1: "wrld" at (6, 10) → stays (6, 10)
-        # Recording 2: "badd" at (7, 11), offset = len("First wrld text.") + 1 = 17
-        #   → (7+17, 11+17) = (24, 28)
+        # Recording 2: "badd" at (7, 11), offset = len("First wrld text.") + 2 = 18
+        #   → (7+18, 11+18) = (25, 29)
         spans = ingestion_service._repo.get_uncertain_spans(entry.id)
-        assert spans == [(6, 10), (24, 28)]
+        assert spans == [(6, 10), (25, 29)]
         assert entry.raw_text[6:10] == "wrld"
-        assert entry.raw_text[24:28] == "badd"
+        assert entry.raw_text[25:29] == "badd"
 
     def test_multi_voice_one_recording_uncertain(
         self, ingestion_service, mock_transcription, mock_embeddings,
@@ -510,10 +510,10 @@ class TestVoiceUncertainSpans:
             [(b"a1", "audio/webm"), (b"a2", "audio/webm")],
             "2026-03-22",
         )
-        # Recording 2 offset = len("Clean text.") + 1 = 12
+        # Recording 2 offset = len("Clean text.") + 2 = 13
         spans = ingestion_service._repo.get_uncertain_spans(entry.id)
-        assert spans == [(16, 21)]
-        assert entry.raw_text[16:21] == "doubt"
+        assert spans == [(17, 22)]
+        assert entry.raw_text[17:22] == "doubt"
 
 
 class TestMultiPageIngestion:
@@ -911,3 +911,101 @@ class TestPreprocessingIntegration:
         assert spy.call_count == 2
         spy.assert_any_call(b"page1", "image/jpeg")
         spy.assert_any_call(b"page2", "image/png")
+
+
+class TestTranscriptFormatting:
+    """Tests for LLM paragraph formatting integration in voice ingestion."""
+
+    @pytest.fixture
+    def mock_formatter(self):
+        formatter = MagicMock()
+        formatter.format_paragraphs.side_effect = lambda text: text.replace(
+            ". ", ".\n\n"
+        )
+        return formatter
+
+    @pytest.fixture
+    def formatting_service(
+        self, db_conn, mock_ocr, mock_transcription, mock_embeddings, mock_formatter,
+    ):
+        repo = SQLiteEntryRepository(db_conn)
+        vector_store = InMemoryVectorStore()
+        return IngestionService(
+            repository=repo,
+            vector_store=vector_store,
+            ocr_provider=mock_ocr,
+            transcription_provider=mock_transcription,
+            embeddings_provider=mock_embeddings,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+            preprocess_images=False,
+            formatter=mock_formatter,
+        )
+
+    def test_ingest_voice_formats_final_text(
+        self, formatting_service, mock_transcription, mock_embeddings, mock_formatter,
+    ):
+        mock_transcription.transcribe.return_value = TranscriptionResult(
+            text="Hello world. Goodbye world."
+        )
+        entry = formatting_service.ingest_voice(
+            b"audio", "audio/webm", "2026-04-22",
+        )
+        assert entry.raw_text == "Hello world. Goodbye world."
+        assert entry.final_text == "Hello world.\n\nGoodbye world."
+        mock_formatter.format_paragraphs.assert_called_once_with(
+            "Hello world. Goodbye world."
+        )
+
+    def test_ingest_multi_voice_formats_final_text(
+        self, formatting_service, mock_transcription, mock_embeddings, mock_formatter,
+    ):
+        mock_transcription.transcribe.side_effect = [
+            TranscriptionResult(text="First part. More text."),
+            TranscriptionResult(text="Second part. Even more."),
+        ]
+        entry = formatting_service.ingest_multi_voice(
+            [(b"a1", "audio/webm"), (b"a2", "audio/webm")],
+            "2026-04-22",
+        )
+        # raw_text uses \n\n between recordings
+        assert "First part. More text.\n\nSecond part." in entry.raw_text
+        # final_text has LLM-inserted paragraph breaks within recordings too
+        assert entry.final_text != entry.raw_text
+        mock_formatter.format_paragraphs.assert_called_once()
+
+    def test_formatter_failure_falls_back_to_raw(
+        self, formatting_service, mock_transcription, mock_embeddings, mock_formatter,
+    ):
+        mock_formatter.format_paragraphs.side_effect = RuntimeError("LLM down")
+        mock_transcription.transcribe.return_value = TranscriptionResult(
+            text="Some text here."
+        )
+        entry = formatting_service.ingest_voice(
+            b"audio", "audio/webm", "2026-04-22",
+        )
+        # Fallback: final_text == raw_text
+        assert entry.final_text == entry.raw_text
+
+    def test_uncertainty_spans_anchored_to_raw_text(
+        self, formatting_service, mock_transcription, mock_embeddings, mock_formatter,
+    ):
+        mock_transcription.transcribe.return_value = TranscriptionResult(
+            text="Hello wrld today.",
+            uncertain_spans=[(6, 10)],  # "wrld"
+        )
+        entry = formatting_service.ingest_voice(
+            b"audio", "audio/webm", "2026-04-22",
+        )
+        spans = formatting_service._repo.get_uncertain_spans(entry.id)
+        assert spans == [(6, 10)]
+        # Spans reference raw_text, not final_text
+        assert entry.raw_text[6:10] == "wrld"
+
+    def test_no_formatter_leaves_final_text_equal(
+        self, ingestion_service, mock_transcription, mock_embeddings,
+    ):
+        """Without a formatter, final_text == raw_text (existing behaviour)."""
+        entry = ingestion_service.ingest_voice(
+            b"audio", "audio/webm", "2026-04-22",
+        )
+        assert entry.final_text == entry.raw_text

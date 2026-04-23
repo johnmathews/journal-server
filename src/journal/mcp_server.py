@@ -5,7 +5,10 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from journal.providers.formatter import FormatterProtocol
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -169,6 +172,16 @@ def _init_services() -> dict:
     # Runtime settings — editable from the webapp without restart.
     from journal.services.runtime_settings import RuntimeSettings
 
+    def _build_formatter(cfg, rs):  # type: ignore[no-untyped-def]
+        """Build a transcript formatter if the runtime setting is enabled."""
+        if not rs.get("transcript_formatting"):
+            return None
+        from journal.providers.formatter import AnthropicFormatter
+        return AnthropicFormatter(
+            api_key=cfg.anthropic_api_key,
+            model=cfg.transcript_formatter_model,
+        )
+
     def _on_runtime_setting_change(key: str, value: Any) -> None:
         """Side-effect callback: rebuild OCR provider when relevant settings change."""
         if key in ("ocr_dual_pass", "ocr_provider"):
@@ -210,6 +223,18 @@ def _init_services() -> dict:
                 ingestion_service._mood_scoring = None
                 job_runner._mood_scoring = None
                 log.info("Mood scoring disabled via runtime settings")
+        elif key == "transcript_formatting":
+            if value:
+                from journal.providers.formatter import AnthropicFormatter
+
+                ingestion_service._formatter = AnthropicFormatter(
+                    api_key=config.anthropic_api_key,
+                    model=config.transcript_formatter_model,
+                )
+                log.info("Transcript formatting enabled via runtime settings")
+            else:
+                ingestion_service._formatter = None
+                log.info("Transcript formatting disabled via runtime settings")
 
     runtime_settings = RuntimeSettings(conn, config, on_change=_on_runtime_setting_change)
     log.info("  Runtime settings loaded")
@@ -227,6 +252,7 @@ def _init_services() -> dict:
         embed_metadata_prefix=config.chunking_embed_metadata_prefix,
         preprocess_images=runtime_settings.get("preprocess_images"),
         mood_scoring=mood_scoring_service,
+        formatter=_build_formatter(config, runtime_settings),
     )
 
     # Jobs infrastructure: repository + single-worker runner. Must

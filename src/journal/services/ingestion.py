@@ -21,6 +21,7 @@ from journal.vectorstore.store import VectorStore
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from journal.providers.formatter import FormatterProtocol
     from journal.services.mood_scoring import MoodScoringService
 
 log = logging.getLogger(__name__)
@@ -130,6 +131,7 @@ class IngestionService:
         embed_metadata_prefix: bool = True,
         preprocess_images: bool = True,
         mood_scoring: "MoodScoringService | None" = None,
+        formatter: "FormatterProtocol | None" = None,
     ) -> None:
         self._repo = repository
         self._vector_store = vector_store
@@ -148,6 +150,28 @@ class IngestionService:
         # `final_text`. Scoring failures are logged by the service
         # and never propagate back into the ingestion flow.
         self._mood_scoring = mood_scoring
+        # Optional transcript formatter. When set, voice ingestion
+        # paths run the raw transcript through an LLM to insert
+        # paragraph breaks, storing the formatted version as
+        # final_text while keeping raw_text unchanged.
+        self._formatter = formatter
+
+    def _maybe_format_transcript(self, raw_text: str) -> str:
+        """Run the transcript through the LLM formatter if available.
+
+        Returns the formatted text, or *raw_text* unchanged if formatting
+        is disabled or fails.
+        """
+        if self._formatter is None:
+            return raw_text
+        try:
+            formatted = self._formatter.format_paragraphs(raw_text)
+            if formatted != raw_text:
+                log.info("Transcript formatted: %d → %d chars", len(raw_text), len(formatted))
+            return formatted
+        except Exception:
+            log.warning("Transcript formatting failed — using raw text", exc_info=True)
+            return raw_text
 
     def _maybe_preprocess(self, image_data: bytes, media_type: str) -> tuple[bytes, str]:
         """Apply image preprocessing if enabled."""
@@ -235,9 +259,15 @@ class IngestionService:
         if not raw_text.strip():
             raise ValueError("Transcription produced no text from audio")
 
-        # Store entry (final_text defaults to raw_text)
+        # Optionally format with LLM paragraph breaks (final_text only;
+        # raw_text stays as the original transcription).
+        final_text = self._maybe_format_transcript(raw_text)
+
         word_count = len(raw_text.split())
-        entry = self._repo.create_entry(date, source_type, raw_text, word_count, user_id=user_id)
+        entry = self._repo.create_entry(
+            date, source_type, raw_text, word_count, user_id=user_id,
+            final_text=final_text if final_text != raw_text else None,
+        )
         self._store_source_file(entry.id, f"voice_{date}", media_type, file_hash)
 
         # Record uncertain spans from transcription confidence data.
@@ -327,13 +357,19 @@ class IngestionService:
             if on_progress is not None:
                 on_progress(i + 1, len(recordings))
 
-        # Combine transcripts with single newline (same rationale as
-        # multi-page images — keeps paragraph splitter blind to recording
-        # boundaries so the chunker can pack efficiently).
-        raw_text = "\n".join(transcripts)
+        # Combine transcripts with double newline — each recording segment
+        # is a natural paragraph boundary in spoken journal entries, and
+        # the blank line benefits downstream paragraph-aware chunking.
+        raw_text = "\n\n".join(transcripts)
+
+        # Optionally format with LLM paragraph breaks (final_text only).
+        final_text = self._maybe_format_transcript(raw_text)
 
         word_count = len(raw_text.split())
-        entry = self._repo.create_entry(date, source_type, raw_text, word_count, user_id=user_id)
+        entry = self._repo.create_entry(
+            date, source_type, raw_text, word_count, user_id=user_id,
+            final_text=final_text if final_text != raw_text else None,
+        )
 
         # Store source file records for each recording
         for i, (file_hash, media_type) in enumerate(
@@ -357,7 +393,7 @@ class IngestionService:
                     )
             cumulative_offset += len(transcript)
             if i < len(transcripts) - 1:
-                cumulative_offset += 1  # the "\n" separator
+                cumulative_offset += 2  # the "\n\n" separator
 
         if combined_spans:
             self._repo.add_uncertain_spans(entry.id, combined_spans)

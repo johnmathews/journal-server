@@ -694,6 +694,9 @@ def register_api_routes(
                 "transcription": {
                     "model": config.transcription_model,
                 },
+                "transcript_formatting": {
+                    "model": config.transcript_formatter_model,
+                },
                 "embedding": {
                     "model": config.embedding_model,
                     "dimensions": config.embedding_dimensions,

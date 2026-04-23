@@ -88,6 +88,19 @@ class Config:
     embedding_model: str = "text-embedding-3-large"
     embedding_dimensions: int = 1024
 
+    # Transcript formatting (LLM paragraph insertion)
+    transcript_formatting: bool = field(
+        default_factory=lambda: os.environ.get(
+            "TRANSCRIPT_FORMATTING", "false"
+        ).lower()
+        in ("1", "true", "yes", "on")
+    )
+    transcript_formatter_model: str = field(
+        default_factory=lambda: os.environ.get(
+            "TRANSCRIPT_FORMATTER_MODEL", "claude-haiku-4-5"
+        )
+    )
+
     # Slack (for downloading files from Slack URLs)
     slack_bot_token: str = field(
         default_factory=lambda: os.environ.get("SLACK_BOT_TOKEN", "")
