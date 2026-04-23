@@ -4,7 +4,11 @@ This document catalogues every external service and AI/LLM integration used (or 
 is organised by **processing stage** so you can see at a glance which models power which step of the pipeline and what
 alternatives exist.
 
-> **Last updated:** 2026-04-14
+> **Last updated:** 2026-04-23
+>
+> Pricing is stored in the `pricing` database table (migration 0017) and served via `GET /api/settings/pricing`.
+> Admins can update rates in the webapp at Settings > API Pricing. The webapp uses these stored values to compute
+> per-1k-words cost estimates that react to changes in OCR provider, dual-pass mode, and other settings.
 
 ---
 
