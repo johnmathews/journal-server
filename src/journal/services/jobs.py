@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from journal.services.entity_extraction import EntityExtractionService
     from journal.services.ingestion import IngestionService
     from journal.services.mood_scoring import MoodScoringService
+    from journal.services.notifications import PushoverNotificationService
 
 log = logging.getLogger(__name__)
 
@@ -120,10 +121,12 @@ _INGEST_IMAGES_KEYS: dict[str, type | tuple[type, ...]] = {
 
 _MOOD_SCORE_ENTRY_KEYS: dict[str, type | tuple[type, ...]] = {
     "entry_id": int,
+    "user_id": int,
 }
 
 _REPROCESS_EMBEDDINGS_KEYS: dict[str, type | tuple[type, ...]] = {
     "entry_id": int,
+    "user_id": int,
 }
 
 _INGEST_AUDIO_KEYS: dict[str, type | tuple[type, ...]] = {
@@ -201,6 +204,7 @@ class JobRunner:
         mood_scoring_service: MoodScoringService,
         entry_repository: EntryRepository,
         ingestion_service: IngestionService | None = None,
+        notification_service: PushoverNotificationService | None = None,
     ) -> None:
         self._jobs = job_repository
         self._extraction = entity_extraction_service
@@ -208,6 +212,7 @@ class JobRunner:
         self._mood_scoring = mood_scoring_service
         self._entries = entry_repository
         self._ingestion = ingestion_service
+        self._notifications = notification_service
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="journal-jobs"
         )
@@ -308,7 +313,9 @@ class JobRunner:
         Used by the text/file ingest endpoints to defer mood scoring
         to a background thread.
         """
-        params = {"entry_id": entry_id}
+        params: dict[str, Any] = {"entry_id": entry_id}
+        if user_id is not None:
+            params["user_id"] = user_id
         _validate_params(params, _MOOD_SCORE_ENTRY_KEYS, job_type="mood_score_entry")
         job = self._jobs.create("mood_score_entry", params, user_id=user_id)
         self._executor.submit(self._run_mood_score_entry, job.id, params)
@@ -323,7 +330,9 @@ class JobRunner:
         updates the vector store. This is the slow part of a text save
         that was previously done synchronously in the PATCH handler.
         """
-        params = {"entry_id": entry_id}
+        params: dict[str, Any] = {"entry_id": entry_id}
+        if user_id is not None:
+            params["user_id"] = user_id
         _validate_params(params, _REPROCESS_EMBEDDINGS_KEYS, job_type="reprocess_embeddings")
         job = self._jobs.create("reprocess_embeddings", params, user_id=user_id)
         self._executor.submit(self._run_reprocess_embeddings, job.id, params)
@@ -357,6 +366,46 @@ class JobRunner:
         self._pending_audio[job.id] = recordings
         self._executor.submit(self._run_audio_ingestion, job.id, params)
         return job
+
+    # ------------------------------------------------------------------
+    # Notification helpers
+    # ------------------------------------------------------------------
+
+    def _notify_success(
+        self, user_id: int | None, job_type: str, result: dict,
+    ) -> None:
+        if self._notifications is not None and user_id is not None:
+            try:
+                self._notifications.notify_job_success(user_id, job_type, result)
+            except Exception:  # noqa: BLE001
+                log.warning("Notification send failed (success)", exc_info=True)
+
+    def _notify_failed(
+        self, user_id: int | None, job_type: str, error_msg: str,
+        exc: Exception | None = None,
+    ) -> None:
+        if self._notifications is not None and user_id is not None:
+            try:
+                self._notifications.notify_job_failed(
+                    user_id, job_type, error_msg, exc,
+                )
+                self._notifications.notify_admin_job_failed(
+                    user_id, job_type, error_msg, exc,
+                )
+            except Exception:  # noqa: BLE001
+                log.warning("Notification send failed (failure)", exc_info=True)
+
+    def _notify_retrying(
+        self, user_id: int | None, job_type: str, attempt: int,
+        delay: int, error_msg: str, exc: Exception | None = None,
+    ) -> None:
+        if self._notifications is not None and user_id is not None:
+            try:
+                self._notifications.notify_job_retrying(
+                    user_id, job_type, attempt, delay, error_msg, exc,
+                )
+            except Exception:  # noqa: BLE001
+                log.warning("Notification send failed (retry)", exc_info=True)
 
     def shutdown(self, wait: bool = False) -> None:
         """Stop the executor, cancelling queued-but-not-started tasks.
@@ -426,12 +475,17 @@ class JobRunner:
                 "warnings": [w for r in results for w in r.warnings],
             }
             self._jobs.mark_succeeded(job_id, summary)
+            self._notify_success(job_user_id, "entity_extraction", summary)
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception(
                 "Entity extraction job %s failed", job_id
             )
             try:
-                self._jobs.mark_failed(job_id, _friendly_error(exc))
+                friendly = _friendly_error(exc)
+                self._jobs.mark_failed(job_id, friendly)
+                self._notify_failed(
+                    params.get("user_id"), "entity_extraction", friendly, exc,
+                )
             except Exception:  # noqa: BLE001 — last-resort bookkeeping
                 log.exception(
                     "Failed to record failure for job %s", job_id
@@ -511,13 +565,21 @@ class JobRunner:
                         job_id, delay, attempt + 1, exc,
                     )
                     self._jobs.update_status_detail(job_id, detail)
+                    # Notify on first retry only
+                    if attempt == 0:
+                        self._notify_retrying(
+                            job_user_id, "ingest_images", attempt + 1,
+                            delay, friendly, exc,
+                        )
                     time.sleep(delay)
 
             if last_exc is not None:
                 raise last_exc
 
             self._jobs.update_progress(job_id, total, total)
-            self._jobs.mark_succeeded(job_id, {"entry_id": entry.id})
+            result = {"entry_id": entry.id}
+            self._jobs.mark_succeeded(job_id, result)
+            self._notify_success(job_user_id, "ingest_images", result)
 
             # Queue follow-up jobs: mood scoring + entity extraction.
             self._queue_post_ingestion_jobs(
@@ -532,6 +594,9 @@ class JobRunner:
                 if _is_transient(exc):
                     friendly += " — please try again later"
                 self._jobs.mark_failed(job_id, friendly)
+                self._notify_failed(
+                    job_user_id, "ingest_images", friendly, exc,
+                )
             except Exception:  # noqa: BLE001 — last-resort bookkeeping
                 log.exception("Failed to record failure for job %s", job_id)
 
@@ -589,11 +654,19 @@ class JobRunner:
 
             count = self._mood_scoring.score_entry(entry_id, text)
             self._jobs.update_progress(job_id, 1, 1)
-            self._jobs.mark_succeeded(job_id, {"entry_id": entry_id, "scores_written": count})
+            result = {"entry_id": entry_id, "scores_written": count}
+            self._jobs.mark_succeeded(job_id, result)
+            self._notify_success(
+                params.get("user_id"), "mood_score_entry", result,
+            )
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Mood score entry job %s failed", job_id)
             try:
-                self._jobs.mark_failed(job_id, _friendly_error(exc))
+                friendly = _friendly_error(exc)
+                self._jobs.mark_failed(job_id, friendly)
+                self._notify_failed(
+                    params.get("user_id"), "mood_score_entry", friendly, exc,
+                )
             except Exception:  # noqa: BLE001 — last-resort bookkeeping
                 log.exception("Failed to record failure for job %s", job_id)
 
@@ -612,13 +685,20 @@ class JobRunner:
 
             chunk_count = self._ingestion.reprocess_embeddings(entry_id)
             self._jobs.update_progress(job_id, 1, 1)
-            self._jobs.mark_succeeded(
-                job_id, {"entry_id": entry_id, "chunk_count": chunk_count}
+            result = {"entry_id": entry_id, "chunk_count": chunk_count}
+            self._jobs.mark_succeeded(job_id, result)
+            self._notify_success(
+                params.get("user_id"), "reprocess_embeddings", result,
             )
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Reprocess embeddings job %s failed", job_id)
             try:
-                self._jobs.mark_failed(job_id, _friendly_error(exc))
+                friendly = _friendly_error(exc)
+                self._jobs.mark_failed(job_id, friendly)
+                self._notify_failed(
+                    params.get("user_id"), "reprocess_embeddings",
+                    friendly, exc,
+                )
             except Exception:  # noqa: BLE001 — last-resort bookkeeping
                 log.exception("Failed to record failure for job %s", job_id)
 
@@ -652,10 +732,17 @@ class JobRunner:
                 "errors": list(backfill_result.errors),
             }
             self._jobs.mark_succeeded(job_id, summary)
+            self._notify_success(
+                params.get("user_id"), "mood_backfill", summary,
+            )
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Mood backfill job %s failed", job_id)
             try:
-                self._jobs.mark_failed(job_id, _friendly_error(exc))
+                friendly = _friendly_error(exc)
+                self._jobs.mark_failed(job_id, friendly)
+                self._notify_failed(
+                    params.get("user_id"), "mood_backfill", friendly, exc,
+                )
             except Exception:  # noqa: BLE001 — last-resort bookkeeping
                 log.exception(
                     "Failed to record failure for job %s", job_id
@@ -727,13 +814,21 @@ class JobRunner:
                         job_id, delay, attempt + 1, exc,
                     )
                     self._jobs.update_status_detail(job_id, detail)
+                    # Notify on first retry only
+                    if attempt == 0:
+                        self._notify_retrying(
+                            job_user_id, "ingest_audio", attempt + 1,
+                            delay, friendly, exc,
+                        )
                     time.sleep(delay)
 
             if last_exc is not None:
                 raise last_exc
 
             self._jobs.update_progress(job_id, total, total)
-            self._jobs.mark_succeeded(job_id, {"entry_id": entry.id})
+            result = {"entry_id": entry.id}
+            self._jobs.mark_succeeded(job_id, result)
+            self._notify_success(job_user_id, "ingest_audio", result)
 
             # Queue follow-up jobs: mood scoring + entity extraction.
             self._queue_post_ingestion_jobs(
@@ -748,5 +843,8 @@ class JobRunner:
                 if _is_transient(exc):
                     friendly += " — please try again later"
                 self._jobs.mark_failed(job_id, friendly)
+                self._notify_failed(
+                    job_user_id, "ingest_audio", friendly, exc,
+                )
             except Exception:  # noqa: BLE001 — last-resort bookkeeping
                 log.exception("Failed to record failure for job %s", job_id)

@@ -243,6 +243,14 @@ class Config:
         default_factory=lambda: os.environ.get("APP_BASE_URL", "http://localhost:5173")
     )
 
+    # Pushover notifications
+    pushover_user_key: str = field(
+        default_factory=lambda: os.environ.get("PUSHOVER_USER_KEY", "")
+    )
+    pushover_app_token: str = field(
+        default_factory=lambda: os.environ.get("PUSHOVER_APP_API_TOKEN", "")
+    )
+
     # Entity extraction
     entity_extraction_model: str = "claude-opus-4-6"
     entity_extraction_max_tokens: int = 4096

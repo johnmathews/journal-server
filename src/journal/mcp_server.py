@@ -252,6 +252,21 @@ def _init_services() -> dict:
         formatter=_build_formatter(config, runtime_settings),
     )
 
+    # Pushover notification service — optional, only when credentials
+    # are configured via environment or per-user preferences.
+    from journal.services.notifications import PushoverNotificationService
+
+    notification_service: PushoverNotificationService | None = None
+    notification_service = PushoverNotificationService(
+        user_repo=user_repo,
+        default_user_key=config.pushover_user_key,
+        default_app_token=config.pushover_app_token,
+    )
+    if config.pushover_app_token:
+        log.info("  Notification service initialized (Pushover, server default token set)")
+    else:
+        log.info("  Notification service initialized (Pushover, per-user credentials only)")
+
     # Jobs infrastructure: repository + single-worker runner. Must
     # share `conn` (opened with check_same_thread=False above). The
     # runner serialises worker writes to one thread at a time.
@@ -268,8 +283,22 @@ def _init_services() -> dict:
         mood_scoring_service=mood_scoring_service,
         entry_repository=repo,
         ingestion_service=ingestion_service,
+        notification_service=notification_service,
     )
     log.info("  Jobs: JobRunner started (single-worker executor)")
+
+    # Health poller — daemon thread that monitors internal components
+    # and notifies admins via Pushover on status degradation.
+    from journal.services.health_poll import HealthPoller
+
+    health_poller = HealthPoller(
+        conn=conn,
+        vector_store=vector_store,
+        db_path=config.db_path,
+        notification_service=notification_service,
+    )
+    health_poller.start()
+    log.info("  Health poller started (interval=300s)")
 
     # Shutdown hook — FastMCP's lifespan is per-session, not
     # per-process, so `atexit` is the honest hook here. `wait=False`
@@ -282,6 +311,7 @@ def _init_services() -> dict:
         # `log.info` here reliably triggers a spurious "I/O on
         # closed file" print from the stdlib logging handler. The
         # JobRunner already logs its own shutdown lifecycle.
+        health_poller.stop()
         job_runner.shutdown(wait=False)
 
     atexit.register(_shutdown_job_runner)
@@ -332,6 +362,8 @@ def _init_services() -> dict:
         "auth_service": auth_service,
         "email_service": email_service,
         "user_repo": user_repo,
+        # Notifications
+        "notification_service": notification_service,
     }
 
     entry_count = repo.count_entries()

@@ -29,6 +29,16 @@ See `docs/security.md` for the threat model and how auth fits in.
 | `JOURNAL_AUTHOR_NAME`               | `John`                | Name the entity extractor uses as the subject of first-person statements. See `docs/entity-tracking.md`.                                                               |
 | `ENTITY_DEDUP_SIMILARITY_THRESHOLD` | `0.88`                | Cosine similarity threshold for the stage-c embedding dedup fallback. Raise to be stricter, lower to merge more aggressively.                                          |
 
+## Optional — Pushover notifications
+
+| Variable                 | Default | Description                                                                                                                                     |
+| ------------------------ | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PUSHOVER_USER_KEY`      |         | Default Pushover user key. Per-user keys in Settings override this. Leave empty if all users configure their own keys.                          |
+| `PUSHOVER_APP_API_TOKEN` |         | Default Pushover application API token. Per-user tokens in Settings override this. Leave empty if all users configure their own tokens.         |
+
+Users configure their own Pushover credentials via the Settings page in the webapp. The environment variables serve as
+server-wide defaults — useful for single-user deployments. See the webapp's Notifications section for topic configuration.
+
 ## Optional — chunking
 
 See `docs/architecture.md` → "Chunking Strategies" for the algorithm and tradeoffs.

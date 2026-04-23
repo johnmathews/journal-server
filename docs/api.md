@@ -1270,6 +1270,73 @@ Journal statistics with optional date filtering.
 
 ---
 
+### GET /api/notifications/topics
+
+Return notification topics with the authenticated user's current toggle state. Admin-only topics are hidden for
+non-admin users.
+
+**Response:**
+
+```json
+{
+  "topics": [
+    {
+      "key": "notif_job_success_ingest_images",
+      "label": "Image ingestion succeeded",
+      "group": "success",
+      "admin_only": false,
+      "default": true,
+      "enabled": true
+    }
+  ]
+}
+```
+
+---
+
+### GET /api/notifications/status
+
+Return whether the authenticated user has Pushover credentials configured (either via user preferences or server
+defaults).
+
+**Response:**
+
+```json
+{ "configured": true }
+```
+
+---
+
+### POST /api/notifications/validate
+
+Validate Pushover credentials against the Pushover API. If valid, the credentials are saved to the user's preferences.
+
+**Request body:**
+
+```json
+{ "user_key": "...", "app_token": "..." }
+```
+
+**Response:**
+
+```json
+{ "valid": true, "error": null }
+```
+
+---
+
+### POST /api/notifications/test
+
+Send a test Pushover notification using the authenticated user's saved credentials.
+
+**Response:**
+
+```json
+{ "sent": true, "error": null }
+```
+
+---
+
 # MCP Tool Reference
 
 The journal MCP server exposes its tools via streamable HTTP transport.
