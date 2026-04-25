@@ -481,7 +481,19 @@ class PushoverNotificationService:
             entry_id = result.get("entry_id")
             if entry_id:
                 parts.append(f"Entry {entry_id} created")
-            parts.append("All processing complete")
+
+            # Include follow-up results when available (pipeline complete).
+            mood = result.get("mood_scoring_result") or {}
+            entity = result.get("entity_extraction_result") or {}
+            if mood:
+                count = mood.get("scores_written", 0)
+                parts.append(f"{count} mood scores")
+            if entity:
+                ent_count = entity.get("entities_created", 0)
+                mention_count = entity.get("mentions_created", 0)
+                parts.append(f"{ent_count} entities, {mention_count} mentions")
+            if not mood and not entity:
+                parts.append("All processing complete")
         elif job_type == "entity_extraction":
             processed = result.get("entries_processed", 0)
             created = result.get("entities_created", 0)

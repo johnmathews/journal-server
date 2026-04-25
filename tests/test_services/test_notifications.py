@@ -347,10 +347,30 @@ class TestHasCredentials:
 
 
 class TestBuildSuccessMessage:
-    def test_ingestion_message(self, svc: PushoverNotificationService) -> None:
+    def test_ingestion_message_without_followups(self, svc: PushoverNotificationService) -> None:
         msg = svc._build_success_message("ingest_images", {"entry_id": 42})
         assert "Entry 42" in msg
         assert "complete" in msg.lower()
+
+    def test_ingestion_message_with_pipeline_results(
+        self, svc: PushoverNotificationService,
+    ) -> None:
+        """Combined pipeline result includes mood + entity summaries."""
+        result = {
+            "entry_id": 76,
+            "mood_scoring_result": {"scores_written": 7},
+            "entity_extraction_result": {
+                "entities_created": 8,
+                "mentions_created": 18,
+            },
+        }
+        msg = svc._build_success_message("ingest_audio", result)
+        assert "Entry 76" in msg
+        assert "7 mood scores" in msg
+        assert "8 entities" in msg
+        assert "18 mentions" in msg
+        # Should NOT contain the generic fallback when follow-up results exist
+        assert "all processing complete" not in msg.lower()
 
     def test_entity_extraction_message(self, svc: PushoverNotificationService) -> None:
         msg = svc._build_success_message(

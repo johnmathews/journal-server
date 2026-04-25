@@ -103,6 +103,7 @@ _ENTITY_EXTRACTION_KEYS: dict[str, type | tuple[type, ...]] = {
     "end_date": str,
     "stale_only": bool,
     "user_id": int,
+    "parent_job_id": str,
 }
 
 _MOOD_BACKFILL_KEYS: dict[str, type | tuple[type, ...]] = {
@@ -122,6 +123,7 @@ _INGEST_IMAGES_KEYS: dict[str, type | tuple[type, ...]] = {
 _MOOD_SCORE_ENTRY_KEYS: dict[str, type | tuple[type, ...]] = {
     "entry_id": int,
     "user_id": int,
+    "parent_job_id": str,
 }
 
 _REPROCESS_EMBEDDINGS_KEYS: dict[str, type | tuple[type, ...]] = {
@@ -306,6 +308,7 @@ class JobRunner:
 
     def submit_mood_score_entry(
         self, entry_id: int, *, user_id: int | None = None,
+        parent_job_id: str | None = None,
     ) -> Job:
         """Queue a mood-scoring job for a single entry.
 
@@ -316,6 +319,8 @@ class JobRunner:
         params: dict[str, Any] = {"entry_id": entry_id}
         if user_id is not None:
             params["user_id"] = user_id
+        if parent_job_id is not None:
+            params["parent_job_id"] = parent_job_id
         _validate_params(params, _MOOD_SCORE_ENTRY_KEYS, job_type="mood_score_entry")
         job = self._jobs.create("mood_score_entry", params, user_id=user_id)
         self._executor.submit(self._run_mood_score_entry, job.id, params)
@@ -407,6 +412,46 @@ class JobRunner:
             except Exception:  # noqa: BLE001
                 log.warning("Notification send failed (retry)", exc_info=True)
 
+    def _try_pipeline_notification(
+        self, parent_job_id: str, user_id: int | None,
+    ) -> None:
+        """Send one combined notification when all pipeline jobs succeed.
+
+        Called by follow-up job runners (mood scoring, entity extraction)
+        that were auto-triggered by an ingestion pipeline.  Each follow-up
+        calls this on completion; the method checks whether *all* sibling
+        follow-ups have also succeeded.  Only the last one to finish
+        actually sends the notification — earlier callers return early.
+
+        If any follow-up failed, its individual failure notification was
+        already sent by ``_notify_failed``, so we skip the combined
+        success notification entirely.
+        """
+        parent = self._jobs.get(parent_job_id)
+        if parent is None or parent.status != "succeeded":
+            return
+
+        follow_up_ids: dict[str, str] = (parent.result or {}).get(
+            "follow_up_jobs", {},
+        )
+        if not follow_up_ids:
+            return
+
+        # Gather results from every follow-up; bail if any isn't done yet.
+        follow_up_results: dict[str, dict[str, Any]] = {}
+        for key, fj_id in follow_up_ids.items():
+            fj = self._jobs.get(fj_id)
+            if fj is None or fj.status != "succeeded":
+                return
+            follow_up_results[key] = fj.result or {}
+
+        # All succeeded — build a combined result and send one notification.
+        combined: dict[str, Any] = dict(parent.result or {})
+        for key, fj_result in follow_up_results.items():
+            combined[f"{key}_result"] = fj_result
+
+        self._notify_success(user_id, parent.type, combined)
+
     def shutdown(self, wait: bool = False) -> None:
         """Stop the executor, cancelling queued-but-not-started tasks.
 
@@ -475,7 +520,11 @@ class JobRunner:
                 "warnings": [w for r in results for w in r.warnings],
             }
             self._jobs.mark_succeeded(job_id, summary)
-            self._notify_success(job_user_id, "entity_extraction", summary)
+            parent_job_id = params.get("parent_job_id")
+            if parent_job_id:
+                self._try_pipeline_notification(parent_job_id, job_user_id)
+            else:
+                self._notify_success(job_user_id, "entity_extraction", summary)
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception(
                 "Entity extraction job %s failed", job_id
@@ -593,7 +642,8 @@ class JobRunner:
                 "follow_up_jobs": follow_up_ids,
             }
             self._jobs.mark_succeeded(job_id, result)
-            self._notify_success(job_user_id, "ingest_images", result)
+            # No notification here — the combined pipeline notification
+            # fires when the last follow-up job (mood/entity) completes.
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Image ingestion job %s failed", job_id)
             # Clean up any remaining image data
@@ -625,10 +675,11 @@ class JobRunner:
         follow_up_ids: dict[str, str] = {}
         for label, key, submit in [
             ("mood scoring", "mood_scoring", lambda: self.submit_mood_score_entry(
-                entry_id, user_id=user_id,
+                entry_id, user_id=user_id, parent_job_id=parent_job_id,
             )),
             ("entity extraction", "entity_extraction", lambda: self.submit_entity_extraction(
-                {"entry_id": entry_id}, user_id=user_id,
+                {"entry_id": entry_id, "parent_job_id": parent_job_id},
+                user_id=user_id,
             )),
         ]:
             try:
@@ -671,9 +722,15 @@ class JobRunner:
             self._jobs.update_progress(job_id, 1, 1)
             result = {"entry_id": entry_id, "scores_written": count}
             self._jobs.mark_succeeded(job_id, result)
-            self._notify_success(
-                params.get("user_id"), "mood_score_entry", result,
-            )
+            parent_job_id = params.get("parent_job_id")
+            if parent_job_id:
+                self._try_pipeline_notification(
+                    parent_job_id, params.get("user_id"),
+                )
+            else:
+                self._notify_success(
+                    params.get("user_id"), "mood_score_entry", result,
+                )
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Mood score entry job %s failed", job_id)
             try:
@@ -857,7 +914,8 @@ class JobRunner:
                 "follow_up_jobs": follow_up_ids,
             }
             self._jobs.mark_succeeded(job_id, result)
-            self._notify_success(job_user_id, "ingest_audio", result)
+            # No notification here — the combined pipeline notification
+            # fires when the last follow-up job (mood/entity) completes.
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Audio ingestion job %s failed", job_id)
             # Clean up any remaining audio data

@@ -911,3 +911,188 @@ class TestShutdown:
         runner.shutdown(wait=True)
         with pytest.raises(RuntimeError):
             runner.submit_entity_extraction({})
+
+
+# --------------------------------------------------------------------
+# Fakes for pipeline notification tests
+# --------------------------------------------------------------------
+
+
+class FakeNotificationService:
+    """Captures notify_job_success calls for assertion."""
+
+    def __init__(self) -> None:
+        self.success_calls: list[tuple[int, str, dict]] = []
+
+    def notify_job_success(
+        self, user_id: int, job_type: str, result: dict[str, Any],
+    ) -> None:
+        self.success_calls.append((user_id, job_type, result))
+
+    def notify_job_failed(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def notify_admin_job_failed(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def notify_job_retrying(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+
+class FakeMoodScoringService:
+    """Returns a fixed score count."""
+
+    def __init__(self, scores: int = 7) -> None:
+        self._scores = scores
+
+    def score_entry(self, entry_id: int, text: str) -> int:
+        return self._scores
+
+
+class FakeEntryRepository:
+    """Returns a canned Entry from get_entry."""
+
+    def __init__(self) -> None:
+        from journal.models import Entry
+        self._entry = Entry(
+            id=1,
+            entry_date="2026-04-25",
+            source_type="voice",
+            raw_text="hello world",
+            final_text="hello world",
+            word_count=2,
+            chunk_count=1,
+        )
+
+    def get_entry(self, entry_id: int) -> Any:
+        return self._entry
+
+
+# --------------------------------------------------------------------
+# Pipeline notification tests
+# --------------------------------------------------------------------
+
+
+class TestPipelineNotification:
+    """Ingestion pipelines (audio/image) send ONE combined Pushover
+    notification after all follow-up jobs complete, not one per job."""
+
+    def _make_pipeline_runner(
+        self,
+        jobs_repo: SQLiteJobRepository,
+    ) -> tuple[JobRunner, FakeNotificationService]:
+        notif = FakeNotificationService()
+        extraction = FakeEntityExtractionService(
+            single_result=_make_extraction_result(
+                1, entities_created=8, mentions_created=18,
+            ),
+        )
+        runner = JobRunner(
+            job_repository=jobs_repo,
+            entity_extraction_service=extraction,
+            mood_backfill_callable=FakeMoodBackfill(),
+            mood_scoring_service=FakeMoodScoringService(scores=7),
+            entry_repository=FakeEntryRepository(),
+            ingestion_service=FakeIngestionService(),
+            notification_service=notif,  # type: ignore[arg-type]
+        )
+        return runner, notif
+
+    def _wait_pipeline(
+        self,
+        jobs_repo: SQLiteJobRepository,
+        parent_id: str,
+        timeout: float = 10.0,
+    ) -> None:
+        """Wait for parent + all follow-up jobs to reach terminal state."""
+        _wait_terminal(jobs_repo, parent_id, timeout)
+        parent = jobs_repo.get(parent_id)
+        assert parent is not None
+        for fj_id in (parent.result or {}).get("follow_up_jobs", {}).values():
+            _wait_terminal(jobs_repo, fj_id, timeout)
+
+    def test_audio_pipeline_sends_one_notification(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        runner, notif = self._make_pipeline_runner(jobs_repo)
+        recordings = [(b"audio1", "audio/webm", "rec.webm")]
+        job = runner.submit_audio_ingestion(
+            recordings, "2026-04-25", user_id=1,
+        )
+        self._wait_pipeline(jobs_repo, job.id)
+        runner.shutdown(wait=True)
+
+        # Exactly one success notification for the whole pipeline
+        assert len(notif.success_calls) == 1
+        user_id, job_type, result = notif.success_calls[0]
+        assert job_type == "ingest_audio"
+
+        # Combined result includes follow-up results
+        assert "mood_scoring_result" in result
+        assert result["mood_scoring_result"]["scores_written"] == 7
+        assert "entity_extraction_result" in result
+        assert result["entity_extraction_result"]["entities_created"] == 8
+        assert result["entity_extraction_result"]["mentions_created"] == 18
+
+        # Parent entry info still present
+        assert result["entry_id"] == 1
+
+    def test_image_pipeline_sends_one_notification(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        runner, notif = self._make_pipeline_runner(jobs_repo)
+        images = [(b"img1", "image/jpeg", "page1.jpg")]
+        job = runner.submit_image_ingestion(images, "2026-04-25", user_id=1)
+        self._wait_pipeline(jobs_repo, job.id)
+        runner.shutdown(wait=True)
+
+        assert len(notif.success_calls) == 1
+        user_id, job_type, result = notif.success_calls[0]
+        assert job_type == "ingest_images"
+        assert "mood_scoring_result" in result
+        assert "entity_extraction_result" in result
+
+    def test_standalone_entity_extraction_still_notifies(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        """Manually triggered batch jobs (no parent_job_id) notify individually."""
+        runner, notif = self._make_pipeline_runner(jobs_repo)
+        runner.submit_entity_extraction({"entry_id": 1}, user_id=1)
+        runner.shutdown(wait=True)
+
+        assert len(notif.success_calls) == 1
+        _, job_type, _ = notif.success_calls[0]
+        assert job_type == "entity_extraction"
+
+    def test_standalone_mood_score_still_notifies(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        """Manually triggered mood scoring (no parent_job_id) notifies individually."""
+        runner, notif = self._make_pipeline_runner(jobs_repo)
+        runner.submit_mood_score_entry(1, user_id=1)
+        runner.shutdown(wait=True)
+
+        assert len(notif.success_calls) == 1
+        _, job_type, _ = notif.success_calls[0]
+        assert job_type == "mood_score_entry"
+
+    def test_parent_job_id_stored_in_follow_up_params(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        """Follow-up jobs created by ingestion carry parent_job_id in params."""
+        runner, _ = self._make_pipeline_runner(jobs_repo)
+        recordings = [(b"audio1", "audio/webm", "rec.webm")]
+        parent = runner.submit_audio_ingestion(
+            recordings, "2026-04-25", user_id=1,
+        )
+        self._wait_pipeline(jobs_repo, parent.id)
+        runner.shutdown(wait=True)
+
+        parent_final = jobs_repo.get(parent.id)
+        assert parent_final is not None
+        follow_ups = parent_final.result["follow_up_jobs"]
+
+        for _key, fj_id in follow_ups.items():
+            fj = jobs_repo.get(fj_id)
+            assert fj is not None
+            assert fj.params["parent_job_id"] == parent.id
