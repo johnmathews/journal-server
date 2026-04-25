@@ -415,17 +415,18 @@ class JobRunner:
     def _try_pipeline_notification(
         self, parent_job_id: str, user_id: int | None,
     ) -> None:
-        """Send one combined notification when all pipeline jobs succeed.
+        """Send one combined notification when all pipeline jobs finish.
 
         Called by follow-up job runners (mood scoring, entity extraction)
         that were auto-triggered by an ingestion pipeline.  Each follow-up
         calls this on completion; the method checks whether *all* sibling
-        follow-ups have also succeeded.  Only the last one to finish
-        actually sends the notification — earlier callers return early.
+        follow-ups have also reached a terminal state.  Only the last one
+        to finish actually sends the notification — earlier callers
+        return early because a sibling is still running.
 
-        If any follow-up failed, its individual failure notification was
-        already sent by ``_notify_failed``, so we skip the combined
-        success notification entirely.
+        Failed follow-ups already fire their own ``_notify_failed``
+        immediately.  The combined notification still fires so the user
+        learns the entry was created and which enrichments succeeded.
         """
         parent = self._jobs.get(parent_job_id)
         if parent is None or parent.status != "succeeded":
@@ -437,15 +438,17 @@ class JobRunner:
         if not follow_up_ids:
             return
 
-        # Gather results from every follow-up; bail if any isn't done yet.
+        # Gather results from every follow-up that succeeded.
+        # Bail if any follow-up hasn't reached a terminal state yet.
         follow_up_results: dict[str, dict[str, Any]] = {}
         for key, fj_id in follow_up_ids.items():
             fj = self._jobs.get(fj_id)
-            if fj is None or fj.status != "succeeded":
-                return
-            follow_up_results[key] = fj.result or {}
+            if fj is None or fj.status not in ("succeeded", "failed"):
+                return  # still running — wait for next completion
+            if fj.status == "succeeded":
+                follow_up_results[key] = fj.result or {}
 
-        # All succeeded — build a combined result and send one notification.
+        # All terminal — build a combined result and send one notification.
         combined: dict[str, Any] = dict(parent.result or {})
         for key, fj_result in follow_up_results.items():
             combined[f"{key}_result"] = fj_result
@@ -535,6 +538,11 @@ class JobRunner:
                 self._notify_failed(
                     params.get("user_id"), "entity_extraction", friendly, exc,
                 )
+                parent_job_id = params.get("parent_job_id")
+                if parent_job_id:
+                    self._try_pipeline_notification(
+                        parent_job_id, params.get("user_id"),
+                    )
             except Exception:  # noqa: BLE001 — last-resort bookkeeping
                 log.exception(
                     "Failed to record failure for job %s", job_id
@@ -642,8 +650,15 @@ class JobRunner:
                 "follow_up_jobs": follow_up_ids,
             }
             self._jobs.mark_succeeded(job_id, result)
-            # No notification here — the combined pipeline notification
-            # fires when the last follow-up job (mood/entity) completes.
+            if follow_up_ids:
+                # Combined pipeline notification fires when the last
+                # follow-up job (mood/entity) completes.
+                pass
+            else:
+                # No follow-ups were queued (e.g. executor shutting
+                # down) — notify directly so the user learns the
+                # entry was created.
+                self._notify_success(job_user_id, "ingest_images", result)
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Image ingestion job %s failed", job_id)
             # Clean up any remaining image data
@@ -708,14 +723,31 @@ class JobRunner:
             self._jobs.update_progress(job_id, 0, 1)
 
             entry_id = params["entry_id"]
+            parent_job_id = params.get("parent_job_id")
             entry = self._entries.get_entry(entry_id)
             if entry is None:
-                self._jobs.mark_failed(job_id, f"Entry {entry_id} not found")
+                error_msg = f"Entry {entry_id} not found"
+                self._jobs.mark_failed(job_id, error_msg)
+                self._notify_failed(
+                    params.get("user_id"), "mood_score_entry", error_msg,
+                )
+                if parent_job_id:
+                    self._try_pipeline_notification(
+                        parent_job_id, params.get("user_id"),
+                    )
                 return
 
             text = entry.final_text or entry.raw_text
             if not text or not text.strip():
-                self._jobs.mark_failed(job_id, f"Entry {entry_id} has no text")
+                error_msg = f"Entry {entry_id} has no text"
+                self._jobs.mark_failed(job_id, error_msg)
+                self._notify_failed(
+                    params.get("user_id"), "mood_score_entry", error_msg,
+                )
+                if parent_job_id:
+                    self._try_pipeline_notification(
+                        parent_job_id, params.get("user_id"),
+                    )
                 return
 
             count = self._mood_scoring.score_entry(entry_id, text)
@@ -739,6 +771,11 @@ class JobRunner:
                 self._notify_failed(
                     params.get("user_id"), "mood_score_entry", friendly, exc,
                 )
+                parent_job_id = params.get("parent_job_id")
+                if parent_job_id:
+                    self._try_pipeline_notification(
+                        parent_job_id, params.get("user_id"),
+                    )
             except Exception:  # noqa: BLE001 — last-resort bookkeeping
                 log.exception("Failed to record failure for job %s", job_id)
 
@@ -914,8 +951,15 @@ class JobRunner:
                 "follow_up_jobs": follow_up_ids,
             }
             self._jobs.mark_succeeded(job_id, result)
-            # No notification here — the combined pipeline notification
-            # fires when the last follow-up job (mood/entity) completes.
+            if follow_up_ids:
+                # Combined pipeline notification fires when the last
+                # follow-up job (mood/entity) completes.
+                pass
+            else:
+                # No follow-ups were queued (e.g. executor shutting
+                # down) — notify directly so the user learns the
+                # entry was created.
+                self._notify_success(job_user_id, "ingest_audio", result)
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Audio ingestion job %s failed", job_id)
             # Clean up any remaining audio data

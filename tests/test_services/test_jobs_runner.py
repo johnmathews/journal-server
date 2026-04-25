@@ -44,12 +44,14 @@ class FakeEntityExtractionService:
         batch_results: list[ExtractionResult] | None = None,
         single_result: ExtractionResult | None = None,
         raise_in_batch: BaseException | None = None,
+        raise_in_single: BaseException | None = None,
         hold_event: threading.Event | None = None,
         entered_event: threading.Event | None = None,
     ) -> None:
         self._batch_results = batch_results or []
         self._single_result = single_result
         self._raise = raise_in_batch
+        self._raise_single = raise_in_single
         self._hold = hold_event
         self._entered = entered_event
         self.batch_calls: list[dict[str, Any]] = []
@@ -92,6 +94,8 @@ class FakeEntityExtractionService:
 
     def extract_from_entry(self, entry_id: int) -> ExtractionResult:
         self.single_calls.append(entry_id)
+        if self._raise_single is not None:
+            raise self._raise_single
         if self._single_result is None:
             raise AssertionError(
                 "single_result not configured on fake"
@@ -919,18 +923,22 @@ class TestShutdown:
 
 
 class FakeNotificationService:
-    """Captures notify_job_success calls for assertion."""
+    """Captures notification calls for assertion."""
 
     def __init__(self) -> None:
         self.success_calls: list[tuple[int, str, dict]] = []
+        self.failure_calls: list[tuple[int, str, str]] = []
 
     def notify_job_success(
         self, user_id: int, job_type: str, result: dict[str, Any],
     ) -> None:
         self.success_calls.append((user_id, job_type, result))
 
-    def notify_job_failed(self, *args: Any, **kwargs: Any) -> None:
-        pass
+    def notify_job_failed(
+        self, user_id: int, job_type: str, error_message: str,
+        exc: Exception | None = None,
+    ) -> None:
+        self.failure_calls.append((user_id, job_type, error_message))
 
     def notify_admin_job_failed(self, *args: Any, **kwargs: Any) -> None:
         pass
@@ -940,12 +948,17 @@ class FakeNotificationService:
 
 
 class FakeMoodScoringService:
-    """Returns a fixed score count."""
+    """Returns a fixed score count, or raises if configured to fail."""
 
-    def __init__(self, scores: int = 7) -> None:
+    def __init__(
+        self, scores: int = 7, *, raise_exc: BaseException | None = None,
+    ) -> None:
         self._scores = scores
+        self._raise = raise_exc
 
     def score_entry(self, entry_id: int, text: str) -> int:
+        if self._raise is not None:
+            raise self._raise
         return self._scores
 
 
@@ -1096,3 +1109,154 @@ class TestPipelineNotification:
             fj = jobs_repo.get(fj_id)
             assert fj is not None
             assert fj.params["parent_job_id"] == parent.id
+
+    def test_partial_failure_still_sends_combined_notification(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        """When mood scoring fails but entity extraction succeeds, the user
+        still gets a combined notification about what worked."""
+        notif = FakeNotificationService()
+        extraction = FakeEntityExtractionService(
+            single_result=_make_extraction_result(
+                1, entities_created=5, mentions_created=12,
+            ),
+        )
+        runner = JobRunner(
+            job_repository=jobs_repo,
+            entity_extraction_service=extraction,
+            mood_backfill_callable=FakeMoodBackfill(),
+            mood_scoring_service=FakeMoodScoringService(
+                raise_exc=RuntimeError("LLM overloaded"),
+            ),
+            entry_repository=FakeEntryRepository(),
+            ingestion_service=FakeIngestionService(),
+            notification_service=notif,  # type: ignore[arg-type]
+        )
+
+        recordings = [(b"audio1", "audio/webm", "rec.webm")]
+        parent = runner.submit_audio_ingestion(
+            recordings, "2026-04-25", user_id=1,
+        )
+        self._wait_pipeline(jobs_repo, parent.id)
+        runner.shutdown(wait=True)
+
+        # 1 failure notification for mood scoring
+        assert len(notif.failure_calls) == 1
+        _, fail_type, _ = notif.failure_calls[0]
+        assert fail_type == "mood_score_entry"
+
+        # 1 combined success notification (entity extraction results only)
+        assert len(notif.success_calls) == 1
+        _, job_type, result = notif.success_calls[0]
+        assert job_type == "ingest_audio"
+        assert result["entry_id"] == 1
+        assert "entity_extraction_result" in result
+        assert result["entity_extraction_result"]["entities_created"] == 5
+        # Mood scoring failed, so its results should NOT be in the combined
+        assert "mood_scoring_result" not in result
+
+    def test_entity_fails_mood_succeeds_sends_combined(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        """When entity extraction fails but mood scoring succeeds, the user
+        still gets a combined notification with mood results."""
+        notif = FakeNotificationService()
+        extraction = FakeEntityExtractionService(
+            raise_in_single=RuntimeError("extraction error"),
+        )
+        runner = JobRunner(
+            job_repository=jobs_repo,
+            entity_extraction_service=extraction,
+            mood_backfill_callable=FakeMoodBackfill(),
+            mood_scoring_service=FakeMoodScoringService(scores=7),
+            entry_repository=FakeEntryRepository(),
+            ingestion_service=FakeIngestionService(),
+            notification_service=notif,  # type: ignore[arg-type]
+        )
+
+        images = [(b"img1", "image/jpeg", "page1.jpg")]
+        parent = runner.submit_image_ingestion(images, "2026-04-25", user_id=1)
+        self._wait_pipeline(jobs_repo, parent.id)
+        runner.shutdown(wait=True)
+
+        # 1 failure notification for entity extraction
+        assert len(notif.failure_calls) == 1
+        _, fail_type, _ = notif.failure_calls[0]
+        assert fail_type == "entity_extraction"
+
+        # 1 combined success notification (mood results only)
+        assert len(notif.success_calls) == 1
+        _, job_type, result = notif.success_calls[0]
+        assert job_type == "ingest_images"
+        assert result["entry_id"] == 1
+        assert "mood_scoring_result" in result
+        assert result["mood_scoring_result"]["scores_written"] == 7
+        assert "entity_extraction_result" not in result
+
+    def test_both_followups_fail_no_misleading_message(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        """When both follow-ups fail, the combined notification must NOT
+        say 'All processing complete'."""
+        notif = FakeNotificationService()
+        extraction = FakeEntityExtractionService(
+            raise_in_single=RuntimeError("extraction error"),
+        )
+        runner = JobRunner(
+            job_repository=jobs_repo,
+            entity_extraction_service=extraction,
+            mood_backfill_callable=FakeMoodBackfill(),
+            mood_scoring_service=FakeMoodScoringService(
+                raise_exc=RuntimeError("mood error"),
+            ),
+            entry_repository=FakeEntryRepository(),
+            ingestion_service=FakeIngestionService(),
+            notification_service=notif,  # type: ignore[arg-type]
+        )
+
+        recordings = [(b"audio1", "audio/webm", "rec.webm")]
+        parent = runner.submit_audio_ingestion(
+            recordings, "2026-04-25", user_id=1,
+        )
+        self._wait_pipeline(jobs_repo, parent.id)
+        runner.shutdown(wait=True)
+
+        # 2 failure notifications (one per follow-up)
+        assert len(notif.failure_calls) == 2
+        fail_types = {call[1] for call in notif.failure_calls}
+        assert fail_types == {"mood_score_entry", "entity_extraction"}
+
+        # 1 combined notification — entry created, but no follow-up results
+        assert len(notif.success_calls) == 1
+        _, job_type, result = notif.success_calls[0]
+        assert job_type == "ingest_audio"
+        assert result["entry_id"] == 1
+        assert "mood_scoring_result" not in result
+        assert "entity_extraction_result" not in result
+
+    def test_both_followups_fail_message_content(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        """Verify _build_success_message does NOT say 'All processing
+        complete' when follow-ups were queued but both failed."""
+        from unittest.mock import MagicMock
+
+        from journal.services.notifications import PushoverNotificationService
+
+        svc = PushoverNotificationService(
+            user_repo=MagicMock(),
+            default_user_key="k",
+            default_app_token="t",
+        )
+        # Simulate the combined result when both follow-ups failed:
+        # follow_up_jobs is non-empty but no *_result keys are present.
+        combined = {
+            "entry_id": 42,
+            "follow_up_jobs": {
+                "mood_scoring": "abc",
+                "entity_extraction": "def",
+            },
+        }
+        msg = svc._build_success_message("ingest_audio", combined)
+        assert "Entry 42" in msg
+        assert "all processing complete" not in msg.lower()

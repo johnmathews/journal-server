@@ -492,7 +492,11 @@ class PushoverNotificationService:
                 ent_count = entity.get("entities_created", 0)
                 mention_count = entity.get("mentions_created", 0)
                 parts.append(f"{ent_count} entities, {mention_count} mentions")
-            if not mood and not entity:
+            if not mood and not entity and not result.get("follow_up_jobs"):
+                # Only show "All processing complete" when no follow-ups
+                # were queued.  If follow-ups were queued but failed, their
+                # failure notifications were already sent separately — don't
+                # claim everything completed successfully.
                 parts.append("All processing complete")
         elif job_type == "entity_extraction":
             processed = result.get("entries_processed", 0)

@@ -271,6 +271,43 @@ For PATCH, all three background jobs (reprocess embeddings, entity extraction, m
 save succeeds. `mood_job_id` is included in the PATCH response alongside the existing `entity_extraction_job_id` and
 `reprocess_job_id`.
 
+## Pipeline notifications (Pushover)
+
+When an ingestion job (image or audio) triggers follow-up jobs (mood scoring and entity extraction), the server sends
+**one combined Pushover notification** after all follow-ups finish, instead of one per job. This mirrors the webapp's
+in-browser toast compression (which groups related toasts via job grouping in the Pinia store).
+
+### How it works
+
+1. Follow-up jobs carry a `parent_job_id` in their params linking them to the parent ingestion job.
+2. The parent ingestion job suppresses its own notification — it does not call `_notify_success`.
+3. When each follow-up completes (success or failure), it calls `_try_pipeline_notification(parent_job_id)`.
+4. `_try_pipeline_notification` checks whether **all** siblings have reached a terminal state (succeeded or failed).
+   If any sibling is still running, it returns early — the last one to finish sends the notification.
+5. The combined result includes results from succeeded follow-ups only. Failed follow-ups are excluded from the
+   combined dict (their individual failure notifications were already sent).
+
+### Notification matrix
+
+| Parent   | Mood scoring | Entity extraction | Notifications the user receives                                               |
+| -------- | ------------ | ----------------- | ----------------------------------------------------------------------------- |
+| succeeds | succeeds     | succeeds          | 1 combined success: entry created + mood scores + entities                     |
+| succeeds | fails        | succeeds          | 1 failure (mood) + 1 combined success: entry created + entities               |
+| succeeds | succeeds     | fails             | 1 failure (entity) + 1 combined success: entry created + mood scores          |
+| succeeds | fails        | fails             | 2 failures (mood + entity) + 1 combined: entry created (no enrichment data)   |
+| fails    | —            | —                 | 1 failure (ingestion) — follow-ups never queued                               |
+
+### Standalone batch jobs
+
+Jobs triggered manually (entity extraction batch from the settings page, mood backfill) have no `parent_job_id` and
+notify individually as before. The pipeline grouping only applies to follow-up jobs auto-triggered by ingestion.
+
+### Edge case: follow-ups fail to queue
+
+If the executor rejects follow-up submissions (e.g. during server shutdown), `_queue_post_ingestion_jobs` catches the
+error and returns an empty `follow_up_jobs` dict. In this case the parent sends its own notification directly, so the
+user still learns the entry was created.
+
 ## What's intentionally out of scope for v1
 
 - **Cancellation.** There is no API to cancel a running job. Jobs are fast enough (tens of seconds for typical runs) that
