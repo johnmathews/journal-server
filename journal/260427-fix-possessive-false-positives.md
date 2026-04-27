@@ -64,3 +64,42 @@ The first dry-run on real data was load-bearing — without it the validator
 would have shipped and quietly mutated the corpus on every subsequent edit.
 "Test the helper unit-style + hold a real-data dry-run before applying" needs
 to be the rule for any repair tool that touches existing rows in bulk.
+
+## Prod verification
+
+After the fix shipped and CI rebuilt the image, re-ran the dry-run on prod:
+
+```
+docker exec journal-server uv run journal repair-entity-names
+Proposed repairs (1):
+  [671] 'Nautilin' -> 'Nautiline'  (type=other, user_id=1)
+```
+
+Down from 17 to 1. Applied:
+
+```
+docker exec journal-server uv run journal repair-entity-names --apply
+Applying 1 repair(s)...
+Updated entity 671: Nautiline
+Applied 1/1 repair(s).
+```
+
+Entity 77 (the original report that triggered this work) now shows the
+correct `Nautiline` canonical_name in the UI. Going forward, the runtime
+validator catches the same class of LLM clipping on every new extraction,
+so the corpus shouldn't accumulate clipped canonicals again.
+
+## Cost impact
+
+None — the validator is pure local Python string manipulation that runs
+after Claude's tool-use response has already been received. No extra LLM
+calls, no extra tokens, no embeddings. A repair is a single SQL UPDATE on
+the `entities` row; mention/quote text is untouched so no re-chunking or
+re-embedding fires either. The webapp `/settings` cost estimates do not
+need to change.
+
+The only thing that *would* shift cost is if we ever decided to re-prompt
+Claude on detected mismatches — explicitly out of scope for this work
+since the deterministic fix already handles the failure mode. The
+`WARNING` logs from `_repair_canonical_name` give us visibility into the
+mis-extraction rate; if it spikes, we'd revisit.
