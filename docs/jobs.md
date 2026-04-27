@@ -319,23 +319,23 @@ than fire one Pushover per stage — these are wrapped in a **synthetic parent j
 
 `JobRunner.submit_save_entry_pipeline()`:
 
-1. Creates a parent job of type `save_entry_pipeline` (status `queued`).
-2. Marks the parent succeeded with the `notify_strategy` already set but an **empty** `follow_up_jobs` map. This
-   makes the strategy visible to fast children before the map is populated; an early `_try_pipeline_notification`
-   call from a child will see the empty map and return without firing.
-3. Submits the three children with `parent_job_id` set in their params.
-4. Marks the parent succeeded a second time with the **populated** `follow_up_jobs` map.
-5. Triggers a defensive `_try_pipeline_notification` call from the API thread to handle the rare case where every
-   child completed before the populated map landed (workers' calls would all have returned early). The atomic
-   `try_acquire_notification_lock` on the repository guards against double-firing if a worker call races with this
-   defensive sweep.
+1. Creates a parent job of type `save_entry_pipeline` (status `queued`) with `notify_strategy` stored in **params**.
+   Storing the strategy in params (fixed at creation) — rather than result (which would require an extra
+   `mark_succeeded` UPDATE) — makes it visible to fast-failing children the moment the parent row exists, with no
+   additional SQLite write that would contend with worker-thread writes on the shared connection.
+2. Submits the three children with `parent_job_id` set in their params.
+3. Marks the parent succeeded **once** with the populated `follow_up_jobs` map in `result`.
+4. Triggers a defensive `_try_pipeline_notification` call from the API thread to handle the rare case where every
+   child completed before mark_succeeded landed (workers' calls would all have returned early seeing
+   `parent.status != "succeeded"`). The atomic `try_acquire_notification_lock` on the repository guards against
+   double-firing if a worker call races with this defensive sweep.
 
-The parent does no actual work — it exists only to hold `follow_up_jobs` and `notify_strategy`, the two fields
-`_try_pipeline_notification` reads to dispatch correctly.
+The parent does no actual work — it exists only to carry `notify_strategy` (in params) and `follow_up_jobs` (in
+result), the two fields `_try_pipeline_notification` reads to dispatch correctly.
 
 ### `notify_strategy`
 
-A field on the parent's `result_json` that controls how children handle their per-job notifications:
+A field on the parent's **`params_json`** that controls how children handle their per-job notifications:
 
 | Value                       | Used by             | Per-child success push | Per-child failure push | Pipeline summary                              |
 | --------------------------- | ------------------- | ---------------------- | ---------------------- | --------------------------------------------- |

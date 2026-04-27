@@ -13,18 +13,23 @@ summary. For edits, both successes and failures must roll up into one push.
 
 ## Design
 
-A new pipeline strategy field, `notify_strategy`, lives on the parent job's `result_json`:
+A new pipeline strategy field, `notify_strategy`, is stored on the parent job's **`params_json`** (not result):
 
 - `compressed_success_only` (default for legacy parents) — current new-entry behavior, unchanged.
 - `compressed_all` — used by the new edit pipeline. Both per-stage success and per-stage failure pushes are
   suppressed; the pipeline summary fires once and uses a per-stage `+`/`-` breakdown if any child failed.
 
-A synthetic parent job of type `save_entry_pipeline` carries the strategy and the `follow_up_jobs` map. It does no
-actual work — `JobRunner.submit_save_entry_pipeline()` creates it, marks it succeeded with the strategy + an
-**empty** `follow_up_jobs` map, submits the three children with `parent_job_id` set, then marks succeeded again
-with the **populated** map. The two-step succession is what makes the strategy visible to fast children before the
-map is populated; otherwise a child that fails immediately would default to `compressed_success_only` and fire its
-own per-stage push, undoing the consolidation.
+The strategy lives in params (fixed at parent-creation time) rather than result so it is visible to children's
+strategy checks the moment the parent row exists, with no additional `mark_succeeded` UPDATE required. An earlier
+draft of this work used `mark_succeeded` twice (once with empty map + strategy, once with populated map) to make
+the strategy visible before the map was populated — but that doubled SQLite writes on the shared connection and
+triggered the project's known threading edge case (`sqlite3.OperationalError: not an error`) under CI's timing,
+breaking `tests/test_api_ingest.py::TestPatchMoodScoring::test_patch_text_queues_mood_scoring`. Moving the
+strategy into params eliminated the second UPDATE.
+
+A synthetic parent job of type `save_entry_pipeline` carries the strategy (in params) and the `follow_up_jobs`
+map (in result). It does no actual work — `JobRunner.submit_save_entry_pipeline()` creates it, submits the three
+children with `parent_job_id` set, then calls `mark_succeeded` once with the populated map.
 
 A defensive `_try_pipeline_notification` call from the API thread covers the rare case where every child completed
 in the gap before the populated map landed. To prevent double-firing when a worker call races with this defensive

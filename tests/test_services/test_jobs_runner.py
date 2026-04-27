@@ -1448,27 +1448,36 @@ class TestSaveEntryPipeline:
             assert child is not None
             assert child.params.get("parent_job_id") == parent.id
 
-    def test_parent_marked_succeeded_immediately_with_strategy(
+    def test_parent_carries_strategy_in_params_and_map_in_result(
         self, jobs_repo: SQLiteJobRepository,
     ) -> None:
-        """The synthetic parent does no work — it is marked succeeded
-        on submission with notify_strategy=compressed_all and the
-        follow_up_jobs map populated."""
+        """The synthetic parent stores ``notify_strategy`` in
+        ``params`` (fixed at creation) and the ``follow_up_jobs`` map
+        in ``result`` (populated by the single mark_succeeded call).
+        Storing the strategy in params is what makes it visible to
+        children's strategy checks before the mark_succeeded UPDATE
+        lands — without a second early UPDATE that would contend with
+        worker writes on the shared SQLite connection."""
         runner, _notif = self._make_runner(jobs_repo)
         parent, children = runner.submit_save_entry_pipeline(
             entry_id=42, user_id=1,
         )
-        # Parent is succeeded right away (don't have to wait for children)
+        # We have to wait for the pipeline before asserting on the
+        # parent's result, since mark_succeeded happens after children
+        # are queued.
+        self._wait_pipeline(jobs_repo, parent.id)
+
         parent_row = jobs_repo.get(parent.id)
         assert parent_row is not None
-        assert parent_row.status == "succeeded"
         assert parent_row.type == "save_entry_pipeline"
+        # Strategy in params (creation-time, race-free)
+        assert parent_row.params["notify_strategy"] == "compressed_all"
+        assert parent_row.params["entry_id"] == 42
+        # follow_up_jobs in result (populated by mark_succeeded)
+        assert parent_row.status == "succeeded"
         assert parent_row.result is not None
-        assert parent_row.result["notify_strategy"] == "compressed_all"
-        assert parent_row.result["entry_id"] == 42
         assert set(parent_row.result["follow_up_jobs"]) == set(children)
 
-        self._wait_pipeline(jobs_repo, parent.id)
         runner.shutdown(wait=True)
 
     def test_existing_new_entry_pipeline_unaffected(

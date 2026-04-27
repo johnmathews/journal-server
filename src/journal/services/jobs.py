@@ -135,6 +135,7 @@ _REPROCESS_EMBEDDINGS_KEYS: dict[str, type | tuple[type, ...]] = {
 _SAVE_ENTRY_PIPELINE_KEYS: dict[str, type | tuple[type, ...]] = {
     "entry_id": int,
     "user_id": int,
+    "notify_strategy": str,
 }
 
 _INGEST_AUDIO_KEYS: dict[str, type | tuple[type, ...]] = {
@@ -389,7 +390,16 @@ class JobRunner:
 
         Returns ``(parent_job, follow_ups)``.
         """
-        params: dict[str, Any] = {"entry_id": entry_id}
+        # ``notify_strategy`` lives in params (fixed at creation),
+        # not result, so it is visible to children's strategy checks
+        # from the moment the parent row exists — no need for a
+        # separate "mark succeeded with strategy" pre-write that
+        # would double the SQLite contention against the worker
+        # thread doing concurrent writes via the shared connection.
+        params: dict[str, Any] = {
+            "entry_id": entry_id,
+            "notify_strategy": "compressed_all",
+        }
         if user_id is not None:
             params["user_id"] = user_id
         _validate_params(
@@ -398,21 +408,6 @@ class JobRunner:
 
         parent = self._jobs.create(
             "save_entry_pipeline", params, user_id=user_id,
-        )
-
-        # Mark parent succeeded with the strategy BUT an empty
-        # follow_up_jobs map BEFORE submitting any child. This makes
-        # the strategy visible to fast children (so their failure
-        # gating sees ``compressed_all``), while the empty map causes
-        # any premature ``_try_pipeline_notification`` call to
-        # return early without firing.
-        self._jobs.mark_succeeded(
-            parent.id,
-            {
-                "entry_id": entry_id,
-                "follow_up_jobs": {},
-                "notify_strategy": "compressed_all",
-            },
         )
 
         follow_ups: dict[str, str] = {}
@@ -434,21 +429,22 @@ class JobRunner:
             )
             follow_ups["mood_scoring"] = mood_job.id
 
-        # Now publish the populated follow_up_jobs map so a future
-        # ``_try_pipeline_notification`` call from any child (or the
-        # defensive sweep below) can iterate over the full set.
+        # One mark_succeeded with the populated follow_up_jobs map.
+        # Until this UPDATE lands, ``_try_pipeline_notification`` calls
+        # from finishing children see ``parent.status != "succeeded"``
+        # and return early — the defensive sweep below covers the
+        # rare case where every child completed before this point.
         self._jobs.mark_succeeded(
             parent.id,
             {
                 "entry_id": entry_id,
                 "follow_up_jobs": follow_ups,
-                "notify_strategy": "compressed_all",
             },
         )
 
         # Defensive sweep: if all children completed in the brief
-        # window before the populated map landed (their pipeline
-        # checks would have returned early on the empty map),
+        # window before mark_succeeded landed (their pipeline checks
+        # would have returned early seeing parent still queued),
         # trigger one more check from this thread so the consolidated
         # push still fires. ``_try_pipeline_notification`` uses
         # ``try_acquire_notification_lock`` to dedupe against any
@@ -531,6 +527,14 @@ class JobRunner:
     def _get_notify_strategy(self, parent_job_id: str | None) -> str:
         """Return the notification strategy for a pipeline parent.
 
+        The strategy is stored in ``parent.params`` (fixed at parent
+        creation), not ``parent.result`` (only available after
+        ``mark_succeeded``).  Reading from params makes the strategy
+        visible to fast-failing children before the parent has been
+        marked succeeded, eliminating a double-write that would
+        otherwise contend with the worker thread on the shared SQLite
+        connection.
+
         Values:
           ``"none"`` — caller has no parent; treat as standalone.
           ``"compressed_success_only"`` (default for legacy parents
@@ -542,9 +546,9 @@ class JobRunner:
         if not parent_job_id:
             return "none"
         parent = self._jobs.get(parent_job_id)
-        if parent is None or parent.result is None:
+        if parent is None:
             return "compressed_success_only"
-        return parent.result.get(
+        return parent.params.get(
             "notify_strategy", "compressed_success_only",
         )
 
@@ -614,7 +618,7 @@ class JobRunner:
         if not self._jobs.try_acquire_notification_lock(parent_job_id):
             return
 
-        strategy = parent_result.get(
+        strategy = parent.params.get(
             "notify_strategy", "compressed_success_only",
         )
 
