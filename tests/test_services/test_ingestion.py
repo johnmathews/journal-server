@@ -1189,6 +1189,125 @@ class TestHeadingDetection:
         assert entry.raw_text == raw
         assert entry.final_text == raw
 
+    def test_voice_with_regex_extractable_leading_date_sets_entry_date(
+        self, ingestion_service, mock_transcription,
+    ):
+        """Reproduces the prod bug: a backdated voice note that begins with a
+        regex-extractable date (e.g. dictating today an entry from 3 days ago,
+        starting with "Friday 1 January 2026") must end up with entry_date set
+        to the dictated date — not today's date the caller passed in. Mirrors
+        the OCR paths' use of extract_date_from_text."""
+        raw = "Friday 1 January 2026. Today I went to the burrow and read."
+        mock_transcription.transcribe.return_value = TranscriptionResult(text=raw)
+
+        entry = ingestion_service.ingest_voice(
+            b"audio", "audio/webm", date="2026-05-04",
+        )
+
+        assert entry.entry_date == "2026-01-01"
+
+    def test_multi_voice_with_regex_extractable_leading_date_sets_entry_date(
+        self, ingestion_service, mock_transcription,
+    ):
+        """Same parity for multi-voice: leading date in the first clip must
+        propagate to the entry's entry_date."""
+        mock_transcription.transcribe.side_effect = [
+            TranscriptionResult(text="Friday 1 January 2026. Morning thoughts."),
+            TranscriptionResult(text="More from later in the day."),
+        ]
+
+        entry = ingestion_service.ingest_multi_voice(
+            [(b"a1", "audio/webm"), (b"a2", "audio/webm")], date="2026-05-04",
+        )
+
+        assert entry.entry_date == "2026-01-01"
+
+    def test_voice_with_detector_iso_date_sets_entry_date(
+        self, detection_service, mock_transcription, mock_detector,
+    ):
+        """When the heading detector returns date_iso (e.g. resolved from a
+        spelled-out or relative phrase the regex can't parse), ingestion must
+        use it as the entry's entry_date."""
+        from journal.services.heading_detector import HeadingDetectionResult
+
+        raw = "The first of January twenty twenty six. I cleaned the kitchen."
+        mock_transcription.transcribe.return_value = TranscriptionResult(text=raw)
+        mock_detector.detect.return_value = HeadingDetectionResult(
+            heading_text="1 January 2026",
+            body="I cleaned the kitchen.",
+            date_iso="2026-01-01",
+        )
+
+        entry = detection_service.ingest_voice(
+            b"audio", "audio/webm", date="2026-05-04",
+        )
+
+        assert entry.entry_date == "2026-01-01"
+        assert entry.final_text == "I cleaned the kitchen."
+
+    def test_multi_voice_with_detector_iso_date_sets_entry_date(
+        self, detection_service, mock_transcription, mock_detector,
+    ):
+        from journal.services.heading_detector import HeadingDetectionResult
+
+        mock_transcription.transcribe.side_effect = [
+            TranscriptionResult(text="The first of January. Morning."),
+            TranscriptionResult(text="Afternoon."),
+        ]
+        mock_detector.detect.return_value = HeadingDetectionResult(
+            heading_text="1 January 2026",
+            body="Morning.\n\nAfternoon.",
+            date_iso="2026-01-01",
+        )
+
+        entry = detection_service.ingest_multi_voice(
+            [(b"a1", "audio/webm"), (b"a2", "audio/webm")], date="2026-05-04",
+        )
+
+        assert entry.entry_date == "2026-01-01"
+
+    def test_image_with_detector_iso_date_overrides_caller_date(
+        self, detection_service, mock_ocr, mock_detector,
+    ):
+        """OCR path: the detector's date_iso should override the caller-passed
+        date when set, just like the regex extractor already does."""
+        from journal.services.heading_detector import HeadingDetectionResult
+
+        ocr_text = "Yesterday\nWoke up early and read."
+        mock_ocr.extract.return_value = _ocr_result(ocr_text)
+        mock_detector.detect.return_value = HeadingDetectionResult(
+            heading_text="3 May 2026",
+            body="Woke up early and read.",
+            date_iso="2026-05-03",
+        )
+
+        entry = detection_service.ingest_image(
+            b"page", "image/jpeg", date="2026-05-04",
+        )
+
+        assert entry.entry_date == "2026-05-03"
+
+    def test_multi_page_ocr_with_detector_iso_date_overrides_caller_date(
+        self, detection_service, mock_ocr, mock_detector,
+    ):
+        from journal.services.heading_detector import HeadingDetectionResult
+
+        mock_ocr.extract.side_effect = [
+            _ocr_result("Yesterday\nFirst page."),
+            _ocr_result("Second page."),
+        ]
+        mock_detector.detect.return_value = HeadingDetectionResult(
+            heading_text="3 May 2026",
+            body="First page.\nSecond page.",
+            date_iso="2026-05-03",
+        )
+
+        entry = detection_service.ingest_multi_page_entry(
+            [(b"p1", "image/jpeg"), (b"p2", "image/jpeg")], date="2026-05-04",
+        )
+
+        assert entry.entry_date == "2026-05-03"
+
     def test_detector_combines_with_formatter_on_body_only(
         self, db_conn, mock_ocr, mock_transcription, mock_embeddings,
     ):

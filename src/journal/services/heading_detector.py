@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import re
@@ -13,6 +14,33 @@ log = logging.getLogger(__name__)
 # Detector inspects only the leading slice of text — anything past this point can't be the
 # heading anyway, and limiting input keeps LLM cost predictable.
 _DETECTION_WINDOW_CHARS = 300
+
+# Plausible journal-date range. The LLM occasionally hallucinates dates like
+# "0001-01-01" or "9999-12-31"; reject anything outside a generous window
+# around the present so a parser glitch can't silently file an entry under
+# the year 1 or year 9999.
+_MIN_PLAUSIBLE_YEAR = 1900
+_MAX_PLAUSIBLE_YEAR = 2100
+
+
+def _validate_iso_date(raw: object) -> str | None:
+    """Return the value if it parses as an ISO 8601 date in a plausible range.
+
+    Returns None when ``raw`` is missing, the wrong type, malformed, or
+    outside ``[_MIN_PLAUSIBLE_YEAR, _MAX_PLAUSIBLE_YEAR]``. Used to guard
+    the LLM's ``iso_date`` field — see ``AnthropicHeadingDetector.detect``.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = datetime.date.fromisoformat(raw.strip())
+    except ValueError:
+        log.warning("Heading detector iso_date is not a valid ISO date: %r", raw[:40])
+        return None
+    if not (_MIN_PLAUSIBLE_YEAR <= parsed.year <= _MAX_PLAUSIBLE_YEAR):
+        log.warning("Heading detector iso_date out of range: %r", parsed.isoformat())
+        return None
+    return parsed.isoformat()
 
 SYSTEM_PROMPT = """\
 You normalize the start of a journal entry. Users often dictate or write a date (sometimes
@@ -37,13 +65,17 @@ If entry_date is provided in the user message (ISO 8601), use it to resolve rela
 
 Respond with ONLY a JSON object on a single line, no other text, no markdown fences:
 
-{"is_heading": true, "heading_text": "28 April 2026", "source_phrase": "April 28th. "}
-{"is_heading": false, "heading_text": null, "source_phrase": null}
+{"is_heading": true, "heading_text": "28 April 2026", "iso_date": "2026-04-28", "source_phrase": "April 28th. "}
+{"is_heading": false, "heading_text": null, "iso_date": null, "source_phrase": null}
 
 Where:
 - heading_text: the canonical form to use as the heading (e.g. "28 April 2026" or
   "28 April 2026, 9am"). Use a clean, consistent format. No trailing punctuation.
   Day-month-year order. Lowercase the time-of-day suffix ("9am", not "9AM").
+- iso_date: the same date in ISO 8601 form ("YYYY-MM-DD"). REQUIRED when is_heading=true.
+  Resolve relative phrases against entry_date if given. If the year is missing from the
+  input AND entry_date is not provided, return is_heading=false instead of guessing.
+  Never include the time component — the date is calendar-day only.
 - source_phrase: the EXACT verbatim substring from the start of the input text that became
   the heading, INCLUDING any trailing punctuation and whitespace that should be stripped
   from the body. The remainder of the input AFTER source_phrase is the body.
@@ -60,10 +92,17 @@ class HeadingDetectionResult:
     was detected, otherwise the empty string. `body` is the remainder of the input — the
     text after the detected date phrase, with heading-area leading whitespace stripped.
     When no heading is detected, `body` is the original input verbatim.
+
+    `date_iso` is the detected date in ISO 8601 ``YYYY-MM-DD`` form when the LLM resolved
+    one (including relative phrases like "today" / "yesterday" against the entry_date hint).
+    Ingestion uses it to set the entry's ``entry_date`` so a backdated dictation that begins
+    with the actual date doesn't end up filed under "today". ``None`` when no heading was
+    detected, when the LLM didn't return a usable iso_date, or for the null detector.
     """
 
     heading_text: str
     body: str
+    date_iso: str | None = None
 
     @property
     def has_heading(self) -> bool:
@@ -165,6 +204,7 @@ class AnthropicHeadingDetector:
 
         heading_text = payload.get("heading_text")
         source_phrase = payload.get("source_phrase")
+        iso_date_raw = payload.get("iso_date")
 
         if not isinstance(heading_text, str) or not heading_text.strip():
             return HeadingDetectionResult(heading_text="", body=text)
@@ -180,7 +220,12 @@ class AnthropicHeadingDetector:
             )
             return HeadingDetectionResult(heading_text="", body=text)
 
+        # iso_date is optional in the response — if absent, malformed, or out of
+        # plausible range, we keep the heading detection but leave date_iso=None
+        # so callers fall back to other date sources (regex, caller-provided).
+        date_iso = _validate_iso_date(iso_date_raw)
+
         body = stripped[len(source_phrase):].lstrip()
         return HeadingDetectionResult(
-            heading_text=heading_text.strip(), body=body
+            heading_text=heading_text.strip(), body=body, date_iso=date_iso,
         )

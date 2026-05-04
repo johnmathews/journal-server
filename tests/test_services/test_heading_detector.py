@@ -20,12 +20,14 @@ def _llm_json(
     is_heading: bool,
     heading_text: str | None = None,
     source_phrase: str | None = None,
+    iso_date: str | None = None,
 ) -> str:
     return json.dumps(
         {
             "is_heading": is_heading,
             "heading_text": heading_text,
             "source_phrase": source_phrase,
+            "iso_date": iso_date,
         }
     )
 
@@ -320,3 +322,94 @@ class TestAnthropicHeadingDetector:
         # Default window is 300 chars; with no entry_date prefix the user message length
         # should be at most that.
         assert len(sent) <= 300
+
+    def test_iso_date_returned_when_valid(self, mock_client):
+        _set_response(
+            mock_client,
+            _llm_json(
+                is_heading=True,
+                heading_text="1 January 2026",
+                source_phrase="The first of January twenty twenty six. ",
+                iso_date="2026-01-01",
+            ),
+        )
+
+        det = AnthropicHeadingDetector(api_key="k")
+        result = det.detect(
+            "The first of January twenty twenty six. I cleaned the kitchen.",
+            entry_date="2026-05-04",
+        )
+
+        assert result.has_heading is True
+        assert result.date_iso == "2026-01-01"
+
+    def test_iso_date_absent_yields_none(self, mock_client):
+        # Older / partial responses may omit iso_date entirely.
+        _set_response(
+            mock_client,
+            '{"is_heading": true, "heading_text": "28 April 2026",'
+            ' "source_phrase": "April 28th. "}',
+        )
+
+        det = AnthropicHeadingDetector(api_key="k")
+        result = det.detect("April 28th. Today I went out.")
+
+        assert result.has_heading is True
+        assert result.date_iso is None
+
+    def test_iso_date_malformed_yields_none(self, mock_client):
+        _set_response(
+            mock_client,
+            _llm_json(
+                is_heading=True,
+                heading_text="28 April 2026",
+                source_phrase="April 28th. ",
+                iso_date="not-a-date",
+            ),
+        )
+
+        det = AnthropicHeadingDetector(api_key="k")
+        result = det.detect("April 28th. Today I went out.")
+
+        # Heading still detected, but date_iso falls back to None — caller
+        # uses other date sources.
+        assert result.has_heading is True
+        assert result.date_iso is None
+
+    def test_iso_date_out_of_plausible_range_yields_none(self, mock_client):
+        _set_response(
+            mock_client,
+            _llm_json(
+                is_heading=True,
+                heading_text="January 1, year 1",
+                source_phrase="0001-01-01. ",
+                iso_date="0001-01-01",
+            ),
+        )
+
+        det = AnthropicHeadingDetector(api_key="k")
+        result = det.detect("0001-01-01. Today I went out.")
+
+        assert result.has_heading is True
+        assert result.date_iso is None
+
+    def test_iso_date_with_time_component_yields_none(self, mock_client):
+        # The prompt forbids a time component but be defensive — datetime ISO
+        # ("2026-04-28T09:00:00") shouldn't slip through into entry_date.
+        _set_response(
+            mock_client,
+            _llm_json(
+                is_heading=True,
+                heading_text="28 April 2026, 9am",
+                source_phrase="28 April 2026, 9am — ",
+                iso_date="2026-04-28T09:00:00",
+            ),
+        )
+
+        det = AnthropicHeadingDetector(api_key="k")
+        result = det.detect("28 April 2026, 9am — woke up.")
+
+        # date.fromisoformat accepts "YYYY-MM-DD" only. A datetime string
+        # raises and we return None.
+        assert result.has_heading is True
+        assert result.date_iso is None

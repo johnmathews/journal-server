@@ -102,11 +102,17 @@ handwritten and spoken proper nouns get correct spellings. See `docs/context-fil
 | ------------------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `TRANSCRIPT_FORMATTING`        | `false`            | Use Anthropic Haiku to insert paragraph breaks into voice transcripts. Word preservation is enforced; failures fall back to raw text.      |
 | `TRANSCRIPT_FORMATTER_MODEL`   | `claude-haiku-4-5` | Model used for paragraph formatting.                                                                                                       |
-| `DATE_HEADING_DETECTION`       | `true`             | When the transcript or OCR text begins with a date (numeric, written, or relative like "today"), strip it from the body. The entry's title already shows the date, so a leading date in the body is just a redundant duplicate. |
+| `DATE_HEADING_DETECTION`       | `true`             | When the transcript or OCR text begins with a date (numeric, written, or relative like "today"), strip it from the body. The entry's title already shows the date, so a leading date in the body is just a redundant duplicate. The detector also returns the resolved ISO date, which becomes the entry's `entry_date` — overriding the upload-time default for backdated dictations. |
 | `DATE_HEADING_MODEL`           | `claude-haiku-4-5` | Model used for heading detection.                                                                                                          |
 
 `raw_text` is preserved verbatim through both steps — the date strip and any LLM-inserted paragraph breaks land only on
 `final_text`. `final_text` is what the chunker, embedder, and search index see.
+
+For voice and multi-voice ingestion, the date stripped from the body also propagates to the entry's `entry_date`. This
+mirrors the OCR paths: a regex pass over the start of the text catches numeric / abbreviated forms ("Friday 1 January
+2026", "2026-01-01"), and the LLM detector's `iso_date` overrides when set so spelled-out and relative phrases ("the
+first of January", "yesterday") also flow through. The result: a backdated dictation that begins with the actual date is
+filed under that date, not under the upload day.
 
 ## Optional — hybrid search
 

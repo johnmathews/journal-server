@@ -253,7 +253,12 @@ class IngestionService:
         # leaving it as the first line would just be a redundant duplicate
         # of the title. raw_text is left verbatim so the OCR overlay /
         # audit trail still points at exactly what the model returned.
+        # If the detector resolved an ISO date (covers spelled-out and
+        # relative phrases the regex can't), it overrides — the LLM is
+        # the more capable of the two extractors.
         det = self._detect_heading(raw_text, date)
+        if det.date_iso:
+            date = det.date_iso
         final_text = det.body if det.has_heading else None
 
         # Store entry (final_text defaults to raw_text when None)
@@ -303,12 +308,30 @@ class IngestionService:
         if not raw_text.strip():
             raise ValueError("Transcription produced no text from audio")
 
+        # Try to extract a date from the start of the transcription before
+        # detection — parity with the OCR paths. A backdated dictation
+        # ("Friday 1 January 2026. Today I…") arrives with `date` set to
+        # the upload day, but the user's intent is the date they spoke;
+        # extract_date_from_text catches the regex-friendly forms here so
+        # the entry is filed under the correct day even if the LLM
+        # detector is disabled.
+        from journal.services.date_extraction import extract_date_from_text
+
+        extracted = extract_date_from_text(raw_text)
+        if extracted:
+            date = extracted
+
         # Detect a leading date and strip it from the body when found —
         # the entry's title already shows the date, so a duplicate at the
         # start of the body would just be redundant. The formatter then
         # runs on the BODY only, so its word-preservation contract is
         # unaffected by any heading characters that no longer appear.
+        # If the detector resolved an ISO date, it overrides any earlier
+        # extraction — it sees the entry_date hint and can resolve
+        # spelled-out / relative phrases the regex can't.
         det = self._detect_heading(raw_text, date)
+        if det.date_iso:
+            date = det.date_iso
         formatted_body = self._maybe_format_transcript(det.body) if det.body else det.body
 
         word_count = len(raw_text.split())
@@ -410,13 +433,28 @@ class IngestionService:
         # the blank line benefits downstream paragraph-aware chunking.
         raw_text = "\n\n".join(transcripts)
 
+        # Try to extract a date from the combined transcription before
+        # detection — parity with the OCR paths and single-voice. The
+        # date typically appears at the very start of the first
+        # recording, so this catches the regex-friendly forms even if
+        # the LLM detector is disabled.
+        from journal.services.date_extraction import extract_date_from_text
+
+        extracted = extract_date_from_text(raw_text)
+        if extracted:
+            date = extracted
+
         # Heading detection runs against the combined raw text — the
         # date typically appears at the very start of the first
         # recording, so this catches it the same way single-voice does.
         # When a date is found we strip it entirely (the entry's title
         # is already the date — a markdown heading would just duplicate
-        # it). Formatter then operates on the body only.
+        # it). If the detector resolved an ISO date, it overrides — the
+        # LLM handles spelled-out and relative phrases the regex can't.
+        # Formatter then operates on the body only.
         det = self._detect_heading(raw_text, date)
+        if det.date_iso:
+            date = det.date_iso
         formatted_body = self._maybe_format_transcript(det.body) if det.body else det.body
 
         word_count = len(raw_text.split())
@@ -769,8 +807,12 @@ class IngestionService:
         # Optional date-heading detection — same as single-page OCR. A
         # detected leading date is stripped from the body entirely, never
         # promoted to a markdown heading: the entry's title already shows
-        # the date, so a heading would just duplicate the title.
+        # the date, so a heading would just duplicate the title. The
+        # detector's ISO date (if any) overrides the regex result for the
+        # same reason as the single-page path.
         det = self._detect_heading(combined_text, date)
+        if det.date_iso:
+            date = det.date_iso
         final_text = det.body if det.has_heading else None
 
         # Create single entry
