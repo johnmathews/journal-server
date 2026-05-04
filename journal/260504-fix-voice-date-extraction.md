@@ -83,3 +83,20 @@ reproducing the same flake on `main`).
 Backfilling existing entries that lost their leading date is not addressed
 here. Per the prior journal entry, the policy is "new ingestions only";
 that still holds.
+
+## Follow-ups landed in the same session
+
+- `ed170b0` — line-length fix in the heading-detector SYSTEM_PROMPT after
+  adding `iso_date` pushed the example JSON past the 100-char ruff limit.
+  The example is now pretty-printed across multiple lines (the LLM still
+  outputs single-line JSON, that instruction is unchanged).
+- `d445753` — pre-existing WIP edits to `config/mood-dimensions.toml`
+  were committed: `anxiety_eagerness` is replaced by `energy_fatigue`
+  (pure arousal, decoupled from valence direction); `comfort_discomfort`
+  is split into three unipolar axes (`fulfillment`, `connection`,
+  `frustration`) that capture distinct facets without the bipolar
+  conflation. Final dimension list: `joy_sadness`, `energy_fatigue`,
+  `agency`, `fulfillment`, `connection`, `frustration`,
+  `proactive_reactive`. This is a behavioural change for mood scoring
+  going forward and worth checking when reviewing dashboards over the
+  transition.
