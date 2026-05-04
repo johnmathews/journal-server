@@ -63,10 +63,23 @@ These do NOT count as a heading — return is_heading=false:
 If entry_date is provided in the user message (ISO 8601), use it to resolve relative phrases
 ("today", "yesterday") into the canonical absolute form.
 
-Respond with ONLY a JSON object on a single line, no other text, no markdown fences:
+Respond with ONLY a JSON object on a single line, no other text, no markdown fences. The
+shape is one of these (formatted here across lines for clarity — your output stays on one
+line):
 
-{"is_heading": true, "heading_text": "28 April 2026", "iso_date": "2026-04-28", "source_phrase": "April 28th. "}
-{"is_heading": false, "heading_text": null, "iso_date": null, "source_phrase": null}
+{
+  "is_heading": true,
+  "heading_text": "28 April 2026",
+  "iso_date": "2026-04-28",
+  "source_phrase": "April 28th. "
+}
+
+{
+  "is_heading": false,
+  "heading_text": null,
+  "iso_date": null,
+  "source_phrase": null
+}
 
 Where:
 - heading_text: the canonical form to use as the heading (e.g. "28 April 2026" or
