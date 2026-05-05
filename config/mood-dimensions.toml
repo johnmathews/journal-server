@@ -1,6 +1,14 @@
 # Mood dimension definitions — source of truth for the per-entry
 # scoring pipeline and the dashboard mood chart.
 #
+# Versioning convention (see [meta] below): bump `version` to today's
+# date in YYYY-MM-DD whenever you edit this file in a way users would
+# care about (added/removed/renamed a facet, changed a scoring criterion,
+# changed the order). For multiple edits on the same day, append `.2`,
+# `.3`, … to disambiguate (e.g. `2026-05-05.2`). The current version is
+# surfaced in the webapp's admin "Moods" page so operators can see what
+# definitions are live without SSH'ing into the server.
+#
 # Each `[[dimension]]` block defines one facet. Fields:
 #
 #   name           — stable canonical key stored in `mood_scores.dimension`.
@@ -44,6 +52,15 @@
 # kind: affect axes (valence, arousal), psychological needs (agency,
 # fulfillment, connection), active negative affect (frustration),
 # stance (proactive_reactive).
+
+[meta]
+version = "2026-05-05"
+description = """
+The seven facets below are organised into four conceptual groups (affect
+axes, psychological needs, active negative affect, stance) — see the
+ordering note above. The webapp's admin "Moods" page renders the same
+groups with plain-English explanations alongside each facet's full notes.
+"""
 
 [[dimension]]
 name = "joy_sadness"

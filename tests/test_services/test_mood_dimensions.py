@@ -9,7 +9,9 @@ import pytest
 from journal.services.mood_dimensions import (
     MoodDimension,
     MoodDimensionConfigError,
+    MoodDimensionsMeta,
     load_mood_dimensions,
+    load_mood_meta,
 )
 
 
@@ -267,3 +269,92 @@ class TestMoodDimensionDataclass:
     def test_score_range_unipolar(self) -> None:
         d = MoodDimension("x", "p", "n", "unipolar", ".")
         assert (d.score_min, d.score_max) == (0.0, 1.0)
+
+
+class TestLoadMoodMeta:
+    def test_returns_empty_meta_when_block_absent(self, tmp_path: Path) -> None:
+        path = _write(
+            tmp_path,
+            """
+[[dimension]]
+name = "joy_sadness"
+positive_pole = "joy"
+negative_pole = "sadness"
+scale_type = "bipolar"
+notes = "."
+""",
+        )
+        meta = load_mood_meta(path)
+        assert isinstance(meta, MoodDimensionsMeta)
+        assert meta.version == ""
+        assert meta.description == ""
+
+    def test_reads_version_and_description(self, tmp_path: Path) -> None:
+        path = _write(
+            tmp_path,
+            """
+[meta]
+version = "2026-05-05"
+description = "blurb"
+
+[[dimension]]
+name = "joy_sadness"
+positive_pole = "joy"
+negative_pole = "sadness"
+scale_type = "bipolar"
+notes = "."
+""",
+        )
+        meta = load_mood_meta(path)
+        assert meta.version == "2026-05-05"
+        assert meta.description == "blurb"
+
+    def test_unknown_meta_keys_are_dropped(self, tmp_path: Path) -> None:
+        # Forward-compat: future versions may add fields; older code
+        # should not crash on them.
+        path = _write(
+            tmp_path,
+            """
+[meta]
+version = "2026-05-05"
+future_field = "ignored"
+
+[[dimension]]
+name = "joy_sadness"
+positive_pole = "joy"
+negative_pole = "sadness"
+scale_type = "bipolar"
+notes = "."
+""",
+        )
+        meta = load_mood_meta(path)
+        assert meta.version == "2026-05-05"
+        assert meta.description == ""
+
+    def test_strips_whitespace(self, tmp_path: Path) -> None:
+        path = _write(
+            tmp_path,
+            """
+[meta]
+version = "  2026-05-05  "
+description = '''
+   multi-line
+   blurb
+'''
+
+[[dimension]]
+name = "joy_sadness"
+positive_pole = "joy"
+negative_pole = "sadness"
+scale_type = "bipolar"
+notes = "."
+""",
+        )
+        meta = load_mood_meta(path)
+        assert meta.version == "2026-05-05"
+        assert meta.description.startswith("multi-line")
+        assert not meta.description.startswith(" ")
+
+    def test_missing_file_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError):
+            load_mood_meta(tmp_path / "does-not-exist.toml")

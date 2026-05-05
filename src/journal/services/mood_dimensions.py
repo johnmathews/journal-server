@@ -30,6 +30,29 @@ _VALID_SCALE_TYPES: tuple[ScaleType, ...] = ("bipolar", "unipolar")
 
 
 @dataclass(frozen=True)
+class MoodDimensionsMeta:
+    """Metadata about the mood-dimensions config file as a whole.
+
+    Surfaced via `/api/dashboard/mood-dimensions` so the webapp's admin
+    "Moods" page can show operators which definitions are live without
+    them needing to SSH into the server.
+
+    - `version` — operator-managed, bumped to today's date (YYYY-MM-DD)
+      whenever the toml is edited in a way that affects scoring or
+      display. Multi-edit days disambiguate with `.2`, `.3`, … suffixes.
+      Free-form string; the server does not parse it as a date.
+    - `description` — optional human-readable blurb for the admin page.
+      Empty string when the toml omits the field.
+    """
+
+    version: str
+    description: str
+
+
+_DEFAULT_META = MoodDimensionsMeta(version="", description="")
+
+
+@dataclass(frozen=True)
 class MoodDimension:
     """One facet in the mood-scoring schema.
 
@@ -169,6 +192,37 @@ def load_mood_dimensions(path: Path) -> tuple[MoodDimension, ...]:
         ", ".join(d.name for d in dimensions),
     )
     return tuple(dimensions)
+
+
+def load_mood_meta(path: Path) -> MoodDimensionsMeta:
+    """Load the optional `[meta]` block from a mood-dimensions TOML file.
+
+    Returns a `MoodDimensionsMeta` with empty-string fields if the file
+    has no `[meta]` block, so callers can treat "no meta" as a valid
+    state without branching. Raises `FileNotFoundError` if the file is
+    missing — the meta loader piggybacks on the same load-loud-or-not-
+    at-all contract as `load_mood_dimensions` so a missing config is
+    impossible to ignore.
+
+    Unknown keys inside `[meta]` are silently dropped — the toml
+    schema is forward-compatible by design so a future server version
+    can add fields without breaking older clients.
+    """
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Mood dimensions config not found: {path}."
+        )
+
+    with path.open("rb") as f:
+        data = tomllib.load(f)
+
+    raw_meta = data.get("meta")
+    if not isinstance(raw_meta, dict):
+        return _DEFAULT_META
+
+    version = str(raw_meta.get("version", "")).strip()
+    description = str(raw_meta.get("description", "")).strip()
+    return MoodDimensionsMeta(version=version, description=description)
 
 
 def _is_snake_case(s: str) -> bool:

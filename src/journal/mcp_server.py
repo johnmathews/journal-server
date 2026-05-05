@@ -134,12 +134,17 @@ def _init_services() -> dict:
     # server refusing to start.
     mood_scoring_service: Any = None
     mood_dimensions: tuple = ()
+    mood_dimensions_meta: Any = None
     if config.enable_mood_scoring:
         from journal.providers.mood_scorer import AnthropicMoodScorer
-        from journal.services.mood_dimensions import load_mood_dimensions
+        from journal.services.mood_dimensions import (
+            load_mood_dimensions,
+            load_mood_meta,
+        )
         from journal.services.mood_scoring import MoodScoringService
 
         mood_dimensions = load_mood_dimensions(config.mood_dimensions_path)
+        mood_dimensions_meta = load_mood_meta(config.mood_dimensions_path)
         mood_scorer = AnthropicMoodScorer(
             api_key=config.anthropic_api_key,
             model=config.mood_scorer_model,
@@ -418,6 +423,7 @@ def _init_services() -> dict:
         "runtime_settings": runtime_settings,
         "stats": stats_collector,
         "mood_dimensions": mood_dimensions,
+        "mood_dimensions_meta": mood_dimensions_meta,
         "mood_scoring": mood_scoring_service,
         # Auth services — used by auth_api.py routes.
         "auth_service": auth_service,

@@ -118,10 +118,14 @@ def reload_mood_dimensions(services: dict, config: Config) -> dict[str, Any]:
     # mood scoring is disabled and these dependencies aren't needed at
     # import time.
     from journal.providers.mood_scorer import AnthropicMoodScorer
-    from journal.services.mood_dimensions import load_mood_dimensions
+    from journal.services.mood_dimensions import (
+        load_mood_dimensions,
+        load_mood_meta,
+    )
     from journal.services.mood_scoring import MoodScoringService
 
     dims = load_mood_dimensions(config.mood_dimensions_path)
+    meta = load_mood_meta(config.mood_dimensions_path)
     scorer = AnthropicMoodScorer(
         api_key=config.anthropic_api_key,
         model=config.mood_scorer_model,
@@ -145,10 +149,13 @@ def reload_mood_dimensions(services: dict, config: Config) -> dict[str, Any]:
     )
     services["ingestion"]._mood_scoring = new_service
     services["job_runner"]._mood_scoring = new_service
+    services["mood_dimensions"] = dims
+    services["mood_dimensions_meta"] = meta
 
     return {
         "reloaded": "mood-dimensions",
         "dimension_count": len(dims),
         "dimensions": [d.name for d in dims],
+        "version": meta.version,
         "reloaded_at": _now_iso(),
     }

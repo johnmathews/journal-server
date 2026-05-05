@@ -1272,11 +1272,17 @@ def register_api_routes(
             }
             for d in dimensions
         ]
+        meta = services.get("mood_dimensions_meta")
+        meta_payload = {
+            "version": meta.version if meta is not None else "",
+            "description": meta.description if meta is not None else "",
+        }
         log.info(
-            "GET /api/dashboard/mood-dimensions — %d dimensions",
+            "GET /api/dashboard/mood-dimensions — %d dimensions, version=%r",
             len(payload),
+            meta_payload["version"],
         )
-        return JSONResponse({"dimensions": payload})
+        return JSONResponse({"dimensions": payload, "meta": meta_payload})
 
     @mcp.custom_route(
         "/api/dashboard/mood-trends",

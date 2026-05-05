@@ -1148,7 +1148,10 @@ class TestDashboardMoodDimensions:
 
         from journal.api import register_api_routes
         from journal.services.chunking import FixedTokenChunker
-        from journal.services.mood_dimensions import MoodDimension
+        from journal.services.mood_dimensions import (
+            MoodDimension,
+            MoodDimensionsMeta,
+        )
 
         dimensions = (
             MoodDimension(
@@ -1165,6 +1168,9 @@ class TestDashboardMoodDimensions:
                 scale_type="unipolar",
                 notes="unipolar agency test",
             ),
+        )
+        meta = MoodDimensionsMeta(
+            version="2026-05-05", description="test description"
         )
         mock_ocr = MagicMock()
         mock_transcription = MagicMock()
@@ -1187,6 +1193,7 @@ class TestDashboardMoodDimensions:
             "ingestion": ingestion,
             "query": query,
             "mood_dimensions": dimensions,
+            "mood_dimensions_meta": meta,
         }
         test_mcp = FastMCP("test-journal")
         register_api_routes(test_mcp, lambda: services)
@@ -1219,6 +1226,16 @@ class TestDashboardMoodDimensions:
         assert unipolar["scale_type"] == "unipolar"
         assert unipolar["score_min"] == 0.0
         assert unipolar["score_max"] == 1.0
+
+    def test_mood_dimensions_includes_meta(
+        self, mood_client: tuple[TestClient, dict]
+    ) -> None:
+        client, _ = mood_client
+        resp = client.get("/api/dashboard/mood-dimensions")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["meta"]["version"] == "2026-05-05"
+        assert data["meta"]["description"] == "test description"
 
     def test_mood_dimensions_empty_when_disabled(
         self,
@@ -1256,7 +1273,10 @@ class TestDashboardMoodDimensions:
         ) as tc:
             resp = tc.get("/api/dashboard/mood-dimensions")
             assert resp.status_code == 200
-            assert resp.json()["dimensions"] == []
+            data = resp.json()
+            assert data["dimensions"] == []
+            # meta is always present; empty strings when scoring is off.
+            assert data["meta"] == {"version": "", "description": ""}
 
 
 class TestDashboardMoodTrends:
