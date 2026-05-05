@@ -129,12 +129,17 @@ positive_pole = "connected"
 negative_pole = "isolated"
 scale_type = "unipolar"
 notes = """
-How strongly does the entry convey a sense of connection — feeling
-related to other people, in tune with someone, part of something
-beyond the self? Score 0 for solitary or disconnected entries (alone,
-or going through the motions with others present). Score 1 for strong
-connection: a deep conversation, shared joy, feeling held or holding
-someone else.
+How strongly does the entry convey felt closeness with specific other
+people — a partner, friend, family member, colleague, or a group of
+people the writer is with? Score 0 for solitary or disconnected entries
+(alone, or going through the motions with others present). Score 1 for
+strong interpersonal warmth: a deep conversation, shared joy, feeling
+held or holding someone else.
+
+Scope this to interpersonal closeness with concrete others. Felt
+belonging to abstract collectives, communities, or anything spiritual
+or transcendent is out of scope here — score those 0 unless a specific
+relationship is also present.
 
 Unipolar because the absence of connection reads as solitude rather
 than as an active opposite. Loneliness — felt isolation despite

@@ -73,15 +73,20 @@ for all entries.
 
 The facets shipped in `config/mood-dimensions.toml` at the time of writing are:
 
-| Facet                | Scale    | Notes                                                    |
-| -------------------- | -------- | -------------------------------------------------------- |
-| `joy_sadness`        | bipolar  | Joyful vs sad.                                           |
-| `anxiety_eagerness`  | bipolar  | Anxious vs eager/enthusiastic. 0 = calm centre.          |
-| `agency`             | unipolar | Strong sense of agency (1) vs apathy/resignation (0).    |
-| `comfort_discomfort` | bipolar  | Comfortable vs uncomfortable (physical + emotional).     |
-| `energy_fatigue`     | bipolar  | Energetic/alert vs tired/drained. Arousal axis.          |
-| `fulfillment`        | unipolar | Meaningful fulfillment (1) vs indifference (0).          |
-| `proactive_reactive` | bipolar  | Proactive/initiating vs reactive. More stance than mood. |
+| Facet                | Scale    | Notes                                                                       |
+| -------------------- | -------- | --------------------------------------------------------------------------- |
+| `joy_sadness`        | bipolar  | Joyful vs sad. The valence axis.                                            |
+| `energy_fatigue`     | bipolar  | Energetic/alert vs tired/drained. The arousal axis.                         |
+| `agency`             | unipolar | Strong sense of agency (1) vs apathy/resignation (0).                       |
+| `fulfillment`        | unipolar | Meaningful fulfillment (1) vs indifference (0).                             |
+| `connection`         | unipolar | Felt closeness with specific other people (1) vs solitude/disconnect (0).   |
+| `frustration`        | unipolar | Active frustration / blocked goals (1) vs calm / no friction (0).           |
+| `proactive_reactive` | bipolar  | Proactive/initiating vs reactive. More stance than mood.                    |
+
+`frustration` is the only facet where a higher stored score means a worse mood. The dashboard inverts it at render
+time — the line is labelled "calm" and the score is plotted as `1 - x` — so the chart stays "higher = better" across
+every line. Storage and the LLM prompt are unchanged; the inversion is a render-time helper in
+`webapp/src/utils/mood-display.ts`.
 
 This is a **starting set**, not a committed schema. After ~60-100 entries, run the correlation / factor analysis
 described in the [Post-hoc analysis](#post-hoc-analysis) section to decide which facets to keep, merge, or drop.
