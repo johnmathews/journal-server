@@ -1054,6 +1054,76 @@ def cmd_extract_entities(args, config):
                 print(f"  [entry {r.entry_id}] {w}")
 
 
+def cmd_backfill_entity_embeddings(args, config):
+    """Re-embed every entity whose description is non-empty.
+
+    The entity's stored embedding (from migration 0004's
+    ``embedding_json`` column) feeds stage-c similarity matching during
+    entity extraction. Without this command, the embedding is computed
+    once at entity creation from name + description and never refreshed
+    — so descriptions edited via the webapp after creation don't
+    influence future recognition.
+
+    Filters:
+    - ``--user-id N`` — restrict to one user.
+    - ``--dry-run`` — count candidates without making OpenAI calls.
+
+    Idempotent. Safe to re-run. Cost is small: at
+    text-embedding-3-large pricing ($0.13/M tokens, ~50 tokens per
+    entity), 500 entities is roughly $0.003.
+    """
+    conn = get_connection(config.db_path)
+    run_migrations(conn)
+    entity_store = SQLiteEntityStore(conn)
+    embeddings = OpenAIEmbeddingsProvider(
+        api_key=config.openai_api_key,
+        model=config.embedding_model,
+        dimensions=config.embedding_dimensions,
+    )
+
+    sql = (
+        "SELECT id, user_id, canonical_name, description"
+        " FROM entities"
+        " WHERE description IS NOT NULL"
+        " AND TRIM(description) != ''"
+    )
+    params: list[object] = []
+    if args.user_id is not None:
+        sql += " AND user_id = ?"
+        params.append(args.user_id)
+    sql += " ORDER BY id"
+    rows = list(conn.execute(sql, params).fetchall())
+
+    scope = (
+        f"user {args.user_id}" if args.user_id is not None else "all users"
+    )
+    print(f"Backfill scope: {scope}")
+    print(f"Candidates with non-empty description: {len(rows)}")
+
+    if args.dry_run:
+        print("Dry run: no embeddings will be generated.")
+        return
+
+    if not rows:
+        return
+
+    succeeded = 0
+    failed = 0
+    for row in rows:
+        entity_id = int(row["id"])
+        text = f"{row['canonical_name']} {row['description']}".strip()
+        try:
+            vec = embeddings.embed_query(text)
+            entity_store.set_entity_embedding(entity_id, vec)
+            succeeded += 1
+        except Exception as exc:  # noqa: BLE001 — keep going on per-row error
+            failed += 1
+            print(f"  ! entity {entity_id}: {exc}", file=sys.stderr)
+
+    print(f"Re-embedded: {succeeded}")
+    print(f"Failed:      {failed}")
+
+
 def cmd_repair_entity_names(args, config):
     """Find and optionally repair entities whose ``canonical_name``
     looks like an LLM-clipped form of a longer token in their mention
@@ -1489,6 +1559,26 @@ def main():
         help="Only process entries flagged as stale",
     )
 
+    # backfill-entity-embeddings
+    p_reembed = subparsers.add_parser(
+        "backfill-entity-embeddings",
+        help=(
+            "Re-embed every entity that has a non-empty description so "
+            "the stored embedding reflects the current text. Used after "
+            "deploying the description-driven recognition feature."
+        ),
+    )
+    p_reembed.add_argument(
+        "--user-id",
+        type=int,
+        help="Restrict the backfill to one user (default: all users)",
+    )
+    p_reembed.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Count candidates without calling the embeddings API",
+    )
+
     # repair-entity-names
     p_repair = subparsers.add_parser(
         "repair-entity-names",
@@ -1521,6 +1611,7 @@ def main():
         "eval-chunking": cmd_eval_chunking,
         "seed": cmd_seed,
         "extract-entities": cmd_extract_entities,
+        "backfill-entity-embeddings": cmd_backfill_entity_embeddings,
         "repair-entity-names": cmd_repair_entity_names,
         "migrate-chromadb": cmd_migrate_chromadb,
     }

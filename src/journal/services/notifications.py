@@ -88,6 +88,13 @@ TOPICS: list[dict[str, Any]] = [
         "default": True,
     },
     {
+        "key": "notif_job_success_entity_reembed",
+        "label": "Entity recognition refresh succeeded",
+        "group": "success",
+        "admin_only": False,
+        "default": False,
+    },
+    {
         "key": "notif_admin_job_failed",
         "label": "Any user's job failed (admin)",
         "group": "admin",
@@ -111,6 +118,7 @@ _SUCCESS_TOPIC_MAP: dict[str, str] = {
     "ingest_images": "notif_job_success_ingest_images",
     "ingest_audio": "notif_job_success_ingest_audio",
     "save_entry_pipeline": "notif_job_success_save_entry",
+    "entity_reembed": "notif_job_success_entity_reembed",
 }
 
 # Map parent_job_type -> topic key for pipeline-failure notifications.
@@ -130,6 +138,7 @@ _JOB_TYPE_LABELS: dict[str, str] = {
     "mood_score_entry": "Mood scoring",
     "reprocess_embeddings": "Embedding reprocessing",
     "save_entry_pipeline": "Entry update",
+    "entity_reembed": "Entity recognition refresh",
 }
 
 

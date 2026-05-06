@@ -1858,6 +1858,237 @@ class TestUpdateEntity:
         )
         assert resp.status_code == 400
 
+    def test_description_change_enqueues_reembed_job(
+        self, client: TestClient, services: dict
+    ) -> None:
+        """When the description changes, the PATCH must queue an async
+        entity_reembed job so future recognition picks up the new text.
+        """
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity(
+            "person", "Sarah", "old", "2026-01-01",
+        )
+        mock_job = MagicMock()
+        mock_job.id = "reembed-job-id"
+        mock_runner = MagicMock()
+        mock_runner.submit_entity_reembed = MagicMock(return_value=mock_job)
+        services["job_runner"] = mock_runner
+
+        resp = client.patch(
+            f"/api/entities/{entity.id}",
+            json={"description": "my mother"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["description"] == "my mother"
+        assert data["reembed_job_id"] == "reembed-job-id"
+        mock_runner.submit_entity_reembed.assert_called_once()
+        kwargs = mock_runner.submit_entity_reembed.call_args.kwargs
+        assert kwargs["user_id"] == _TEST_USER_ID
+
+    def test_description_unchanged_does_not_enqueue_job(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity(
+            "person", "Sarah", "my mother", "2026-01-01",
+        )
+        mock_runner = MagicMock()
+        services["job_runner"] = mock_runner
+
+        # PATCH with the same description.
+        resp = client.patch(
+            f"/api/entities/{entity.id}",
+            json={"description": "my mother"},
+        )
+        assert resp.status_code == 200
+        assert "reembed_job_id" not in resp.json()
+        mock_runner.submit_entity_reembed.assert_not_called()
+
+    def test_name_change_without_description_does_not_enqueue_job(
+        self, client: TestClient, services: dict
+    ) -> None:
+        """Renaming the canonical name doesn't currently trigger a
+        reembed — only description edits do. (Name changes are
+        comparatively rare and the existing embedding still references
+        the old name; if this becomes a problem we revisit the trigger.)
+        """
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity(
+            "person", "Sarah", "my mother", "2026-01-01",
+        )
+        mock_runner = MagicMock()
+        services["job_runner"] = mock_runner
+
+        resp = client.patch(
+            f"/api/entities/{entity.id}",
+            json={"canonical_name": "Sarah Jane"},
+        )
+        assert resp.status_code == 200
+        mock_runner.submit_entity_reembed.assert_not_called()
+
+    def test_description_change_succeeds_without_job_runner(
+        self, client: TestClient, services: dict
+    ) -> None:
+        """If no job_runner is wired up (e.g. early test setup), the
+        PATCH must still succeed — re-embedding is best-effort."""
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity(
+            "person", "Sarah", "old", "2026-01-01",
+        )
+        # Confirm the fixture services dict has no job_runner.
+        services.pop("job_runner", None)
+
+        resp = client.patch(
+            f"/api/entities/{entity.id}",
+            json={"description": "new"},
+        )
+        assert resp.status_code == 200
+        assert "reembed_job_id" not in resp.json()
+
+
+class TestEntityAliasEndpoints:
+    def test_add_alias_returns_201_and_updated_entity(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity("person", "Sarah", "my mother", "2026-01-01")
+        resp = client.post(
+            f"/api/entities/{entity.id}/aliases",
+            json={"alias": "Mum"},
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["id"] == entity.id
+        assert "mum" in data["aliases"]
+
+    def test_add_alias_idempotent_when_already_present(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity("person", "Sarah", "", "2026-01-01")
+        entity_store.add_alias(entity.id, "Mum")
+        resp = client.post(
+            f"/api/entities/{entity.id}/aliases",
+            json={"alias": "MUM"},  # different casing, same normalised
+        )
+        assert resp.status_code == 201
+        # Still only one alias.
+        refreshed = entity_store.get_entity(entity.id)
+        assert refreshed is not None
+        assert refreshed.aliases.count("mum") == 1
+
+    def test_add_alias_collision_returns_409_with_existing_entity(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        sarah = entity_store.create_entity("person", "Sarah", "", "2026-01-01")
+        entity_store.add_alias(sarah.id, "Mum")
+        other = entity_store.create_entity("person", "Other Person", "", "2026-01-01")
+
+        resp = client.post(
+            f"/api/entities/{other.id}/aliases",
+            json={"alias": "Mum"},
+        )
+        assert resp.status_code == 409
+        data = resp.json()
+        assert data["existing_entity_id"] == sarah.id
+        assert data["existing_canonical_name"] == "Sarah"
+        assert data["existing_entity_type"] == "person"
+        assert data["alias"] == "Mum"
+
+    def test_add_alias_missing_alias_returns_400(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity("person", "Sarah", "", "2026-01-01")
+        resp = client.post(f"/api/entities/{entity.id}/aliases", json={})
+        assert resp.status_code == 400
+
+    def test_add_alias_empty_alias_returns_400(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity("person", "Sarah", "", "2026-01-01")
+        resp = client.post(
+            f"/api/entities/{entity.id}/aliases", json={"alias": "  "}
+        )
+        assert resp.status_code == 400
+
+    def test_add_alias_to_nonexistent_entity_returns_404(
+        self, client: TestClient, services: dict
+    ) -> None:
+        resp = client.post("/api/entities/9999/aliases", json={"alias": "X"})
+        assert resp.status_code == 404
+
+    def test_delete_alias_removes_and_returns_updated(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity("person", "Sarah", "", "2026-01-01")
+        entity_store.add_alias(entity.id, "Mum")
+        entity_store.add_alias(entity.id, "Mother")
+
+        resp = client.delete(f"/api/entities/{entity.id}/aliases/mum")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "mum" not in data["aliases"]
+        assert "mother" in data["aliases"]
+
+    def test_delete_alias_missing_returns_404(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity("person", "Sarah", "", "2026-01-01")
+        resp = client.delete(f"/api/entities/{entity.id}/aliases/nonexistent")
+        assert resp.status_code == 404
+
+    def test_delete_alias_on_nonexistent_entity_returns_404(
+        self, client: TestClient, services: dict
+    ) -> None:
+        resp = client.delete("/api/entities/9999/aliases/something")
+        assert resp.status_code == 404
+
+    def test_lookup_alias_returns_entity_when_found(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity("person", "Sarah", "", "2026-01-01")
+        entity_store.add_alias(entity.id, "Mum")
+
+        resp = client.get("/api/entities/aliases/lookup", params={"alias": "Mum"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["entity_id"] == entity.id
+        assert data["canonical_name"] == "Sarah"
+        assert data["entity_type"] == "person"
+
+    def test_lookup_alias_returns_null_when_not_found(
+        self, client: TestClient, services: dict
+    ) -> None:
+        resp = client.get(
+            "/api/entities/aliases/lookup", params={"alias": "nonexistent"}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"entity_id": None}
+
+    def test_lookup_alias_is_case_insensitive(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity("person", "Sarah", "", "2026-01-01")
+        entity_store.add_alias(entity.id, "Mum")
+
+        resp = client.get("/api/entities/aliases/lookup", params={"alias": "MUM"})
+        assert resp.status_code == 200
+        assert resp.json()["entity_id"] == entity.id
+
+    def test_lookup_alias_missing_param_returns_400(
+        self, client: TestClient, services: dict
+    ) -> None:
+        resp = client.get("/api/entities/aliases/lookup")
+        assert resp.status_code == 400
+
 
 class TestDeleteEntity:
     def test_delete_entity(

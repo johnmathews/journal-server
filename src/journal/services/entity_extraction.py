@@ -272,6 +272,51 @@ class EntityExtractionService:
                 return user.display_name
         return self._author_name
 
+    def reembed_entity_for_description(
+        self, entity_id: int, *, user_id: int,
+    ) -> dict[str, object]:
+        """Recompute and persist an entity's embedding from its current
+        canonical name + description.
+
+        Used by the ``entity_reembed`` background job, which fires when
+        a user edits an entity's description. The stored embedding feeds
+        stage-c similarity matching during extraction (see
+        ``_resolve_entity``); without this, an edit only changes
+        cosmetic display text and never influences future recognition.
+
+        Returns a small summary dict suitable for the job result.
+        Empty / whitespace-only descriptions short-circuit with
+        ``embedded=False`` so the job records why nothing happened
+        instead of writing a meaningless zero-vector.
+        """
+        entity = self._store.get_entity(entity_id, user_id=user_id)
+        if entity is None:
+            raise ValueError(f"Entity {entity_id} not found for user {user_id}")
+
+        text = f"{entity.canonical_name} {entity.description}".strip()
+        if not text or not entity.description.strip():
+            log.info(
+                "Reembed skipped for entity %d: description empty",
+                entity_id,
+            )
+            return {
+                "entity_id": entity_id,
+                "embedded": False,
+                "reason": "empty description",
+            }
+
+        embedding = self._embeddings.embed_query(text)
+        self._store.set_entity_embedding(entity_id, embedding)
+        log.info(
+            "Reembedded entity %d (%s, %d dims)",
+            entity_id, entity.canonical_name, len(embedding),
+        )
+        return {
+            "entity_id": entity_id,
+            "embedded": True,
+            "dimensions": len(embedding),
+        }
+
     def extract_from_entry(self, entry_id: int) -> ExtractionResult:
         entry = self._repo.get_entry(entry_id)
         if entry is None:

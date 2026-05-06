@@ -47,6 +47,8 @@ class FakeEntityExtractionService:
         raise_in_single: BaseException | None = None,
         hold_event: threading.Event | None = None,
         entered_event: threading.Event | None = None,
+        reembed_result: dict[str, Any] | None = None,
+        raise_in_reembed: BaseException | None = None,
     ) -> None:
         self._batch_results = batch_results or []
         self._single_result = single_result
@@ -54,8 +56,25 @@ class FakeEntityExtractionService:
         self._raise_single = raise_in_single
         self._hold = hold_event
         self._entered = entered_event
+        self._reembed_result = reembed_result
+        self._raise_reembed = raise_in_reembed
         self.batch_calls: list[dict[str, Any]] = []
         self.single_calls: list[int] = []
+        self.reembed_calls: list[dict[str, Any]] = []
+
+    def reembed_entity_for_description(
+        self, entity_id: int, *, user_id: int,
+    ) -> dict[str, Any]:
+        self.reembed_calls.append(
+            {"entity_id": entity_id, "user_id": user_id}
+        )
+        if self._raise_reembed is not None:
+            raise self._raise_reembed
+        return self._reembed_result or {
+            "entity_id": entity_id,
+            "embedded": True,
+            "dimensions": 3,
+        }
 
     def extract_batch(
         self,
@@ -1523,3 +1542,79 @@ class TestSaveEntryPipeline:
         assert notif.success_calls[0][1] == "ingest_audio"
         # No pipeline-failure consolidation for new-entry flow
         assert len(notif.pipeline_failure_calls) == 0
+
+
+# --------------------------------------------------------------------
+# Entity reembed (description-driven embedding refresh)
+# --------------------------------------------------------------------
+
+
+class TestEntityReembed:
+    """WU2: ``submit_entity_reembed`` queues a job that refreshes an
+    entity's stored embedding by calling
+    ``EntityExtractionService.reembed_entity_for_description``.
+    """
+
+    def test_submit_creates_queued_job(
+        self, runner_factory, jobs_repo
+    ) -> None:
+        extraction = FakeEntityExtractionService(
+            reembed_result={
+                "entity_id": 7, "embedded": True, "dimensions": 1536,
+            },
+        )
+        runner = runner_factory(extraction=extraction)
+        job = runner.submit_entity_reembed(7, user_id=1)
+        assert job.type == "entity_reembed"
+        assert job.params == {"entity_id": 7, "user_id": 1}
+
+    def test_run_calls_reembed_and_marks_succeeded(
+        self, runner_factory, jobs_repo
+    ) -> None:
+        extraction = FakeEntityExtractionService(
+            reembed_result={
+                "entity_id": 7, "embedded": True, "dimensions": 1536,
+            },
+        )
+        runner = runner_factory(extraction=extraction)
+        job = runner.submit_entity_reembed(7, user_id=1)
+        _wait_terminal(jobs_repo, job.id)
+        runner.shutdown(wait=True)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "succeeded"
+        assert final.progress_current == 1
+        assert final.progress_total == 1
+        assert final.result == {
+            "entity_id": 7, "embedded": True, "dimensions": 1536,
+        }
+        assert extraction.reembed_calls == [{"entity_id": 7, "user_id": 1}]
+
+    def test_run_marks_failed_when_service_raises(
+        self, runner_factory, jobs_repo
+    ) -> None:
+        extraction = FakeEntityExtractionService(
+            raise_in_reembed=ValueError("Entity 99 not found for user 1"),
+        )
+        runner = runner_factory(extraction=extraction)
+        job = runner.submit_entity_reembed(99, user_id=1)
+        _wait_terminal(jobs_repo, job.id)
+        runner.shutdown(wait=True)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "failed"
+        assert "not found" in (final.error_message or "")
+
+    def test_submit_rejects_unexpected_param(self) -> None:
+        # The public submit signature only accepts entity_id + user_id;
+        # there is no path for stray params, so we exercise the
+        # validation directly via the underlying allowed-keys map.
+        from journal.services.jobs import _ENTITY_REEMBED_KEYS, _validate_params
+        with pytest.raises(ValueError, match="Unknown params"):
+            _validate_params(
+                {"entity_id": 1, "user_id": 1, "extra": "bad"},
+                _ENTITY_REEMBED_KEYS,
+                job_type="entity_reembed",
+            )

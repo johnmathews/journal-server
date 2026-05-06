@@ -84,6 +84,7 @@ def test_cli_all_commands_registered(capsys):
         "health",
         "backfill-chunks",
         "backfill-mood",
+        "backfill-entity-embeddings",
         "rechunk",
         "eval-chunking",
         "extract-entities",
@@ -399,3 +400,164 @@ def test_cmd_health_compact_mode(tmp_path, capsys):
 
     payload = json.loads(out)
     assert payload["status"] == "ok"
+
+
+def test_cmd_backfill_entity_embeddings_dry_run(tmp_path, capsys):
+    """`backfill-entity-embeddings --dry-run` reports candidates and
+    makes no embedding calls."""
+    from unittest.mock import MagicMock, patch
+
+    from journal.cli import cmd_backfill_entity_embeddings
+    from journal.config import Config
+    from journal.db.connection import get_connection
+    from journal.db.migrations import run_migrations
+    from journal.entitystore.store import SQLiteEntityStore
+
+    db_path = tmp_path / "reembed.db"
+    conn = get_connection(db_path)
+    run_migrations(conn)
+    store = SQLiteEntityStore(conn)
+    # Two with descriptions, one without — only the two should count.
+    store.create_entity("person", "Sarah", "my mother", "2026-01-01")
+    store.create_entity("place", "Vienna", "city in Austria", "2026-01-01")
+    store.create_entity("person", "Ghost", "", "2026-01-01")
+    conn.close()
+
+    config = Config(db_path=db_path, openai_api_key="sk-test")
+
+    with patch("journal.cli.OpenAIEmbeddingsProvider") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        cmd_backfill_entity_embeddings(
+            MagicMock(user_id=None, dry_run=True), config,
+        )
+
+    out = capsys.readouterr().out
+    assert "Candidates with non-empty description: 2" in out
+    assert "Dry run" in out
+    # Embeddings client must not be called for an actual embed
+    inst = mock_cls.return_value
+    inst.embed_query.assert_not_called()
+
+
+def test_cmd_backfill_entity_embeddings_writes_embeddings(
+    tmp_path, capsys,
+):
+    """Without --dry-run, the command calls the embeddings API and
+    persists the resulting vector via set_entity_embedding."""
+    from unittest.mock import MagicMock, patch
+
+    from journal.cli import cmd_backfill_entity_embeddings
+    from journal.config import Config
+    from journal.db.connection import get_connection
+    from journal.db.migrations import run_migrations
+    from journal.entitystore.store import SQLiteEntityStore
+
+    db_path = tmp_path / "reembed_apply.db"
+    conn = get_connection(db_path)
+    run_migrations(conn)
+    store = SQLiteEntityStore(conn)
+    sarah = store.create_entity("person", "Sarah", "my mother", "2026-01-01")
+    vienna = store.create_entity("place", "Vienna", "city", "2026-01-01")
+    store.create_entity("person", "Ghost", "", "2026-01-01")
+    conn.close()
+
+    config = Config(db_path=db_path, openai_api_key="sk-test")
+
+    fake_provider = MagicMock()
+    fake_provider.embed_query = MagicMock(return_value=[0.5] * 4)
+    with patch(
+        "journal.cli.OpenAIEmbeddingsProvider", return_value=fake_provider,
+    ):
+        cmd_backfill_entity_embeddings(
+            MagicMock(user_id=None, dry_run=False), config,
+        )
+
+    out = capsys.readouterr().out
+    assert "Re-embedded: 2" in out
+    assert "Failed:      0" in out
+    assert fake_provider.embed_query.call_count == 2
+
+    # Verify the embeddings actually landed.
+    conn = get_connection(db_path)
+    store = SQLiteEntityStore(conn)
+    assert store.get_entity_embedding(sarah.id) == [0.5, 0.5, 0.5, 0.5]
+    assert store.get_entity_embedding(vienna.id) == [0.5, 0.5, 0.5, 0.5]
+    conn.close()
+
+
+def test_cmd_backfill_entity_embeddings_user_id_filter(
+    tmp_path, capsys,
+):
+    """--user-id N restricts the backfill to one user."""
+    from unittest.mock import MagicMock, patch
+
+    from journal.cli import cmd_backfill_entity_embeddings
+    from journal.config import Config
+    from journal.db.connection import get_connection
+    from journal.db.migrations import run_migrations
+    from journal.entitystore.store import SQLiteEntityStore
+
+    db_path = tmp_path / "reembed_userscope.db"
+    conn = get_connection(db_path)
+    run_migrations(conn)
+    conn.execute(
+        "INSERT INTO users (email, display_name, is_admin, email_verified) "
+        "VALUES ('u2@test.com', 'User Two', 0, 1)"
+    )
+    conn.commit()
+    store = SQLiteEntityStore(conn)
+    store.create_entity("person", "Sarah", "user1 entity", "2026-01-01", user_id=1)
+    store.create_entity("person", "Bob",   "user2 entity", "2026-01-01", user_id=2)
+    conn.close()
+
+    config = Config(db_path=db_path, openai_api_key="sk-test")
+    fake_provider = MagicMock()
+    fake_provider.embed_query = MagicMock(return_value=[0.1])
+    with patch(
+        "journal.cli.OpenAIEmbeddingsProvider", return_value=fake_provider,
+    ):
+        cmd_backfill_entity_embeddings(
+            MagicMock(user_id=2, dry_run=False), config,
+        )
+
+    out = capsys.readouterr().out
+    assert "user 2" in out
+    assert "Re-embedded: 1" in out
+    assert fake_provider.embed_query.call_count == 1
+
+
+def test_cmd_backfill_entity_embeddings_continues_on_per_row_failure(
+    tmp_path, capsys,
+):
+    """A failure embedding one entity should not abort the rest."""
+    from unittest.mock import MagicMock, patch
+
+    from journal.cli import cmd_backfill_entity_embeddings
+    from journal.config import Config
+    from journal.db.connection import get_connection
+    from journal.db.migrations import run_migrations
+    from journal.entitystore.store import SQLiteEntityStore
+
+    db_path = tmp_path / "reembed_failure.db"
+    conn = get_connection(db_path)
+    run_migrations(conn)
+    store = SQLiteEntityStore(conn)
+    store.create_entity("person", "Sarah", "first", "2026-01-01")
+    store.create_entity("person", "Bob",   "second", "2026-01-01")
+    conn.close()
+
+    config = Config(db_path=db_path, openai_api_key="sk-test")
+    fake_provider = MagicMock()
+    fake_provider.embed_query = MagicMock(
+        side_effect=[RuntimeError("rate limit"), [0.7]],
+    )
+    with patch(
+        "journal.cli.OpenAIEmbeddingsProvider", return_value=fake_provider,
+    ):
+        cmd_backfill_entity_embeddings(
+            MagicMock(user_id=None, dry_run=False), config,
+        )
+
+    out = capsys.readouterr().out
+    assert "Re-embedded: 1" in out
+    assert "Failed:      1" in out

@@ -144,6 +144,11 @@ _INGEST_AUDIO_KEYS: dict[str, type | tuple[type, ...]] = {
     "user_id": int,
 }
 
+_ENTITY_REEMBED_KEYS: dict[str, type | tuple[type, ...]] = {
+    "entity_id": int,
+    "user_id": int,
+}
+
 
 def _validate_params(
     params: dict[str, Any],
@@ -455,6 +460,24 @@ class JobRunner:
         assert parent_final is not None
         return parent_final, follow_ups
 
+    def submit_entity_reembed(
+        self, entity_id: int, *, user_id: int,
+    ) -> Job:
+        """Queue a job that recomputes an entity's stored embedding from
+        its current canonical name + description.
+
+        Triggered when the user edits an entity's description so that
+        future entity-recognition uses the refreshed text.
+        """
+        params: dict[str, Any] = {
+            "entity_id": entity_id,
+            "user_id": user_id,
+        }
+        _validate_params(params, _ENTITY_REEMBED_KEYS, job_type="entity_reembed")
+        job = self._jobs.create("entity_reembed", params, user_id=user_id)
+        self._executor.submit(self._run_entity_reembed, job.id, params)
+        return job
+
     def submit_audio_ingestion(
         self,
         recordings: list[tuple[bytes, str, str]],  # (data, media_type, filename)
@@ -742,6 +765,40 @@ class JobRunner:
                     self._try_pipeline_notification(
                         parent_job_id, params.get("user_id"),
                     )
+            except Exception:  # noqa: BLE001 — last-resort bookkeeping
+                log.exception(
+                    "Failed to record failure for job %s", job_id
+                )
+
+    def _run_entity_reembed(
+        self, job_id: str, params: dict[str, Any]
+    ) -> None:
+        """Execute one entity-reembed job from start to terminal state.
+
+        Same exception-safety guarantee as ``_run_entity_extraction``:
+        a stuck-running row is strictly worse than a failed row, so
+        every exit path lands in ``mark_succeeded`` or ``mark_failed``.
+        """
+        try:
+            self._jobs.mark_running(job_id)
+            self._jobs.update_progress(job_id, 0, 1)
+            entity_id = int(params["entity_id"])
+            job_user_id = int(params["user_id"])
+
+            summary = self._extraction.reembed_entity_for_description(
+                entity_id, user_id=job_user_id,
+            )
+            self._jobs.update_progress(job_id, 1, 1)
+            self._jobs.mark_succeeded(job_id, summary)
+            self._notify_success(job_user_id, "entity_reembed", summary)
+        except Exception as exc:  # noqa: BLE001 — terminal-state guard
+            log.exception("Entity reembed job %s failed", job_id)
+            try:
+                friendly = _friendly_error(exc)
+                self._jobs.mark_failed(job_id, friendly)
+                self._notify_failed(
+                    params.get("user_id"), "entity_reembed", friendly, exc,
+                )
             except Exception:  # noqa: BLE001 — last-resort bookkeeping
                 log.exception(
                     "Failed to record failure for job %s", job_id

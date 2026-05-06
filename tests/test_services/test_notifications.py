@@ -362,9 +362,10 @@ class TestGetTopicsForUser:
     ) -> None:
         topics = svc.get_topics_for_user(1, is_admin=False)
         assert all(not t["admin_only"] for t in topics)
-        # 3 success (ingest_images, ingest_audio, save_entry) +
+        # 4 success (ingest_images, ingest_audio, save_entry,
+        #            entity_reembed)
         # 3 failure (job_retrying, job_failed, job_failed_save_entry)
-        assert len(topics) == 6
+        assert len(topics) == 7
 
     def test_admin_sees_all_topics(
         self, svc: PushoverNotificationService,

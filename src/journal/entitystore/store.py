@@ -51,6 +51,12 @@ class EntityStore(Protocol):
 
     def add_alias(self, entity_id: int, alias: str) -> None: ...
 
+    def remove_alias(self, entity_id: int, alias: str) -> bool: ...
+
+    def find_entity_by_alias_for_user(
+        self, alias: str, user_id: int
+    ) -> Entity | None: ...
+
     def get_entity_embedding(self, entity_id: int) -> list[float] | None: ...
 
     def set_entity_embedding(
@@ -339,6 +345,33 @@ class SQLiteEntityStore:
             (entity_id, normalised),
         )
         self._conn.commit()
+
+    def remove_alias(self, entity_id: int, alias: str) -> bool:
+        normalised = _normalise(alias)
+        if not normalised:
+            return False
+        cursor = self._conn.execute(
+            "DELETE FROM entity_aliases"
+            " WHERE entity_id = ? AND alias_normalised = ?",
+            (entity_id, normalised),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def find_entity_by_alias_for_user(
+        self, alias: str, user_id: int
+    ) -> Entity | None:
+        normalised = _normalise(alias)
+        if not normalised:
+            return None
+        row = self._conn.execute(
+            "SELECT e.* FROM entities e"
+            " JOIN entity_aliases a ON a.entity_id = e.id"
+            " WHERE a.alias_normalised = ? AND e.user_id = ?"
+            " LIMIT 1",
+            (normalised, user_id),
+        ).fetchone()
+        return self._hydrate(row) if row else None
 
     # ---- embeddings ---------------------------------------------------
 

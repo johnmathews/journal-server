@@ -2658,6 +2658,18 @@ def register_api_routes(
                 status_code=400,
             )
 
+        # Snapshot the old description before update so we can detect
+        # whether the patch actually changed it. A no-op edit (PATCH
+        # with the same description) should not enqueue a re-embed job.
+        old_description: str | None = None
+        if description is not None:
+            existing = entity_store.get_entity(entity_id, user_id=user_id)
+            if existing is None:
+                return JSONResponse(
+                    {"error": f"Entity {entity_id} not found"}, status_code=404,
+                )
+            old_description = existing.description
+
         try:
             updated = entity_store.update_entity(
                 entity_id,
@@ -2669,8 +2681,34 @@ def register_api_routes(
         except ValueError:
             return JSONResponse({"error": f"Entity {entity_id} not found"}, status_code=404)
 
+        # If description actually changed, queue an async job to refresh
+        # the entity's stored embedding so future recognition reflects
+        # the new description (stage-c similarity match in extraction).
+        # Best-effort: if no job runner is wired up (e.g. some test
+        # setups), the PATCH still succeeds.
+        reembed_job_id: str | None = None
+        description_changed = (
+            description is not None and description != old_description
+        )
+        if description_changed:
+            job_runner: JobRunner | None = services.get("job_runner")
+            if job_runner is not None:
+                try:
+                    reembed_job = job_runner.submit_entity_reembed(
+                        entity_id, user_id=user_id,
+                    )
+                    reembed_job_id = reembed_job.id
+                except Exception:
+                    log.warning(
+                        "PATCH /api/entities/%d — failed to queue reembed job",
+                        entity_id, exc_info=True,
+                    )
+
         log.info("PATCH /api/entities/%d — updated", entity_id)
-        return JSONResponse(_entity_detail(updated))
+        body = _entity_detail(updated)
+        if reembed_job_id is not None:
+            body["reembed_job_id"] = reembed_job_id
+        return JSONResponse(body)
 
     @mcp.custom_route(
         "/api/entities/{entity_id:int}",
@@ -2754,6 +2792,117 @@ def register_api_routes(
                 "aliases_added": result.aliases_added,
             }
         )
+
+    # ---- entity aliases --------------------------------------------------
+
+    @mcp.custom_route(
+        "/api/entities/aliases/lookup",
+        methods=["GET"],
+        name="api_lookup_alias",
+    )
+    async def lookup_alias(request: Request) -> JSONResponse:
+        services = _require_services()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+        entity_store: EntityStore = services["entity_store"]
+        user = get_authenticated_user(request)
+        user_id = user.user_id
+
+        alias = request.query_params.get("alias", "").strip()
+        if not alias:
+            return JSONResponse(
+                {"error": "'alias' query parameter is required"}, status_code=400
+            )
+
+        existing = entity_store.find_entity_by_alias_for_user(alias, user_id=user_id)
+        if existing is None:
+            return JSONResponse({"entity_id": None})
+        return JSONResponse(
+            {
+                "entity_id": existing.id,
+                "canonical_name": existing.canonical_name,
+                "entity_type": existing.entity_type,
+            }
+        )
+
+    @mcp.custom_route(
+        "/api/entities/{entity_id:int}/aliases",
+        methods=["POST"],
+        name="api_add_entity_alias",
+    )
+    async def add_entity_alias(request: Request) -> JSONResponse:
+        services = _require_services()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+        entity_store: EntityStore = services["entity_store"]
+        user = get_authenticated_user(request)
+        user_id = user.user_id
+        entity_id = int(request.path_params["entity_id"])
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+        alias_raw = body.get("alias") if isinstance(body, dict) else None
+        if not isinstance(alias_raw, str) or not alias_raw.strip():
+            return JSONResponse(
+                {"error": "'alias' must be a non-empty string"}, status_code=400
+            )
+
+        entity = entity_store.get_entity(entity_id, user_id=user_id)
+        if entity is None:
+            return JSONResponse({"error": f"Entity {entity_id} not found"}, status_code=404)
+
+        existing = entity_store.find_entity_by_alias_for_user(alias_raw, user_id=user_id)
+        if existing is not None and existing.id != entity_id:
+            return JSONResponse(
+                {
+                    "error": "alias already maps to a different entity",
+                    "alias": alias_raw.strip(),
+                    "existing_entity_id": existing.id,
+                    "existing_canonical_name": existing.canonical_name,
+                    "existing_entity_type": existing.entity_type,
+                },
+                status_code=409,
+            )
+
+        entity_store.add_alias(entity_id, alias_raw)
+        updated = entity_store.get_entity(entity_id, user_id=user_id)
+        assert updated is not None
+        log.info("POST /api/entities/%d/aliases — added %r", entity_id, alias_raw)
+        return JSONResponse(_entity_detail(updated), status_code=201)
+
+    @mcp.custom_route(
+        "/api/entities/{entity_id:int}/aliases/{alias:path}",
+        methods=["DELETE"],
+        name="api_delete_entity_alias",
+    )
+    async def delete_entity_alias(request: Request) -> JSONResponse:
+        services = _require_services()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+        entity_store: EntityStore = services["entity_store"]
+        user = get_authenticated_user(request)
+        user_id = user.user_id
+        entity_id = int(request.path_params["entity_id"])
+        alias = request.path_params["alias"]
+
+        entity = entity_store.get_entity(entity_id, user_id=user_id)
+        if entity is None:
+            return JSONResponse({"error": f"Entity {entity_id} not found"}, status_code=404)
+
+        removed = entity_store.remove_alias(entity_id, alias)
+        if not removed:
+            return JSONResponse(
+                {"error": f"Alias {alias!r} not found on entity {entity_id}"},
+                status_code=404,
+            )
+
+        updated = entity_store.get_entity(entity_id, user_id=user_id)
+        assert updated is not None
+        log.info("DELETE /api/entities/%d/aliases/%s — removed", entity_id, alias)
+        return JSONResponse(_entity_detail(updated))
 
     # ---- quarantine ------------------------------------------------------
 

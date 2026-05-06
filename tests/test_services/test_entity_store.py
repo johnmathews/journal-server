@@ -109,6 +109,94 @@ class TestAliases:
         topic_hit = store.find_by_alias("Atlas", "topic")
         assert topic_hit is None or topic_hit.id == topic.id
 
+    def test_remove_alias_removes_existing(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        entity = store.create_entity("person", "Atlas", "", "2026-01-01")
+        store.add_alias(entity.id, "Atlas")
+        store.add_alias(entity.id, "Wong")
+
+        assert store.remove_alias(entity.id, "Atlas") is True
+        refetched = store.get_entity(entity.id)
+        assert refetched is not None
+        assert "atlas" not in refetched.aliases
+        assert "wong" in refetched.aliases
+
+    def test_remove_alias_is_case_insensitive(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        entity = store.create_entity("person", "Atlas", "", "2026-01-01")
+        store.add_alias(entity.id, "Atlas")
+        # Stored normalised as "atlas"; remove with different casing.
+        assert store.remove_alias(entity.id, "ATLAS") is True
+
+    def test_remove_alias_missing_returns_false(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        entity = store.create_entity("person", "Atlas", "", "2026-01-01")
+        assert store.remove_alias(entity.id, "nonexistent") is False
+
+    def test_remove_alias_empty_returns_false(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        entity = store.create_entity("person", "Atlas", "", "2026-01-01")
+        assert store.remove_alias(entity.id, "   ") is False
+
+    def test_find_entity_by_alias_for_user_returns_match(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        entity = store.create_entity(
+            "person", "Atlas Wong", "", "2026-01-01", user_id=1
+        )
+        store.add_alias(entity.id, "Atlas")
+
+        found = store.find_entity_by_alias_for_user("Atlas", user_id=1)
+        assert found is not None
+        assert found.id == entity.id
+
+    def test_find_entity_by_alias_for_user_is_type_agnostic(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        # Unlike find_by_alias which is scoped to one type, the lookup
+        # endpoint needs to find the alias across all types so the webapp
+        # can warn before letting the user attach the alias to a person
+        # when the same alias already maps to a topic.
+        topic = store.create_entity(
+            "topic", "Atlas Project", "", "2026-01-01", user_id=1
+        )
+        store.add_alias(topic.id, "Atlas")
+
+        found = store.find_entity_by_alias_for_user("Atlas", user_id=1)
+        assert found is not None
+        assert found.id == topic.id
+
+    def test_find_entity_by_alias_for_user_scopes_by_user(
+        self, store: SQLiteEntityStore, db_conn: sqlite3.Connection
+    ) -> None:
+        # Migration 0001 seeds user_id=1; insert a second user so the
+        # FK constraint on entities.user_id is satisfied.
+        db_conn.execute(
+            "INSERT INTO users (email, display_name, is_admin, email_verified) "
+            "VALUES ('other@test.com', 'Other User', 0, 1)"
+        )
+        other = store.create_entity(
+            "person", "Other", "", "2026-01-01", user_id=2
+        )
+        store.add_alias(other.id, "Atlas")
+
+        # User 1 has no entity with this alias.
+        assert store.find_entity_by_alias_for_user("Atlas", user_id=1) is None
+        # User 2 finds it.
+        found = store.find_entity_by_alias_for_user("Atlas", user_id=2)
+        assert found is not None
+        assert found.id == other.id
+
+    def test_find_entity_by_alias_for_user_empty_returns_none(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        store.create_entity("person", "Atlas", "", "2026-01-01")
+        assert store.find_entity_by_alias_for_user("   ", user_id=1) is None
+
 
 class TestEmbeddings:
     def test_embedding_initially_none(

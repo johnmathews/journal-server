@@ -1159,3 +1159,128 @@ class TestPostExtractionSanitySweep:
         entity_store.release_quarantine(e.id)
         refreshed = entity_store.get_entity(e.id)
         assert refreshed is not None and refreshed.is_quarantined is False
+
+
+class TestReembedDescription:
+    """WU2: re-embed an entity from its current name + description.
+
+    Used by the ``entity_reembed`` background job that fires when the
+    user edits a description in the webapp. Without this the stored
+    embedding would stay frozen at creation-time text.
+    """
+
+    def test_reembed_updates_stored_embedding(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        entity = entity_store.create_entity(
+            "person", "Sarah", "my mother", "2026-01-01",
+        )
+        extractor = MagicMock()
+        embeddings = MagicMock()
+        embeddings.embed_query = MagicMock(return_value=[0.42, -0.3, 0.7])
+        service = _make_service(repo, entity_store, extractor, embeddings=embeddings)
+
+        result = service.reembed_entity_for_description(
+            entity.id, user_id=1,
+        )
+
+        assert result["embedded"] is True
+        assert result["entity_id"] == entity.id
+        assert result["dimensions"] == 3
+        embeddings.embed_query.assert_called_once_with("Sarah my mother")
+        stored = entity_store.get_entity_embedding(entity.id)
+        assert stored == [0.42, -0.3, 0.7]
+
+    def test_reembed_uses_current_description_after_update(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        entity = entity_store.create_entity(
+            "person", "Sarah", "old description", "2026-01-01",
+        )
+        # Simulate the user editing the description.
+        entity_store.update_entity(entity.id, description="my mother, lives in Edinburgh")
+
+        extractor = MagicMock()
+        embeddings = MagicMock()
+        embeddings.embed_query = MagicMock(return_value=[1.0])
+        service = _make_service(repo, entity_store, extractor, embeddings=embeddings)
+
+        service.reembed_entity_for_description(entity.id, user_id=1)
+        embeddings.embed_query.assert_called_once_with(
+            "Sarah my mother, lives in Edinburgh"
+        )
+
+    def test_reembed_skips_when_description_empty(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        entity = entity_store.create_entity(
+            "person", "Sarah", "", "2026-01-01",
+        )
+        extractor = MagicMock()
+        embeddings = MagicMock()
+        service = _make_service(repo, entity_store, extractor, embeddings=embeddings)
+
+        result = service.reembed_entity_for_description(entity.id, user_id=1)
+
+        assert result["embedded"] is False
+        assert result["reason"] == "empty description"
+        embeddings.embed_query.assert_not_called()
+        # Embedding column stays None.
+        assert entity_store.get_entity_embedding(entity.id) is None
+
+    def test_reembed_skips_when_description_whitespace_only(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        entity = entity_store.create_entity(
+            "person", "Sarah", "   \n  ", "2026-01-01",
+        )
+        extractor = MagicMock()
+        embeddings = MagicMock()
+        service = _make_service(repo, entity_store, extractor, embeddings=embeddings)
+
+        result = service.reembed_entity_for_description(entity.id, user_id=1)
+        assert result["embedded"] is False
+        embeddings.embed_query.assert_not_called()
+
+    def test_reembed_missing_entity_raises(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        extractor = MagicMock()
+        embeddings = MagicMock()
+        service = _make_service(repo, entity_store, extractor, embeddings=embeddings)
+        with pytest.raises(ValueError, match="not found"):
+            service.reembed_entity_for_description(9999, user_id=1)
+
+    def test_reembed_user_scoped(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+        db_conn,
+    ) -> None:
+        # An entity owned by user 1 cannot be reembedded under user 2.
+        db_conn.execute(
+            "INSERT INTO users (email, display_name, is_admin, email_verified) "
+            "VALUES ('u2@test.com', 'User Two', 0, 1)"
+        )
+        entity = entity_store.create_entity(
+            "person", "Sarah", "my mother", "2026-01-01", user_id=1,
+        )
+        extractor = MagicMock()
+        embeddings = MagicMock()
+        embeddings.embed_query = MagicMock(return_value=[0.5, 0.5])
+        service = _make_service(repo, entity_store, extractor, embeddings=embeddings)
+        with pytest.raises(ValueError, match="not found"):
+            service.reembed_entity_for_description(entity.id, user_id=2)
+        # Correct user works.
+        result = service.reembed_entity_for_description(entity.id, user_id=1)
+        assert result["embedded"] is True
