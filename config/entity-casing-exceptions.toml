@@ -30,10 +30,18 @@ description = "Preserved-case overrides for smart-title-case entity normalizatio
 "bbc" = "BBC"
 "nasa" = "NASA"
 "fbi" = "FBI"
+"claude.code" = "Claude Code"
+"ghcr.io" = "ghcr.io"
+
+# Other
+"EVs" = "EVs"
+"ev" = "EV"
+"evs" = "EVs"
 
 # Sports
 "fc barcelona" = "FC Barcelona"
 "ac milan" = "AC Milan"
+"clean and press" = "Clean and Press"
 
 # Names with apostrophes / Dutch particles that need explicit casing
 "o'brien" = "O'Brien"
