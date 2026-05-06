@@ -736,12 +736,16 @@ class SQLiteEntityStore:
             if absorbed_id == survivor_id:
                 raise ValueError("Cannot merge entity into itself")
 
-            # Snapshot the absorbed entity for merge history
+            # Snapshot the absorbed entity for merge history. Quarantine
+            # state is included so the audit trail survives merges of
+            # previously-quarantined entities.
             self._conn.execute(
                 "INSERT INTO entity_merge_history"
                 " (survivor_id, absorbed_id, absorbed_name,"
-                "  absorbed_type, absorbed_desc, absorbed_aliases)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
+                "  absorbed_type, absorbed_desc, absorbed_aliases,"
+                "  absorbed_is_quarantined, absorbed_quarantine_reason,"
+                "  absorbed_quarantined_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     survivor_id,
                     absorbed_id,
@@ -749,6 +753,9 @@ class SQLiteEntityStore:
                     absorbed.entity_type,
                     absorbed.description,
                     json.dumps(absorbed.aliases),
+                    1 if absorbed.is_quarantined else 0,
+                    absorbed.quarantine_reason,
+                    absorbed.quarantined_at,
                 ),
             )
 
@@ -983,6 +990,13 @@ class SQLiteEntityStore:
                 "absorbed_type": r["absorbed_type"],
                 "absorbed_desc": r["absorbed_desc"],
                 "absorbed_aliases": json.loads(r["absorbed_aliases"]),
+                "absorbed_is_quarantined": bool(
+                    r["absorbed_is_quarantined"]
+                ),
+                "absorbed_quarantine_reason": r[
+                    "absorbed_quarantine_reason"
+                ],
+                "absorbed_quarantined_at": r["absorbed_quarantined_at"],
                 "merged_at": r["merged_at"],
                 "merged_by": r["merged_by"],
             }

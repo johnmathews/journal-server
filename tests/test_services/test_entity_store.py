@@ -556,6 +556,29 @@ class TestMergeEntities:
         assert history[0]["absorbed_type"] == "person"
         assert history[0]["absorbed_desc"] == "old desc"
         assert "alias1" in history[0]["absorbed_aliases"]
+        # An entity that wasn't quarantined snapshots clean defaults.
+        assert history[0]["absorbed_is_quarantined"] is False
+        assert history[0]["absorbed_quarantine_reason"] == ""
+        assert history[0]["absorbed_quarantined_at"] == ""
+
+    def test_merge_history_captures_quarantine_state(
+        self, store: SQLiteEntityStore, sample_entry_id: int
+    ) -> None:
+        # Quarantine is preserved through merge so the audit trail of *why*
+        # an entity was quarantined survives the row deletion.
+        a = store.create_entity("person", "Hallucinated", "", "2026-01-01")
+        store.quarantine_entity(a.id, reason="canonical not in any quote")
+        survivor = store.create_entity("person", "Clean", "", "2026-01-01")
+        store.merge_entities(survivor.id, [a.id])
+
+        history = store.get_merge_history(survivor.id)
+        assert len(history) == 1
+        assert history[0]["absorbed_is_quarantined"] is True
+        assert (
+            history[0]["absorbed_quarantine_reason"]
+            == "canonical not in any quote"
+        )
+        assert history[0]["absorbed_quarantined_at"] != ""
 
     def test_merge_into_self_raises(self, store: SQLiteEntityStore) -> None:
         a = store.create_entity("person", "A", "", "2026-01-01")
