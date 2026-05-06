@@ -137,3 +137,23 @@ re-extraction.
 
 The webapp side (mood-trends affect-axes default + quarantine UI surface) ships in
 `journal-webapp` in the same eng-ui-changes session.
+
+## Follow-up — `e5e9289`
+
+Once it was deployed and working in prod (user reproed by re-running a few entries; the
+quarantine tab is empty as expected), the user asked a thoughtful design question: what
+happens if a quarantined entity is later merged into a clean survivor — does the
+audit trail of *why* it was quarantined survive?
+
+It didn't. `entity_merge_history` snapshots `absorbed_name`, `absorbed_type`,
+`absorbed_desc`, and `absorbed_aliases`, but not `is_quarantined` /
+`quarantine_reason` / `quarantined_at`. So a quarantined entity merged into a clean
+target lost the reason on the way through.
+
+Migration `0019_merge_history_quarantine.sql` adds the three columns (additive,
+defaults, no data risk). `merge_entities()` writes them on every snapshot;
+`get_merge_history()` returns them. Existing test extended to assert clean defaults
+on a non-quarantined absorption; new test covers the
+`quarantined → merged → snapshot includes reason` path.
+
+Tests: 1712 passing (+1).
