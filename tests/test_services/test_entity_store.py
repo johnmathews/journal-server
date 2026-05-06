@@ -311,6 +311,41 @@ class TestMentions:
         by_entry = store.get_mentions_for_entry(sample_entry_id)
         assert len(by_entry) == 1
 
+    def test_create_mention_with_match_source(
+        self,
+        store: SQLiteEntityStore,
+        sample_entry_id: int,
+    ) -> None:
+        entity = store.create_entity("person", "Atlas", "", "2026-03-22")
+        mention = store.create_mention(
+            entity_id=entity.id,
+            entry_id=sample_entry_id,
+            quote="Atlas",
+            confidence=0.9,
+            extraction_run_id="run-1",
+            match_source="llm_asserted",
+        )
+        assert mention.match_source == "llm_asserted"
+        # Round-trip via SELECT.
+        fetched = store.get_mentions_for_entry(sample_entry_id)
+        assert len(fetched) == 1
+        assert fetched[0].match_source == "llm_asserted"
+
+    def test_create_mention_default_match_source_is_none(
+        self,
+        store: SQLiteEntityStore,
+        sample_entry_id: int,
+    ) -> None:
+        entity = store.create_entity("person", "Atlas", "", "2026-03-22")
+        mention = store.create_mention(
+            entity_id=entity.id,
+            entry_id=sample_entry_id,
+            quote="Atlas",
+            confidence=0.9,
+            extraction_run_id="run-1",
+        )
+        assert mention.match_source is None
+
     def test_delete_mentions_for_entry_only_removes_that_entry(
         self,
         store: SQLiteEntityStore,

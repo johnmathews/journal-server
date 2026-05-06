@@ -109,6 +109,7 @@ class EntityStore(Protocol):
         quote: str,
         confidence: float,
         extraction_run_id: str,
+        match_source: str | None = None,
     ) -> EntityMention: ...
 
     def get_mentions_for_entity(
@@ -536,12 +537,17 @@ class SQLiteEntityStore:
         quote: str,
         confidence: float,
         extraction_run_id: str,
+        match_source: str | None = None,
     ) -> EntityMention:
         cursor = self._conn.execute(
             "INSERT INTO entity_mentions"
-            " (entity_id, entry_id, quote, confidence, extraction_run_id)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (entity_id, entry_id, quote, confidence, extraction_run_id),
+            " (entity_id, entry_id, quote, confidence,"
+            "  extraction_run_id, match_source)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                entity_id, entry_id, quote, confidence,
+                extraction_run_id, match_source,
+            ),
         )
         self._conn.commit()
         mention_id = cursor.lastrowid
@@ -1038,6 +1044,10 @@ class SQLiteEntityStore:
 
 
 def _row_to_mention(row: sqlite3.Row) -> EntityMention:
+    # match_source arrives via migration 0020. Fall back to None for
+    # rows from fixtures that bypass the migration runner.
+    keys = row.keys()
+    match_source = row["match_source"] if "match_source" in keys else None
     return EntityMention(
         id=row["id"],
         entity_id=row["entity_id"],
@@ -1046,6 +1056,7 @@ def _row_to_mention(row: sqlite3.Row) -> EntityMention:
         confidence=row["confidence"],
         extraction_run_id=row["extraction_run_id"],
         created_at=row["created_at"],
+        match_source=match_source,
     )
 
 

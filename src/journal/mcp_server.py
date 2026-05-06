@@ -192,6 +192,9 @@ def _init_services() -> dict:
         author_name=config.journal_author_name,
         dedup_similarity_threshold=config.entity_dedup_similarity_threshold,
         user_repo=user_repo,
+        llm_candidate_top_k=config.entity_llm_candidate_top_k,
+        llm_candidate_threshold=config.entity_llm_candidate_threshold,
+        llm_match_min_cosine=config.entity_llm_match_min_cosine,
     )
 
     # Runtime settings — editable from the webapp without restart.

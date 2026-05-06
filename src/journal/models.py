@@ -236,6 +236,12 @@ class EntityMention:
     confidence: float
     extraction_run_id: str
     created_at: str = ""
+    # NULL for mentions that created a new entity; otherwise one of
+    # "stage_a" (exact canonical name), "stage_b" (alias), "stage_c"
+    # (embedding similarity), or "llm_asserted" (matches_known_id
+    # supplied by the extraction LLM, validated through the four
+    # guards in `_resolve_entity`).
+    match_source: str | None = None
 
 
 @dataclass

@@ -74,6 +74,9 @@ def _build_services(config):
         embeddings_provider=embeddings,
         author_name=config.journal_author_name,
         dedup_similarity_threshold=config.entity_dedup_similarity_threshold,
+        llm_candidate_top_k=config.entity_llm_candidate_top_k,
+        llm_candidate_threshold=config.entity_llm_candidate_threshold,
+        llm_match_min_cosine=config.entity_llm_match_min_cosine,
     )
 
     return ingestion, query, entity_extraction

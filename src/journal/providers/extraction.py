@@ -70,6 +70,21 @@ def build_system_prompt(author_name: str) -> str:
         "Preferred predicates for relationships (use free text when none\n"
         "of these fit):\n"
         "  " + ", ".join(PREFERRED_PREDICATES) + "\n\n"
+        "Known entities protocol:\n"
+        "  - The user message may include a `known_entities` block —\n"
+        "    a JSON array of entities the author has already curated.\n"
+        "    Each item has `id`, `canonical_name`, `entity_type`,\n"
+        "    `aliases`, and `description`.\n"
+        "  - When a mention in the entry refers to one of these known\n"
+        "    entities, set `matches_known_id` on the extracted entity\n"
+        "    to that entity's `id`, and set `match_justification` to\n"
+        "    a 5–15 word reason citing what made you confident\n"
+        "    (e.g. \"description says 'my mother', mention is 'Mum'\").\n"
+        "  - The list is NOT exhaustive. If no known entity is a good\n"
+        "    fit, leave both fields unset (or null) and propose a new\n"
+        "    entity as you normally would. Do not force a match.\n"
+        "  - Only set `matches_known_id` to an `id` that appears in\n"
+        "    the supplied `known_entities` list.\n\n"
         "Rules:\n"
         "  - Be conservative. Only extract named or strongly-implied\n"
         "    entities. Do NOT invent generic nouns (e.g. 'the meeting').\n"
@@ -120,6 +135,24 @@ ENTITY_EXTRACTION_TOOL: dict[str, Any] = {
                             "type": "number",
                             "minimum": 0.0,
                             "maximum": 1.0,
+                        },
+                        "matches_known_id": {
+                            "type": ["integer", "null"],
+                            "description": (
+                                "If this mention refers to one of the "
+                                "known_entities provided in the user "
+                                "message, set this to that entity's id. "
+                                "Otherwise null."
+                            ),
+                        },
+                        "match_justification": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "Short (5-15 words) reason for the "
+                                "matches_known_id link, citing what made "
+                                "you confident. Only set when "
+                                "matches_known_id is not null."
+                            ),
                         },
                     },
                 },
@@ -175,6 +208,7 @@ class ExtractionProvider(Protocol):
         entry_text: str,
         entry_date: str,
         author_name: str,
+        known_entities: list[dict[str, Any]] | None = None,
     ) -> RawExtractionResult: ...
 
 
@@ -196,18 +230,29 @@ class AnthropicExtractionProvider:
         entry_text: str,
         entry_date: str,
         author_name: str,
+        known_entities: list[dict[str, Any]] | None = None,
     ) -> RawExtractionResult:
         """Call Claude to extract entities and relationships.
 
         The tool_choice parameter forces the model to return its answer
         as a tool call rather than prose, so we can parse
         `message.content[0].input` as a structured dict.
+
+        ``known_entities`` is a per-entry list of curated entity
+        candidates (vector pre-filtered by the caller — typically the
+        top ~30 by cosine similarity to the entry text). It is passed
+        in the user message so the cache breakpoint on the system
+        prompt is preserved across entries; only the user message
+        varies per call.
         """
+        import json
+
         logger.info(
-            "Extracting entities via Anthropic (model=%s, date=%s, chars=%d)",
+            "Extracting entities via Anthropic (model=%s, date=%s, chars=%d, known=%d)",
             self._model,
             entry_date,
             len(entry_text),
+            len(known_entities) if known_entities else 0,
         )
 
         system_text = build_system_prompt(author_name)
@@ -215,6 +260,15 @@ class AnthropicExtractionProvider:
             f"Entry date: {entry_date}\n\n"
             f"Entry text:\n{entry_text}"
         )
+        if known_entities:
+            user_text += (
+                "\n\nKnown entities the author has already curated "
+                "(use the `id` of any that match, otherwise propose a "
+                "new entity):\n"
+                "```json\n"
+                + json.dumps(known_entities, ensure_ascii=False)
+                + "\n```"
+            )
 
         message = self._client.messages.create(
             model=self._model,

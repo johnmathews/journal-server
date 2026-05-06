@@ -116,6 +116,63 @@ class TestAnthropicExtractionProvider:
         for t in ("person", "place", "activity", "organization", "topic", "other"):
             assert t in prompt
 
+    def test_system_prompt_describes_known_entities_protocol(self) -> None:
+        prompt = build_system_prompt("Jane")
+        # Must mention the new tool fields and the NIL fallback.
+        assert "matches_known_id" in prompt
+        assert "match_justification" in prompt
+        assert "Do not force a match" in prompt or "do not force a match" in prompt.lower()
+
+    def test_known_entities_appear_in_user_message(self) -> None:
+        provider = _make_provider()
+        tool_block = MagicMock()
+        tool_block.type = "tool_use"
+        tool_block.input = {"entities": [], "relationships": []}
+        mock_message = MagicMock()
+        mock_message.content = [tool_block]
+        provider._client.messages.create.return_value = mock_message
+
+        provider.extract_entities(
+            entry_text="I called Mum",
+            entry_date="2026-05-01",
+            author_name="John",
+            known_entities=[
+                {
+                    "id": 7,
+                    "canonical_name": "Sarah",
+                    "entity_type": "person",
+                    "aliases": ["mum"],
+                    "description": "my mother",
+                },
+            ],
+        )
+
+        kwargs = provider._client.messages.create.call_args.kwargs
+        user_msg_text = kwargs["messages"][0]["content"][0]["text"]
+        assert "known entities" in user_msg_text.lower()
+        assert "Sarah" in user_msg_text
+        assert '"id": 7' in user_msg_text
+        # System prompt is NOT mutated by per-call known_entities
+        # (cacheable across calls).
+        assert "Sarah" not in kwargs["system"][0]["text"]
+
+    def test_no_known_entities_block_when_empty(self) -> None:
+        provider = _make_provider()
+        tool_block = MagicMock()
+        tool_block.type = "tool_use"
+        tool_block.input = {"entities": [], "relationships": []}
+        mock_message = MagicMock()
+        mock_message.content = [tool_block]
+        provider._client.messages.create.return_value = mock_message
+
+        provider.extract_entities(
+            entry_text="text", entry_date="2026-05-01", author_name="John",
+        )
+        kwargs = provider._client.messages.create.call_args.kwargs
+        user_msg_text = kwargs["messages"][0]["content"][0]["text"]
+        # No need to pollute the user message when nothing was retrieved.
+        assert "known entities" not in user_msg_text.lower()
+
 
 class TestParseToolResponse:
     def test_none_message_returns_empty(self) -> None:

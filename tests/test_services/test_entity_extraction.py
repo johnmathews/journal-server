@@ -96,6 +96,9 @@ def _make_service(
     threshold: float = 0.88,
     embeddings: MagicMock | None = None,
     user_repo: SQLiteUserRepository | None = None,
+    llm_candidate_top_k: int = 30,
+    llm_candidate_threshold: float = 0.4,
+    llm_match_min_cosine: float = 0.3,
 ) -> EntityExtractionService:
     if embeddings is None:
         embeddings = MagicMock()
@@ -108,6 +111,9 @@ def _make_service(
         author_name=author_name,
         dedup_similarity_threshold=threshold,
         user_repo=user_repo,
+        llm_candidate_top_k=llm_candidate_top_k,
+        llm_candidate_threshold=llm_candidate_threshold,
+        llm_match_min_cosine=llm_match_min_cosine,
     )
 
 
@@ -403,7 +409,7 @@ class TestBatchExtraction:
 
         extractor = MagicMock()
 
-        def side_effect(entry_text, entry_date, author_name):  # type: ignore[no-untyped-def]
+        def side_effect(entry_text, entry_date, author_name, **kwargs):  # type: ignore[no-untyped-def]
             if "first" in entry_text:
                 return _raw(entities=[_entity("Atlas", "person")])
             raise RuntimeError("boom")
@@ -481,7 +487,7 @@ class TestBatchProgressCallback:
 
         extractor = MagicMock()
 
-        def side_effect(entry_text, entry_date, author_name):  # type: ignore[no-untyped-def]
+        def side_effect(entry_text, entry_date, author_name, **kwargs):  # type: ignore[no-untyped-def]
             if "first" in entry_text:
                 return _raw(entities=[_entity("Atlas", "person")])
             raise RuntimeError("boom")
@@ -1284,3 +1290,390 @@ class TestReembedDescription:
         # Correct user works.
         result = service.reembed_entity_for_description(entity.id, user_id=1)
         assert result["embedded"] is True
+
+
+class TestBuildKnownEntityCandidates:
+    """WU4-C: vector pre-filter for the known-entities prompt block."""
+
+    def test_returns_top_k_above_threshold_sorted_by_score(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        # Three entities with embeddings; one is far from the entry,
+        # the other two are close. Threshold 0.4 should drop the far
+        # one; results should be sorted by descending similarity.
+        sarah = entity_store.create_entity(
+            "person", "Sarah", "my mother", "2026-01-01",
+        )
+        entity_store.set_entity_embedding(sarah.id, [1.0, 0.0, 0.0])
+        atlas = entity_store.create_entity(
+            "person", "Atlas", "the dog", "2026-01-01",
+        )
+        entity_store.set_entity_embedding(atlas.id, [0.7, 0.7, 0.0])
+        far = entity_store.create_entity(
+            "place", "Antarctica", "cold", "2026-01-01",
+        )
+        entity_store.set_entity_embedding(far.id, [0.0, 0.0, 1.0])
+
+        embeddings = MagicMock()
+        embeddings.embed_query = MagicMock(return_value=[1.0, 0.0, 0.0])
+        service = _make_service(
+            repo, entity_store, MagicMock(),
+            embeddings=embeddings, llm_candidate_threshold=0.4,
+        )
+
+        candidates, by_id = service.build_known_entity_candidates(
+            "I called Mum", user_id=1,
+        )
+        ids_in_order = [c["id"] for c in candidates]
+        assert ids_in_order == [sarah.id, atlas.id]
+        assert far.id not in by_id
+
+    def test_top_k_caps_results(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        # Five entities, top_k=2 → only 2 returned.
+        for i in range(5):
+            e = entity_store.create_entity(
+                "person", f"Person {i}", f"desc {i}", "2026-01-01",
+            )
+            entity_store.set_entity_embedding(e.id, [1.0, 0.0])
+
+        embeddings = MagicMock()
+        embeddings.embed_query = MagicMock(return_value=[1.0, 0.0])
+        service = _make_service(
+            repo, entity_store, MagicMock(),
+            embeddings=embeddings,
+            llm_candidate_top_k=2, llm_candidate_threshold=0.0,
+        )
+        candidates, _ = service.build_known_entity_candidates(
+            "any text", user_id=1,
+        )
+        assert len(candidates) == 2
+
+    def test_returns_empty_when_user_has_no_embedded_entities(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        # Entity exists but no embedding set yet.
+        entity_store.create_entity("person", "Sarah", "", "2026-01-01")
+        embeddings = MagicMock()
+        embeddings.embed_query = MagicMock(return_value=[1.0, 0.0])
+        service = _make_service(
+            repo, entity_store, MagicMock(), embeddings=embeddings,
+        )
+        candidates, by_id = service.build_known_entity_candidates(
+            "any text", user_id=1,
+        )
+        assert candidates == []
+        assert by_id == {}
+        # The entry text should not be embedded if there are no
+        # candidates to compare against — saves an OpenAI call.
+        embeddings.embed_query.assert_not_called()
+
+    def test_returns_empty_when_user_id_none(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        embeddings = MagicMock()
+        service = _make_service(
+            repo, entity_store, MagicMock(), embeddings=embeddings,
+        )
+        candidates, by_id = service.build_known_entity_candidates(
+            "text", user_id=None,
+        )
+        assert candidates == []
+        assert by_id == {}
+        embeddings.embed_query.assert_not_called()
+
+    def test_candidate_dict_shape(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        sarah = entity_store.create_entity(
+            "person", "Sarah", "my mother", "2026-01-01",
+        )
+        entity_store.add_alias(sarah.id, "Mum")
+        entity_store.set_entity_embedding(sarah.id, [1.0, 0.0])
+        embeddings = MagicMock()
+        embeddings.embed_query = MagicMock(return_value=[1.0, 0.0])
+        service = _make_service(
+            repo, entity_store, MagicMock(), embeddings=embeddings,
+        )
+        candidates, _ = service.build_known_entity_candidates(
+            "I called Mum", user_id=1,
+        )
+        assert len(candidates) == 1
+        c = candidates[0]
+        assert c["id"] == sarah.id
+        assert c["canonical_name"] == "Sarah"
+        assert c["entity_type"] == "person"
+        assert "mum" in c["aliases"]
+        assert c["description"] == "my mother"
+
+
+class TestExtractFromEntryPassesKnownEntities:
+    """End-to-end check: extract_from_entry calls the candidate
+    builder and forwards the result to the extraction provider.
+    """
+
+    def test_known_entities_forwarded_to_extractor(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        sarah = entity_store.create_entity(
+            "person", "Sarah", "my mother", "2026-01-01", user_id=1,
+        )
+        entity_store.set_entity_embedding(sarah.id, [1.0, 0.0])
+        entry = repo.create_entry(
+            "2026-01-02", "photo", "I called Mum today.", 5, user_id=1,
+        )
+
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw()
+        embeddings = MagicMock()
+        embeddings.embed_query = MagicMock(return_value=[1.0, 0.0])
+
+        service = _make_service(
+            repo, entity_store, extractor, embeddings=embeddings,
+        )
+        service.extract_from_entry(entry.id)
+
+        kwargs = extractor.extract_entities.call_args.kwargs
+        known = kwargs["known_entities"]
+        assert known is not None and len(known) == 1
+        assert known[0]["id"] == sarah.id
+
+    def test_no_known_entities_passed_when_user_has_none(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        entry = repo.create_entry(
+            "2026-01-02", "photo", "fresh entry", 2, user_id=1,
+        )
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw()
+        service = _make_service(repo, entity_store, extractor)
+
+        service.extract_from_entry(entry.id)
+        kwargs = extractor.extract_entities.call_args.kwargs
+        assert kwargs["known_entities"] is None
+
+
+class TestLLMAssertedMatch:
+    """WU4-D: stage-0 LLM-asserted match with the four-guard hybrid
+    sanity check.
+    """
+
+    def _setup(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+        *,
+        candidate_embedding: list[float] | None = None,
+        new_embedding: list[float] | None = None,
+        threshold: float = 0.3,
+    ) -> tuple[object, object, EntityExtractionService]:
+        """Common setup: create Sarah (known) with an embedding, an
+        entry mentioning "Mum", and a service primed with one
+        candidate.
+        """
+        sarah = entity_store.create_entity(
+            "person", "Sarah", "my mother", "2026-01-01", user_id=1,
+        )
+        if candidate_embedding is not None:
+            entity_store.set_entity_embedding(sarah.id, candidate_embedding)
+        entry = repo.create_entry(
+            "2026-01-02", "photo", "I called Mum.", 3, user_id=1,
+        )
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[
+                _entity(
+                    "Mum", "person",
+                    description="my mother",
+                    quote="I called Mum.",
+                ),
+            ],
+        )
+        # Inject matches_known_id post-hoc since the helper doesn't
+        # accept it.
+        extractor.extract_entities.return_value.entities[0]["matches_known_id"] = sarah.id
+        extractor.extract_entities.return_value.entities[0]["match_justification"] = (
+            "description says my mother"
+        )
+        embeddings = MagicMock()
+        embeddings.embed_query = MagicMock(
+            return_value=new_embedding or [1.0, 0.0],
+        )
+        service = _make_service(
+            repo, entity_store, extractor,
+            embeddings=embeddings,
+            llm_match_min_cosine=threshold,
+        )
+        return sarah, entry, service
+
+    def test_match_accepted_when_all_four_guards_pass(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        sarah, entry, service = self._setup(
+            repo, entity_store,
+            candidate_embedding=[1.0, 0.0],
+            new_embedding=[1.0, 0.0],
+        )
+        service.extract_from_entry(entry.id)
+
+        # The new "Mum" extraction should resolve to Sarah, not create
+        # a duplicate. And the mention should be tagged llm_asserted.
+        mentions = entity_store.get_mentions_for_entry(entry.id)
+        assert len(mentions) == 1
+        assert mentions[0].entity_id == sarah.id
+        assert mentions[0].match_source == "llm_asserted"
+        # No duplicate "Mum" entity should exist as a person. (Sarah
+        # may be soft-quarantined by the post-extraction sanity sweep
+        # because the literal string "Sarah" doesn't appear in the
+        # entry quote — that's expected and orthogonal to this test.)
+        all_persons = entity_store.list_entities(
+            entity_type="person", user_id=1, include_quarantined=True,
+        )
+        assert len(all_persons) == 1
+        assert all_persons[0].id == sarah.id
+
+    def test_guard_a_rejects_unknown_id(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        # LLM hallucinates an id that doesn't exist. Guard A should
+        # reject and fall through to a/b/c (which will also miss),
+        # creating a brand-new entity.
+        entry = repo.create_entry(
+            "2026-01-02", "photo", "I called Mum.", 3, user_id=1,
+        )
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity("Mum", "person", quote="I called Mum.")],
+        )
+        extractor.extract_entities.return_value.entities[0]["matches_known_id"] = 9999
+        service = _make_service(repo, entity_store, extractor)
+        service.extract_from_entry(entry.id)
+
+        mentions = entity_store.get_mentions_for_entry(entry.id)
+        assert len(mentions) == 1
+        # Created a new entity (no llm_asserted, no stage_a/b/c match).
+        assert mentions[0].match_source is None
+
+    def test_guard_b_rejects_id_outside_candidate_set(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        # Sarah exists but has NO embedding, so she won't be in the
+        # candidate set passed to the LLM. If the LLM still asserts
+        # her id, guard B rejects.
+        sarah = entity_store.create_entity(
+            "person", "Sarah", "my mother", "2026-01-01", user_id=1,
+        )
+        # No set_entity_embedding — Sarah is not a candidate.
+        entry = repo.create_entry(
+            "2026-01-02", "photo", "I called Mum.", 3, user_id=1,
+        )
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity("Mum", "person", quote="I called Mum.")],
+        )
+        extractor.extract_entities.return_value.entities[0]["matches_known_id"] = sarah.id
+        service = _make_service(repo, entity_store, extractor)
+        service.extract_from_entry(entry.id)
+
+        mentions = entity_store.get_mentions_for_entry(entry.id)
+        # Stage-a triggered? No, "Mum" != "Sarah". Created new entity.
+        assert mentions[0].match_source is None
+        assert mentions[0].entity_id != sarah.id
+
+    def test_guard_c_rejects_type_mismatch(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        # A topic entity is asserted as a person mention. Guard C
+        # rejects.
+        topic = entity_store.create_entity(
+            "topic", "Sarah Project", "old", "2026-01-01", user_id=1,
+        )
+        entity_store.set_entity_embedding(topic.id, [1.0, 0.0])
+        entry = repo.create_entry(
+            "2026-01-02", "photo", "I called Mum.", 3, user_id=1,
+        )
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity("Mum", "person", quote="I called Mum.")],
+        )
+        extractor.extract_entities.return_value.entities[0]["matches_known_id"] = topic.id
+        embeddings = MagicMock()
+        embeddings.embed_query = MagicMock(return_value=[1.0, 0.0])
+        service = _make_service(repo, entity_store, extractor, embeddings=embeddings)
+        service.extract_from_entry(entry.id)
+
+        mentions = entity_store.get_mentions_for_entry(entry.id)
+        assert mentions[0].entity_id != topic.id
+        assert mentions[0].match_source is None
+
+    def test_guard_d_rejects_low_cosine(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        # Cosine of orthogonal vectors is 0.0 → below default 0.3.
+        # Guard D rejects, so the LLM-asserted match is discarded.
+        sarah, entry, service = self._setup(
+            repo, entity_store,
+            candidate_embedding=[1.0, 0.0],
+            new_embedding=[0.0, 1.0],
+            threshold=0.3,
+        )
+        service.extract_from_entry(entry.id)
+
+        mentions = entity_store.get_mentions_for_entry(entry.id)
+        # Sarah was a candidate by virtue of embedding presence, but
+        # the cosine guard rejected the match. Stage a/b/c didn't fire
+        # either ("Mum" doesn't match "Sarah" and stage-c uses a
+        # different threshold). New entity created.
+        assert mentions[0].match_source is None
+        assert mentions[0].entity_id != sarah.id
+
+    def test_no_matches_known_id_runs_normal_resolution(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        # When the LLM doesn't set matches_known_id, the extracted
+        # entity flows through stage-a/b/c as before. Here stage-a
+        # fires because the canonical exactly matches.
+        sarah = entity_store.create_entity(
+            "person", "Sarah", "", "2026-01-01", user_id=1,
+        )
+        entry = repo.create_entry(
+            "2026-01-02", "photo", "I saw Sarah.", 3, user_id=1,
+        )
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity("Sarah", "person", quote="I saw Sarah.")],
+        )
+        # No matches_known_id field on the dict.
+        service = _make_service(repo, entity_store, extractor)
+        service.extract_from_entry(entry.id)
+
+        mentions = entity_store.get_mentions_for_entry(entry.id)
+        assert mentions[0].entity_id == sarah.id
+        assert mentions[0].match_source == "stage_a"

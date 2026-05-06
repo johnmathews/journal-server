@@ -363,6 +363,31 @@ class Config:
             os.environ.get("ENTITY_DEDUP_SIMILARITY_THRESHOLD", "0.88")
         )
     )
+    # Vector pre-filter for the "known_entities" block we send to the
+    # extraction LLM (WU4). Per-call: embed the entry, retrieve top-K
+    # user entities by cosine similarity, drop anything below
+    # ``candidate_threshold``. The LLM only sees entities that clear
+    # the floor, so it can't anchor onto a distant candidate.
+    entity_llm_candidate_top_k: int = field(
+        default_factory=lambda: int(
+            os.environ.get("ENTITY_LLM_CANDIDATE_TOP_K", "30")
+        )
+    )
+    entity_llm_candidate_threshold: float = field(
+        default_factory=lambda: float(
+            os.environ.get("ENTITY_LLM_CANDIDATE_THRESHOLD", "0.4")
+        )
+    )
+    # Guard D in the four-guard hybrid sanity check on LLM-asserted
+    # matches: cosine(new mention's embedding, asserted match's
+    # stored embedding) must be at least this. Below the floor, we
+    # reject the assertion and fall through to the existing
+    # stage-a/b/c resolution.
+    entity_llm_match_min_cosine: float = field(
+        default_factory=lambda: float(
+            os.environ.get("ENTITY_LLM_MATCH_MIN_COSINE", "0.3")
+        )
+    )
     # Name the extractor uses for the journal author — "I went to Blue
     # Bottle" becomes a relationship with this name as the subject.
     journal_author_name: str = field(

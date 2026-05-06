@@ -249,6 +249,10 @@ class EntityExtractionService:
         author_name: str = "John",
         dedup_similarity_threshold: float = 0.88,
         user_repo: UserRepository | None = None,
+        # WU4: known-entity prompt injection knobs.
+        llm_candidate_top_k: int = 30,
+        llm_candidate_threshold: float = 0.4,
+        llm_match_min_cosine: float = 0.3,
     ) -> None:
         self._repo = repository
         self._store = entity_store
@@ -257,6 +261,16 @@ class EntityExtractionService:
         self._author_name = author_name
         self._threshold = dedup_similarity_threshold
         self._user_repo = user_repo
+        self._llm_candidate_top_k = llm_candidate_top_k
+        self._llm_candidate_threshold = llm_candidate_threshold
+        self._llm_match_min_cosine = llm_match_min_cosine
+        # Per-call scratch space populated by ``extract_from_entry``
+        # before the LLM call. ``_resolve_entity`` reads these for
+        # guard B (membership) and guard D (cosine) on stage-0
+        # LLM-asserted matches. Empty in tests that drive
+        # ``_resolve_entity`` directly.
+        self._current_candidate_ids: set[int] = set()
+        self._current_candidate_embeddings: dict[int, list[float]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -317,6 +331,77 @@ class EntityExtractionService:
             "dimensions": len(embedding),
         }
 
+    def build_known_entity_candidates(
+        self,
+        entry_text: str,
+        *,
+        user_id: int | None,
+    ) -> tuple[list[dict[str, Any]], dict[int, list[float]]]:
+        """Vector pre-filter for the known-entities block.
+
+        Embeds ``entry_text``, retrieves all of the user's entities
+        with stored embeddings (across all types), computes cosine
+        similarity, drops anything below
+        ``llm_candidate_threshold``, and returns the top
+        ``llm_candidate_top_k``.
+
+        Returns ``(candidates, candidate_embeddings)`` where
+        ``candidates`` is the list of dicts shaped for the LLM tool
+        (``id``, ``canonical_name``, ``entity_type``, ``aliases``,
+        ``description``) and ``candidate_embeddings`` is a parallel
+        ``id -> embedding`` map kept by the caller for guard D in the
+        stage-0 sanity check (saves another store round-trip).
+
+        When ``user_id`` is None or the user has no entities with
+        embeddings yet, both return values are empty.
+        """
+        if user_id is None:
+            return [], {}
+
+        # No fast path for "all types" in the store today; iterate
+        # the six-element ENTITY_TYPES tuple and union. The cost is
+        # six small SELECTs against an indexed table — cheap.
+        from journal.providers.extraction import ENTITY_TYPES
+
+        all_with_embeddings: list[tuple[Any, list[float]]] = []
+        for etype in ENTITY_TYPES:
+            all_with_embeddings.extend(
+                self._store.list_entities_of_type_with_embeddings(
+                    etype, user_id=user_id,
+                )
+            )
+
+        if not all_with_embeddings:
+            return [], {}
+
+        entry_vec = self._embeddings.embed_query(entry_text)
+
+        scored: list[tuple[float, Any, list[float]]] = []
+        for entity, vec in all_with_embeddings:
+            score = _cosine_similarity(entry_vec, vec)
+            if score < self._llm_candidate_threshold:
+                continue
+            scored.append((score, entity, vec))
+
+        scored.sort(key=lambda t: t[0], reverse=True)
+        scored = scored[: self._llm_candidate_top_k]
+
+        candidates: list[dict[str, Any]] = []
+        embeddings_by_id: dict[int, list[float]] = {}
+        for _score, entity, vec in scored:
+            candidates.append(
+                {
+                    "id": entity.id,
+                    "canonical_name": entity.canonical_name,
+                    "entity_type": entity.entity_type,
+                    "aliases": list(entity.aliases),
+                    "description": entity.description or "",
+                }
+            )
+            embeddings_by_id[entity.id] = vec
+
+        return candidates, embeddings_by_id
+
     def extract_from_entry(self, entry_id: int) -> ExtractionResult:
         entry = self._repo.get_entry(entry_id)
         if entry is None:
@@ -330,10 +415,30 @@ class EntityExtractionService:
             entry_id, run_id, author_name,
         )
 
+        entry_text = entry.final_text or entry.raw_text or ""
+        known_entities, candidate_embeddings = self.build_known_entity_candidates(
+            entry_text, user_id=user_id,
+        )
+        log.info(
+            "Extraction candidate set for entry %d: %d known entities",
+            entry_id, len(known_entities),
+        )
+        # Stash for the duration of this call so ``_resolve_entity``
+        # can use the candidate set + per-id embeddings for guard B
+        # (membership) and guard D (cosine sanity) in WU4-D. Cleared
+        # in the finally block below.
+        self._current_candidate_ids: set[int] = {
+            int(c["id"]) for c in known_entities
+        }
+        self._current_candidate_embeddings: dict[int, list[float]] = (
+            candidate_embeddings
+        )
+
         raw = self._extractor.extract_entities(
-            entry_text=entry.final_text or entry.raw_text,
+            entry_text=entry_text,
             entry_date=entry.entry_date,
             author_name=author_name,
+            known_entities=known_entities or None,
         )
 
         # Idempotency: clear any prior extraction results for this
@@ -370,6 +475,14 @@ class EntityExtractionService:
             pending_quarantine_reason = (
                 raw_entity.get("pending_quarantine_reason") or ""
             )
+            raw_matches_known_id = raw_entity.get("matches_known_id")
+            matches_known_id = (
+                int(raw_matches_known_id)
+                if isinstance(raw_matches_known_id, int)
+                and not isinstance(raw_matches_known_id, bool)
+                else None
+            )
+            match_justification = raw_entity.get("match_justification")
 
             if not canonical:
                 continue
@@ -380,6 +493,7 @@ class EntityExtractionService:
                 warning,
                 near_miss,
                 signature_matches,
+                match_source,
             ) = self._resolve_entity(
                 canonical=canonical,
                 entity_type=entity_type,
@@ -387,6 +501,8 @@ class EntityExtractionService:
                 aliases=aliases,
                 first_seen=entry.entry_date,
                 user_id=user_id,
+                matches_known_id=matches_known_id,
+                match_justification=match_justification,
             )
             touched_entity_ids.add(entity_id)
             if created:
@@ -458,6 +574,7 @@ class EntityExtractionService:
                     quote=quote,
                     confidence=confidence,
                     extraction_run_id=run_id,
+                    match_source=match_source,
                 )
             except sqlite3.IntegrityError as exc:
                 raise ValueError(
@@ -718,16 +835,26 @@ class EntityExtractionService:
         aliases: list[str],
         first_seen: str,
         user_id: int | None = None,
+        matches_known_id: int | None = None,
+        match_justification: str | None = None,
     ) -> tuple[
         int,
         bool,
         str | None,
         tuple[int, float] | None,
         list[tuple[int, float]],
+        str | None,
     ]:
         """Resolve an extracted entity against the store.
 
-        Returns ``(entity_id, created, warning, near_miss, signature_matches)``.
+        Returns ``(entity_id, created, warning, near_miss,
+        signature_matches, match_source)``.
+
+        ``match_source`` is one of ``"stage_a"`` (exact canonical
+        match), ``"stage_b"`` (alias match), ``"stage_c"`` (embedding
+        similarity ≥ threshold), ``"llm_asserted"`` (matches_known_id
+        accepted by all four WU4-D guards), or ``None`` (a brand-new
+        row was created).
 
         ``created`` is True when a brand-new row was inserted. ``warning``
         is populated if the embedding-similarity fallback fired (stage c).
@@ -736,13 +863,7 @@ class EntityExtractionService:
         the caller should persist this as a merge candidate.
 
         ``signature_matches`` is a list of ``(candidate_id, score)`` pairs
-        produced by the relaxed string-signature heuristic (lowercased,
-        whitespace-stripped equality, or short-substring containment).
-        These are emitted in addition to ``near_miss`` so OCR-driven
-        near-duplicates that the embedding distance happens to miss
-        (e.g. ``Zij Kanaal C Weg`` vs ``Zij Kanaal C Zuid``) still surface
-        in the merge-review UI. The list is unioned with the embedding
-        path's result; the caller is responsible for persisting them.
+        produced by the relaxed string-signature heuristic.
         """
         # Run the relaxed signature heuristic against every same-type
         # entity (regardless of whether the current extraction matches
@@ -752,12 +873,28 @@ class EntityExtractionService:
             canonical, entity_type, user_id=user_id,
         )
 
+        # Stage 0: LLM asserted a match against a known entity.
+        # Accept only if all four guards (A: user-scope, B: candidate
+        # membership, C: type match, D: cosine ≥ floor) pass.
+        if matches_known_id is not None:
+            asserted_id = self._try_llm_asserted_match(
+                asserted_id=int(matches_known_id),
+                canonical=canonical,
+                entity_type=entity_type,
+                description=description,
+                user_id=user_id,
+                justification=match_justification,
+            )
+            if asserted_id is not None:
+                return asserted_id, False, None, None, signature_matches, "llm_asserted"
+            # Fall through to stages a/b/c.
+
         # Stage a: exact canonical name match.
         existing = self._store.get_entity_by_name(
             canonical, entity_type, user_id=user_id,
         )
         if existing is not None:
-            return existing.id, False, None, None, signature_matches
+            return existing.id, False, None, None, signature_matches, "stage_a"
 
         # Stage b: alias match on the canonical name itself, then on
         # each provided alias.
@@ -765,13 +902,13 @@ class EntityExtractionService:
             canonical, entity_type, user_id=user_id,
         )
         if by_alias is not None:
-            return by_alias.id, False, None, None, signature_matches
+            return by_alias.id, False, None, None, signature_matches, "stage_b"
         for alias in aliases:
             by_alias = self._store.find_by_alias(
                 alias, entity_type, user_id=user_id,
             )
             if by_alias is not None:
-                return by_alias.id, False, None, None, signature_matches
+                return by_alias.id, False, None, None, signature_matches, "stage_b"
 
         # Stage c: embedding similarity fallback.
         new_embedding = self._embeddings.embed_query(
@@ -794,7 +931,7 @@ class EntityExtractionService:
                 f"potential merge: {canonical!r} ~ {best_name!r},"
                 f" similarity {best_score:.3f}"
             )
-            return best_id, False, warning, None, signature_matches
+            return best_id, False, warning, None, signature_matches, "stage_c"
 
         # Still no match — create a new entity and remember its
         # embedding so future runs can short-circuit via stage c.
@@ -814,7 +951,98 @@ class EntityExtractionService:
         if best_id is not None and best_score >= near_miss_threshold:
             near_miss = (best_id, best_score)
 
-        return entity.id, True, None, near_miss, signature_matches
+        return entity.id, True, None, near_miss, signature_matches, None
+
+    def _try_llm_asserted_match(
+        self,
+        *,
+        asserted_id: int,
+        canonical: str,
+        entity_type: str,
+        description: str,
+        user_id: int | None,
+        justification: str | None,
+    ) -> int | None:
+        """Run the four-guard hybrid sanity check on an LLM-asserted
+        match (WU4-D). Returns the entity id if accepted, ``None``
+        otherwise. Rejections are logged so the threshold can be
+        retuned from real data.
+
+        - Guard A: the asserted entity belongs to ``user_id``. Rejects
+          cross-user references and hallucinated ids that don't exist.
+        - Guard B: the asserted id was in the candidate set we passed
+          to the LLM. Anything outside the catalog is by definition a
+          hallucination.
+        - Guard C: the asserted entity's ``entity_type`` matches what
+          the LLM is claiming for this mention.
+        - Guard D: cosine similarity between the new mention's
+          embedding (computed from canonical + description) and the
+          asserted match's stored embedding is ≥
+          ``llm_match_min_cosine``. Catches semantic drift / over-
+          attribution where the LLM picks a known entity that is
+          weakly related at best.
+        """
+        # Guard A: ownership.
+        target = self._store.get_entity(asserted_id, user_id=user_id)
+        if target is None:
+            log.info(
+                "LLM-asserted match rejected (guard A: not found for "
+                "user %s): id=%s, canonical=%r, justification=%r",
+                user_id, asserted_id, canonical, justification,
+            )
+            return None
+
+        # Guard B: candidate-list membership.
+        if asserted_id not in self._current_candidate_ids:
+            log.info(
+                "LLM-asserted match rejected (guard B: not in candidate "
+                "set): id=%s, canonical=%r, justification=%r",
+                asserted_id, canonical, justification,
+            )
+            return None
+
+        # Guard C: type match.
+        if target.entity_type != entity_type:
+            log.info(
+                "LLM-asserted match rejected (guard C: type mismatch "
+                "%s vs %s): id=%s, canonical=%r, justification=%r",
+                target.entity_type, entity_type, asserted_id,
+                canonical, justification,
+            )
+            return None
+
+        # Guard D: cosine sanity.
+        target_vec = self._current_candidate_embeddings.get(asserted_id)
+        if target_vec is None:
+            # No embedding for the candidate — fall back to the store
+            # to avoid blanket-failing legitimate matches.
+            target_vec = self._store.get_entity_embedding(asserted_id)
+        if target_vec is None:
+            log.info(
+                "LLM-asserted match rejected (guard D: no stored "
+                "embedding to compare against): id=%s, canonical=%r",
+                asserted_id, canonical,
+            )
+            return None
+        new_embedding = self._embeddings.embed_query(
+            f"{canonical} {description}".strip()
+        )
+        cosine = _cosine_similarity(new_embedding, target_vec)
+        if cosine < self._llm_match_min_cosine:
+            log.info(
+                "LLM-asserted match rejected (guard D: cosine %.3f < "
+                "%.3f): id=%s, canonical=%r, justification=%r",
+                cosine, self._llm_match_min_cosine, asserted_id,
+                canonical, justification,
+            )
+            return None
+
+        log.info(
+            "LLM-asserted match accepted: id=%s, canonical=%r, "
+            "cosine=%.3f, justification=%r",
+            asserted_id, canonical, cosine, justification,
+        )
+        return target.id
 
     def _find_signature_matches(
         self,
