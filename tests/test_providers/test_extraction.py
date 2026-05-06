@@ -8,6 +8,7 @@ from journal.providers.extraction import (
     AnthropicExtractionProvider,
     ExtractionProvider,
     RawExtractionResult,
+    _longest_canonical_substring_in_quote,
     _parse_tool_response,
     _repair_canonical_name,
     build_system_prompt,
@@ -365,3 +366,126 @@ class TestParseToolResponseRepairsAndLogs:
         assert any(
             "does not appear" in rec.message for rec in caplog.records
         )
+
+
+# ----------------------------------------------------------------------
+# WU4: longest-substring repair + pending_quarantine_reason fallback
+# ----------------------------------------------------------------------
+
+
+class TestRepairOrQuarantineHallucinations:
+    """The ``Zij Kanaal C Zuid`` class of LLM hallucination — the model
+    fabricates a canonical_name that contains words not actually present
+    in the source quote (e.g. ``"Zij Kanaal C Zuid"`` for a quote
+    containing only ``"Zij Kanaal C"``). The longest-substring repair
+    rebinds the canonical to the largest token-aligned substring of the
+    canonical that *is* present in the quote. If nothing of length ≥ 3
+    matches, the entity is flagged with ``pending_quarantine_reason``
+    so the calling extraction service can soft-quarantine it.
+    """
+
+    def test_canonical_name_renamed_to_longest_quote_substring(self) -> None:
+        """Prod-style: 'Zij Kanaal C Zuid' rebound to 'Zij Kanaal C'."""
+        result = _longest_canonical_substring_in_quote(
+            "Zij Kanaal C Zuid",
+            '"Zij Kanaal C" Zuid is clearly a canal',
+        )
+        # 'Zij Kanaal C Zuid' isn't in the quote (the canal name is in
+        # quotes and 'Zuid' appears outside). The longest substring of
+        # the canonical that IS in the quote is 'Zij Kanaal C'.
+        assert result == "Zij Kanaal C"
+
+    def test_canonical_name_already_in_quote_unchanged(self) -> None:
+        result = _longest_canonical_substring_in_quote(
+            "Amsterdam", "I went to Amsterdam yesterday",
+        )
+        assert result == "Amsterdam"
+
+    def test_canonical_name_no_substring_marks_pending_quarantine(self) -> None:
+        """When no token-aligned substring of canonical is in the quote,
+        ``_longest_canonical_substring_in_quote`` returns None — the
+        caller should then flag the entity for quarantine."""
+        result = _longest_canonical_substring_in_quote(
+            "Completely Hallucinated Name", "unrelated text",
+        )
+        assert result is None
+
+    def test_repair_is_case_insensitive(self) -> None:
+        """Quote casing differs from canonical, but repair preserves
+        the original canonical's casing."""
+        result = _longest_canonical_substring_in_quote(
+            "john's bakery", "... at JOHN'S BAKERY today ...",
+        )
+        # Whole canonical is present case-insensitively → return as-is.
+        assert result == "john's bakery"
+
+    def test_repair_handles_extra_whitespace(self) -> None:
+        """Quote has a double space between tokens — match still
+        succeeds because both sides collapse whitespace before
+        comparison."""
+        result = _longest_canonical_substring_in_quote(
+            "Foo Bar", "... Foo  Bar ...",
+        )
+        assert result == "Foo Bar"
+
+    def test_minimum_length_threshold(self) -> None:
+        """A single-character canonical never repairs to itself; we
+        never produce sub-3-char matches that would be noise."""
+        result = _longest_canonical_substring_in_quote(
+            "a", "a quiet day",
+        )
+        assert result is None
+
+
+class TestParseToolResponseFlagsHallucinations:
+    """Integration: when the canonical name can't be substring-repaired,
+    the parsed entity carries a ``pending_quarantine_reason`` for the
+    extraction service to act on."""
+
+    def test_completely_unmatched_canonical_marked_pending(self) -> None:
+        tool_block = MagicMock()
+        tool_block.type = "tool_use"
+        tool_block.input = {
+            "entities": [
+                {
+                    "entity_type": "place",
+                    "canonical_name": "Atlantis",
+                    "quote": "Just a quiet day at home.",
+                    "confidence": 0.4,
+                },
+            ],
+            "relationships": [],
+        }
+        mock = MagicMock()
+        mock.content = [tool_block]
+        result = _parse_tool_response(mock)
+        assert len(result.entities) == 1
+        assert result.entities[0]["canonical_name"] == "Atlantis"
+        # Audit trail: the result carries a pending_quarantine_reason
+        # so the caller can quarantine the new entity.
+        reason = result.entities[0].get("pending_quarantine_reason", "")
+        assert reason
+        assert "Atlantis" in reason
+
+    def test_renamed_canonical_does_not_have_pending_reason(self) -> None:
+        """If the longest-substring repair succeeds, the result is
+        treated as clean — no pending_quarantine_reason."""
+        tool_block = MagicMock()
+        tool_block.type = "tool_use"
+        tool_block.input = {
+            "entities": [
+                {
+                    "entity_type": "place",
+                    "canonical_name": "Zij Kanaal C Zuid",
+                    "quote": '"Zij Kanaal C" Zuid is clearly a canal',
+                    "confidence": 0.7,
+                },
+            ],
+            "relationships": [],
+        }
+        mock = MagicMock()
+        mock.content = [tool_block]
+        result = _parse_tool_response(mock)
+        assert len(result.entities) == 1
+        assert result.entities[0]["canonical_name"] == "Zij Kanaal C"
+        assert not result.entities[0].get("pending_quarantine_reason", "")

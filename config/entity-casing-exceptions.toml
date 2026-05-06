@@ -1,0 +1,47 @@
+# Operator-managed entity-casing exceptions.
+# Keys are the lowercased form of the entity name; values are the preserved-case canonical
+# form to write back. Lookup is case-insensitive; output is exactly what's on the right.
+#
+# After editing this file, reload without restarting the server:
+#   curl -X POST <admin-reload-endpoint>/entity-casing
+#
+# The mood-dimensions.toml admin reload tab in the webapp also surfaces a button for this.
+
+[meta]
+version = "2026-05-06"
+description = "Preserved-case overrides for smart-title-case entity normalization."
+
+[exceptions]
+# Tech / brands
+"ios" = "iOS"
+"iphone" = "iPhone"
+"ipad" = "iPad"
+"ipod" = "iPod"
+"macos" = "macOS"
+"github" = "GitHub"
+"linkedin" = "LinkedIn"
+"ebay" = "eBay"
+"youtube" = "YouTube"
+"whatsapp" = "WhatsApp"
+"ikea" = "IKEA"
+"ibm" = "IBM"
+"hp" = "HP"
+"klm" = "KLM"
+"bbc" = "BBC"
+"nasa" = "NASA"
+"fbi" = "FBI"
+
+# Sports
+"fc barcelona" = "FC Barcelona"
+"ac milan" = "AC Milan"
+
+# Names with apostrophes / Dutch particles that need explicit casing
+"o'brien" = "O'Brien"
+"o'reilly" = "O'Reilly"
+"mcdonald's" = "McDonald's"
+"'t gooi" = "'t Gooi"
+
+# Place-name leading articles (handled by algorithm, but listed for clarity / overrides)
+"the netherlands" = "The Netherlands"
+"the hague" = "The Hague"
+"den haag" = "Den Haag"

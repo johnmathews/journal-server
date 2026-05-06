@@ -167,6 +167,42 @@ def test_entry_uncertain_spans_cascade_delete(db_conn):
     assert count == 0
 
 
+class TestEntityQuarantineMigration:
+    """Migration 0018 adds quarantine columns to the entities table."""
+
+    def test_entities_has_quarantine_columns(self, db_conn):
+        columns = db_conn.execute("PRAGMA table_info(entities)").fetchall()
+        names = {col["name"] for col in columns}
+        assert {"is_quarantined", "quarantine_reason", "quarantined_at"} <= names
+
+    def test_quarantine_defaults(self, db_conn):
+        """Existing rows + new rows default to is_quarantined = 0 with
+        empty reason and timestamp strings."""
+        db_conn.execute(
+            "INSERT INTO entities (user_id, entity_type, canonical_name)"
+            " VALUES (1, 'person', 'TestSeed')"
+        )
+        db_conn.commit()
+        row = db_conn.execute(
+            "SELECT is_quarantined, quarantine_reason, quarantined_at"
+            " FROM entities WHERE canonical_name = 'TestSeed'"
+        ).fetchone()
+        assert row["is_quarantined"] == 0
+        assert row["quarantine_reason"] == ""
+        assert row["quarantined_at"] == ""
+
+    def test_quarantine_index_exists(self, db_conn):
+        row = db_conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='index' AND name='idx_entities_quarantined'"
+        ).fetchone()
+        assert row is not None
+
+    def test_migration_version_at_least_18(self, db_conn):
+        from journal.db.migrations import get_current_version
+        assert get_current_version(db_conn) >= 18
+
+
 def test_entry_uncertain_spans_check_constraints(db_conn):
     db_conn.execute(
         "INSERT INTO entries (user_id, entry_date, source_type, raw_text, word_count)"

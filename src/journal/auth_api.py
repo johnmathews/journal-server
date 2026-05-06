@@ -755,6 +755,7 @@ def register_admin_routes(
     # Admin-gated; no body required.
 
     from journal.services.reload import (
+        reload_entity_casing_exceptions,
         reload_mood_dimensions,
         reload_ocr_provider,
         reload_transcription_provider,
@@ -825,4 +826,15 @@ def register_admin_routes(
         """Re-read the mood-dimensions TOML and rebuild the mood scoring service."""
         return _reload_endpoint(
             request, reload_mood_dimensions, "mood-dimensions",
+        )
+
+    @mcp.custom_route(
+        "/api/admin/reload/entity-casing",
+        methods=["POST"],
+        name="api_admin_reload_entity_casing",
+    )
+    async def admin_reload_entity_casing(request: Request) -> JSONResponse:
+        """Re-read the entity-casing exceptions TOML and rebind it on the entity store."""
+        return _reload_endpoint(
+            request, reload_entity_casing_exceptions, "entity-casing",
         )

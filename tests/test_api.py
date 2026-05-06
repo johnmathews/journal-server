@@ -1983,6 +1983,150 @@ class TestMergeHistory:
         assert data["history"][0]["absorbed_name"] == "Old Name"
 
 
+class TestEntityQuarantineApi:
+    """Soft-quarantine endpoints from WU3."""
+
+    def test_list_quarantined_returns_quarantined_only(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        active = entity_store.create_entity("person", "Atlas", "", "2026-01-01")
+        hidden = entity_store.create_entity("person", "Hallucinated", "", "2026-01-02")
+        entity_store.quarantine_entity(hidden.id, "noise")
+
+        resp = client.get("/api/entities/quarantined")
+        assert resp.status_code == 200
+        data = resp.json()
+        ids = {item["id"] for item in data["items"]}
+        assert hidden.id in ids
+        assert active.id not in ids
+        assert data["total"] == 1
+        only = data["items"][0]
+        assert only["is_quarantined"] is True
+        assert only["quarantine_reason"] == "noise"
+
+    def test_quarantine_endpoint_sets_flag(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity("person", "Atlas", "", "2026-01-01")
+
+        resp = client.post(
+            f"/api/entities/{entity.id}/quarantine",
+            json={"reason": "looks like a hallucination"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["is_quarantined"] is True
+        assert body["quarantine_reason"] == "looks like a hallucination"
+        assert body["quarantined_at"]
+
+        refetched = entity_store.get_entity(entity.id)
+        assert refetched is not None
+        assert refetched.is_quarantined is True
+
+    def test_quarantine_nonexistent_returns_404(
+        self, client: TestClient, services: dict
+    ) -> None:
+        resp = client.post(
+            "/api/entities/99999/quarantine", json={"reason": "x"},
+        )
+        assert resp.status_code == 404
+
+    def test_quarantine_invalid_reason_type_returns_400(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity("person", "Atlas", "", "2026-01-01")
+        resp = client.post(
+            f"/api/entities/{entity.id}/quarantine",
+            json={"reason": 123},
+        )
+        assert resp.status_code == 400
+
+    def test_release_quarantine_clears_flag(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity("person", "Atlas", "", "2026-01-01")
+        entity_store.quarantine_entity(entity.id, "noise")
+
+        resp = client.post(f"/api/entities/{entity.id}/release-quarantine")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["is_quarantined"] is False
+        assert body["quarantine_reason"] == ""
+        assert body["quarantined_at"] == ""
+
+    def test_release_quarantine_nonexistent_returns_404(
+        self, client: TestClient, services: dict
+    ) -> None:
+        resp = client.post("/api/entities/99999/release-quarantine")
+        assert resp.status_code == 404
+
+    def test_default_entity_list_excludes_quarantined(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        active = entity_store.create_entity("person", "Atlas", "", "2026-01-01")
+        hidden = entity_store.create_entity("person", "Hallucinated", "", "2026-01-02")
+        entity_store.quarantine_entity(hidden.id, "noise")
+
+        resp = client.get("/api/entities")
+        assert resp.status_code == 200
+        data = resp.json()
+        ids = {item["id"] for item in data["items"]}
+        assert active.id in ids
+        assert hidden.id not in ids
+        assert data["total"] == 1
+
+    def test_quarantined_entity_excluded_from_entity_distribution(
+        self,
+        client: TestClient,
+        repo: SQLiteEntryRepository,
+        services: dict,
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entry = repo.create_entry("2026-03-15", "photo", "text", 1)
+        atlas = entity_store.create_entity("person", "Atlas", "", "2026-03-15")
+        ghost = entity_store.create_entity("person", "Ghost", "", "2026-03-15")
+        entity_store.create_mention(atlas.id, entry.id, "Atlas", 0.9, "run-1")
+        entity_store.create_mention(ghost.id, entry.id, "Ghost", 0.9, "run-1")
+
+        # Sanity: both visible before quarantine.
+        resp = client.get("/api/dashboard/entity-distribution")
+        names_before = {item["canonical_name"] for item in resp.json()["items"]}
+        assert {"Atlas", "Ghost"} <= names_before
+
+        # Quarantine Ghost — it should disappear from the chart.
+        entity_store.quarantine_entity(ghost.id, "spurious")
+        resp = client.get("/api/dashboard/entity-distribution")
+        assert resp.status_code == 200
+        names_after = {item["canonical_name"] for item in resp.json()["items"]}
+        assert "Atlas" in names_after
+        assert "Ghost" not in names_after
+
+    def test_quarantined_entity_excluded_from_entity_trends(
+        self,
+        client: TestClient,
+        repo: SQLiteEntryRepository,
+        services: dict,
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entry = repo.create_entry("2026-03-15", "photo", "text", 1)
+        atlas = entity_store.create_entity("person", "Atlas", "", "2026-03-15")
+        ghost = entity_store.create_entity("person", "Ghost", "", "2026-03-15")
+        entity_store.create_mention(atlas.id, entry.id, "Atlas", 0.9, "run-1")
+        entity_store.create_mention(ghost.id, entry.id, "Ghost", 0.9, "run-1")
+        entity_store.quarantine_entity(ghost.id, "spurious")
+
+        resp = client.get("/api/dashboard/entity-trends?bin=month")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "Atlas" in data["entities"]
+        assert "Ghost" not in data["entities"]
+
+
 class TestEntitySearchFilter:
     """Regression test for the tuple-unpack bug in GET /api/entities?search=..."""
 

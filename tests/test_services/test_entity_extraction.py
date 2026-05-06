@@ -11,7 +11,12 @@ from journal.db.repository import SQLiteEntryRepository
 from journal.db.user_repository import SQLiteUserRepository
 from journal.entitystore.store import SQLiteEntityStore
 from journal.providers.extraction import RawExtractionResult
-from journal.services.entity_extraction import EntityExtractionService
+from journal.services.entity_extraction import (
+    EntityExtractionService,
+    _is_short_difference,
+    _is_signature_match,
+    _normalized_signature,
+)
 
 if TYPE_CHECKING:
     import sqlite3
@@ -164,13 +169,15 @@ class TestDedupExactName:
         repo: SQLiteEntryRepository,
         entity_store: SQLiteEntityStore,
     ) -> None:
-        e1 = repo.create_entry("2026-03-22", "photo", "one", 1).id
-        e2 = repo.create_entry("2026-03-23", "photo", "two", 1).id
+        # Entry text contains "Atlas" so the post-extraction sanity
+        # sweep won't quarantine the dedup'd entity.
+        e1 = repo.create_entry("2026-03-22", "photo", "Atlas one", 2).id
+        e2 = repo.create_entry("2026-03-23", "photo", "Atlas two", 2).id
 
         extractor = MagicMock()
         extractor.extract_entities.side_effect = [
-            _raw(entities=[_entity("Atlas", "person")]),
-            _raw(entities=[_entity("Atlas", "person")]),
+            _raw(entities=[_entity("Atlas", "person", quote="Atlas one")]),
+            _raw(entities=[_entity("Atlas", "person", quote="Atlas two")]),
         ]
         service = _make_service(repo, entity_store, extractor)
 
@@ -737,3 +744,418 @@ class TestDeletedEntryRace:
             service.extract_from_entry(entry.id)
 
         entity_store.create_relationship = original_create_rel
+
+
+class TestNormalizedSignatureHelpers:
+    """Pure-function tests for the relaxed merge-candidate heuristic."""
+
+    def test_normalized_signature_collapses_whitespace_and_case(self) -> None:
+        assert _normalized_signature("Zij Kanaal C Weg") == "zijkanaalcweg"
+        assert _normalized_signature("Zijkanaal C Weg") == "zijkanaalcweg"
+        # Identical text differing only in whitespace should collapse to
+        # the same signature.
+        assert (
+            _normalized_signature("Zij Kanaal")
+            == _normalized_signature("ZijKanaal")
+        )
+
+    def test_normalized_signature_drops_trivial_punctuation(self) -> None:
+        assert _normalized_signature("St. Mary-le-Bow") == "stmarylebow"
+        assert _normalized_signature("St Mary, le Bow") == "stmarylebow"
+
+    def test_is_short_difference_true_for_short_suffix(self) -> None:
+        # "Zij Kanaal C" is contained in "Zij Kanaal C Weg"; leftover
+        # "Weg" is a single token.
+        assert _is_short_difference("Zij Kanaal C Weg", "Zij Kanaal C")
+
+    def test_is_short_difference_false_when_not_substring(self) -> None:
+        assert not _is_short_difference("Amsterdam", "Rotterdam")
+
+    def test_is_short_difference_false_for_long_leftover(self) -> None:
+        # Contains "Apple" but the leftover " has many trailing words" is
+        # both longer than 6 chars AND multi-word — should not flag.
+        assert not _is_short_difference(
+            "Apple has many trailing words", "Apple"
+        )
+
+    def test_is_signature_match_equal_signatures(self) -> None:
+        assert _is_signature_match("Zij Kanaal C Weg", "Zijkanaal C Weg")
+
+    def test_is_signature_match_short_suffix_difference(self) -> None:
+        # Differs in the trailing word — the user's prod case.
+        assert _is_signature_match("Zij Kanaal C Weg", "Zij Kanaal C Zuid")
+
+    def test_is_signature_match_whitespace_only_difference(self) -> None:
+        assert _is_signature_match("Zij Kanaal", "ZijKanaal")
+
+    def test_is_signature_match_unrelated_names(self) -> None:
+        assert not _is_signature_match("Amsterdam", "Rotterdam")
+
+    def test_is_signature_match_skips_identical_strings(self) -> None:
+        # Pure equality is technically a signature match, but the caller
+        # uses _is_signature_match to find *near* duplicates within the
+        # same entity_type — identical strings can't pair with themselves
+        # so this returns True and the caller filters self-pairs by id.
+        assert _is_signature_match("Vienna", "Vienna")
+
+    def test_is_signature_match_skips_empty_or_singlechar_names(self) -> None:
+        # Avoid false positives on degenerate inputs.
+        assert not _is_signature_match("", "Anything")
+        assert not _is_signature_match("a", "Apple")
+
+
+class TestSignatureMergeCandidatesDuringExtraction:
+    """Integration: relaxed heuristic emits merge candidates during
+    extraction even when embedding distance does not."""
+
+    def test_two_places_with_whitespace_only_difference_flagged(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        # Pre-seed the existing place with an embedding that is clearly
+        # NOT close to whatever the new extraction produces, so that the
+        # embedding-distance path will not flag the pair.
+        existing = entity_store.create_entity(
+            "place", "Zijkanaal C Weg", "", "2026-03-01"
+        )
+        entity_store.set_entity_embedding(existing.id, [1.0, 0.0, 0.0])
+
+        e = repo.create_entry("2026-03-22", "photo", "one", 1).id
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity("Zij Kanaal C Weg", "place")],
+        )
+        embeddings = MagicMock()
+        # Orthogonal — embedding distance gives 0 similarity, well below
+        # any threshold. Without the new heuristic, no candidate is created.
+        embeddings.embed_query = MagicMock(return_value=[0.0, 1.0, 0.0])
+        service = _make_service(
+            repo, entity_store, extractor,
+            embeddings=embeddings, threshold=0.9,
+        )
+        service.extract_from_entry(e)
+
+        candidates = entity_store.list_merge_candidates(status="pending")
+        names = {
+            tuple(sorted([c.entity_a.canonical_name, c.entity_b.canonical_name]))
+            for c in candidates
+        }
+        assert ("Zij Kanaal C Weg", "Zijkanaal C Weg") in names
+
+    def test_two_places_differing_in_trailing_word_flagged(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        existing = entity_store.create_entity(
+            "place", "Zij Kanaal C Weg", "", "2026-03-01"
+        )
+        entity_store.set_entity_embedding(existing.id, [1.0, 0.0, 0.0])
+
+        e = repo.create_entry("2026-03-22", "photo", "one", 1).id
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity("Zij Kanaal C Zuid", "place")],
+        )
+        embeddings = MagicMock()
+        embeddings.embed_query = MagicMock(return_value=[0.0, 1.0, 0.0])
+        service = _make_service(
+            repo, entity_store, extractor,
+            embeddings=embeddings, threshold=0.9,
+        )
+        service.extract_from_entry(e)
+
+        candidates = entity_store.list_merge_candidates(status="pending")
+        names = {
+            tuple(sorted([c.entity_a.canonical_name, c.entity_b.canonical_name]))
+            for c in candidates
+        }
+        assert ("Zij Kanaal C Weg", "Zij Kanaal C Zuid") in names
+
+    def test_unrelated_place_names_not_flagged_by_heuristic(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        # Both names have similar length but no signature overlap, and
+        # we keep embeddings orthogonal so the embedding-distance path
+        # cannot accidentally flag them either.
+        existing = entity_store.create_entity(
+            "place", "Amsterdam", "", "2026-03-01"
+        )
+        entity_store.set_entity_embedding(existing.id, [1.0, 0.0, 0.0])
+
+        e = repo.create_entry("2026-03-22", "photo", "one", 1).id
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity("Rotterdam", "place")],
+        )
+        embeddings = MagicMock()
+        embeddings.embed_query = MagicMock(return_value=[0.0, 1.0, 0.0])
+        service = _make_service(
+            repo, entity_store, extractor,
+            embeddings=embeddings, threshold=0.9,
+        )
+        service.extract_from_entry(e)
+
+        assert entity_store.list_merge_candidates(status="pending") == []
+
+    def test_signature_match_skipped_across_entity_types(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        # A "Football" activity and a "Football" organization should not
+        # be flagged — they're different types, so they can't be merged.
+        existing = entity_store.create_entity(
+            "activity", "Football", "", "2026-03-01"
+        )
+        entity_store.set_entity_embedding(existing.id, [1.0, 0.0, 0.0])
+
+        e = repo.create_entry("2026-03-22", "photo", "one", 1).id
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity("Football", "organization")],
+        )
+        embeddings = MagicMock()
+        embeddings.embed_query = MagicMock(return_value=[0.0, 1.0, 0.0])
+        service = _make_service(
+            repo, entity_store, extractor,
+            embeddings=embeddings, threshold=0.9,
+        )
+        service.extract_from_entry(e)
+
+        assert entity_store.list_merge_candidates(status="pending") == []
+
+
+class TestPostExtractionSanitySweep:
+    """WU4: after extraction, every entity touched in this run is
+    re-checked. If its canonical name doesn't appear in any of its
+    mention quotes or any mentioned entry's final_text, it is
+    soft-quarantined. Catches LLM hallucinations that survive the
+    provider-level repair stage and zombie-rebound entities (a
+    hallucinated name re-bound to a corrected quote via embedding
+    similarity).
+    """
+
+    def test_entity_with_canonical_name_in_quote_not_quarantined(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        entry = repo.create_entry(
+            "2026-03-22", "photo", "I cycled along Vienna today.", 5,
+        )
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity(
+                "Vienna", "place", quote="cycled along Vienna today",
+            )],
+        )
+        service = _make_service(repo, entity_store, extractor)
+        service.extract_from_entry(entry.id)
+        e = entity_store.get_entity_by_name("Vienna", "place")
+        assert e is not None
+        assert e.is_quarantined is False
+
+    def test_entity_with_canonical_name_in_entry_text_but_not_quote_not_quarantined(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        """Quotes can be paraphrases or shortened — the entry text is
+        the broader source. If the canonical appears in the entry text
+        but not in the (clipped) quote, the entity is still legitimate.
+        """
+        entry = repo.create_entry(
+            "2026-03-22",
+            "photo",
+            "I went cycling along Zij Kanaal today after lunch.",
+            10,
+        )
+        extractor = MagicMock()
+        # Quote is clipped — doesn't contain the full canonical, but
+        # the entry text does.
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity(
+                "Zij Kanaal", "place", quote="cycling along",
+            )],
+        )
+        service = _make_service(repo, entity_store, extractor)
+        service.extract_from_entry(entry.id)
+        e = entity_store.get_entity_by_name("Zij Kanaal", "place")
+        assert e is not None
+        assert e.is_quarantined is False
+
+    def test_entity_with_canonical_name_in_neither_quote_nor_entry_quarantined(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        """A canonical that doesn't appear anywhere — soft-quarantine.
+        Pre-seed the entity and the quote so the provider-level repair
+        wouldn't have caught it (we want to test the post-extraction
+        sweep specifically)."""
+        entry = repo.create_entry(
+            "2026-03-22", "photo", "Just a quiet day at home.", 6,
+        )
+        extractor = MagicMock()
+        # Quote contains 'a quiet day' (so the provider repair would
+        # rename the canonical away from 'Atlantis'). To exercise the
+        # SWEEP path specifically, pre-seed the entity directly.
+        existing = entity_store.create_entity(
+            "place", "Atlantis", "", "2026-03-01"
+        )
+        # And give it a mention with a quote that *also* doesn't contain
+        # the canonical name.
+        entity_store.create_mention(
+            entity_id=existing.id,
+            entry_id=entry.id,
+            quote="quiet day",
+            confidence=0.4,
+            extraction_run_id="seed",
+        )
+        # Now re-extract — the LLM produces the same entity (matched on
+        # canonical-by-name), with a quote that ALSO lacks 'Atlantis'.
+        # The provider repair won't fire (we bypass it via _resolve), so
+        # the entity is `touched` in this run; the sweep must quarantine.
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity("Atlantis", "place", quote="quiet day")],
+        )
+        service = _make_service(repo, entity_store, extractor)
+        service.extract_from_entry(entry.id)
+
+        refreshed = entity_store.get_entity(
+            existing.id, user_id=None,
+        )
+        # If the post-extraction sweep is wired in, this is True.
+        assert refreshed is not None
+        assert refreshed.is_quarantined is True
+        assert refreshed.quarantine_reason
+        assert "Atlantis" in refreshed.quarantine_reason
+
+    def test_reextraction_after_entry_edit_quarantines_orphaned_canonical(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        """Headline regression test for the prod ``Zij Kanaal C Zuid``
+        incident.
+
+        Reproduction:
+          1. Original entry text mentions ``Zij Kanaal C Zuid``; an
+             entity is created with that canonical_name and a mention
+             whose quote contains the full string.
+          2. The user edits the entry (final_text correction) and
+             removes the stray "Zuid", leaving only ``Zij Kanaal C``.
+          3. Re-extraction is triggered. The new mention's quote
+             contains ``Zij Kanaal C`` only. Because of the existing
+             embedding-similarity dedup logic (and the old canonical
+             name still being a substring on the alias ladder), the
+             new mention re-binds to the SAME entity that still carries
+             the hallucinated canonical ``Zij Kanaal C Zuid``.
+          4. After the post-extraction sanity sweep runs, the entity
+             must be quarantined — its canonical can't be found in any
+             quote or entry text any more.
+        """
+        # 1. seed: original entry + entity with the full hallucinated name.
+        entry = repo.create_entry(
+            "2026-03-22",
+            "photo",
+            "I cycled past Zij Kanaal C Zuid this afternoon.",
+            10,
+        )
+        original_entity = entity_store.create_entity(
+            "place", "Zij Kanaal C Zuid", "", "2026-03-01"
+        )
+        entity_store.create_mention(
+            entity_id=original_entity.id,
+            entry_id=entry.id,
+            quote="cycled past Zij Kanaal C Zuid this afternoon",
+            confidence=0.9,
+            extraction_run_id="initial",
+        )
+
+        # 2. user edits entry text: drops the stray "Zuid".
+        repo.update_final_text(
+            entry.id,
+            "I cycled past Zij Kanaal C this afternoon.",
+            8,
+            1,
+        )
+
+        # 3. re-extract. The LLM emits 'Zij Kanaal C Zuid' (the same
+        #    canonical it returned originally), with a quote that
+        #    contains only 'Zij Kanaal C'. The provider's longest-
+        #    substring repair will rename it to 'Zij Kanaal C', but
+        #    because of stage-a/b matching this re-binds to the SAME
+        #    original entity (745 in prod). Wait — that won't actually
+        #    happen because the old entity has a different canonical
+        #    after rename. To reproduce the prod path more faithfully,
+        #    we feed the LLM raw extraction with a quote that DOES
+        #    contain the full hallucinated string (so the provider
+        #    repair leaves the canonical alone), and let the sweep
+        #    catch the still-orphan canonical via the entry-text
+        #    check.
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[
+                _entity(
+                    "Zij Kanaal C Zuid",
+                    "place",
+                    quote="cycled past Zij Kanaal C Zuid this afternoon",
+                ),
+            ],
+        )
+        service = _make_service(repo, entity_store, extractor)
+        service.extract_from_entry(entry.id)
+
+        # Sanity: the entity was matched (no new entity created).
+        assert entity_store.count_entities(include_quarantined=True) == 1
+
+        # 4. post-sanity sweep: 'Zij Kanaal C Zuid' is in the new quote
+        #    but NOT in the entry's final_text. The current sweep checks
+        #    quote-or-entry-text — quote alone is enough to clear it. To
+        #    exercise the regression in the user's prod case (where the
+        #    entry text is the source of truth), we now strip "Zuid"
+        #    from the quote too via a second re-extraction round whose
+        #    quote no longer contains the hallucinated tail.
+        extractor.extract_entities.return_value = _raw(
+            entities=[
+                _entity(
+                    "Zij Kanaal C Zuid",
+                    "place",
+                    # Quote is now the corrected snippet — does NOT
+                    # contain the stray "Zuid". The provider repair
+                    # WILL rename this; but for the sweep to fire we
+                    # bypass that by pre-seeding via the store API.
+                    quote="cycled past Zij Kanaal C this afternoon",
+                ),
+            ],
+        )
+        service.extract_from_entry(entry.id)
+
+        # The entity matched against the seeded canonical (stage a),
+        # so its name is still 'Zij Kanaal C Zuid'. The sweep checks
+        # quotes (now: 'Zij Kanaal C') and entry text (now: 'Zij Kanaal
+        # C') — neither contains 'Zij Kanaal C Zuid'. Quarantine.
+        refreshed = entity_store.get_entity(original_entity.id)
+        assert refreshed is not None
+        assert refreshed.is_quarantined is True
+        assert "Zij Kanaal C Zuid" in refreshed.quarantine_reason
+
+    def test_quarantined_entity_can_be_released_via_store(
+        self,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        """Orthogonal sanity check — soft-quarantine is reversible."""
+        e = entity_store.create_entity(
+            "place", "Atlantis", "", "2026-03-01"
+        )
+        entity_store.quarantine_entity(e.id, "test reason")
+        refreshed = entity_store.get_entity(e.id)
+        assert refreshed is not None and refreshed.is_quarantined is True
+        entity_store.release_quarantine(e.id)
+        refreshed = entity_store.get_entity(e.id)
+        assert refreshed is not None and refreshed.is_quarantined is False

@@ -27,6 +27,7 @@ from journal.config import Config
 from journal.providers.ocr import build_ocr_provider
 from journal.providers.transcription import build_transcription_provider
 from journal.services.reload import (
+    reload_entity_casing_exceptions,
     reload_mood_dimensions,
     reload_ocr_provider,
     reload_transcription_provider,
@@ -296,3 +297,124 @@ class TestReloadMoodDimensions:
         cfg = replace(base_config, enable_mood_scoring=False)
         with pytest.raises(RuntimeError, match="mood scoring is disabled"):
             reload_mood_dimensions(services, cfg)
+
+
+# ---------------------------------------------------------------------------
+# Entity-casing exceptions reload
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def entity_casing_path(tmp_path: Path) -> Path:
+    """A small entity-casing exceptions TOML for reload tests."""
+    p = tmp_path / "entity-casing-exceptions.toml"
+    p.write_text(
+        '[meta]\n'
+        'version = "test"\n'
+        '\n'
+        '[exceptions]\n'
+        '"ios" = "iOS"\n'
+        '"nasa" = "NASA"\n',
+        encoding="utf-8",
+    )
+    return p
+
+
+class TestReloadEntityCasingExceptions:
+    def _build_services(
+        self, casing_path: Path, db_path: Path
+    ) -> dict[str, Any]:
+        """Construct an isolated services dict with a real SQLite-backed store."""
+        from journal.db.connection import get_connection
+        from journal.db.migrations import run_migrations
+        from journal.entitystore.store import SQLiteEntityStore
+        from journal.services.entity_naming import (
+            load_entity_casing_exceptions,
+        )
+
+        conn = get_connection(db_path)
+        run_migrations(conn)
+        exceptions = load_entity_casing_exceptions(casing_path)
+        store = SQLiteEntityStore(conn, casing_exceptions=exceptions)
+        return {
+            "entity_store": store,
+            "entity_casing_exceptions": exceptions,
+        }
+
+    def test_swaps_exceptions_table(
+        self, entity_casing_path: Path, base_config: Config, tmp_path: Path
+    ) -> None:
+        cfg = replace(
+            base_config, entity_casing_exceptions_path=entity_casing_path
+        )
+        services = self._build_services(entity_casing_path, tmp_path / "casing-test.db")
+        store = services["entity_store"]
+
+        # Sanity: the seeded exceptions are in effect.
+        e1 = store.create_entity("topic", "ios", "", "2026-01-01")
+        assert e1.canonical_name == "iOS"
+
+        # Operator edits the file to add a new entry (and remove an old one).
+        entity_casing_path.write_text(
+            '[exceptions]\n'
+            '"hp" = "HP"\n',
+            encoding="utf-8",
+        )
+        summary = reload_entity_casing_exceptions(services, cfg)
+
+        # New exception is honoured; old one no longer applied.
+        e2 = store.create_entity("organization", "hp", "", "2026-01-01")
+        assert e2.canonical_name == "HP"
+        e3 = store.create_entity("topic", "ios", "", "2026-01-02")
+        # 'iOS' is no longer in the table — but mid-word uppercase fallback
+        # only fires for input that has uppercase chars; raw 'ios' falls
+        # through to plain title case.
+        assert e3.canonical_name == "Ios"
+
+        # Summary reflects new state.
+        assert summary["reloaded"] == "entity-casing"
+        assert summary["exception_count"] == 1
+        assert summary["path"] == str(entity_casing_path)
+        assert "reloaded_at" in summary
+
+    def test_returns_summary_for_initial_load(
+        self, entity_casing_path: Path, base_config: Config, tmp_path: Path
+    ) -> None:
+        cfg = replace(
+            base_config, entity_casing_exceptions_path=entity_casing_path
+        )
+        services = self._build_services(entity_casing_path, tmp_path / "casing-test.db")
+        summary = reload_entity_casing_exceptions(services, cfg)
+        assert summary["reloaded"] == "entity-casing"
+        assert summary["exception_count"] == 2
+        assert "reloaded_at" in summary
+
+    def test_missing_file_logs_and_returns_empty(
+        self, tmp_path: Path, base_config: Config
+    ) -> None:
+        casing_path = tmp_path / "missing.toml"
+        cfg = replace(
+            base_config, entity_casing_exceptions_path=casing_path
+        )
+        # Build services with a nonexistent file path — empty initial table.
+        services = self._build_services(
+            tmp_path / "nope.toml", tmp_path / "casing-test.db"
+        )
+        summary = reload_entity_casing_exceptions(services, cfg)
+        assert summary["exception_count"] == 0
+
+    def test_services_dict_updated(
+        self, entity_casing_path: Path, base_config: Config, tmp_path: Path
+    ) -> None:
+        cfg = replace(
+            base_config, entity_casing_exceptions_path=entity_casing_path
+        )
+        services = self._build_services(entity_casing_path, tmp_path / "casing-test.db")
+        # Edit and reload.
+        entity_casing_path.write_text(
+            '[exceptions]\n'
+            '"klm" = "KLM"\n',
+            encoding="utf-8",
+        )
+        reload_entity_casing_exceptions(services, cfg)
+        assert services["entity_casing_exceptions"] == {"klm": "KLM"}

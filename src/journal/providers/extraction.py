@@ -12,6 +12,7 @@ triples.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -327,6 +328,71 @@ def _repair_canonical_name(
     return canonical_name, False
 
 
+# Minimum length (in characters) of a canonical substring we will accept
+# as a longest-substring repair. Below this, the match is too short to
+# carry meaning — we'd rather flag the whole thing for quarantine.
+_MIN_SUBSTRING_REPAIR_LEN = 3
+
+
+def _longest_canonical_substring_in_quote(
+    canonical: str, quote: str,
+) -> str | None:
+    """Return the longest token-aligned substring of ``canonical`` that
+    appears in ``quote``, or None if nothing of length ≥ 3 chars matches.
+
+    Comparison is **case-insensitive** and **whitespace-tolerant**: both
+    sides have whitespace runs collapsed to a single space before the
+    substring check. The returned string preserves the **canonical's
+    original casing** (so the post-WU2 smart-title-cased canonical isn't
+    re-cased from the quote).
+
+    Token-aligned: candidates are produced by joining contiguous
+    space-separated tokens of ``canonical``. We never return mid-token
+    fragments like ``"C Zui"`` from ``"Zij Kanaal C Zuid"``.
+
+    Used by the entity-extraction provider to repair hallucinated
+    canonical names — when the LLM emits ``"Zij Kanaal C Zuid"`` for a
+    quote containing only ``"Zij Kanaal C"``, this returns
+    ``"Zij Kanaal C"``. If the longest matchable substring is too short
+    (< 3 chars), the result is None so the caller can soft-quarantine
+    the new entity instead of fabricating a tiny rebound.
+    """
+    if not canonical or not quote:
+        return None
+
+    canonical_collapsed = re.sub(r"\s+", " ", canonical.strip())
+    quote_collapsed = re.sub(r"\s+", " ", quote.strip())
+    canonical_lower = canonical_collapsed.lower()
+    quote_lower = quote_collapsed.lower()
+
+    if not canonical_collapsed or not quote_collapsed:
+        return None
+
+    # Whole canonical present (modulo case + whitespace) — return as-is,
+    # subject to the minimum-length floor (a 1-char canonical is too
+    # short to be meaningful).
+    if (
+        canonical_lower in quote_lower
+        and len(canonical_collapsed) >= _MIN_SUBSTRING_REPAIR_LEN
+    ):
+        return canonical
+
+    # Token-aligned: try every contiguous span of canonical's tokens,
+    # longest first. Returns the first substring whose lower form is
+    # in the quote and is at least _MIN_SUBSTRING_REPAIR_LEN chars long.
+    tokens = canonical_collapsed.split()
+    n = len(tokens)
+    for length in range(n, 0, -1):
+        for start in range(0, n - length + 1):
+            candidate = " ".join(tokens[start : start + length])
+            if len(candidate) < _MIN_SUBSTRING_REPAIR_LEN:
+                continue
+            cand_lower = candidate.lower()
+            if cand_lower in quote_lower:
+                return candidate
+    return None
+
+
 def _parse_tool_response(message: Any) -> RawExtractionResult:
     """Extract entities/relationships from an Anthropic tool-use response.
 
@@ -365,6 +431,7 @@ def _parse_tool_response(message: Any) -> RawExtractionResult:
         repaired_name, was_repaired = _repair_canonical_name(
             canonical_name, quote,
         )
+        pending_quarantine_reason = ""
         if was_repaired:
             logger.warning(
                 "Repaired clipped canonical_name from LLM: %r -> %r "
@@ -376,11 +443,36 @@ def _parse_tool_response(message: Any) -> RawExtractionResult:
             and quote
             and canonical_name.lower() not in quote.lower()
         ):
-            logger.warning(
-                "LLM returned canonical_name %r that does not appear "
-                "in its quote %r — keeping as-is, no repair candidate "
-                "found", canonical_name, quote,
+            # The token-prefix repair didn't catch anything. Try a
+            # longest-token-substring repair against the quote — this is
+            # the WU4 path that handles LLM hallucinations like
+            # "Zij Kanaal C Zuid" for a quote containing only
+            # "Zij Kanaal C". If a substring matches we rename;
+            # otherwise we keep the original name (for audit) and flag
+            # the result so the calling extraction service can
+            # soft-quarantine the entity it creates.
+            longest_substring = _longest_canonical_substring_in_quote(
+                canonical_name, quote,
             )
+            if longest_substring is not None and (
+                longest_substring.lower() != canonical_name.lower()
+            ):
+                logger.info(
+                    "Renamed canonical_name from %r to %r "
+                    "(longest-substring of quote %r)",
+                    canonical_name, longest_substring, quote,
+                )
+                repaired_name = longest_substring
+            else:
+                pending_quarantine_reason = (
+                    f"canonical_name {canonical_name!r} not found in "
+                    f"source quote {quote!r}"
+                )
+                logger.warning(
+                    "LLM returned canonical_name %r that does not appear "
+                    "in its quote %r — flagging for quarantine",
+                    canonical_name, quote,
+                )
         entities.append(
             {
                 "entity_type": item.get("entity_type", "other"),
@@ -389,6 +481,7 @@ def _parse_tool_response(message: Any) -> RawExtractionResult:
                 "aliases": list(item.get("aliases") or []),
                 "quote": quote,
                 "confidence": float(item.get("confidence", 0.0) or 0.0),
+                "pending_quarantine_reason": pending_quarantine_reason,
             }
         )
 

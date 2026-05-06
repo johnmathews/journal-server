@@ -16,11 +16,12 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
+import re
 import sqlite3
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from journal.models import ExtractionResult
+from journal.models import Entity, ExtractionResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -53,6 +54,169 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     if norm_a == 0.0 or norm_b == 0.0:
         return 0.0
     return dot / (math.sqrt(norm_a) * math.sqrt(norm_b))
+
+
+# Synthetic similarity scores assigned to merge candidates surfaced via
+# the relaxed string-signature heuristic. We pick values close to 1.0 so
+# the candidates float to the top of the merge-review UI (which sorts by
+# similarity DESC) — the heuristic is high-confidence on near-duplicate
+# place names that the embedding distance happens to miss.
+_SIGNATURE_EXACT_MATCH_SCORE = 1.0
+_SIGNATURE_SHORT_DIFF_SCORE = 0.95
+
+
+def _normalized_signature(name: str) -> str:
+    """Lowercase, strip whitespace runs, drop trivial punctuation.
+
+    Designed so OCR-driven splits like ``Zij Kanaal`` vs ``Zijkanaal``
+    or ``St. Mary`` vs ``St Mary`` collapse to the same string. We keep
+    this conservative — only commas, periods, and hyphens are stripped
+    so names that intentionally contain other punctuation aren't merged
+    by accident.
+    """
+    s = name.lower().strip()
+    s = re.sub(r"\s+", "", s)
+    s = re.sub(r"[\.,\-]", "", s)
+    return s
+
+
+def _is_short_difference(longer: str, shorter: str) -> bool:
+    """Return True when ``shorter`` is a substring of ``longer`` and the
+    leftover after removing it is small enough to suggest a near-duplicate.
+
+    We treat "small" as either ``<= 6 characters`` or a single token
+    (no whitespace). Both cases catch trailing/leading qualifiers like
+    ``" Weg"``, ``" Zuid"``, or ``"St "`` that distinguish near-duplicate
+    place names without producing false positives on long sentences that
+    happen to contain a short common substring.
+    """
+    if shorter not in longer:
+        return False
+    leftover = longer.replace(shorter, "", 1).strip()
+    return len(leftover) <= 6 or " " not in leftover
+
+
+def _common_prefix_len(a: str, b: str) -> int:
+    """Length of the longest common prefix of ``a`` and ``b``."""
+    n = min(len(a), len(b))
+    i = 0
+    while i < n and a[i] == b[i]:
+        i += 1
+    return i
+
+
+def _common_suffix_len(a: str, b: str) -> int:
+    """Length of the longest common suffix of ``a`` and ``b``."""
+    n = min(len(a), len(b))
+    i = 0
+    while i < n and a[-1 - i] == b[-1 - i]:
+        i += 1
+    return i
+
+
+def _is_signature_match(name_a: str, name_b: str) -> bool:
+    """True if two entity names should be flagged as merge candidates by
+    the relaxed string-signature heuristic.
+
+    Three cases trigger a match:
+      1. Normalized signatures (lowercased, whitespace-stripped, trivial
+         punctuation removed) are identical.
+      2. One signature is a substring of the other and the leftover is
+         short (≤ 6 chars or a single token).
+      3. The two signatures share a long common prefix or suffix
+         (≥ 60% of the shorter name and ≥ 4 chars) and each unique tail
+         is short (≤ 6 chars or a single token).
+
+    Case 3 catches near-duplicates whose trailing/leading qualifiers
+    differ (e.g. ``Zij Kanaal C Weg`` vs ``Zij Kanaal C Zuid``) which
+    pure substring containment misses.
+
+    The caller is responsible for filtering out same-id pairs and
+    enforcing same-``entity_type``.
+    """
+    # Degenerate inputs: skip to avoid false positives on empty strings
+    # or single-character names that would substring-match anything.
+    if not name_a.strip() or not name_b.strip():
+        return False
+    if min(len(name_a.strip()), len(name_b.strip())) < 2:
+        return False
+
+    sig_a = _normalized_signature(name_a)
+    sig_b = _normalized_signature(name_b)
+    if not sig_a or not sig_b:
+        return False
+    if sig_a == sig_b:
+        return True
+
+    # Case 2: substring + short-leftover. Compare the
+    # whitespace-collapsed but case-preserved variants so the leftover
+    # length reflects the original strings, not the case-folded
+    # signatures.
+    collapsed_a = re.sub(r"\s+", "", name_a.strip())
+    collapsed_b = re.sub(r"\s+", "", name_b.strip())
+    if sig_b in sig_a and _is_short_difference(collapsed_a, collapsed_b):
+        return True
+    if sig_a in sig_b and _is_short_difference(collapsed_b, collapsed_a):
+        return True
+
+    # Case 3: long common prefix or suffix with short divergent tails.
+    # Operate on the signatures so case/whitespace differences don't
+    # truncate the common region. We require:
+    #   - the common region to be ≥ 8 chars (avoids "Amsterdam" /
+    #     "Rotterdam" sharing a 6-char "terdam" suffix);
+    #   - the common region to be at least twice the max tail length
+    #     (so the shared portion clearly dominates the divergence);
+    #   - both divergent tails to be short (≤ 6 chars).
+    prefix = _common_prefix_len(sig_a, sig_b)
+    if prefix >= 8:
+        tail_a = sig_a[prefix:]
+        tail_b = sig_b[prefix:]
+        max_tail = max(len(tail_a), len(tail_b))
+        if (
+            _is_short_tail(tail_a)
+            and _is_short_tail(tail_b)
+            and prefix >= 2 * max_tail
+        ):
+            return True
+
+    suffix = _common_suffix_len(sig_a, sig_b)
+    if suffix >= 8:
+        tail_a = sig_a[: len(sig_a) - suffix]
+        tail_b = sig_b[: len(sig_b) - suffix]
+        max_tail = max(len(tail_a), len(tail_b))
+        if (
+            _is_short_tail(tail_a)
+            and _is_short_tail(tail_b)
+            and suffix >= 2 * max_tail
+        ):
+            return True
+
+    return False
+
+
+def _is_short_tail(tail: str) -> bool:
+    """Whether a divergent tail string counts as 'short' for the
+    common-prefix/suffix heuristic.
+
+    A tail of ≤ 6 characters is always short. Longer tails are only
+    accepted when they're empty or a single token — but since we've
+    already collapsed whitespace, this collapses to the length check.
+    """
+    return len(tail) <= 6
+
+
+def _signature_match_score(name_a: str, name_b: str) -> float | None:
+    """Return a synthetic similarity score for the heuristic, or None.
+
+    ``_SIGNATURE_EXACT_MATCH_SCORE`` for identical signatures (case /
+    whitespace / trivial-punctuation differences only),
+    ``_SIGNATURE_SHORT_DIFF_SCORE`` for short-substring near-duplicates.
+    """
+    if not _is_signature_match(name_a, name_b):
+        return None
+    if _normalized_signature(name_a) == _normalized_signature(name_b):
+        return _SIGNATURE_EXACT_MATCH_SCORE
+    return _SIGNATURE_SHORT_DIFF_SCORE
 
 
 def _report_progress(
@@ -147,6 +311,9 @@ class EntityExtractionService:
         resolved: dict[str, int] = {}
         # Cache the author entity so we only look it up / create it once.
         author_entity_id: int | None = None
+        # Every entity touched by this extraction run — used by the
+        # post-extraction sanity sweep below.
+        touched_entity_ids: set[int] = set()
 
         for raw_entity in raw.entities:
             canonical = (raw_entity.get("canonical_name") or "").strip()
@@ -155,11 +322,20 @@ class EntityExtractionService:
             aliases: list[str] = list(raw_entity.get("aliases") or [])
             quote = raw_entity.get("quote") or ""
             confidence = float(raw_entity.get("confidence") or 0.0)
+            pending_quarantine_reason = (
+                raw_entity.get("pending_quarantine_reason") or ""
+            )
 
             if not canonical:
                 continue
 
-            entity_id, created, warning, near_miss = self._resolve_entity(
+            (
+                entity_id,
+                created,
+                warning,
+                near_miss,
+                signature_matches,
+            ) = self._resolve_entity(
                 canonical=canonical,
                 entity_type=entity_type,
                 description=description,
@@ -167,14 +343,44 @@ class EntityExtractionService:
                 first_seen=entry.entry_date,
                 user_id=user_id,
             )
+            touched_entity_ids.add(entity_id)
             if created:
                 entities_created += 1
+                # If the LLM result was flagged at the provider layer
+                # because the canonical can't be found in its source
+                # quote, soft-quarantine the freshly-created entity so
+                # the operator sees it in the quarantine UI before it
+                # pollutes any chart.
+                if pending_quarantine_reason:
+                    try:
+                        self._store.quarantine_entity(
+                            entity_id, reason=pending_quarantine_reason,
+                        )
+                        log.info(
+                            "Quarantined new entity %d on creation: %s",
+                            entity_id, pending_quarantine_reason,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(
+                            "Failed to quarantine new entity %d: %s",
+                            entity_id, exc,
+                        )
             else:
                 entities_matched += 1
             if warning:
                 warnings.append(warning)
             if near_miss is not None:
                 candidate_id, score = near_miss
+                with contextlib.suppress(Exception):
+                    self._store.create_merge_candidate(
+                        entity_id_a=candidate_id,
+                        entity_id_b=entity_id,
+                        similarity=score,
+                        extraction_run_id=run_id,
+                    )
+            for candidate_id, score in signature_matches:
+                if candidate_id == entity_id:
+                    continue
                 with contextlib.suppress(Exception):
                     self._store.create_merge_candidate(
                         entity_id_a=candidate_id,
@@ -289,6 +495,45 @@ class EntityExtractionService:
             )
         else:
             orphans_deleted = 0
+
+        # Post-extraction sanity sweep: any entity touched in this run
+        # whose canonical name can't be found anywhere in its mention
+        # quotes or any mentioned entry's final_text gets soft-
+        # quarantined. Catches LLM hallucinations that survived the
+        # provider-level repair stage and zombie-rebound entities (e.g.
+        # a hallucinated name re-bound to a corrected quote via
+        # embedding similarity).
+        #
+        # The author entity is exempt: first-person prose ("I went...")
+        # legitimately produces an "author" mention whose canonical
+        # (the user's display name) is never written verbatim. Skip it.
+        author_lower = author_name.lower()
+        for touched_id in touched_entity_ids:
+            entity = self._store.get_entity(touched_id)
+            if entity is None or entity.is_quarantined:
+                # Already quarantined (either pre-existing or by the
+                # pending_quarantine_reason path above) or deleted by
+                # orphan cleanup — nothing to do.
+                continue
+            if entity.canonical_name.lower() == author_lower:
+                continue
+            if not self._canonical_name_supported(entity):
+                reason = (
+                    f"canonical name {entity.canonical_name!r} not found "
+                    f"in any mention quote or entry text after extraction "
+                    f"run {run_id}"
+                )
+                try:
+                    self._store.quarantine_entity(touched_id, reason=reason)
+                    log.info(
+                        "Quarantined entity %d (sanity sweep): %s",
+                        touched_id, reason,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "Sanity-sweep quarantine failed for entity %d: %s",
+                        touched_id, exc,
+                    )
 
         self._store.mark_entry_extracted(entry_id)
 
@@ -428,22 +673,46 @@ class EntityExtractionService:
         aliases: list[str],
         first_seen: str,
         user_id: int | None = None,
-    ) -> tuple[int, bool, str | None, tuple[int, float] | None]:
+    ) -> tuple[
+        int,
+        bool,
+        str | None,
+        tuple[int, float] | None,
+        list[tuple[int, float]],
+    ]:
         """Resolve an extracted entity against the store.
 
-        Returns (entity_id, created, warning, near_miss). `created` is
-        True when a brand-new row was inserted. `warning` is populated if
-        the embedding-similarity fallback fired (stage c). `near_miss` is
-        a ``(candidate_id, score)`` tuple when a new entity was created
-        but a similar entity exists below the merge threshold — the caller
-        should persist this as a merge candidate for user review.
+        Returns ``(entity_id, created, warning, near_miss, signature_matches)``.
+
+        ``created`` is True when a brand-new row was inserted. ``warning``
+        is populated if the embedding-similarity fallback fired (stage c).
+        ``near_miss`` is a ``(candidate_id, score)`` tuple when a new entity
+        was created but a similar entity exists below the merge threshold —
+        the caller should persist this as a merge candidate.
+
+        ``signature_matches`` is a list of ``(candidate_id, score)`` pairs
+        produced by the relaxed string-signature heuristic (lowercased,
+        whitespace-stripped equality, or short-substring containment).
+        These are emitted in addition to ``near_miss`` so OCR-driven
+        near-duplicates that the embedding distance happens to miss
+        (e.g. ``Zij Kanaal C Weg`` vs ``Zij Kanaal C Zuid``) still surface
+        in the merge-review UI. The list is unioned with the embedding
+        path's result; the caller is responsible for persisting them.
         """
+        # Run the relaxed signature heuristic against every same-type
+        # entity (regardless of whether the current extraction matches
+        # one of them via stage a/b or proceeds to stage c). This is the
+        # source of merge candidates that the embedding distance misses.
+        signature_matches = self._find_signature_matches(
+            canonical, entity_type, user_id=user_id,
+        )
+
         # Stage a: exact canonical name match.
         existing = self._store.get_entity_by_name(
             canonical, entity_type, user_id=user_id,
         )
         if existing is not None:
-            return existing.id, False, None, None
+            return existing.id, False, None, None, signature_matches
 
         # Stage b: alias match on the canonical name itself, then on
         # each provided alias.
@@ -451,13 +720,13 @@ class EntityExtractionService:
             canonical, entity_type, user_id=user_id,
         )
         if by_alias is not None:
-            return by_alias.id, False, None, None
+            return by_alias.id, False, None, None, signature_matches
         for alias in aliases:
             by_alias = self._store.find_by_alias(
                 alias, entity_type, user_id=user_id,
             )
             if by_alias is not None:
-                return by_alias.id, False, None, None
+                return by_alias.id, False, None, None, signature_matches
 
         # Stage c: embedding similarity fallback.
         new_embedding = self._embeddings.embed_query(
@@ -480,7 +749,7 @@ class EntityExtractionService:
                 f"potential merge: {canonical!r} ~ {best_name!r},"
                 f" similarity {best_score:.3f}"
             )
-            return best_id, False, warning, None
+            return best_id, False, warning, None, signature_matches
 
         # Still no match — create a new entity and remember its
         # embedding so future runs can short-circuit via stage c.
@@ -500,7 +769,42 @@ class EntityExtractionService:
         if best_id is not None and best_score >= near_miss_threshold:
             near_miss = (best_id, best_score)
 
-        return entity.id, True, None, near_miss
+        return entity.id, True, None, near_miss, signature_matches
+
+    def _find_signature_matches(
+        self,
+        canonical: str,
+        entity_type: str,
+        user_id: int | None = None,
+    ) -> list[tuple[int, float]]:
+        """Scan existing same-type entities for string-signature matches.
+
+        Returns a list of ``(entity_id, score)`` for every existing entity
+        whose canonical name pairs with ``canonical`` under
+        ``_is_signature_match``. Empty when nothing matches.
+
+        We pull the entity rows via ``list_entities`` (not the embedding
+        variant) so the heuristic still works for entities that were
+        somehow stored without an embedding. The list is bounded to a
+        large but finite limit — same-type collections are small in
+        practice.
+        """
+        if not canonical or not canonical.strip():
+            return []
+        # 5000 is well above any realistic same-type cardinality but caps
+        # us in case of pathological data.
+        existing = self._store.list_entities(
+            entity_type=entity_type, limit=5000, user_id=user_id,
+        )
+        matches: list[tuple[int, float]] = []
+        for candidate in existing:
+            if candidate.canonical_name == canonical:
+                # Same name — that's stage-a territory, not a candidate.
+                continue
+            score = _signature_match_score(canonical, candidate.canonical_name)
+            if score is not None:
+                matches.append((candidate.id, score))
+        return matches
 
     def _resolve_for_relationship(
         self,
@@ -549,6 +853,58 @@ class EntityExtractionService:
             None,
             f"skipped relationship — {name!r} not in extracted entities",
         )
+
+    def _canonical_name_supported(self, entity: Entity) -> bool:
+        """True if the entity's canonical name appears in at least one
+        of its mention quotes, or in the ``final_text`` of any entry
+        the entity is mentioned in.
+
+        Comparison is **case-insensitive** and **whitespace-tolerant**:
+        whitespace runs on both sides are collapsed to a single space
+        before substring matching. This mirrors the provider-level
+        repair so a canonical that only shows up with extra/missing
+        whitespace is still considered supported.
+        """
+        canonical = (entity.canonical_name or "").strip()
+        if not canonical:
+            # An empty canonical can't be 'found' anywhere meaningful;
+            # don't quarantine on that signal alone.
+            return True
+        canonical_lower = re.sub(r"\s+", " ", canonical.lower())
+
+        # 1. Mention quotes — there may be many across all entries.
+        # We pull a generous limit; in practice an entity has a handful
+        # of mentions, and even active power users top out in the low
+        # hundreds. The limit is a safety belt, not an expected boundary.
+        mentions = self._store.get_mentions_for_entity(
+            entity.id, limit=10_000, offset=0,
+        )
+        for m in mentions:
+            quote = m.quote or ""
+            if not quote:
+                continue
+            quote_lower = re.sub(r"\s+", " ", quote.lower())
+            if canonical_lower in quote_lower:
+                return True
+
+        # 2. Entry final_text for any entry the entity is mentioned in.
+        # final_text is already populated for OCR'd entries (it falls
+        # back to raw_text in the repository hydrator).
+        seen_entry_ids: set[int] = set()
+        for m in mentions:
+            seen_entry_ids.add(m.entry_id)
+        for entry_id in seen_entry_ids:
+            entry = self._repo.get_entry(entry_id)
+            if entry is None:
+                continue
+            text = entry.final_text or entry.raw_text or ""
+            if not text:
+                continue
+            text_lower = re.sub(r"\s+", " ", text.lower())
+            if canonical_lower in text_lower:
+                return True
+
+        return False
 
     # Unused but provided for completeness when adapter tests want to
     # prod internal state.

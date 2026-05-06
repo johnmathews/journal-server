@@ -159,3 +159,31 @@ def reload_mood_dimensions(services: dict, config: Config) -> dict[str, Any]:
         "version": meta.version,
         "reloaded_at": _now_iso(),
     }
+
+
+def reload_entity_casing_exceptions(
+    services: dict, config: Config
+) -> dict[str, Any]:
+    """Reload the entity-casing exceptions TOML and rebind it on the store.
+
+    The exceptions dict held by ``SQLiteEntityStore`` is replaced via
+    ``set_casing_exceptions`` — a single atomic attribute write. Pre-reload
+    callers that already entered ``smart_title_case`` finish with the dict
+    they captured; subsequent ``create_entity`` calls see the new table.
+
+    Also stashes the parsed dict under ``services["entity_casing_exceptions"]``
+    so the admin tab / future read endpoints can introspect it without
+    re-parsing the TOML.
+    """
+    from journal.services.entity_naming import load_entity_casing_exceptions
+
+    exceptions = load_entity_casing_exceptions(config.entity_casing_exceptions_path)
+    store = services["entity_store"]
+    store.set_casing_exceptions(exceptions)
+    services["entity_casing_exceptions"] = exceptions
+    return {
+        "reloaded": "entity-casing",
+        "exception_count": len(exceptions),
+        "path": str(config.entity_casing_exceptions_path),
+        "reloaded_at": _now_iso(),
+    }

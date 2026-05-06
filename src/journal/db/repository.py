@@ -1050,7 +1050,7 @@ class SQLiteEntryRepository:
             FROM entity_mentions m
             JOIN entries e  ON e.id  = m.entry_id
             JOIN entities en ON en.id = m.entity_id
-            WHERE 1=1
+            WHERE en.is_quarantined = 0
         """
         params: list[str | int] = []
         if user_id is not None:
@@ -1356,7 +1356,7 @@ class SQLiteEntryRepository:
             FROM entity_mentions m
             JOIN entries e  ON e.id  = m.entry_id
             JOIN entities en ON en.id = m.entity_id
-            WHERE 1=1
+            WHERE en.is_quarantined = 0
         """
         params: list[str | int] = []
         if user_id is not None:
@@ -1390,7 +1390,8 @@ class SQLiteEntryRepository:
             FROM entity_mentions m
             JOIN entries e  ON e.id  = m.entry_id
             JOIN entities en ON en.id = m.entity_id
-            WHERE en.canonical_name IN ({placeholders})
+            WHERE en.is_quarantined = 0
+              AND en.canonical_name IN ({placeholders})
         """
         bin_params: list[str | int] = list(entity_names)
         if user_id is not None:
@@ -1463,7 +1464,7 @@ class SQLiteEntryRepository:
             JOIN entries  e  ON e.id  = em.entry_id
             JOIN entities en ON en.id = em.entity_id
             JOIN mood_scores ms ON ms.entry_id = e.id AND ms.dimension = ?
-            WHERE 1=1
+            WHERE en.is_quarantined = 0
         """
         params: list[str | int] = [dimension]
         if user_id is not None:

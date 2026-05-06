@@ -644,3 +644,175 @@ class TestMergeCandidates:
 
         # Candidate should be auto-resolved
         assert store.list_merge_candidates(status="pending") == []
+
+
+class TestSmartTitleCaseAtWriteTime:
+    """create_entity normalises canonical_name through smart_title_case."""
+
+    def test_lowercase_input_is_title_cased(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        e = store.create_entity("activity", "running", "", "2026-01-01")
+        assert e.canonical_name == "Running"
+
+    def test_midword_uppercase_preserved(self, db_conn) -> None:
+        # Even without exceptions, mixed-case input must pass through.
+        store = SQLiteEntityStore(db_conn)
+        e = store.create_entity("topic", "iOS", "", "2026-01-01")
+        assert e.canonical_name == "iOS"
+
+    def test_exception_table_is_applied(self, db_conn) -> None:
+        store = SQLiteEntityStore(
+            db_conn, casing_exceptions={"ios": "iOS", "nasa": "NASA"}
+        )
+        e1 = store.create_entity("topic", "ios", "", "2026-01-01")
+        e2 = store.create_entity("topic", "nasa", "", "2026-01-01")
+        assert e1.canonical_name == "iOS"
+        assert e2.canonical_name == "NASA"
+
+    def test_set_casing_exceptions_swaps_table(self, db_conn) -> None:
+        store = SQLiteEntityStore(db_conn)
+        # First write — no exceptions, plain title case.
+        e1 = store.create_entity("organization", "ikea", "", "2026-01-01")
+        assert e1.canonical_name == "Ikea"
+
+        # Operator adds an exception and reloads.
+        store.set_casing_exceptions({"hp": "HP"})
+        e2 = store.create_entity("organization", "hp", "", "2026-01-01")
+        assert e2.canonical_name == "HP"
+
+    def test_whitespace_collapsed(self, store: SQLiteEntityStore) -> None:
+        e = store.create_entity(
+            "activity", "  morning   prayer  ", "", "2026-01-01"
+        )
+        assert e.canonical_name == "Morning Prayer"
+
+
+class TestEntityQuarantine:
+    def test_quarantine_sets_flag_reason_and_timestamp(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        entity = store.create_entity("person", "Atlas", "a friend", "2026-01-01")
+        store.quarantine_entity(entity.id, "duplicate of Atlas Wong")
+        fetched = store.get_entity(entity.id)
+        assert fetched is not None
+        assert fetched.is_quarantined is True
+        assert fetched.quarantine_reason == "duplicate of Atlas Wong"
+        assert fetched.quarantined_at  # non-empty ISO timestamp
+        # Untouched fields still populated.
+        assert fetched.description == "a friend"
+        assert fetched.canonical_name == "Atlas"
+
+    def test_quarantine_nonexistent_raises(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        with pytest.raises(ValueError):
+            store.quarantine_entity(99999, "no such entity")
+
+    def test_quarantine_idempotent_refreshes_reason(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        entity = store.create_entity("person", "Atlas", "", "2026-01-01")
+        store.quarantine_entity(entity.id, "first reason")
+        store.quarantine_entity(entity.id, "second reason")
+        fetched = store.get_entity(entity.id)
+        assert fetched is not None
+        assert fetched.is_quarantined is True
+        assert fetched.quarantine_reason == "second reason"
+
+    def test_release_quarantine_clears_flag_reason_and_timestamp(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        entity = store.create_entity("person", "Atlas", "", "2026-01-01")
+        store.quarantine_entity(entity.id, "noise")
+        store.release_quarantine(entity.id)
+        fetched = store.get_entity(entity.id)
+        assert fetched is not None
+        assert fetched.is_quarantined is False
+        assert fetched.quarantine_reason == ""
+        assert fetched.quarantined_at == ""
+
+    def test_release_nonexistent_raises(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        with pytest.raises(ValueError):
+            store.release_quarantine(99999)
+
+    def test_list_entities_excludes_quarantined_by_default(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        active = store.create_entity("person", "Atlas", "", "2026-01-01")
+        hidden = store.create_entity("person", "Hallucinated", "", "2026-01-02")
+        store.quarantine_entity(hidden.id, "hallucination")
+        ids = {e.id for e in store.list_entities(user_id=1)}
+        assert active.id in ids
+        assert hidden.id not in ids
+
+    def test_list_entities_include_quarantined(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        active = store.create_entity("person", "Atlas", "", "2026-01-01")
+        hidden = store.create_entity("person", "Hallucinated", "", "2026-01-02")
+        store.quarantine_entity(hidden.id, "hallucination")
+        ids = {e.id for e in store.list_entities(user_id=1, include_quarantined=True)}
+        assert {active.id, hidden.id} <= ids
+
+    def test_list_entities_with_mention_counts_excludes_quarantined(
+        self,
+        store: SQLiteEntityStore,
+        repo: SQLiteEntryRepository,
+    ) -> None:
+        entry = repo.create_entry("2026-01-01", "photo", "text", 1)
+        active = store.create_entity("person", "Atlas", "", "2026-01-01")
+        hidden = store.create_entity("person", "Hallucinated", "", "2026-01-01")
+        store.create_mention(active.id, entry.id, "Atlas", 0.9, "r1")
+        store.create_mention(hidden.id, entry.id, "Halluc", 0.3, "r1")
+        store.quarantine_entity(hidden.id, "spurious")
+
+        rows = store.list_entities_with_mention_counts(user_id=1)
+        ids = {e.id for e, _, _ in rows}
+        assert active.id in ids
+        assert hidden.id not in ids
+
+        rows_all = store.list_entities_with_mention_counts(
+            user_id=1, include_quarantined=True,
+        )
+        ids_all = {e.id for e, _, _ in rows_all}
+        assert {active.id, hidden.id} <= ids_all
+
+    def test_list_quarantined_entities_returns_only_user_quarantined(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        active = store.create_entity("person", "Atlas", "", "2026-01-01")
+        hidden_a = store.create_entity("person", "BadA", "", "2026-01-02")
+        hidden_b = store.create_entity("topic", "BadB", "", "2026-01-02")
+        store.quarantine_entity(hidden_a.id, "noise")
+        store.quarantine_entity(hidden_b.id, "noise")
+
+        result = store.list_quarantined_entities(user_id=1)
+        ids = {e.id for e in result}
+        assert ids == {hidden_a.id, hidden_b.id}
+        assert active.id not in ids
+        assert all(e.is_quarantined for e in result)
+
+    def test_quarantined_entity_can_be_merge_survivor(
+        self,
+        store: SQLiteEntityStore,
+        repo: SQLiteEntryRepository,
+    ) -> None:
+        """Quarantine flag is orthogonal to merge: a quarantined entity can
+        still absorb other entities. The flag survives the merge — operator
+        decides whether to release after consolidating."""
+        entry = repo.create_entry("2026-01-01", "photo", "text", 1)
+        survivor = store.create_entity("person", "Atlas", "", "2026-01-01")
+        absorbed = store.create_entity("person", "Atlas Wong", "", "2026-01-01")
+        store.create_mention(absorbed.id, entry.id, "Atlas Wong", 0.9, "r1")
+        store.quarantine_entity(survivor.id, "looks broken")
+
+        result = store.merge_entities(survivor.id, [absorbed.id])
+        assert result.mentions_reassigned == 1
+
+        post_merge = store.get_entity(survivor.id)
+        assert post_merge is not None
+        assert post_merge.is_quarantined is True
+        assert post_merge.quarantine_reason == "looks broken"

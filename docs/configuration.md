@@ -155,11 +155,13 @@ docker compose up
 
 ## Reloading file-backed config
 
-Three resources are read from disk only at startup and otherwise stay
+Four resources are read from disk only at startup and otherwise stay
 cached in memory: the OCR glossary directory (`OCR_CONTEXT_DIR/*.md`),
-the transcription context (same files, different formatter), and the
-mood-dimensions TOML (`MOOD_DIMENSIONS_PATH`). When you edit one of
-those files in production, the server will not see the change until you
+the transcription context (same files, different formatter), the
+mood-dimensions TOML (`MOOD_DIMENSIONS_PATH`), and the entity-casing
+exceptions TOML (`ENTITY_CASING_EXCEPTIONS_PATH`, defaults to
+`config/entity-casing-exceptions.toml`). When you edit one of those
+files in production, the server will not see the change until you
 either restart it or hit one of these admin-only endpoints.
 
 | Endpoint                                       | Reloads                                                                                |
@@ -167,8 +169,9 @@ either restart it or hit one of these admin-only endpoints.
 | `POST /api/admin/reload/ocr-context`           | OCR provider (rebuilds with the current glossary)                                      |
 | `POST /api/admin/reload/transcription-context` | Transcription provider stack (Whisper / Gemini, with current context)                  |
 | `POST /api/admin/reload/mood-dimensions`       | `MoodScoringService` (rebuilds from the TOML); 409 if `JOURNAL_ENABLE_MOOD_SCORING` is unset |
+| `POST /api/admin/reload/entity-casing`         | Entity-casing exceptions (rebinds the table on `SQLiteEntityStore` for new writes)     |
 
-All three require an admin session (or admin API key). They take no
+All four require an admin session (or admin API key). They take no
 body, return a small JSON summary describing what was reloaded, and
 don't disturb in-flight requests — callers that already resolved the
 old provider keep using it until they finish; new requests pick up the
@@ -186,7 +189,16 @@ curl -X POST -b "session_id=$ADMIN_SESSION" \
 # After editing MOOD_DIMENSIONS_PATH
 curl -X POST -b "session_id=$ADMIN_SESSION" \
   http://localhost:8400/api/admin/reload/mood-dimensions
+
+# After editing config/entity-casing-exceptions.toml
+curl -X POST -b "session_id=$ADMIN_SESSION" \
+  http://localhost:8400/api/admin/reload/entity-casing
 ```
+
+The entity-casing TOML is purely additive: it adjusts how new entity
+canonical names are normalised at write time (`smart_title_case`).
+Existing rows are not rewritten on reload — see
+`docs/entity-tracking.md` for the algorithm and the no-backfill rule.
 
 OCR and transcription deliberately do not share a reload — although both
 read `OCR_CONTEXT_DIR`, the formatter chains differ and a single reload

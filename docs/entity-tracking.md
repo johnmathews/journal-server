@@ -97,24 +97,199 @@ operations can orphan an entity (leave it with zero mentions):
 Both paths use the same `EntityStore.delete_orphaned_entities()` method, which only deletes entities from the candidate
 set that have zero remaining mentions across all entries — so an entity mentioned in other entries is never pruned.
 
+## Merging entities
+
+Two or more entities that the extractor failed to consolidate (for example `"Atlas"` and `"Atlas Wong"` if neither alias
+nor stage-c similarity caught them) can be merged manually. Merging collapses the absorbed entities into a single
+**survivor**: their mentions and relationships move onto the survivor, their canonical names and aliases become aliases
+on the survivor, and a snapshot of each absorbed entity is recorded in `entity_merge_history` (migration `0008`) so the
+operation is auditable and — eventually — undoable.
+
+### API
+
+`POST /api/entities/merge`
+
+```json
+{
+  "survivor_id": 42,
+  "absorbed_ids": [88, 91]
+}
+```
+
+Both fields are required. `survivor_id` is an integer; `absorbed_ids` is a non-empty list of integers. The handler
+verifies the authenticated user owns every entity in the request before delegating to `EntityStore.merge_entities()`.
+
+Response (200):
+
+```json
+{
+  "survivor": { /* full entity detail, same shape as GET /api/entities/{id} */ },
+  "absorbed_ids": [88, 91],
+  "mentions_reassigned": 17,
+  "relationships_reassigned": 4,
+  "aliases_added": 3
+}
+```
+
+Error cases: `400` for invalid payload shape or merging an entity into itself, `404` if any referenced entity is missing
+or owned by another user.
+
+### Data-model behaviour
+
+`SQLiteEntityStore.merge_entities()` (`src/journal/entitystore/store.py`, around lines 664–757) does the following for
+each absorbed entity, inside one transaction:
+
+1. **Snapshot.** Inserts a row into `entity_merge_history` capturing `survivor_id`, `absorbed_id`, and the absorbed
+   entity's `canonical_name`, `entity_type`, `description`, and `aliases` (JSON list) at the moment of merge.
+2. **Reassign mentions.** `UPDATE entity_mentions SET entity_id = survivor_id WHERE entity_id = absorbed_id`. Mention
+   rows are NOT deleted — the FK reassignment is enough.
+3. **Reassign relationships.** Both the subject and the object side are rewritten (`subject_entity_id` and
+   `object_entity_id`).
+4. **Promote aliases.** The absorbed entity's existing aliases plus its own canonical name are added to
+   `entity_aliases` for the survivor (`INSERT OR IGNORE`, normalised to lowercase). The survivor's own canonical name
+   is excluded so it never appears as an alias of itself.
+5. **Delete the absorbed row.** `DELETE FROM entities WHERE id = absorbed_id`. The `entity_aliases` rows belonging to
+   the absorbed entity are removed by FK cascade.
+6. **Auto-resolve candidates.** Any pending rows in `entity_merge_candidates` that reference the absorbed entity (on
+   either side) are marked `accepted` with `resolved_at` set to the current UTC timestamp — so a manual merge
+   automatically clears the merge-review queue for that entity.
+
+A single call returns one `MergeResult` summarising totals across all absorbed entities.
+
+### UI flow
+
+From the entity list view (`src/views/EntityListView.vue`), each row exposes a checkbox. Selecting two or more rows
+reveals a "Merge selected" action. Clicking it opens a modal that lists the selected entities with a radio button per
+row; the operator picks the survivor and confirms. The webapp posts to `/api/entities/merge` and reloads the list. The
+absorbed entities disappear; the survivor's alias list grows by however many distinct surface forms it just inherited.
+
+### Merge candidates
+
+The extraction service's stage-c (embedding similarity) fallback runs against every entity of the same type. When a
+near-miss is found — similarity above `max(threshold - 0.15, 0.5)` but below `ENTITY_DEDUP_SIMILARITY_THRESHOLD` — the
+service writes a row to `entity_merge_candidates` (also defined in migration `0008`). A short-name signature heuristic
+flags additional pairs whose canonical names differ only in trailing tokens (place names like `"Zij Kanaal C Zuid"` vs
+`"Zij Kanaal C Noord"` that the embedding distance alone misses).
+<!-- pending: short-name signature heuristic lands with WU5 -->
+
+Pending candidates surface on the entity list view as a "Possible duplicates to review" banner. Each pair can be:
+
+- **Accepted** — the webapp issues `POST /api/entities/merge` to fold the lower-mention-count entity into the
+  higher-mention-count one (or vice versa, at the operator's discretion).
+- **Dismissed** — `PATCH /api/entities/merge-candidates/{id}` with `{"status": "dismissed"}`. The pair is never
+  re-flagged unless the embeddings change.
+
+`GET /api/entities/merge-candidates?status=pending&limit=50` lists current candidates;
+`GET /api/entities/{id}/merge-history` returns the audit trail for a survivor.
+
+## Quarantine
+
+Quarantine is a **soft-hide** for entities that look broken but are worth keeping around. A quarantined entity row
+stays in the database — its description, aliases, and merge history are preserved — but it is excluded from the default
+entity list and from chart endpoints, so it doesn't pollute the UI while the operator decides what to do with it.
+
+The schema columns landed in migration `0018_entity_quarantine.sql`: `is_quarantined` (0/1), `quarantine_reason`
+(free-text), and `quarantined_at` (UTC ISO-8601 string, empty when not quarantined). Migration adds a partial index
+`idx_entities_quarantined` so that listing the (typically small) quarantined set stays fast without touching the
+active-entity hot path.
+
+### When entities are quarantined
+
+Two paths:
+
+1. **Automatic, post-extraction sanity sweep.** After extraction completes for an entry, the service re-checks every
+   entity that was touched by the run (created or matched). If the entity's `canonical_name` does not appear (case-
+   insensitively, whitespace-tolerant) in any of its mention quotes, and does not appear in the `final_text` of any
+   entry it is mentioned in, the entity is flagged as quarantined. This catches the LLM-hallucination failure mode
+   where a canonical name was invented out of partial context and never actually written by the author, including the
+   "zombie rebound" case where a hallucinated canonical (e.g. `"Zij Kanaal C Zuid"`) re-binds to a corrected entry
+   text via embedding similarity. The journal author entity is exempt — first-person prose ("I went...") legitimately
+   produces an author mention whose canonical (the user's display name) is never written verbatim. The implementation
+   lives in `EntityExtractionService.extract_from_entry` (the sweep) and `_canonical_name_supported` (the matcher) in
+   `src/journal/services/entity_extraction.py`.
+2. **Automatic, hallucinated-name rejection at the LLM layer.** When the extraction provider receives an entity whose
+   `canonical_name` is not a substring of its source quote, it first tries a longest-token-substring repair against the
+   quote (rebinding `"Zij Kanaal C Zuid"` to `"Zij Kanaal C"` when the quote contains only the shorter form). If no
+   token-aligned substring of length ≥ 3 chars matches, the entity is still surfaced (so the audit trail isn't lost)
+   but is flagged with `pending_quarantine_reason`; the extraction service quarantines the new row at creation time.
+   See `_longest_canonical_substring_in_quote` and the WU4 branch in `_parse_tool_response`
+   (`src/journal/providers/extraction.py`).
+3. **Manual.** An operator can quarantine an entity directly from the entity detail view — useful for deliberately
+   hiding noise (a single accidental mention of a public figure, for instance) without deleting the row outright.
+
+### Endpoints
+
+- `GET /api/entities/quarantined` — returns the authed user's quarantined entities (full detail shape, including
+  `is_quarantined`, `quarantine_reason`, and `quarantined_at`).
+- `POST /api/entities/{id}/quarantine` — body `{"reason": "<free text>"}`. Sets the flag, stamps the timestamp, and
+  returns the updated detail. 404 if the entity is missing or not owned by the user; 400 if `reason` is non-string.
+- `POST /api/entities/{id}/release-quarantine` — clears the flag, reason, and timestamp. Returns the updated detail.
+  Idempotent on already-active entities.
+
+The default `GET /api/entities` list and the dashboard chart endpoints (`entity-distribution`, `entity-trends`,
+`mood-entity-correlation`) exclude quarantined rows. The store-level methods accept an `include_quarantined=True`
+flag for callers (e.g. an admin "show everything" view) that need the unfiltered set.
+
+### Operator guidance
+
+If a quarantined entity is a duplicate of a clean survivor — which is the common case after an LLM hallucination —
+prefer **merging** it into the survivor (see "Merging entities" above) over releasing it. Merging preserves the
+hallucinated row's mentions on the correct entity and records the absorbed name in `entity_merge_history`, whereas a
+plain release leaves the bad canonical name visible to the UI again.
+
+## Casing normalization
+
+New entity canonical names are smart-title-cased at write time, before the row is inserted in
+`SQLiteEntityStore.create_entity()`. The transformation is performed by `smart_title_case()` in
+`services/entity_naming.py`, with rules tuned for journal-style proper nouns:
+
+- Lowercased single words become title case: `running → Running`.
+- Multi-word strings are title-cased per token: `the netherlands → The Netherlands`.
+- Mid-word uppercase characters are preserved verbatim, so the function is safe on names that already carry
+  intentional casing: `iOS`, `iPhone`, `FC Barcelona`, `O'Brien` all pass through unchanged.
+
+### Exception list
+
+Names that don't fit the rules — brand names like `IKEA`, lowercase-leading product names like `iOS`, contractions like
+`O'Brien` — are listed in `config/entity-casing-exceptions.toml`. The file is operator-managed: edit it to add a new
+exception, then call `POST /api/admin/reload/entity-casing` to refresh the in-memory cache without a server restart.
+The reload route is wired through `services/reload.py` alongside the other hot-reload endpoints (mood dimensions, OCR
+context, etc.).
+
+### Scope
+
+Only **new writes** are normalised. Migration `0011`'s `UNIQUE(user_id, entity_type, canonical_name)` constraint uses
+SQLite's default `BINARY` collation, so pre-existing duplicate rows that differ only in case (`running` vs `Running`)
+are not collapsed automatically. Operators can merge them manually via the merge UI; backfill is intentionally not
+performed.
+
 ## Post-LLM canonical_name validation
 
-The model occasionally returns a `canonical_name` that's one or two characters shorter than the form actually present in the
-source quote — for example `"Nautilin"` for a quote `"Nautiline, the iOS app..."`. The clipped name is itself a substring of the
-longer form, so a naive substring check does not catch this; the validator works at the **token** level.
+The model has two failure modes worth defending against. Both run inside `_parse_tool_response` in
+`src/journal/providers/extraction.py` so they apply to every extraction call regardless of provider.
 
-In `src/journal/providers/extraction.py` (`_repair_canonical_name`), every entity returned by the LLM is checked against its
-own `quote`:
+### Mode 1 — clipped trailing character (`Nautilin`/`Nautiline`)
+
+`_repair_canonical_name` checks every entity against its own `quote` at the **token** level:
 
 1. If any whitespace-separated token in the quote (after stripping surrounding punctuation) **equals** the canonical_name
    case-insensitively, the LLM's choice is trusted unchanged. This protects deliberately-shorter canonicals like `"Bob"` for a
    quote `"Robert 'Bob' Smith"` where the short form is genuinely a separate token.
-2. Otherwise, if the canonical_name is a strict prefix of some longer token in the quote, the longer token is returned (case
+2. If the only longer token differs only by an inflection suffix (`'s`, `s'`, `s`), the canonical is also trusted — we do not
+   promote `"Hermione"` to `"Hermione's"` or `"Daniel"` to `"Daniels"`.
+3. Otherwise, if the canonical_name is a strict prefix of some longer token in the quote, the longer token is returned (case
    preserved from the original token). This catches the clipped-trailing-character failure mode.
-3. Anything else is left alone with a `WARNING` log so it can be reviewed manually. We never invent characters out of thin air.
 
-The repair runs inside `_parse_tool_response` so it applies to every extraction call regardless of provider, and a separate
-warning is logged whenever a repair fires (so the rate of LLM mis-extraction is visible in the logs).
+A separate `WARNING` log fires whenever a repair triggers, so the rate of LLM mis-extraction is visible.
+
+### Mode 2 — hallucinated canonical (`Zij Kanaal C Zuid`)
+
+When the canonical_name is not a substring of the quote at all and the prefix-repair above produces nothing,
+`_longest_canonical_substring_in_quote` looks for the longest **token-aligned** substring of the canonical that does appear in
+the quote (case-insensitive, whitespace-tolerant, minimum 3 characters). If found, the canonical is renamed to that substring
+and an `INFO` log is emitted. If not, the original canonical is preserved (for the audit trail) but the parsed entity carries
+a `pending_quarantine_reason` field; the extraction service soft-quarantines the new row immediately on creation. Together with
+the post-extraction sanity sweep above, this catches both fresh hallucinations and zombie rebounds.
 
 ### `journal repair-entity-names`
 

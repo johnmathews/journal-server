@@ -1073,6 +1073,65 @@ Get the merge history for an entity (all entities that were merged into it).
 }
 ```
 
+### GET /api/entities/quarantined
+
+List quarantined entities for the authenticated user. Quarantined entities are hidden from
+`GET /api/entities` and from chart endpoints (`entity-distribution`, `entity-trends`, `mood-entity-correlation`)
+by default; this endpoint is the only path that surfaces them. See
+[entity-tracking.md](entity-tracking.md#quarantine) for the semantics.
+
+**Response (200):**
+
+```json
+{
+ "items": [
+  {
+   "id": 17,
+   "canonical_name": "Hallucinated Name",
+   "entity_type": "person",
+   "aliases": [],
+   "description": "",
+   "first_seen": "2026-04-01",
+   "created_at": "2026-04-01T09:00:00Z",
+   "updated_at": "2026-04-12T10:30:00Z",
+   "is_quarantined": true,
+   "quarantine_reason": "canonical name not present in any quote",
+   "quarantined_at": "2026-04-12T10:30:00Z"
+  }
+ ],
+ "total": 1
+}
+```
+
+### POST /api/entities/{entity_id}/quarantine
+
+Soft-quarantine an entity. The row stays in the database — descriptions, aliases, and merge history are preserved —
+but it is excluded from default lists and charts. Idempotent: calling it again refreshes the reason and timestamp.
+
+**Request body:**
+
+```json
+{ "reason": "canonical name absent from all quotes" }
+```
+
+`reason` is optional and defaults to an empty string. Must be a string when provided.
+
+**Response (200):** Full entity detail with `is_quarantined: true`, `quarantine_reason`, and `quarantined_at` populated.
+
+**Response (400):** `reason` is not a string.
+**Response (404):** Entity not found or not owned by the authenticated user.
+
+### POST /api/entities/{entity_id}/release-quarantine
+
+Clear the quarantine flag, reason, and timestamp. The entity reappears in default lists and charts on the next read.
+Idempotent on already-active entities.
+
+**Request body:** none (or `{}`).
+
+**Response (200):** Full entity detail with `is_quarantined: false`, `quarantine_reason: ""`, `quarantined_at: ""`.
+
+**Response (404):** Entity not found or not owned by the authenticated user.
+
 ---
 
 ## Batch job endpoints

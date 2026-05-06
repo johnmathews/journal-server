@@ -113,7 +113,19 @@ def _init_services() -> dict:
 
     chunker = build_chunker(config, embeddings)
 
-    entity_store = SQLiteEntityStore(conn)
+    from journal.services.entity_naming import load_entity_casing_exceptions
+
+    entity_casing_exceptions = load_entity_casing_exceptions(
+        config.entity_casing_exceptions_path
+    )
+    log.info(
+        "  Entity casing exceptions loaded: %d entries from %s",
+        len(entity_casing_exceptions),
+        config.entity_casing_exceptions_path,
+    )
+    entity_store = SQLiteEntityStore(
+        conn, casing_exceptions=entity_casing_exceptions
+    )
     extraction_provider = AnthropicExtractionProvider(
         api_key=config.anthropic_api_key,
         model=config.entity_extraction_model,
@@ -416,6 +428,7 @@ def _init_services() -> dict:
             ),
         ),
         "entity_store": entity_store,
+        "entity_casing_exceptions": entity_casing_exceptions,
         "entity_extraction": entity_extraction_service,
         "job_repository": job_repository,
         "job_runner": job_runner,

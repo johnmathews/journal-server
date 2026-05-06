@@ -222,6 +222,9 @@ class Entity:
     first_seen: str = ""
     created_at: str = ""
     updated_at: str = ""
+    is_quarantined: bool = False
+    quarantine_reason: str = ""
+    quarantined_at: str = ""
 
 
 @dataclass

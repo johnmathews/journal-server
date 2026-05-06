@@ -135,6 +135,9 @@ def _entity_summary(
         "mention_count": mention_count,
         "first_seen": entity.first_seen,
         "last_seen": last_seen,
+        "is_quarantined": bool(getattr(entity, "is_quarantined", False)),
+        "quarantine_reason": getattr(entity, "quarantine_reason", "") or "",
+        "quarantined_at": getattr(entity, "quarantined_at", "") or "",
     }
     if quotes is not None:
         d["quotes"] = quotes
@@ -152,6 +155,9 @@ def _entity_detail(entity: Any) -> dict[str, Any]:
         "first_seen": entity.first_seen,
         "created_at": entity.created_at,
         "updated_at": entity.updated_at,
+        "is_quarantined": bool(getattr(entity, "is_quarantined", False)),
+        "quarantine_reason": getattr(entity, "quarantine_reason", "") or "",
+        "quarantined_at": getattr(entity, "quarantined_at", "") or "",
     }
 
 
@@ -2747,6 +2753,112 @@ def register_api_routes(
                 "relationships_reassigned": result.relationships_reassigned,
                 "aliases_added": result.aliases_added,
             }
+        )
+
+    # ---- quarantine ------------------------------------------------------
+
+    @mcp.custom_route(
+        "/api/entities/quarantined",
+        methods=["GET"],
+        name="api_list_quarantined_entities",
+    )
+    async def list_quarantined_entities_route(request: Request) -> JSONResponse:
+        services = _require_services()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+        entity_store: EntityStore = services["entity_store"]
+        user = get_authenticated_user(request)
+        user_id = user.user_id
+
+        entities = entity_store.list_quarantined_entities(user_id=user_id)
+        items = [_entity_detail(e) for e in entities]
+        log.info(
+            "GET /api/entities/quarantined — %d entities", len(items),
+        )
+        return JSONResponse({"items": items, "total": len(items)})
+
+    @mcp.custom_route(
+        "/api/entities/{entity_id:int}/quarantine",
+        methods=["POST"],
+        name="api_quarantine_entity",
+    )
+    async def quarantine_entity_route(request: Request) -> JSONResponse:
+        services = _require_services()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+        entity_store: EntityStore = services["entity_store"]
+        user = get_authenticated_user(request)
+        user_id = user.user_id
+        entity_id = int(request.path_params["entity_id"])
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+        reason = body.get("reason", "") if isinstance(body, dict) else ""
+        if reason is not None and not isinstance(reason, str):
+            return JSONResponse(
+                {"error": "'reason' must be a string"}, status_code=400,
+            )
+        reason_str = (reason or "").strip()
+
+        # Ownership / existence check before mutating.
+        existing = entity_store.get_entity(entity_id, user_id=user_id)
+        if existing is None:
+            return JSONResponse(
+                {"error": f"Entity {entity_id} not found"}, status_code=404,
+            )
+
+        try:
+            entity_store.quarantine_entity(entity_id, reason_str)
+        except ValueError:
+            return JSONResponse(
+                {"error": f"Entity {entity_id} not found"}, status_code=404,
+            )
+
+        updated = entity_store.get_entity(entity_id, user_id=user_id)
+        log.info(
+            "POST /api/entities/%d/quarantine — reason=%r",
+            entity_id, reason_str,
+        )
+        return JSONResponse(
+            _entity_detail(updated) if updated else {"id": entity_id}
+        )
+
+    @mcp.custom_route(
+        "/api/entities/{entity_id:int}/release-quarantine",
+        methods=["POST"],
+        name="api_release_quarantine_entity",
+    )
+    async def release_quarantine_route(request: Request) -> JSONResponse:
+        services = _require_services()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+        entity_store: EntityStore = services["entity_store"]
+        user = get_authenticated_user(request)
+        user_id = user.user_id
+        entity_id = int(request.path_params["entity_id"])
+
+        existing = entity_store.get_entity(entity_id, user_id=user_id)
+        if existing is None:
+            return JSONResponse(
+                {"error": f"Entity {entity_id} not found"}, status_code=404,
+            )
+
+        try:
+            entity_store.release_quarantine(entity_id)
+        except ValueError:
+            return JSONResponse(
+                {"error": f"Entity {entity_id} not found"}, status_code=404,
+            )
+
+        updated = entity_store.get_entity(entity_id, user_id=user_id)
+        log.info(
+            "POST /api/entities/%d/release-quarantine", entity_id,
+        )
+        return JSONResponse(
+            _entity_detail(updated) if updated else {"id": entity_id}
         )
 
     # ---- merge candidates -----------------------------------------------

@@ -14,9 +14,11 @@ import logging
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from journal.models import Entity, EntityMention, EntityRelationship, MergeCandidate, MergeResult
+from journal.services.entity_naming import smart_title_case
 
 if TYPE_CHECKING:
     import sqlite3
+    from collections.abc import Mapping
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +63,7 @@ class EntityStore(Protocol):
         limit: int = 100,
         offset: int = 0,
         user_id: int | None = None,
+        include_quarantined: bool = False,
     ) -> list[Entity]: ...
 
     def list_entities_with_mention_counts(
@@ -70,13 +73,21 @@ class EntityStore(Protocol):
         offset: int = 0,
         user_id: int | None = None,
         search: str | None = None,
+        include_quarantined: bool = False,
     ) -> list[tuple[Entity, int, str]]: ...
+
+    def list_quarantined_entities(self, user_id: int) -> list[Entity]: ...
+
+    def quarantine_entity(self, entity_id: int, reason: str) -> None: ...
+
+    def release_quarantine(self, entity_id: int) -> None: ...
 
     def count_entities(
         self,
         entity_type: str | None = None,
         user_id: int | None = None,
         search: str | None = None,
+        include_quarantined: bool = False,
     ) -> int: ...
 
     def get_entity(self, entity_id: int, user_id: int | None = None) -> Entity | None: ...
@@ -185,6 +196,18 @@ def _normalise(s: str) -> str:
 
 
 def _row_to_entity(row: sqlite3.Row, aliases: list[str]) -> Entity:
+    # `is_quarantined`/`quarantine_reason`/`quarantined_at` arrive on the row
+    # via migration 0018. They're read with sqlite3.Row's mapping access using
+    # `.keys()` so older fixtures that bypass the migration runner don't
+    # explode — quarantine simply degrades to "off" for them.
+    keys = row.keys()
+    is_quarantined = bool(row["is_quarantined"]) if "is_quarantined" in keys else False
+    quarantine_reason = (
+        row["quarantine_reason"] if "quarantine_reason" in keys else ""
+    ) or ""
+    quarantined_at = (
+        row["quarantined_at"] if "quarantined_at" in keys else ""
+    ) or ""
     return Entity(
         id=row["id"],
         entity_type=row["entity_type"],
@@ -195,14 +218,36 @@ def _row_to_entity(row: sqlite3.Row, aliases: list[str]) -> Entity:
         first_seen=row["first_seen"] or "",
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        is_quarantined=is_quarantined,
+        quarantine_reason=quarantine_reason,
+        quarantined_at=quarantined_at,
     )
 
 
 class SQLiteEntityStore:
     """SQLite-backed implementation of the `EntityStore` Protocol."""
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        casing_exceptions: Mapping[str, str] | None = None,
+    ) -> None:
         self._conn = conn
+        # Stored as a dict so the reload helper can rebind it in place by
+        # calling `store.set_casing_exceptions(...)`. A None value at construction
+        # time means "no exceptions" — the algorithm degrades to plain smart-title-case.
+        self._casing_exceptions: dict[str, str] = (
+            dict(casing_exceptions) if casing_exceptions else {}
+        )
+
+    def set_casing_exceptions(self, exceptions: Mapping[str, str]) -> None:
+        """Swap in a fresh exceptions table. Called by the reload helper.
+
+        Atomic from the caller's perspective: a single attribute write replaces
+        the dict reference; in-flight ``create_entity`` calls already inside
+        ``smart_title_case`` keep their existing reference until they finish.
+        """
+        self._casing_exceptions = dict(exceptions)
 
     # ---- entity lookup and creation -----------------------------------
 
@@ -265,17 +310,20 @@ class SQLiteEntityStore:
         first_seen: str,
         user_id: int = 1,
     ) -> Entity:
+        normalised_name = smart_title_case(
+            canonical_name, exceptions=self._casing_exceptions
+        )
         cursor = self._conn.execute(
             "INSERT INTO entities"
             " (user_id, entity_type, canonical_name, description, first_seen)"
             " VALUES (?, ?, ?, ?, ?)",
-            (user_id, entity_type, canonical_name.strip(), description, first_seen),
+            (user_id, entity_type, normalised_name, description, first_seen),
         )
         self._conn.commit()
         entity_id = cursor.lastrowid
         assert entity_id is not None
         log.info(
-            "Created entity %d: %s (%s)", entity_id, canonical_name, entity_type
+            "Created entity %d: %s (%s)", entity_id, normalised_name, entity_type
         )
         entity = self.get_entity(entity_id)
         assert entity is not None
@@ -343,6 +391,7 @@ class SQLiteEntityStore:
         limit: int = 100,
         offset: int = 0,
         user_id: int | None = None,
+        include_quarantined: bool = False,
     ) -> list[Entity]:
         sql = "SELECT * FROM entities"
         params: list[object] = []
@@ -353,6 +402,8 @@ class SQLiteEntityStore:
         if user_id is not None:
             conditions.append("user_id = ?")
             params.append(user_id)
+        if not include_quarantined:
+            conditions.append("is_quarantined = 0")
         if conditions:
             sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY entity_type, canonical_name LIMIT ? OFFSET ?"
@@ -367,6 +418,7 @@ class SQLiteEntityStore:
         offset: int = 0,
         user_id: int | None = None,
         search: str | None = None,
+        include_quarantined: bool = False,
     ) -> list[tuple[Entity, int, str]]:
         sql = (
             "SELECT e.*, COUNT(m.id) AS mention_count,"
@@ -383,6 +435,8 @@ class SQLiteEntityStore:
         if user_id is not None:
             conditions.append("e.user_id = ?")
             params.append(user_id)
+        if not include_quarantined:
+            conditions.append("e.is_quarantined = 0")
         if search:
             needle = f"%{search.strip().lower()}%"
             conditions.append(
@@ -412,6 +466,7 @@ class SQLiteEntityStore:
         entity_type: str | None = None,
         user_id: int | None = None,
         search: str | None = None,
+        include_quarantined: bool = False,
     ) -> int:
         sql = "SELECT COUNT(*) AS cnt FROM entities"
         params: list[object] = []
@@ -422,6 +477,8 @@ class SQLiteEntityStore:
         if user_id is not None:
             conditions.append("user_id = ?")
             params.append(user_id)
+        if not include_quarantined:
+            conditions.append("is_quarantined = 0")
         if search:
             needle = f"%{search.strip().lower()}%"
             conditions.append(
@@ -770,6 +827,73 @@ class SQLiteEntityStore:
         if deleted:
             log.info("Deleted %d orphaned entities (zero mentions)", deleted)
         return deleted
+
+    # ---- quarantine ------------------------------------------------------
+
+    def quarantine_entity(self, entity_id: int, reason: str) -> None:
+        """Soft-quarantine an entity.
+
+        Sets ``is_quarantined = 1``, stamps ``quarantine_reason`` and
+        ``quarantined_at`` (UTC ISO-8601), and leaves all other columns —
+        including aliases, descriptions, and merge history — untouched.
+
+        Raises ``ValueError`` if the entity does not exist; idempotent for
+        repeat calls on an already-quarantined row (the reason and timestamp
+        are refreshed so the most recent action wins).
+        """
+        existing = self.get_entity(entity_id)
+        if existing is None:
+            raise ValueError(f"Entity {entity_id} not found")
+        self._conn.execute(
+            "UPDATE entities SET is_quarantined = 1,"
+            " quarantine_reason = ?,"
+            " quarantined_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),"
+            " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+            " WHERE id = ?",
+            (reason, entity_id),
+        )
+        self._conn.commit()
+        log.info(
+            "Quarantined entity %d (%s): %s",
+            entity_id, existing.canonical_name, reason,
+        )
+
+    def release_quarantine(self, entity_id: int) -> None:
+        """Clear the quarantine flag, reason, and timestamp.
+
+        Raises ``ValueError`` if the entity does not exist; safe to call on
+        a non-quarantined entity (it just becomes a no-op write).
+        """
+        existing = self.get_entity(entity_id)
+        if existing is None:
+            raise ValueError(f"Entity {entity_id} not found")
+        self._conn.execute(
+            "UPDATE entities SET is_quarantined = 0,"
+            " quarantine_reason = '',"
+            " quarantined_at = '',"
+            " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+            " WHERE id = ?",
+            (entity_id,),
+        )
+        self._conn.commit()
+        log.info(
+            "Released quarantine on entity %d (%s)",
+            entity_id, existing.canonical_name,
+        )
+
+    def list_quarantined_entities(self, user_id: int) -> list[Entity]:
+        """Return only quarantined entities for the given user.
+
+        Ordering matches ``list_entities`` (entity_type then canonical_name)
+        so the operator UI is stable.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM entities"
+            " WHERE user_id = ? AND is_quarantined = 1"
+            " ORDER BY entity_type, canonical_name",
+            (user_id,),
+        ).fetchall()
+        return [self._hydrate(r) for r in rows]
 
     # ---- merge candidates -----------------------------------------------
 

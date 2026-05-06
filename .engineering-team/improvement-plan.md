@@ -1,217 +1,117 @@
-# Implementation Plan: Journal Analysis Tool
+# Improvement plan — UI changes (mood-trend defaults, entity casing, stale entities)
 
-**Date:** 2026-03-22
-
-## Work Units
-
-### Unit 1: Project Scaffolding (Critical)
-**Priority:** Critical
-**Dependencies:** None
-
-Set up the Python project structure, dependencies, and development tooling.
-
-**Changes:**
-- `pyproject.toml` — Project metadata, dependencies, tool config
-- `src/journal/__init__.py` — Package init
-- `src/journal/py.typed` — PEP 561 marker
-- `.gitignore` — Python/Docker/IDE ignores
-- `CLAUDE.md` — Project conventions for Claude Code
-- `Dockerfile` — Multi-stage build
-- `docker-compose.yml` — Full stack (app + ChromaDB)
-- `.github/workflows/ci.yml` — GitHub Actions CI
-
-**Dependencies:**
-- `anthropic` ~0.86
-- `openai` ~2.29
-- `chromadb-client` ~1.5
-- `mcp[cli]` ~1.26
-- `tiktoken` (for token counting/chunking)
-- Dev: `pytest`, `pytest-asyncio`, `coverage`, `ruff`
-
-**Acceptance criteria:** `uv sync` works, `pytest` runs (even with no tests), `docker compose build` succeeds
+Date: 2026-05-06. Server-side mirror of the canonical plan at
+`/Users/john/projects/journal/webapp/.claude/worktrees/eng-ui-changes/.engineering-team/improvement-plan.md`.
+Same content, included here so anyone working in the server worktree has it locally.
 
 ---
 
-### Unit 2: Configuration and Logging (Critical)
-**Priority:** Critical
-**Dependencies:** Unit 1
+# Improvement plan — UI changes (mood-trend defaults, entity casing, stale entities)
 
-**Changes:**
-- `src/journal/config.py` — Pydantic-free config from env vars (API keys, DB paths, ChromaDB host, etc.)
-- `src/journal/logging.py` — Structured logging setup
-- `tests/conftest.py` — Shared fixtures (temp DB, mock clients)
+Date: 2026-05-06. Worktree: `eng-ui-changes` in both repos.
 
-**Acceptance criteria:** Config loads from env vars with sensible defaults, logging works
+## Approach
 
----
+Cross-cutting work across two repos. Each work unit is scoped to one repo; cross-repo
+dependencies (server API → webapp consumer) are called out explicitly. All work happens in
+the matching `eng-ui-changes` worktree in each repo, producing two coordinated commits.
 
-### Unit 3: Database Layer (Critical)
-**Priority:** Critical
-**Dependencies:** Unit 2
+## Work units overview
 
-**Changes:**
-- `src/journal/db/connection.py` — SQLite connection factory with PRAGMAs
-- `src/journal/db/migrations.py` — Migration runner using `PRAGMA user_version`
-- `src/journal/db/migrations/0001_initial_schema.sql` — Core schema (entries, mood_scores, people, places, tags, source_files, FTS5)
-- `src/journal/db/repository.py` — Repository interface (Protocol) + SQLite implementation
-- `tests/test_db/` — Tests for migrations, CRUD, FTS5 queries
+| # | Repo | Title | Priority | Depends on |
+|---|---|---|---|---|
+| 1 | webapp | Mood-trends default = affect-axes group | High | — |
+| 2 | server | Smart entity capitalization (write-time normalization) | Medium | — |
+| 3 | server | Entity `is_quarantined` flag + repo + filter | High | — |
+| 4 | server | Reject/rename hallucinated names + post-save sanity sweep | High | WU3 |
+| 5 | server | Loosen merge-candidate detection for near-duplicate places | Medium | — |
+| 6 | server | Docs: existing merge feature + production deployment | Medium | — |
+| 7 | webapp | Surface quarantined entities in admin/list UI | Medium | WU3, WU4 |
 
-**Repository interface methods:**
-- `create_entry(date, source_type, raw_text, word_count) -> Entry`
-- `get_entry(entry_id) -> Entry | None`
-- `get_entries_by_date(date) -> list[Entry]`
-- `list_entries(start_date?, end_date?, limit, offset) -> list[Entry]`
-- `search_text(query, start_date?, end_date?) -> list[Entry]` (FTS5)
-- `get_statistics(start_date?, end_date?) -> Statistics`
-- `add_people(entry_id, names) -> None`
-- `add_places(entry_id, names) -> None`
-- `add_tags(entry_id, tags) -> None`
-- `add_mood_score(entry_id, dimension, score, confidence?) -> None`
-- `get_mood_trends(start_date?, end_date?, granularity) -> list[MoodTrend]`
-- `get_topic_frequency(topic, start_date?, end_date?) -> int`
+WU1, WU2, WU3, WU5, WU6 are independent — implement in parallel. WU4 follows WU3. WU7
+follows WU3 + WU4.
 
-**Acceptance criteria:** All CRUD operations tested, FTS5 search works, migrations apply cleanly
+## WU1 — Mood-trends default selection = affect-axes group (webapp)
 
----
+Replace the `agency` default (`stores/dashboard.ts:127, 240–248`) with the affect group's
+members from `MOOD_GROUPS` (`utils/mood-groups.ts`). Update tests in
+`stores/__tests__/dashboard.test.ts`. Visual-verify via Playwright.
 
-### Unit 4: Provider Interfaces and Adapters (Critical)
-**Priority:** Critical
-**Dependencies:** Unit 2
+Acceptance: only `joy_sadness` and `energy_fatigue` series visible on first load; affect
+group label shows full state; user can still toggle freely; tests + lint green.
 
-**Changes:**
-- `src/journal/providers/ocr.py` — OCR interface (Protocol) + Anthropic adapter
-- `src/journal/providers/transcription.py` — Transcription interface (Protocol) + OpenAI Whisper adapter
-- `src/journal/providers/embeddings.py` — Embeddings interface (Protocol) + OpenAI adapter
-- `tests/test_providers/` — Tests with mocked API responses
+## WU2 — Smart entity capitalization (server)
 
-**OCR interface:**
-- `extract_text(image_data: bytes, media_type: str) -> str`
+New `services/entity_naming.py` with `smart_title_case()` (algorithm in eval report). New
+`config/entity-casing-exceptions.toml` with operator-managed preserved-case overrides
+(`iOS`, `IKEA`, `FC Barcelona`, etc.). Hook into `entitystore/store.py:create_entity()`.
+Add `reload_entity_casing_exceptions()` in `services/reload.py` and an admin reload route.
+Comprehensive test module + fixture updates across existing tests.
 
-**Transcription interface:**
-- `transcribe(audio_data: bytes, media_type: str, language?: str) -> str`
+Acceptance: new entities normalized at write time; mid-word uppercase preserved; exceptions
+honored; reload endpoint works; pytest + ruff green.
 
-**Embeddings interface:**
-- `embed_texts(texts: list[str]) -> list[list[float]]`
-- `embed_query(query: str) -> list[float]`
+## WU3 — Entity quarantine flag (server)
 
-**Acceptance criteria:** All adapters tested with mocked responses, interfaces are clean Protocols
+New migration `0012_entity_quarantine.sql` adding `is_quarantined`, `quarantine_reason`,
+`quarantined_at`. Update model + repository. Default-filter quarantined out of entity-list
+and chart endpoints. New endpoints: `/api/entities/quarantined`,
+`/api/entities/{id}/quarantine`, `/api/entities/{id}/release-quarantine`. Tests cover
+migration + repository + endpoints.
 
----
+Acceptance: migration applies; default lists exclude quarantined; release/quarantine
+round-trip persists; tests green.
 
-### Unit 5: Vector Store Layer (High)
-**Priority:** High
-**Dependencies:** Unit 4
+## WU4 — Reject/rename hallucinated names + post-save sanity sweep (server)
 
-**Changes:**
-- `src/journal/vectorstore/store.py` — VectorStore interface (Protocol) + ChromaDB implementation
-- `tests/test_vectorstore/` — Tests (can use in-memory ChromaDB for testing)
+`providers/extraction.py:379` — replace warn-and-keep with longest-substring repair, fall
+back to `pending_quarantine_reason` flag. `services/entity_extraction.py:extract_from_entry`
+— add a sweep over touched entities; for any entity whose canonical_name is not a substring
+of any mention quote or any mentioned entry's text, soft-quarantine via the WU3 helper.
+Reproduction test pinned to the `Zij Kanaal C Zuid` flow.
 
-**VectorStore interface:**
-- `add_entry(entry_id, chunks: list[str], embeddings: list[list[float]], metadata: dict) -> None`
-- `search(query_embedding: list[float], limit, filters?) -> list[SearchResult]`
-- `delete_entry(entry_id) -> None`
+Acceptance: hallucinated names auto-renamed when possible, quarantined otherwise; no row
+deletion; reproduction test passes; logs at INFO clearly state the action taken.
 
-**Acceptance criteria:** Add/search/delete operations tested, metadata filtering works
+## WU5 — Loosen merge-candidate detection (server)
 
----
+Add a normalized-signature heuristic alongside the existing embedding-distance threshold:
+whitespace-stripped, lowercased; entities of the same type whose signatures are equal or
+short-substring-of-each-other become merge candidates. New tests cover the prod
+`Zij Kanaal C *` triple.
 
-### Unit 6: Ingestion Service (High)
-**Priority:** High
-**Dependencies:** Units 3, 4, 5
+Acceptance: new tests pass; existing tests pass; manually verifiable on prod DB.
 
-**Changes:**
-- `src/journal/services/ingestion.py` — Orchestrates: OCR/transcription -> chunking -> embedding -> store in both DBs
-- `src/journal/services/chunking.py` — Text chunking with tiktoken (paragraph-aware, 500 token chunks, 100 token overlap)
-- `tests/test_services/test_ingestion.py` — Tests with mocked providers
+## WU6 — Docs: merge feature + production deployment (server)
 
-**Flow:**
-1. Receive image/audio + date
-2. Extract text (OCR or transcription)
-3. Compute word count, store entry in SQLite
-4. Chunk text
-5. Generate embeddings for chunks
-6. Store chunks + embeddings in ChromaDB with entry_id metadata
-7. Return entry summary
+Add "Merging entities", "Quarantine", and "Casing normalization" sections to
+`docs/entity-tracking.md`. New file `docs/production-deployment.md` covering compose layout,
+containers, bind mounts, image source, update workflow, public exposure, operational
+commands. Explicitly call out `:latest` pinning and manual update workflow as a known
+fragility.
 
-**Acceptance criteria:** Full ingestion pipeline tested end-to-end with mocks, chunking produces correct overlap
+Acceptance: docs match the actual code and prod state; render cleanly.
 
----
+## WU7 — Webapp: surface quarantined entities (webapp)
 
-### Unit 7: Query Service (High)
-**Priority:** High
-**Dependencies:** Units 3, 5
+Add quarantine badge + filter + release action in `views/EntityListView.vue`. Show
+quarantine reason in `views/EntityDetailView.vue`. New API client functions in
+`api/entities.ts`. Tests for both views.
 
-**Changes:**
-- `src/journal/services/query.py` — Query service that combines SQLite and ChromaDB results
-- `tests/test_services/test_query.py` — Tests
+Acceptance: quarantined entities hidden from default view; visible under Quarantined
+filter; release works round-trip; coverage thresholds met; visual verification via
+Playwright.
 
-**Methods:**
-- `search_entries(query, start_date?, end_date?, limit, offset) -> SearchResults`
-- `get_entries_by_date(date) -> list[Entry]`
-- `list_entries(start_date?, end_date?, limit, offset) -> list[Entry]`
-- `get_statistics(start_date?, end_date?) -> Statistics`
-- `get_mood_trends(start_date?, end_date?, granularity) -> MoodTrends`
-- `get_topic_frequency(topic, start_date?, end_date?) -> TopicFrequency`
+## Risk summary
 
-**Acceptance criteria:** All query types tested, semantic search uses vector store, frequency queries use FTS5
+WU4 is highest-risk (LLM repair path). Soft-quarantine instead of delete; comprehensive
+test coverage including the prod-incident reproduction. WU2's risk is test-fixture churn.
+Others are low-risk.
 
----
+## Out-of-scope (flagged)
 
-### Unit 8: MCP Server (High)
-**Priority:** High
-**Dependencies:** Units 6, 7
-
-**Changes:**
-- `src/journal/mcp_server.py` — FastMCP server with 7 tools, lifespan pattern, streamable HTTP
-- `tests/test_mcp_server.py` — Tests for tool functions
-
-**Tools:**
-1. `journal_search_entries` — Semantic search
-2. `journal_get_entries_by_date` — Date lookup
-3. `journal_list_entries` — Chronological listing
-4. `journal_get_statistics` — Quantitative stats
-5. `journal_get_mood_trends` — Mood over time
-6. `journal_get_topic_frequency` — Keyword/topic counting
-7. `journal_ingest_entry` — Ingest image or voice note
-
-**Acceptance criteria:** All tools tested, lifespan manages connections, server starts on streamable HTTP
-
----
-
-### Unit 9: CLI Interface (Medium)
-**Priority:** Medium
-**Dependencies:** Units 6, 7
-
-**Changes:**
-- `src/journal/cli.py` — CLI using argparse (ingest, search, stats, list commands)
-- `tests/test_cli.py` — Tests
-
-**Acceptance criteria:** All subcommands work, output is human-readable
-
----
-
-### Unit 10: Docker and Deployment (Medium)
-**Priority:** Medium
-**Dependencies:** Unit 8
-
-**Changes:**
-- `Dockerfile` — Multi-stage build (already scaffolded in Unit 1, finalize here)
-- `docker-compose.yml` — Full stack with ChromaDB, journal app, volumes, healthchecks
-- `docs/deployment.md` — Deployment documentation
-
-**Acceptance criteria:** `docker compose up` starts the full stack, MCP server is reachable, data persists across restarts
-
----
-
-### Unit 11: Documentation (Medium)
-**Priority:** Medium
-**Dependencies:** All previous units
-
-**Changes:**
-- `docs/architecture.md` — Architecture overview, component diagram, data flow
-- `docs/api.md` — MCP tool reference (auto-generated descriptions)
-- `docs/development.md` — Local dev setup, running tests, adding providers
-- `docs/configuration.md` — Environment variables reference
-- `README.md` — Project overview, quick start
-
-**Acceptance criteria:** All docs are accurate, complete, and match the code
+1. Backfilling pre-existing duplicate-case entity rows — future writes consistent post-WU2;
+   user cleans up via merge UI.
+2. Production image pinning / Watchtower — `:latest` everywhere; documented but unchanged.
+3. Embedding-matcher improvements — long-term; WU4 sweep is a pragmatic compensating
+   control.

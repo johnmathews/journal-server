@@ -369,6 +369,18 @@ class Config:
         default_factory=lambda: os.environ.get("JOURNAL_AUTHOR_NAME", "John")
     )
 
+    # Entity casing — operator-managed exception list for smart title-case
+    # normalization applied at entity-write time. See
+    # `services/entity_naming.py` and `docs/entity-tracking.md`.
+    entity_casing_exceptions_path: Path = field(
+        default_factory=lambda: Path(
+            os.environ.get(
+                "ENTITY_CASING_EXCEPTIONS_PATH",
+                "config/entity-casing-exceptions.toml",
+            )
+        )
+    )
+
     def __post_init__(self) -> None:
         valid_providers = {"openai", "gemini"}
         if self.transcription_provider not in valid_providers:
