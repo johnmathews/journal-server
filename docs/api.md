@@ -955,9 +955,82 @@ All fields are optional — include only the ones you want to change.
 
 **Response (200):** Full entity detail object (same shape as GET /api/entities/{id}).
 
+When the patch changes `description`, the response also includes `reembed_job_id` — the id of an
+async background job that recomputes the entity's stored embedding so future entity recognition
+reflects the new text. Poll `GET /api/jobs/{id}` to follow it. The field is omitted when the
+description was unchanged or no job runner is wired up.
+
 **Response (400):** `canonical_name` is empty, or `entity_type` is invalid.
 
 **Response (404):** Entity not found.
+
+### POST /api/entities/{entity_id}/aliases
+
+Add an alias to an entity.
+
+**Request body:**
+
+```json
+{ "alias": "Mum" }
+```
+
+**Response (201):** Full entity detail object (same shape as GET /api/entities/{entity_id}) with
+the new alias included. Idempotent: re-asserting an existing alias on the same entity just returns
+the entity unchanged.
+
+**Response (400):** `alias` is missing or empty.
+
+**Response (404):** Entity not found.
+
+**Response (409):** The alias is already mapped to a *different* entity for this user. The body
+includes the existing entity's id, name, and type so the caller can offer a merge:
+
+```json
+{
+ "error": "alias already maps to a different entity",
+ "alias": "Mum",
+ "existing_entity_id": 7,
+ "existing_canonical_name": "Sarah",
+ "existing_entity_type": "person"
+}
+```
+
+The webapp surfaces this as a "merge into the existing entity?" dialog and, on confirm, calls
+`POST /api/entities/merge` with the existing entity as survivor.
+
+### DELETE /api/entities/{entity_id}/aliases/{alias}
+
+Remove an alias from an entity. The alias is normalised (lowercased + whitespace-stripped) before
+matching, so case doesn't matter.
+
+**Response (200):** Updated entity detail object.
+
+**Response (404):** Entity not found, or the alias is not attached to this entity.
+
+### GET /api/entities/aliases/lookup
+
+Non-mutating, type-agnostic collision check. Used by the webapp before submitting a new alias to
+warn the user inline.
+
+**Query parameters:**
+
+| Parameter | Type   | Required | Description                  |
+| --------- | ------ | -------- | ---------------------------- |
+| `alias`   | string | yes      | The alias text to look up.   |
+
+**Response (200):** When the alias is unowned for this user:
+
+```json
+{ "entity_id": null }
+```
+
+When some entity owns it:
+
+```json
+{ "entity_id": 7, "canonical_name": "Sarah", "entity_type": "person" }
+```
+
+**Response (400):** `alias` query parameter missing.
 
 ### DELETE /api/entities/{entity_id}
 

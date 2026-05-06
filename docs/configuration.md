@@ -28,6 +28,9 @@ See `docs/security.md` for the threat model and how auth fits in.
 | `LOG_LEVEL`                         | `INFO`                | Logging level (DEBUG, INFO, WARNING, ERROR)                                                                                                                            |
 | `JOURNAL_AUTHOR_NAME`               | `John`                | Name the entity extractor uses as the subject of first-person statements. See `docs/entity-tracking.md`.                                                               |
 | `ENTITY_DEDUP_SIMILARITY_THRESHOLD` | `0.88`                | Cosine similarity threshold for the stage-c embedding dedup fallback. Raise to be stricter, lower to merge more aggressively.                                          |
+| `ENTITY_LLM_CANDIDATE_TOP_K`        | `30`                  | Max number of curated user entities passed to the extraction LLM as `known_entities` per call. See `docs/entity-tracking.md` (stage 0).                                |
+| `ENTITY_LLM_CANDIDATE_THRESHOLD`    | `0.4`                 | Minimum cosine similarity (entry-text vs entity embedding) required for an entity to be included in the per-call `known_entities` candidate set.                       |
+| `ENTITY_LLM_MATCH_MIN_COSINE`       | `0.3`                 | Floor for guard D in the four-guard hybrid sanity check on LLM-asserted matches: cosine(new mention, asserted match's stored embedding) must be ≥ this to be accepted. |
 
 ## Optional — Pushover notifications
 

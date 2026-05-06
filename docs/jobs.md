@@ -13,7 +13,7 @@ A single `jobs` table (migration `0006_jobs.sql`) holds one row per submitted ba
 | column             | type    | notes                                                        |
 | ------------------ | ------- | ------------------------------------------------------------ |
 | `id`               | TEXT PK | UUID v4 assigned at submission time                          |
-| `type`             | TEXT    | `entity_extraction` \| `mood_backfill`                       |
+| `type`             | TEXT    | `entity_extraction` \| `mood_backfill` \| `entity_reembed` \| ingestion / save-entry types |
 | `status`           | TEXT    | `queued` → `running` → `succeeded` \| `failed`               |
 | `params_json`      | TEXT    | JSON-encoded submission params (e.g. `{"stale_only": true}`) |
 | `progress_current` | INTEGER | Updated after each entry finishes                            |
@@ -241,6 +241,20 @@ Reprocess embeddings jobs store:
  "chunk_count": 5
 }
 ```
+
+Entity-reembed jobs (triggered by `PATCH /api/entities/{id}` when the description changes) store one of:
+
+```json
+{ "entity_id": 7, "embedded": true, "dimensions": 1536 }
+```
+
+```json
+{ "entity_id": 7, "embedded": false, "reason": "empty description" }
+```
+
+The job recomputes the entity's stored embedding from `f"{canonical_name} {description}"` so the stage-c similarity
+match in entity extraction reflects later edits. Notification topic `notif_job_success_entity_reembed` defaults off
+(these fire on every description edit and are routine); failures still go through the global `notif_job_failed`.
 
 Consumers should not assume any field beyond these — if the server adds new counters in a future version, clients must
 tolerate unknown keys.
