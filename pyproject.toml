@@ -37,7 +37,7 @@ source = ["src/journal"]
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 65
+fail_under = 80
 
 [tool.ruff]
 target-version = "py313"
