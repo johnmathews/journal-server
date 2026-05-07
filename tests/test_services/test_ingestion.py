@@ -53,8 +53,17 @@ def mock_embeddings():
 
 
 @pytest.fixture
-def ingestion_service(db_conn, mock_ocr, mock_transcription, mock_embeddings):
-    repo = SQLiteEntryRepository(db_conn)
+def repo(db_conn):
+    """Shared EntryRepository for tests that need to peek at repo state
+    after an ingestion call (e.g. to assert chunks/spans/pages were
+    written). Keeping this as its own fixture avoids the ``ingestion_service._repo``
+    reach-in pattern that earlier tests used.
+    """
+    return SQLiteEntryRepository(db_conn)
+
+
+@pytest.fixture
+def ingestion_service(repo, mock_ocr, mock_transcription, mock_embeddings):
     vector_store = InMemoryVectorStore()
     return IngestionService(
         repository=repo,
@@ -208,7 +217,7 @@ class TestIngestMultiVoice:
         assert calls == [(1, 2), (2, 2)]
 
     def test_persists_chunks(
-        self, ingestion_service, mock_transcription, mock_embeddings,
+        self, ingestion_service, repo, mock_transcription, mock_embeddings,
     ):
         mock_transcription.transcribe.side_effect = [
             TranscriptionResult(text="First recording text about the day."),
@@ -218,7 +227,7 @@ class TestIngestMultiVoice:
             [(b"a1", "audio/webm"), (b"a2", "audio/webm")],
             "2026-03-22",
         )
-        stored = ingestion_service._repo.get_chunks(entry.id)
+        stored = repo.get_chunks(entry.id)
         assert len(stored) == entry.chunk_count
         assert len(stored) > 0
 
@@ -233,9 +242,9 @@ class TestIngestImageUpdates:
         entry = ingestion_service.ingest_image(b"page data", "image/jpeg", "2026-03-22")
         assert entry.chunk_count > 0
 
-    def test_ingest_image_creates_page(self, ingestion_service):
+    def test_ingest_image_creates_page(self, ingestion_service, repo):
         entry = ingestion_service.ingest_image(b"page data", "image/jpeg", "2026-03-22")
-        pages = ingestion_service._repo.get_entry_pages(entry.id)
+        pages = repo.get_entry_pages(entry.id)
         assert len(pages) == 1
         assert pages[0].page_number == 1
         assert pages[0].raw_text == entry.raw_text
@@ -248,9 +257,9 @@ class TestIngestImageUpdates:
         entry = ingestion_service.ingest_voice(b"audio data", "audio/mp3", "2026-03-22")
         assert entry.chunk_count > 0
 
-    def test_ingest_voice_no_pages(self, ingestion_service):
+    def test_ingest_voice_no_pages(self, ingestion_service, repo):
         entry = ingestion_service.ingest_voice(b"audio data", "audio/mp3", "2026-03-22")
-        pages = ingestion_service._repo.get_entry_pages(entry.id)
+        pages = repo.get_entry_pages(entry.id)
         assert len(pages) == 0
 
 
@@ -259,9 +268,9 @@ class TestChunkPersistence:
     with the offsets the chunker computed, so the webapp overlay can read
     them back without re-running the chunker."""
 
-    def test_ingest_image_persists_chunks(self, ingestion_service):
+    def test_ingest_image_persists_chunks(self, ingestion_service, repo):
         entry = ingestion_service.ingest_image(b"page data", "image/jpeg", "2026-03-22")
-        stored = ingestion_service._repo.get_chunks(entry.id)
+        stored = repo.get_chunks(entry.id)
         assert len(stored) == entry.chunk_count
         assert len(stored) > 0
         # Every persisted chunk must have its source range contained
@@ -270,21 +279,21 @@ class TestChunkPersistence:
             assert 0 <= chunk.char_start <= chunk.char_end <= len(entry.final_text)
             assert chunk.token_count > 0
 
-    def test_ingest_voice_persists_chunks(self, ingestion_service):
+    def test_ingest_voice_persists_chunks(self, ingestion_service, repo):
         entry = ingestion_service.ingest_voice(b"audio data", "audio/mp3", "2026-03-22")
-        stored = ingestion_service._repo.get_chunks(entry.id)
+        stored = repo.get_chunks(entry.id)
         assert len(stored) == entry.chunk_count
         assert len(stored) > 0
 
-    def test_update_entry_text_replaces_chunks(self, ingestion_service):
+    def test_update_entry_text_replaces_chunks(self, ingestion_service, repo):
         entry = ingestion_service.ingest_image(b"page data", "image/jpeg", "2026-03-22")
-        original_chunks = ingestion_service._repo.get_chunks(entry.id)
+        original_chunks = repo.get_chunks(entry.id)
         assert len(original_chunks) > 0
 
         new_text = "Completely different corrected text for the entry."
         ingestion_service.update_entry_text(entry.id, new_text)
 
-        updated_chunks = ingestion_service._repo.get_chunks(entry.id)
+        updated_chunks = repo.get_chunks(entry.id)
         # New chunks reflect the new text.
         assert len(updated_chunks) > 0
         assert updated_chunks[0].text != original_chunks[0].text
@@ -292,11 +301,11 @@ class TestChunkPersistence:
         for chunk in updated_chunks:
             assert chunk.char_end <= len(new_text)
 
-    def test_delete_entry_removes_chunks(self, ingestion_service):
+    def test_delete_entry_removes_chunks(self, ingestion_service, repo):
         entry = ingestion_service.ingest_image(b"page data", "image/jpeg", "2026-03-22")
-        assert len(ingestion_service._repo.get_chunks(entry.id)) > 0
+        assert len(repo.get_chunks(entry.id)) > 0
         ingestion_service.delete_entry(entry.id)
-        assert ingestion_service._repo.get_chunks(entry.id) == []
+        assert repo.get_chunks(entry.id) == []
 
 
 class TestUncertainSpansIngestion:
@@ -306,7 +315,7 @@ class TestUncertainSpansIngestion:
     webapp will highlight the wrong characters (or nothing at all)."""
 
     def test_single_page_persists_uncertain_spans(
-        self, ingestion_service, mock_ocr
+        self, ingestion_service, repo, mock_ocr
     ):
         mock_ocr.extract.return_value = _ocr_result(
             "Hello Ritsya from Vienna.",
@@ -315,21 +324,21 @@ class TestUncertainSpansIngestion:
         entry = ingestion_service.ingest_image(
             b"page data", "image/jpeg", "2026-03-22"
         )
-        spans = ingestion_service._repo.get_uncertain_spans(entry.id)
+        spans = repo.get_uncertain_spans(entry.id)
         assert spans == [(6, 12), (18, 24)]
         # Verify that the stored offsets actually land on the right words.
         assert entry.raw_text[6:12] == "Ritsya"
         assert entry.raw_text[18:24] == "Vienna"
 
-    def test_single_page_no_uncertain_spans(self, ingestion_service, mock_ocr):
+    def test_single_page_no_uncertain_spans(self, ingestion_service, repo, mock_ocr):
         mock_ocr.extract.return_value = _ocr_result("All confident.", [])
         entry = ingestion_service.ingest_image(
             b"clean data", "image/jpeg", "2026-03-22"
         )
-        assert ingestion_service._repo.get_uncertain_spans(entry.id) == []
+        assert repo.get_uncertain_spans(entry.id) == []
 
     def test_multi_page_shifts_spans_into_entry_coordinates(
-        self, ingestion_service, mock_ocr
+        self, ingestion_service, repo, mock_ocr
     ):
         """The parser gives us per-page spans. After the join, spans
         from page 2 must be offset by len(page1_stripped) + 1 (the
@@ -347,7 +356,7 @@ class TestUncertainSpansIngestion:
         expected_text = "First Ritsya line.\nSecond Vienna line."
         assert entry.raw_text == expected_text
 
-        spans = ingestion_service._repo.get_uncertain_spans(entry.id)
+        spans = repo.get_uncertain_spans(entry.id)
         # Page 1 span unshifted: still at (6, 12) → "Ritsya"
         # Page 2 span shifted: original (7, 13), offset = len("First Ritsya line.") + 1 = 19
         #   new start = 7 + 19 = 26, new end = 13 + 19 = 32 → "Vienna"
@@ -358,7 +367,7 @@ class TestUncertainSpansIngestion:
         assert entry.raw_text[26:32] == "Vienna"
 
     def test_multi_page_strips_leading_whitespace_and_clips_spans(
-        self, ingestion_service, mock_ocr
+        self, ingestion_service, repo, mock_ocr
     ):
         """An OCR page that starts with whitespace gets lstripped
         before joining. A span that was in the leading whitespace
@@ -379,7 +388,7 @@ class TestUncertainSpansIngestion:
         )
         # The combined text is "hello world\nsecond" (page 1 stripped).
         assert entry.raw_text == "hello world\nsecond"
-        spans = ingestion_service._repo.get_uncertain_spans(entry.id)
+        spans = repo.get_uncertain_spans(entry.id)
         # Wait — (4, 9) in "   hello world" is "ello ". After stripping
         # 3 leading chars, that's (1, 6) = "ello ". So the span shifts,
         # not the word it points at.
@@ -387,7 +396,7 @@ class TestUncertainSpansIngestion:
         assert entry.raw_text[1:6] == "ello "
 
     def test_multi_page_drops_span_entirely_in_trimmed_whitespace(
-        self, ingestion_service, mock_ocr
+        self, ingestion_service, repo, mock_ocr
     ):
         """A span that falls within whitespace stripped from the page
         edges must be discarded. The `_strip_and_shift_page_spans`
@@ -403,13 +412,13 @@ class TestUncertainSpansIngestion:
             date="2026-03-22",
         )
         assert entry.raw_text == "hello world\nnext"
-        spans = ingestion_service._repo.get_uncertain_spans(entry.id)
+        spans = repo.get_uncertain_spans(entry.id)
         # Only the second span survives; shifted by -2 (leading strip).
         assert spans == [(6, 11)]
         assert entry.raw_text[6:11] == "world"
 
     def test_multi_page_only_one_page_has_uncertainty(
-        self, ingestion_service, mock_ocr
+        self, ingestion_service, repo, mock_ocr
     ):
         mock_ocr.extract.side_effect = [
             _ocr_result("All clean page one.", []),
@@ -421,14 +430,14 @@ class TestUncertainSpansIngestion:
         )
         expected_text = "All clean page one.\nPage two Atlas here."
         assert entry.raw_text == expected_text
-        spans = ingestion_service._repo.get_uncertain_spans(entry.id)
+        spans = repo.get_uncertain_spans(entry.id)
         # Page 2 offset = len("All clean page one.") + 1 = 20
         # Shifted span: (9 + 20, 14 + 20) = (29, 34)
         assert spans == [(29, 34)]
         assert entry.raw_text[29:34] == "Atlas"
 
     def test_patch_does_not_touch_uncertain_spans(
-        self, ingestion_service, mock_ocr
+        self, ingestion_service, repo, mock_ocr
     ):
         """Editing final_text must not clear or modify the uncertainty
         spans, because they live in raw_text coordinates and raw_text
@@ -439,12 +448,12 @@ class TestUncertainSpansIngestion:
         entry = ingestion_service.ingest_image(
             b"page data", "image/jpeg", "2026-03-22"
         )
-        spans_before = ingestion_service._repo.get_uncertain_spans(entry.id)
+        spans_before = repo.get_uncertain_spans(entry.id)
         assert spans_before == [(6, 12)]
 
         ingestion_service.update_entry_text(entry.id, "Completely different text.")
 
-        spans_after = ingestion_service._repo.get_uncertain_spans(entry.id)
+        spans_after = repo.get_uncertain_spans(entry.id)
         assert spans_after == [(6, 12)]
 
 
@@ -454,7 +463,7 @@ class TestVoiceUncertainSpans:
     toggle highlights low-confidence words for voice entries too."""
 
     def test_ingest_voice_persists_uncertain_spans(
-        self, ingestion_service, mock_transcription, mock_embeddings,
+        self, ingestion_service, repo, mock_transcription, mock_embeddings,
     ):
         mock_transcription.transcribe.return_value = TranscriptionResult(
             text="Hello wrld today.",
@@ -463,12 +472,12 @@ class TestVoiceUncertainSpans:
         entry = ingestion_service.ingest_voice(
             b"audio data", "audio/mp3", "2026-03-22",
         )
-        spans = ingestion_service._repo.get_uncertain_spans(entry.id)
+        spans = repo.get_uncertain_spans(entry.id)
         assert spans == [(6, 10)]
         assert entry.raw_text[6:10] == "wrld"
 
     def test_ingest_voice_no_uncertain_spans(
-        self, ingestion_service, mock_transcription, mock_embeddings,
+        self, ingestion_service, repo, mock_transcription, mock_embeddings,
     ):
         mock_transcription.transcribe.return_value = TranscriptionResult(
             text="All confident text.",
@@ -477,10 +486,10 @@ class TestVoiceUncertainSpans:
         entry = ingestion_service.ingest_voice(
             b"audio data", "audio/mp3", "2026-03-22",
         )
-        assert ingestion_service._repo.get_uncertain_spans(entry.id) == []
+        assert repo.get_uncertain_spans(entry.id) == []
 
     def test_multi_voice_shifts_spans_into_combined_coordinates(
-        self, ingestion_service, mock_transcription, mock_embeddings,
+        self, ingestion_service, repo, mock_transcription, mock_embeddings,
     ):
         mock_transcription.transcribe.side_effect = [
             TranscriptionResult(
@@ -500,13 +509,13 @@ class TestVoiceUncertainSpans:
         # Recording 1: "wrld" at (6, 10) → stays (6, 10)
         # Recording 2: "badd" at (7, 11), offset = len("First wrld text.") + 2 = 18
         #   → (7+18, 11+18) = (25, 29)
-        spans = ingestion_service._repo.get_uncertain_spans(entry.id)
+        spans = repo.get_uncertain_spans(entry.id)
         assert spans == [(6, 10), (25, 29)]
         assert entry.raw_text[6:10] == "wrld"
         assert entry.raw_text[25:29] == "badd"
 
     def test_multi_voice_one_recording_uncertain(
-        self, ingestion_service, mock_transcription, mock_embeddings,
+        self, ingestion_service, repo, mock_transcription, mock_embeddings,
     ):
         mock_transcription.transcribe.side_effect = [
             TranscriptionResult(text="Clean text.", uncertain_spans=[]),
@@ -520,7 +529,7 @@ class TestVoiceUncertainSpans:
             "2026-03-22",
         )
         # Recording 2 offset = len("Clean text.") + 2 = 13
-        spans = ingestion_service._repo.get_uncertain_spans(entry.id)
+        spans = repo.get_uncertain_spans(entry.id)
         assert spans == [(17, 22)]
         assert entry.raw_text[17:22] == "doubt"
 
@@ -548,7 +557,7 @@ class TestMultiPageIngestion:
         assert entry.final_text == entry.raw_text
         assert entry.chunk_count > 0
 
-    def test_ingest_multi_page_creates_pages(self, ingestion_service, mock_ocr):
+    def test_ingest_multi_page_creates_pages(self, ingestion_service, repo, mock_ocr):
         mock_ocr.extract.side_effect = [
             _ocr_result("First page."),
             _ocr_result("Second page."),
@@ -558,7 +567,7 @@ class TestMultiPageIngestion:
             date="2026-03-22",
         )
 
-        pages = ingestion_service._repo.get_entry_pages(entry.id)
+        pages = repo.get_entry_pages(entry.id)
         assert len(pages) == 2
         assert pages[0].page_number == 1
         assert pages[0].raw_text == "First page."
@@ -780,7 +789,7 @@ class TestRechunkEntry:
     """WU-D: IngestionService.rechunk_entry() end-to-end test with an in-memory
     vector store so we can observe the old → new chunk transition."""
 
-    def test_rechunk_replaces_existing_vectors(self, ingestion_service, mock_embeddings):
+    def test_rechunk_replaces_existing_vectors(self, ingestion_service, repo, mock_embeddings):
         # Ingest once with a chunker that produces N chunks.
         entry = ingestion_service.ingest_image(
             b"fake image", "image/jpeg", "2026-03-22"
@@ -796,7 +805,7 @@ class TestRechunkEntry:
         # Rechunk called embed_texts again (one call for the new chunks).
         mock_embeddings.embed_texts.assert_called_once()
         # The stored chunk_count is updated.
-        refreshed = ingestion_service._repo.get_entry(entry.id)
+        refreshed = repo.get_entry(entry.id)
         assert refreshed.chunk_count == new_count
 
     def test_rechunk_missing_entry_raises(self, ingestion_service):
@@ -804,7 +813,7 @@ class TestRechunkEntry:
             ingestion_service.rechunk_entry(999)
 
     def test_rechunk_dry_run_does_not_touch_embeddings_or_db(
-        self, ingestion_service, mock_embeddings
+        self, ingestion_service, repo, mock_embeddings
     ):
         entry = ingestion_service.ingest_image(
             b"fake image", "image/jpeg", "2026-03-22"
@@ -825,14 +834,14 @@ class TestRechunkEntry:
         # Vector store unchanged.
         assert ingestion_service._vector_store.count() == before_count
         # SQLite chunk_count unchanged.
-        refreshed = ingestion_service._repo.get_entry(entry.id)
+        refreshed = repo.get_entry(entry.id)
         assert refreshed.chunk_count == original_count
 
-    def test_rechunk_empty_text_returns_zero(self, ingestion_service):
+    def test_rechunk_empty_text_returns_zero(self, ingestion_service, repo):
         # Manually create an entry with no text (bypasses ingest_image
         # which would have rejected empty OCR output).
-        entry = ingestion_service._repo.create_entry("2026-03-22", "photo", "", 0)
-        ingestion_service._repo.update_chunk_count(entry.id, 0)
+        entry = repo.create_entry("2026-03-22", "photo", "", 0)
+        repo.update_chunk_count(entry.id, 0)
 
         result = ingestion_service.rechunk_entry(entry.id)
         assert result == 0
@@ -1673,7 +1682,7 @@ class TestIngestionPublicAPI:
         )
         assert ingestion_service.get_page_count(entry.id) == 0
 
-    def test_store_source_file_inserts_row(self, ingestion_service):
+    def test_store_source_file_inserts_row(self, ingestion_service, repo):
         entry = ingestion_service.ingest_text(
             text="any text", date="2026-03-22", source_type="text_entry",
         )
@@ -1682,7 +1691,7 @@ class TestIngestionPublicAPI:
         )
         assert isinstance(source_id, int) and source_id > 0
         # And it shows up in the source_files table for that entry.
-        row = ingestion_service._repo._conn.execute(  # noqa: SLF001 — direct DB peek for assertion
+        row = repo.connection.execute(
             "SELECT file_path, file_type, file_hash FROM source_files WHERE id = ?",
             (source_id,),
         ).fetchone()
