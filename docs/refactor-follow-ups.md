@@ -158,53 +158,59 @@ extraction is the trickiest part.
 
 ---
 
-### 3. Test private-state cleanup, round 2
+### 3. Test private-state cleanup, round 2 — LARGELY RESOLVED 2026-05-07
 
-**Where:** `tests/` — about 258 reach-ins remaining as of 2026-05-07.
+Sweep complete for every category in the original snapshot. Total
+reach-in count 254 → 66 (-188 sites). Per-category outcomes:
 
-**What landed in Unit 6:** `EntryRepository.connection` and
-`JobRepository.connection` properties added; `repo._conn` / `jobs_repo._conn`
-renamed to `.connection` everywhere in tests. ~17 sites resolved.
+| Pattern | Result |
+|---|---|
+| `provider._client` (~69) | resolved — `_make_provider()` helpers in each provider test file now return `(provider, fake_client)` and tests configure the SDK mock through the test's own `client` variable |
+| `ingestion_service._repo` (~27) | resolved — `tests/test_services/test_ingestion.py` fixture split into `repo` + `ingestion_service`; one site survives in `tests/test_auth_api.py` (mirrors a real production reach-in — see item 7 below) |
+| `scorer._client` (~13) | resolved — `_make_scorer(client)` helper patches `anthropic.Anthropic` |
+| `svc._build_success_message` (~11) | resolved — extracted to module-level `build_success_message`; tests import the function directly |
+| `provider._primary` / `_fallback` / `_secondary` / `_shadow` (~25) | resolved — promoted to read-only accessors on `RetryingTranscriptionProvider`, `ShadowTranscriptionProvider`, and `DualPassOCRProvider` |
+| `runner._ingestion` (~10) | resolved — `runner_factory` accepts `ingestion=` kwarg |
+| `rr._client` (~8) | resolved — `_make()` helper returns `(rr, fake_client)` |
+| `provider._model` (~7) | resolved — `.model` property added to all 9 provider/service classes that hold a model name; `__new__` write-pattern tests rebuilt to use real constructors with patched SDKs |
+| `svc._is_topic_enabled` (~5) | resolved — rewrote tests against the public `notify_*` surface (Pushover urlopen side effect) |
+| `svc._post_to_pushover` / `svc._resolve_credentials` | resolved — extracted to module-level `post_to_pushover` / `resolve_credentials`; tests import them directly |
+| `_vector_store` (~5) | resolved — `IngestionService.vector_store` property added (mirrors `QueryService.vector_store`); test sites switched |
+| `poller._thread` (4) | resolved — added `is_running()` and `wait(timeout=...)` to `HealthPoller` |
 
-**Remaining categories** (current counts — re-grep before starting,
-they change as the codebase evolves):
+**Residual: ~66 reach-ins** — all in one of these tolerated buckets:
 
-| Pattern | Sites | Strategy |
-|---|---:|---|
-| `provider._client` | ~69 | Add `replace_client(...)` per provider class, OR migrate tests to full provider mocks |
-| `ingestion_service._repo` | ~27 | Add named pass-throughs on IngestionService for the long-tail repo methods (Unit 1b pattern) |
-| `scorer._client` | ~13 | Same as provider._client |
-| `svc._build_success_message` | ~11 | Direct test of a private method; either promote to public API or rewrite the test against the public surface |
-| `provider._primary` | ~11 | Tests assert factory-built provider's primary/fallback shape; promote to a `.primary` / `.fallback` accessor pair |
-| `runner._ingestion` | ~10 | JobRunner internal state poked by tests; add public accessor or refactor the test |
-| `rr._client` | ~8 | Same as provider._client |
-| `provider._model` | ~7 | Promote to `.model` property (read-only) |
-| `svc._is_topic_enabled` | ~5 | Test of private method; same options as `svc._build_*` |
+1. **Docstring text** (~7 sites in `provider._client`): the helper
+   docstrings explicitly mention the old reach-in pattern they
+   replaced. Counts in the grep but is not actually a code reach-in.
+2. **Production reach-in mirrors** (~22 sites): `services/reload.py`
+   directly writes `services["ingestion"]._ocr`,
+   `_transcription`, `_mood_scoring`, `_repo` and
+   `services["job_runner"]._mood_scoring`. Tests for the reload
+   endpoints assert those side effects via the same attributes (and
+   `.._system_text`, `.._context_prompt` on the OCR/transcription
+   providers). Cleaning these up requires promoting the swap surface
+   to a public API on the affected services first — see item 7 below.
+3. **Tests of legitimately internal state** (~6 sites):
+   `job_runner._jobs` / `_executor` mid-test inspection,
+   `mcp_module._services` for the MCP bootstrap, `mcp_server._init_services`
+   for the same. Promoting these would add tests-only public API.
+4. **Singleton residual** (~5 sites in `runner._extraction`,
+   `store._client`, etc.): one-off accesses where the surrounding test
+   does mostly OK but pokes one private attribute for an assertion.
+   Worth cleaning up if those tests are revisited for other reasons,
+   not a category-sized investment.
 
-**Goal:** Drive the count to zero (or to a small, justified set with
-a comment explaining why). The grep gate that catches new ones:
+**Grep gate** (CI / manual): the count should not rise above 70 in
+casual development; a meaningful jump means a new private-state
+reach-in slipped in.
 
 ```bash
-grep -rE '\._[a-z]' tests/ | grep -v 'self\._' | grep -v 'import \|from '
+grep -rE '\._[a-z]' tests/ --include='*.py' | grep -v 'self\._' | grep -v 'import \|from ' | wc -l
 ```
 
-**Approach:** One session per category, biggest-first. The
-`provider._client` block is the largest and warrants a per-provider
-design pass — figure out whether the test wants to *replace* the
-client entirely (in which case a `replace_client(...)` method on the
-provider) or simply *observe* the client config (in which case
-read-only accessors). Don't lump them.
-
-**Acceptance:** Per-category PR. Each PR resolves all sites in its
-category, leaves the grep count at zero for that pattern, and doesn't
-introduce new public API for tests-only consumers.
-
-**Session size:** 30-60 min for the small categories
-(`scorer._client`, `provider._model`); a session each for
-`provider._client`, `ingestion_service._repo`, `svc._build_*`.
-
-**Pointer:** `journal/260507-units-5-6-7.md` § "Categories deferred
-to a future Unit 6.5".
+**Pointers:** `journal/260507-item-3-test-private-state-cleanup.md`
+for the full breakdown of decisions per category.
 
 ---
 
@@ -280,6 +286,53 @@ speculatively.
 
 ---
 
+### 7. Production reach-in pattern: hot-swap of providers via `_attr =`
+
+**Where:** `src/journal/services/reload.py`, `src/journal/cli.py:290`,
+plus the matching test fixtures in `tests/test_auth_api.py` and
+the reload-endpoint tests in `tests/test_admin_api.py` /
+`tests/test_auth_api.py`.
+
+**What:** The reload endpoints rebind `services["ingestion"]._ocr`,
+`._transcription`, `._mood_scoring`, `._repo`, and
+`services["job_runner"]._mood_scoring` directly via attribute
+assignment. The pattern works (Python attribute writes are atomic) but
+it is the only place in production where one component reaches across
+the public service boundary. Every test that verifies a reload
+landed has to mirror the pattern, and the residual ~22 reach-ins from
+item 3 all live here.
+
+**Goal:** Promote the swap surface to a public method on each
+affected service. Concrete shape (sketch):
+
+```python
+class IngestionService:
+    def replace_ocr(self, provider: OCRProvider) -> None: ...
+    def replace_transcription(self, provider: TranscriptionProvider) -> None: ...
+    def replace_mood_scoring(self, scoring: MoodScoringService | None) -> None: ...
+
+class JobRunner:
+    def replace_mood_scoring(self, scoring: MoodScoringService) -> None: ...
+```
+
+`reload.py` calls those instead of writing `_ocr` etc. The reload
+tests assert `services["ingestion"].ocr is not old_ocr` (or call
+the same `replace_*` again and observe the new instance). The CLI's
+`ingestion._repo` reach-in at `cli.py:290` becomes
+`ingestion.repository` (read-only property, mirroring the existing
+`QueryService.connection` style).
+
+**Acceptance:** No `services["ingestion"]._*` writes anywhere in
+`src/`. The `tests/` reach-in count drops to ≤ ~10 (just the
+docstring text and the truly-internal singletons listed in item 3's
+residual breakdown).
+
+**Session size:** 30-60 minutes per service.
+
+**Pointer:** Item 3's residual breakdown.
+
+---
+
 ## Standing facts (verify before acting)
 
 These snapshots are accurate as of 2026-05-07. Each has a re-verification
@@ -300,7 +353,7 @@ and should be addressed before unrelated work.
 grep -rE '\._[a-z]' tests/ --include='*.py' | grep -v 'self\._' | grep -v 'import \|from ' | wc -l
 ```
 
-Expected: ~258 (declining as item 3 is worked). A *rise* means a new
+Expected: ~66 after item 3 part E (down from 254). A *rise* means a new
 test reached into private state and should be addressed at the source.
 
 ### File sizes vs the soft cap

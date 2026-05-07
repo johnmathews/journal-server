@@ -123,8 +123,7 @@ class TestHealthPoller:
 
     def test_start_stop(self, poller: HealthPoller) -> None:
         poller.start()
-        assert poller._thread is not None
-        assert poller._thread.is_alive()
+        assert poller.is_running()
         poller.stop()
-        poller._thread.join(timeout=3)
-        assert not poller._thread.is_alive()
+        poller.wait(timeout=3)
+        assert not poller.is_running()

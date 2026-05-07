@@ -751,13 +751,13 @@ class TestMetadataPrefix:
         service_with_prefix.ingest_image(b"fake image", "image/jpeg", "2026-02-15")
 
         # Fetch what was stored in the vector store for this entry.
-        stored = service_with_prefix._vector_store.get_chunks_for_entry(1) \
-            if hasattr(service_with_prefix._vector_store, "get_chunks_for_entry") else None
+        stored = service_with_prefix.vector_store.get_chunks_for_entry(1) \
+            if hasattr(service_with_prefix.vector_store, "get_chunks_for_entry") else None
 
         # Fall back to searching — InMemoryVectorStore doesn't yet expose
         # get_chunks_for_entry (that's added in WU-H). Assert via a search.
         if stored is None:
-            results = service_with_prefix._vector_store.search(
+            results = service_with_prefix.vector_store.search(
                 query_embedding=[0.1, 0.2, 0.3], limit=10
             )
             assert len(results) >= 1
@@ -823,7 +823,7 @@ class TestRechunkEntry:
         mock_embeddings.embed_texts.reset_mock()
         # Also snapshot the vector store size so we can verify nothing
         # was deleted or added.
-        before_count = ingestion_service._vector_store.count()
+        before_count = ingestion_service.vector_store.count()
 
         new_count = ingestion_service.rechunk_entry(entry.id, dry_run=True)
 
@@ -832,7 +832,7 @@ class TestRechunkEntry:
         # But it did NOT call embed_texts.
         mock_embeddings.embed_texts.assert_not_called()
         # Vector store unchanged.
-        assert ingestion_service._vector_store.count() == before_count
+        assert ingestion_service.vector_store.count() == before_count
         # SQLite chunk_count unchanged.
         refreshed = repo.get_entry(entry.id)
         assert refreshed.chunk_count == original_count

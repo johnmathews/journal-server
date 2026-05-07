@@ -108,6 +108,18 @@ class HealthPoller:
         """Signal the poller to stop."""
         self._stop_event.set()
 
+    def is_running(self) -> bool:
+        """True iff the polling thread is alive (started, not yet joined)."""
+        return self._thread is not None and self._thread.is_alive()
+
+    def wait(self, timeout: float | None = None) -> None:
+        """Block until the polling thread exits or *timeout* elapses.
+
+        No-op if the poller was never started.
+        """
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+
     def poll_once(self) -> None:
         """Run a single poll cycle. Exposed for testing."""
         checks = [

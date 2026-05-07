@@ -229,6 +229,74 @@ def build_success_message(job_type: str, result: dict[str, Any]) -> str:
     return "\n".join(parts) if parts else "- Completed successfully"
 
 
+def resolve_credentials(
+    user_repo: Any,
+    user_id: int,
+    *,
+    default_user_key: str,
+    default_app_token: str,
+) -> tuple[str, str]:
+    """Resolve Pushover credentials for a user.
+
+    Per-user preferences override server-wide defaults. Module-level
+    so tests can drive it without constructing the full service.
+    """
+    user_key = (
+        user_repo.get_preference(user_id, "pushover_user_key")
+        or default_user_key
+    )
+    app_token = (
+        user_repo.get_preference(user_id, "pushover_app_token")
+        or default_app_token
+    )
+    return (
+        str(user_key) if user_key else "",
+        str(app_token) if app_token else "",
+    )
+
+
+def post_to_pushover(
+    user_key: str,
+    app_token: str,
+    title: str,
+    message: str,
+    priority: int,
+) -> NotificationResult:
+    """POST a message to the Pushover API.
+
+    Module-level so tests can drive the HTTP wrapper directly. No
+    instance state — every caller passes the credentials explicitly.
+    """
+    try:
+        data = urllib.parse.urlencode({
+            "token": app_token,
+            "user": user_key,
+            "title": title[:250],
+            "message": message[:1024],
+            "priority": priority,
+        }).encode()
+        req = urllib.request.Request(
+            _PUSHOVER_MESSAGES_URL,
+            data=data,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+            body = json.loads(resp.read())
+            if body.get("status") == 1:
+                return NotificationResult(sent=True, status_code=resp.status)
+            return NotificationResult(
+                sent=False,
+                status_code=resp.status,
+                error="; ".join(body.get("errors", ["Unknown error"])),
+            )
+    except urllib.error.HTTPError as e:
+        log.warning("Pushover API error %d: %s", e.code, e.reason)
+        return NotificationResult(sent=False, status_code=e.code, error=str(e))
+    except Exception as e:  # noqa: BLE001 — best-effort outbound notification
+        log.warning("Pushover request failed: %s", e)
+        return NotificationResult(sent=False, error=str(e))
+
+
 def build_pipeline_failure_body(
     parent_job_type: str,
     combined: dict[str, Any],
@@ -630,19 +698,17 @@ class PushoverNotificationService:
     # ── Private helpers ──────────────────────────────────────────────
 
     def _resolve_credentials(self, user_id: int) -> tuple[str, str]:
-        """Resolve Pushover credentials for a user.
-
-        Per-user preferences override server-wide defaults.
+        """Method shim around :func:`resolve_credentials` so tests and
+        internal callers keep their existing call sites. The free
+        function takes the dependencies explicitly so tests can drive
+        it without constructing the whole service.
         """
-        user_key = (
-            self._user_repo.get_preference(user_id, "pushover_user_key")
-            or self._default_user_key
+        return resolve_credentials(
+            self._user_repo,
+            user_id,
+            default_user_key=self._default_user_key,
+            default_app_token=self._default_app_token,
         )
-        app_token = (
-            self._user_repo.get_preference(user_id, "pushover_app_token")
-            or self._default_app_token
-        )
-        return str(user_key) if user_key else "", str(app_token) if app_token else ""
 
     def _is_topic_enabled(self, user_id: int, topic_key: str) -> bool:
         """Check if a notification topic is enabled for a user."""
@@ -670,33 +736,9 @@ class PushoverNotificationService:
         message: str,
         priority: int,
     ) -> NotificationResult:
-        """POST a message to the Pushover API."""
-        try:
-            data = urllib.parse.urlencode({
-                "token": app_token,
-                "user": user_key,
-                "title": title[:250],
-                "message": message[:1024],
-                "priority": priority,
-            }).encode()
-            req = urllib.request.Request(
-                _PUSHOVER_MESSAGES_URL,
-                data=data,
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
-                body = json.loads(resp.read())
-                if body.get("status") == 1:
-                    return NotificationResult(sent=True, status_code=resp.status)
-                return NotificationResult(
-                    sent=False,
-                    status_code=resp.status,
-                    error="; ".join(body.get("errors", ["Unknown error"])),
-                )
-        except urllib.error.HTTPError as e:
-            log.warning("Pushover API error %d: %s", e.code, e.reason)
-            return NotificationResult(sent=False, status_code=e.code, error=str(e))
-        except Exception as e:
-            log.warning("Pushover request failed: %s", e)
-            return NotificationResult(sent=False, error=str(e))
+        """Method shim around :func:`post_to_pushover` so internal
+        callers keep their existing call sites. The free function has
+        no instance dependencies and is the easier seam for tests.
+        """
+        return post_to_pushover(user_key, app_token, title, message, priority)
 

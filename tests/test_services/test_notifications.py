@@ -12,6 +12,8 @@ from journal.services.notifications import (
     TOPICS,
     PushoverNotificationService,
     build_success_message,
+    post_to_pushover,
+    resolve_credentials,
 )
 
 
@@ -43,31 +45,39 @@ def _make_urlopen_response(body: dict, status: int = 200) -> MagicMock:
 
 
 class TestCredentialResolution:
-    def test_falls_back_to_defaults(
-        self, svc: PushoverNotificationService, mock_user_repo: MagicMock
-    ) -> None:
+    """resolve_credentials is a module-level helper exercised directly."""
+
+    def test_falls_back_to_defaults(self, mock_user_repo: MagicMock) -> None:
         mock_user_repo.get_preference.return_value = None
-        key, token = svc._resolve_credentials(1)
+        key, token = resolve_credentials(
+            mock_user_repo, 1,
+            default_user_key="default-user-key",
+            default_app_token="default-app-token",
+        )
         assert key == "default-user-key"
         assert token == "default-app-token"
 
-    def test_per_user_overrides_defaults(
-        self, svc: PushoverNotificationService, mock_user_repo: MagicMock
-    ) -> None:
+    def test_per_user_overrides_defaults(self, mock_user_repo: MagicMock) -> None:
         def pref_side_effect(user_id: int, key: str):
-            return {"pushover_user_key": "user-key", "pushover_app_token": "user-token"}.get(key)
+            return {
+                "pushover_user_key": "user-key",
+                "pushover_app_token": "user-token",
+            }.get(key)
         mock_user_repo.get_preference.side_effect = pref_side_effect
-        key, token = svc._resolve_credentials(1)
+        key, token = resolve_credentials(
+            mock_user_repo, 1,
+            default_user_key="default-user-key",
+            default_app_token="default-app-token",
+        )
         assert key == "user-key"
         assert token == "user-token"
 
     def test_empty_defaults_return_empty(self, mock_user_repo: MagicMock) -> None:
-        svc = PushoverNotificationService(
-            user_repo=mock_user_repo,
+        key, token = resolve_credentials(
+            mock_user_repo, 1,
             default_user_key="",
             default_app_token="",
         )
-        key, token = svc._resolve_credentials(1)
         assert key == ""
         assert token == ""
 
@@ -165,11 +175,9 @@ class TestTopicGating:
 
 class TestPostToPushover:
     @patch("journal.services.notifications.urllib.request.urlopen")
-    def test_success(
-        self, mock_urlopen: MagicMock, svc: PushoverNotificationService
-    ) -> None:
+    def test_success(self, mock_urlopen: MagicMock) -> None:
         mock_urlopen.return_value = _make_urlopen_response({"status": 1})
-        result = svc._post_to_pushover(
+        result = post_to_pushover(
             "uk", "at", "Title", "Message", PRIORITY_NORMAL,
         )
         assert result.sent is True
@@ -177,35 +185,29 @@ class TestPostToPushover:
         assert result.error is None
 
     @patch("journal.services.notifications.urllib.request.urlopen")
-    def test_invalid_credentials(
-        self, mock_urlopen: MagicMock, svc: PushoverNotificationService
-    ) -> None:
+    def test_invalid_credentials(self, mock_urlopen: MagicMock) -> None:
         mock_urlopen.return_value = _make_urlopen_response(
             {"status": 0, "errors": ["user key is invalid"]}
         )
-        result = svc._post_to_pushover(
+        result = post_to_pushover(
             "bad-key", "at", "Title", "Msg", PRIORITY_NORMAL,
         )
         assert result.sent is False
         assert "invalid" in (result.error or "")
 
     @patch("journal.services.notifications.urllib.request.urlopen")
-    def test_network_error(
-        self, mock_urlopen: MagicMock, svc: PushoverNotificationService
-    ) -> None:
+    def test_network_error(self, mock_urlopen: MagicMock) -> None:
         mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
-        result = svc._post_to_pushover(
+        result = post_to_pushover(
             "uk", "at", "Title", "Msg", PRIORITY_NORMAL,
         )
         assert result.sent is False
         assert "Connection refused" in (result.error or "")
 
     @patch("journal.services.notifications.urllib.request.urlopen")
-    def test_truncates_long_title_and_message(
-        self, mock_urlopen: MagicMock, svc: PushoverNotificationService
-    ) -> None:
+    def test_truncates_long_title_and_message(self, mock_urlopen: MagicMock) -> None:
         mock_urlopen.return_value = _make_urlopen_response({"status": 1})
-        svc._post_to_pushover("uk", "at", "T" * 300, "M" * 2000, 0)
+        post_to_pushover("uk", "at", "T" * 300, "M" * 2000, 0)
         # Verify the request was made (no exception from truncation)
         mock_urlopen.assert_called_once()
 

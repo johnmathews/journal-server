@@ -165,6 +165,17 @@ class IngestionService:
         # heading on final_text. raw_text is never touched.
         self._heading_detector = heading_detector
 
+    @property
+    def vector_store(self) -> "VectorStore":
+        """Read-only accessor mirroring ``QueryService.vector_store``.
+
+        Operational tools (admin endpoints, the CLI's rechunk command,
+        tests asserting post-ingest vector state) need a stable handle
+        to the store; the leading-underscore attribute kept on signalling
+        "private" without being so in practice.
+        """
+        return self._vector_store
+
     def _detect_heading(
         self, text: str, entry_date: str
     ) -> "HeadingDetectionResult":
