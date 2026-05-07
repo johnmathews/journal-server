@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from journal.api._shared import _convert_heic_to_jpeg, _runtime_get
 from journal.api.dashboard import register_dashboard_routes
 from journal.api.entities import register_entities_routes
+from journal.api.entity_merge import register_entity_merge_routes
 from journal.api.entries import register_entries_routes
 from journal.api.health import register_health_routes
 from journal.api.ingestion import register_ingestion_routes
@@ -54,6 +55,7 @@ def register_api_routes(
     register_search_routes(mcp, services_getter)
     register_jobs_routes(mcp, services_getter)
     register_entities_routes(mcp, services_getter)
+    register_entity_merge_routes(mcp, services_getter)
 
 
 __all__ = [
