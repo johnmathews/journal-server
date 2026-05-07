@@ -366,28 +366,68 @@ class TestPatchMoodScoring:
         """When config.enable_mood_scoring is True, PATCH should queue a mood job."""
         from journal.config import Config
 
-        config = Config(enable_mood_scoring=True)
-        services["config"] = config
+        services["config"] = Config(enable_mood_scoring=True)
 
-        # Prevent entity extraction from running in a background thread —
-        # its SQLite writes on the shared connection race with the mood job
-        # creation that this test is actually checking.
-        job_runner = services["job_runner"]
-        original = job_runner.submit_entity_extraction
-        job_runner.submit_entity_extraction = MagicMock(
-            return_value=MagicMock(id="fake-entity-job"),
+        entry = repo.create_entry("2026-04-01", "photo", "raw text", 2)
+        response = client.patch(
+            f"/api/entries/{entry.id}",
+            json={"final_text": "corrected text"},
         )
+        assert response.status_code == 200
+        data = response.json()
+        assert data.get("mood_job_id") is not None
+
+    def test_save_entry_pipeline_dispatches_workers_after_mark_succeeded(
+        self, services: dict, repo: SQLiteEntryRepository,
+    ) -> None:
+        """Regression for the shared-connection race: every worker
+        ``executor.submit`` must happen AFTER the parent pipeline's
+        ``mark_succeeded`` commits. Otherwise the worker thread starts
+        writing while the API thread is still mid-write, and the two
+        collide on the ``check_same_thread=False`` connection (commit
+        fails with ``sqlite3.OperationalError: not an error``).
+        """
+        job_runner = services["job_runner"]
+        entry = repo.create_entry("2026-04-01", "photo", "raw text", 2)
+
+        # Record interleaving of mark_succeeded vs executor.submit calls.
+        events: list[str] = []
+        original_mark_succeeded = job_runner._jobs.mark_succeeded
+        original_executor_submit = job_runner._executor.submit
+
+        def tracked_mark_succeeded(job_id: str, result: object) -> object:
+            events.append(f"mark_succeeded:{job_id}")
+            return original_mark_succeeded(job_id, result)
+
+        def tracked_submit(*args: object, **kwargs: object) -> object:
+            events.append("executor.submit")
+            return original_executor_submit(*args, **kwargs)
+
+        job_runner._jobs.mark_succeeded = tracked_mark_succeeded  # type: ignore[method-assign]
+        job_runner._executor.submit = tracked_submit  # type: ignore[method-assign]
         try:
-            entry = repo.create_entry("2026-04-01", "photo", "raw text", 2)
-            response = client.patch(
-                f"/api/entries/{entry.id}",
-                json={"final_text": "corrected text"},
+            job_runner.submit_save_entry_pipeline(
+                entry_id=entry.id, user_id=1, enable_mood_scoring=True,
             )
-            assert response.status_code == 200
-            data = response.json()
-            assert data.get("mood_job_id") is not None
         finally:
-            job_runner.submit_entity_extraction = original
+            job_runner._jobs.mark_succeeded = original_mark_succeeded  # type: ignore[method-assign]
+            job_runner._executor.submit = original_executor_submit  # type: ignore[method-assign]
+
+        # Pipeline ``mark_succeeded`` must precede every executor.submit
+        # call. Worker self-bookkeeping (mark_running, mark_succeeded for
+        # children) happens later on the worker thread and is irrelevant
+        # to this invariant — only events recorded synchronously from
+        # ``submit_save_entry_pipeline`` matter, so look at the position
+        # of the FIRST executor.submit relative to the pipeline parent's
+        # mark_succeeded.
+        first_submit = events.index("executor.submit")
+        pipeline_mark_succeeded = next(
+            i for i, e in enumerate(events) if e.startswith("mark_succeeded:")
+        )
+        assert pipeline_mark_succeeded < first_submit, (
+            f"executor.submit happened before mark_succeeded — race window "
+            f"is open. Event order: {events[:first_submit + 1]}"
+        )
 
     def test_patch_text_no_mood_without_config(
         self, client: TestClient, repo: SQLiteEntryRepository,

@@ -44,53 +44,44 @@ For any new session continuing this refactor, start with:
 
 ## Open items
 
-### 1. Flake: `test_patch_text_queues_mood_scoring`
+### 1. ~~Flake: `test_patch_text_queues_mood_scoring`~~ — RESOLVED 2026-05-07
 
-**Where:** `tests/test_api_ingest.py:363`
+Root cause was a within-call race in `submit_save_entry_pipeline`: each
+child's `executor.submit` happened before the API thread finished its
+own SQLite writes (additional `_jobs.create` calls + `mark_succeeded`
+on the parent), so the worker thread started writing through the
+shared `check_same_thread=False` connection while the request thread
+was still mid-write. Fix: stage every child row up front, call
+`mark_succeeded` on the parent, then dispatch all children to the
+executor as a final step. Verified with
+`pytest --count=1000` (was ~5/100 failures pre-fix). New
+deterministic regression test asserts pipeline `mark_succeeded`
+precedes every `executor.submit`. See
+`journal/260507-item-1-save-pipeline-race-fix.md`.
 
-**What happened:** Failed once on CI run `25489575555` (Unit 3 push) with
-`AssertionError: assert None is not None`. The same logs contained
-`sqlite3.OperationalError: not an error`. Re-passed on the next CI run
-unchanged. The test's own comment flags background-thread SQLite contention:
+### 1.1 Cross-call connection-sharing race (newly surfaced)
 
-> Prevent entity extraction from running in a background thread —
-> its SQLite writes on the shared connection race with the mood job
-> creation that this test is actually checking.
+While reproducing item 1, a 20× PATCH loop test exposed a separate
+issue: iteration N's API-thread writes can race iteration N-1's
+worker-thread writes on the shared connection (the worker is still
+draining when the next PATCH lands). The within-call fix does not
+address this — it is a property of "one SQLite connection shared by
+two writer threads", which the runner module's docstring claims is
+safe but isn't.
 
-The test mocks `submit_entity_extraction` to dodge the race, which suggests
-there is still a window where another job's write can race with the PATCH
-handler's read. The single-flake-then-recovery pattern fits a race rather
-than a logic bug.
+**Goal:** Decide whether to fix structurally (write lock around the
+connection, or connection-per-thread) or to accept the residual risk
+and update the runner docstring to stop claiming safety it doesn't
+provide.
 
-**Goal:** Reproduce reliably, then fix.
+**Symptom:** `sqlite3.OperationalError: not an error` raised from any
+write that interleaves with another thread's write. Not currently
+observed in production logs but not implausible under load.
 
-**Approach:**
+**Session size:** Half-day if structural fix; 15 minutes if the
+decision is "accept and document".
 
-1. Reproduce — likely needs a tight loop or a barrier (`threading.Barrier`)
-   to force the worker thread and the PATCH thread to interleave on the
-   shared SQLite connection. Run with `pytest --count=200` or a custom
-   fixture that holds an `Event` open until both threads are mid-write.
-2. Diagnose — the relevant invariant from `services/jobs/runner.py`'s
-   docstring is "writes from multiple worker threads on a single
-   connection with WAL + NORMAL synchronous is NOT safe". Check whether
-   the test is exercising a code path that violates that invariant
-   (e.g. spawning a follow-up job whose worker writes while the test
-   thread is mid-read).
-3. Fix — options, ordered by preference:
-   1. Make the test's setup deterministically wait for any in-flight
-      jobs to drain before reading `data.get("mood_job_id")`.
-   2. Change the API path so the PATCH response is constructed entirely
-      inside one transaction.
-   3. Document and assert the race window if it is genuinely benign.
-
-**Acceptance:** A `pytest --count=N` run for some reproducibly-large N
-goes green; the original test plus any new regression test stay green
-in CI for ten consecutive pushes.
-
-**Session size:** 30–90 minutes. Can be done standalone.
-
-**Pointer:** `journal/260507-units-3-and-4.md` for the broader context of
-when this test was last touched.
+**Pointer:** `journal/260507-item-1-save-pipeline-race-fix.md` § "Out of scope".
 
 ---
 

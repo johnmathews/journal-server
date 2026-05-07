@@ -319,22 +319,67 @@ class JobRunner:
 
         follow_ups: dict[str, str] = {}
 
-        reprocess_job = self.submit_reprocess_embeddings(
-            entry_id, user_id=user_id, parent_job_id=parent.id,
-        )
-        follow_ups["reprocess_embeddings"] = reprocess_job.id
+        # Defer every child's executor.submit until AFTER this thread is
+        # done writing to SQLite. The connection is opened with
+        # ``check_same_thread=False`` and shared with the worker thread;
+        # if a child starts executing while this thread is still calling
+        # ``_jobs.create`` / ``mark_succeeded``, the two threads collide
+        # on the connection and one commit fails with
+        # ``sqlite3.OperationalError: not an error``. The fix is to do
+        # all of this thread's writes first, then dispatch workers in a
+        # batch — single-worker executor + serialised dispatch keeps the
+        # worker thread idle until we are done.
+        deferred: list[Callable[[], None]] = []
 
-        extraction_job = self.submit_entity_extraction(
-            {"entry_id": entry_id, "parent_job_id": parent.id},
-            user_id=user_id,
+        def _stage_child(
+            job_type: str,
+            keys: frozenset[str],
+            child_params: dict[str, Any],
+            run_method: Callable[..., Any],
+            follow_up_key: str,
+        ) -> None:
+            validate_params(child_params, keys, job_type=job_type)
+            child = self._jobs.create(job_type, child_params, user_id=user_id)
+            follow_ups[follow_up_key] = child.id
+            deferred.append(
+                lambda jid=child.id, p=child_params: self._executor.submit(
+                    run_method, jid, p,
+                ),
+            )
+
+        reprocess_params: dict[str, Any] = {
+            "entry_id": entry_id, "parent_job_id": parent.id,
+        }
+        if user_id is not None:
+            reprocess_params["user_id"] = user_id
+        _stage_child(
+            "reprocess_embeddings", REPROCESS_EMBEDDINGS_KEYS,
+            reprocess_params, self._run_reprocess_embeddings,
+            "reprocess_embeddings",
         )
-        follow_ups["entity_extraction"] = extraction_job.id
+
+        extraction_params: dict[str, Any] = {
+            "entry_id": entry_id, "parent_job_id": parent.id,
+        }
+        if user_id is not None:
+            extraction_params["user_id"] = user_id
+        _stage_child(
+            "entity_extraction", ENTITY_EXTRACTION_KEYS,
+            extraction_params, self._run_entity_extraction,
+            "entity_extraction",
+        )
 
         if enable_mood_scoring:
-            mood_job = self.submit_mood_score_entry(
-                entry_id, user_id=user_id, parent_job_id=parent.id,
+            mood_params: dict[str, Any] = {
+                "entry_id": entry_id, "parent_job_id": parent.id,
+            }
+            if user_id is not None:
+                mood_params["user_id"] = user_id
+            _stage_child(
+                "mood_score_entry", MOOD_SCORE_ENTRY_KEYS,
+                mood_params, self._run_mood_score_entry,
+                "mood_scoring",
             )
-            follow_ups["mood_scoring"] = mood_job.id
 
         # One mark_succeeded with the populated follow_up_jobs map.
         # Until this UPDATE lands, ``_try_pipeline_notification`` calls
@@ -348,6 +393,12 @@ class JobRunner:
                 "follow_up_jobs": follow_ups,
             },
         )
+
+        # All API-thread writes have committed; safe to release the
+        # workers. The single-worker executor will then drain them in
+        # FIFO order without contending against this thread.
+        for dispatch in deferred:
+            dispatch()
 
         # Defensive sweep: if all children completed in the brief
         # window before mark_succeeded landed (their pipeline checks
