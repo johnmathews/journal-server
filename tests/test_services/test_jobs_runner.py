@@ -490,13 +490,14 @@ class TestErrorHandling:
 
         # Swap in a happy fake and submit a second job — it must
         # still run. This guards against the executor being wedged
-        # by an earlier exception.
+        # by an earlier exception. The swap happens on the
+        # WorkerContext the runner builds in __init__; ``_ctx`` is
+        # the only seam tests have for mid-flight dependency swaps
+        # without rebuilding the whole runner.
         good = FakeEntityExtractionService(
             batch_results=[_make_extraction_result(1)]
         )
-        # Replace the extraction service on the runner. This is a
-        # little grubby but keeps the test focused on lifecycle.
-        runner._extraction = good  # type: ignore[attr-defined]
+        runner._ctx.extraction = good  # noqa: SLF001 — test mid-flight swap
 
         second = runner.submit_entity_extraction({})
         runner.shutdown(wait=True)

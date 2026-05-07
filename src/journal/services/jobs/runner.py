@@ -27,14 +27,21 @@ serialises access to it (see `db/connection.py` docstring). If that
 invariant is relaxed, writes from multiple worker threads on a
 single connection with WAL + NORMAL synchronous is NOT safe and
 the schema access pattern must be redesigned first.
+
+Worker bodies live in ``services/jobs/workers/<name>.py``. Each one
+is a free function ``run_<name>(ctx, job_id, params)`` taking a
+``WorkerContext`` so the worker is independently testable without
+constructing the full runner. This module is the dispatcher: it
+holds the executor + the in-memory blob queues used by image and
+audio ingestion (large bytes don't fit in the jobs.params_json
+column), and it exposes the ``submit_*`` API the rest of the system
+calls.
 """
 
 from __future__ import annotations
 
 import logging
-import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
@@ -49,11 +56,8 @@ if TYPE_CHECKING:
     from journal.services.mood_scoring import MoodScoringService
     from journal.services.notifications import PushoverNotificationService
 
-from journal.services.jobs.errors import (
-    RETRY_DELAYS_SECONDS,
-    friendly_error,
-    is_transient,
-)
+from journal.services.jobs.notifier import JobNotifier
+from journal.services.jobs.save_pipeline import submit_save_entry_pipeline
 from journal.services.jobs.validation import (
     ENTITY_EXTRACTION_KEYS,
     ENTITY_REEMBED_KEYS,
@@ -63,8 +67,17 @@ from journal.services.jobs.validation import (
     MOOD_BACKFILL_MODES,
     MOOD_SCORE_ENTRY_KEYS,
     REPROCESS_EMBEDDINGS_KEYS,
-    SAVE_ENTRY_PIPELINE_KEYS,
     validate_params,
+)
+from journal.services.jobs.workers import WorkerContext
+from journal.services.jobs.workers.audio_ingestion import run_audio_ingestion
+from journal.services.jobs.workers.entity_extraction import run_entity_extraction
+from journal.services.jobs.workers.entity_reembed import run_entity_reembed
+from journal.services.jobs.workers.image_ingestion import run_image_ingestion
+from journal.services.jobs.workers.mood_backfill import run_mood_backfill
+from journal.services.jobs.workers.mood_score_entry import run_mood_score_entry
+from journal.services.jobs.workers.reprocess_embeddings import (
+    run_reprocess_embeddings,
 )
 
 log = logging.getLogger(__name__)
@@ -77,7 +90,7 @@ class EntityReembedder(Protocol):
     Production wires this to ``EntityExtractionService.reembed_entity_for_description``
     — the same instance JobRunner already uses for ``extract_from_entry``
     and ``extract_batch``. The Protocol exists so tests can drive
-    ``_run_entity_reembed`` against a fake without standing up the full
+    ``run_entity_reembed`` against a fake without standing up the full
     extraction pipeline. ``extract_from_entry`` and ``extract_batch``
     intentionally stay on the concrete ``EntityExtractionService``
     constructor parameter — they are normal cross-service interactions,
@@ -117,18 +130,14 @@ class JobRunner:
         notification_service: PushoverNotificationService | None = None,
     ) -> None:
         self._jobs = job_repository
-        self._extraction = entity_extraction_service
         # Default the reembedder to the extraction service: it implements
         # the EntityReembedder Protocol via reembed_entity_for_description.
-        # Tests pass a fake to drive _run_entity_reembed in isolation.
-        self._reembedder: EntityReembedder = (
-            entity_reembedder if entity_reembedder is not None else entity_extraction_service
+        # Tests pass a fake to drive run_entity_reembed in isolation.
+        reembedder: EntityReembedder = (
+            entity_reembedder
+            if entity_reembedder is not None
+            else entity_extraction_service
         )
-        self._mood_backfill = mood_backfill_callable
-        self._mood_scoring = mood_scoring_service
-        self._entries = entry_repository
-        self._ingestion = ingestion_service
-        self._notifications = notification_service
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="journal-jobs"
         )
@@ -139,6 +148,26 @@ class JobRunner:
         self._pending_images: dict[str, list[tuple[bytes, str, str]]] = {}
         # Same pattern for audio recordings: (data, media_type, filename).
         self._pending_audio: dict[str, list[tuple[bytes, str, str]]] = {}
+
+        self._notifier = JobNotifier(
+            jobs=job_repository,
+            notifications=notification_service,
+        )
+        # Single context every worker submission shares. Workers that
+        # don't need every field simply don't read it.
+        self._ctx = WorkerContext(
+            jobs=job_repository,
+            notifier=self._notifier,
+            extraction=entity_extraction_service,
+            reembedder=reembedder,
+            mood_backfill=mood_backfill_callable,
+            mood_scoring=mood_scoring_service,
+            entries=entry_repository,
+            ingestion=ingestion_service,
+            pop_pending_images=lambda jid: self._pending_images.pop(jid, []),
+            pop_pending_audio=lambda jid: self._pending_audio.pop(jid, []),
+            queue_post_ingestion_jobs=self._queue_post_ingestion_jobs,
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -162,7 +191,7 @@ class JobRunner:
             run_params, ENTITY_EXTRACTION_KEYS, job_type="entity_extraction"
         )
         job = self._jobs.create("entity_extraction", run_params, user_id=user_id)
-        self._executor.submit(self._run_entity_extraction, job.id, run_params)
+        self._executor.submit(run_entity_extraction, self._ctx, job.id, run_params)
         return job
 
     def submit_mood_backfill(
@@ -191,7 +220,7 @@ class JobRunner:
                 f"{sorted(MOOD_BACKFILL_MODES)}, got {run_params['mode']!r}"
             )
         job = self._jobs.create("mood_backfill", run_params, user_id=user_id)
-        self._executor.submit(self._run_mood_backfill, job.id, run_params)
+        self._executor.submit(run_mood_backfill, self._ctx, job.id, run_params)
         return job
 
     def submit_image_ingestion(
@@ -214,10 +243,11 @@ class JobRunner:
             params["user_id"] = user_id
         validate_params(params, INGEST_IMAGES_KEYS, job_type="ingest_images")
         job = self._jobs.create(
-            "ingest_images", {**params, "page_count": len(images)}, user_id=user_id,
+            "ingest_images", {**params, "page_count": len(images)},
+            user_id=user_id,
         )
         self._pending_images[job.id] = images
-        self._executor.submit(self._run_image_ingestion, job.id, params)
+        self._executor.submit(run_image_ingestion, self._ctx, job.id, params)
         return job
 
     def submit_mood_score_entry(
@@ -237,7 +267,7 @@ class JobRunner:
             params["parent_job_id"] = parent_job_id
         validate_params(params, MOOD_SCORE_ENTRY_KEYS, job_type="mood_score_entry")
         job = self._jobs.create("mood_score_entry", params, user_id=user_id)
-        self._executor.submit(self._run_mood_score_entry, job.id, params)
+        self._executor.submit(run_mood_score_entry, self._ctx, job.id, params)
         return job
 
     def submit_reprocess_embeddings(
@@ -262,7 +292,7 @@ class JobRunner:
             params["parent_job_id"] = parent_job_id
         validate_params(params, REPROCESS_EMBEDDINGS_KEYS, job_type="reprocess_embeddings")
         job = self._jobs.create("reprocess_embeddings", params, user_id=user_id)
-        self._executor.submit(self._run_reprocess_embeddings, job.id, params)
+        self._executor.submit(run_reprocess_embeddings, self._ctx, job.id, params)
         return job
 
     def submit_save_entry_pipeline(
@@ -275,143 +305,20 @@ class JobRunner:
         """Queue the three background jobs that run after an entry edit
         and orchestrate ONE consolidated Pushover for them.
 
-        Creates a synthetic parent job of type ``save_entry_pipeline``
-        with no actual worker — it is marked succeeded immediately
-        with::
-
-            result = {
-                "entry_id": entry_id,
-                "follow_up_jobs": {key -> child_job_id},
-                "notify_strategy": "compressed_all",
-            }
-
-        Each child (``reprocess_embeddings``, ``entity_extraction``,
-        and optionally ``mood_score_entry``) is submitted with
-        ``parent_job_id`` set. Children's workers detect the
-        ``compressed_all`` strategy and skip BOTH per-child success
-        and failure pushovers, deferring to
-        ``_try_pipeline_notification``. The last child to reach a
-        terminal state emits one consolidated Pushover — success
-        summary if all children succeeded, per-stage failure
-        breakdown otherwise.
-
-        Returns ``(parent_job, follow_ups)``.
+        See ``services/jobs/save_pipeline.py`` for the full design;
+        this method is a thin delegating shim so api/ callers keep
+        the existing ``job_runner.submit_save_entry_pipeline(...)``
+        call site.
         """
-        # ``notify_strategy`` lives in params (fixed at creation),
-        # not result, so it is visible to children's strategy checks
-        # from the moment the parent row exists — no need for a
-        # separate "mark succeeded with strategy" pre-write that
-        # would double the SQLite contention against the worker
-        # thread doing concurrent writes via the shared connection.
-        params: dict[str, Any] = {
-            "entry_id": entry_id,
-            "notify_strategy": "compressed_all",
-        }
-        if user_id is not None:
-            params["user_id"] = user_id
-        validate_params(
-            params, SAVE_ENTRY_PIPELINE_KEYS, job_type="save_entry_pipeline",
+        return submit_save_entry_pipeline(
+            jobs=self._jobs,
+            executor=self._executor,
+            ctx=self._ctx,
+            notifier=self._notifier,
+            entry_id=entry_id,
+            user_id=user_id,
+            enable_mood_scoring=enable_mood_scoring,
         )
-
-        parent = self._jobs.create(
-            "save_entry_pipeline", params, user_id=user_id,
-        )
-
-        follow_ups: dict[str, str] = {}
-
-        # Defer every child's executor.submit until AFTER this thread is
-        # done writing to SQLite. The connection is opened with
-        # ``check_same_thread=False`` and shared with the worker thread;
-        # if a child starts executing while this thread is still calling
-        # ``_jobs.create`` / ``mark_succeeded``, the two threads collide
-        # on the connection and one commit fails with
-        # ``sqlite3.OperationalError: not an error``. The fix is to do
-        # all of this thread's writes first, then dispatch workers in a
-        # batch — single-worker executor + serialised dispatch keeps the
-        # worker thread idle until we are done.
-        deferred: list[Callable[[], None]] = []
-
-        def _stage_child(
-            job_type: str,
-            keys: frozenset[str],
-            child_params: dict[str, Any],
-            run_method: Callable[..., Any],
-            follow_up_key: str,
-        ) -> None:
-            validate_params(child_params, keys, job_type=job_type)
-            child = self._jobs.create(job_type, child_params, user_id=user_id)
-            follow_ups[follow_up_key] = child.id
-            deferred.append(
-                lambda jid=child.id, p=child_params: self._executor.submit(
-                    run_method, jid, p,
-                ),
-            )
-
-        reprocess_params: dict[str, Any] = {
-            "entry_id": entry_id, "parent_job_id": parent.id,
-        }
-        if user_id is not None:
-            reprocess_params["user_id"] = user_id
-        _stage_child(
-            "reprocess_embeddings", REPROCESS_EMBEDDINGS_KEYS,
-            reprocess_params, self._run_reprocess_embeddings,
-            "reprocess_embeddings",
-        )
-
-        extraction_params: dict[str, Any] = {
-            "entry_id": entry_id, "parent_job_id": parent.id,
-        }
-        if user_id is not None:
-            extraction_params["user_id"] = user_id
-        _stage_child(
-            "entity_extraction", ENTITY_EXTRACTION_KEYS,
-            extraction_params, self._run_entity_extraction,
-            "entity_extraction",
-        )
-
-        if enable_mood_scoring:
-            mood_params: dict[str, Any] = {
-                "entry_id": entry_id, "parent_job_id": parent.id,
-            }
-            if user_id is not None:
-                mood_params["user_id"] = user_id
-            _stage_child(
-                "mood_score_entry", MOOD_SCORE_ENTRY_KEYS,
-                mood_params, self._run_mood_score_entry,
-                "mood_scoring",
-            )
-
-        # One mark_succeeded with the populated follow_up_jobs map.
-        # Until this UPDATE lands, ``_try_pipeline_notification`` calls
-        # from finishing children see ``parent.status != "succeeded"``
-        # and return early — the defensive sweep below covers the
-        # rare case where every child completed before this point.
-        self._jobs.mark_succeeded(
-            parent.id,
-            {
-                "entry_id": entry_id,
-                "follow_up_jobs": follow_ups,
-            },
-        )
-
-        # All API-thread writes have committed; safe to release the
-        # workers. The single-worker executor will then drain them in
-        # FIFO order without contending against this thread.
-        for dispatch in deferred:
-            dispatch()
-
-        # Defensive sweep: if all children completed in the brief
-        # window before mark_succeeded landed (their pipeline checks
-        # would have returned early seeing parent still queued),
-        # trigger one more check from this thread so the consolidated
-        # push still fires. ``_try_pipeline_notification`` uses
-        # ``try_acquire_notification_lock`` to dedupe against any
-        # concurrent worker call.
-        self._try_pipeline_notification(parent.id, user_id)
-
-        parent_final = self._jobs.get(parent.id)
-        assert parent_final is not None
-        return parent_final, follow_ups
 
     def submit_entity_reembed(
         self, entity_id: int, *, user_id: int,
@@ -428,7 +335,7 @@ class JobRunner:
         }
         validate_params(params, ENTITY_REEMBED_KEYS, job_type="entity_reembed")
         job = self._jobs.create("entity_reembed", params, user_id=user_id)
-        self._executor.submit(self._run_entity_reembed, job.id, params)
+        self._executor.submit(run_entity_reembed, self._ctx, job.id, params)
         return job
 
     def submit_audio_ingestion(
@@ -457,169 +364,8 @@ class JobRunner:
             user_id=user_id,
         )
         self._pending_audio[job.id] = recordings
-        self._executor.submit(self._run_audio_ingestion, job.id, params)
+        self._executor.submit(run_audio_ingestion, self._ctx, job.id, params)
         return job
-
-    # ------------------------------------------------------------------
-    # Notification helpers
-    # ------------------------------------------------------------------
-
-    def _notify_success(
-        self, user_id: int | None, job_type: str, result: dict,
-    ) -> None:
-        if self._notifications is not None and user_id is not None:
-            try:
-                self._notifications.notify_job_success(user_id, job_type, result)
-            except Exception:  # noqa: BLE001
-                log.warning("Notification send failed (success)", exc_info=True)
-
-    def _notify_failed(
-        self, user_id: int | None, job_type: str, error_msg: str,
-        exc: Exception | None = None,
-    ) -> None:
-        if self._notifications is not None and user_id is not None:
-            try:
-                self._notifications.notify_job_failed(
-                    user_id, job_type, error_msg, exc,
-                )
-                self._notifications.notify_admin_job_failed(
-                    user_id, job_type, error_msg, exc,
-                )
-            except Exception:  # noqa: BLE001
-                log.warning("Notification send failed (failure)", exc_info=True)
-
-    def _notify_retrying(
-        self, user_id: int | None, job_type: str, attempt: int,
-        delay: int, error_msg: str, exc: Exception | None = None,
-    ) -> None:
-        if self._notifications is not None and user_id is not None:
-            try:
-                self._notifications.notify_job_retrying(
-                    user_id, job_type, attempt, delay, error_msg, exc,
-                )
-            except Exception:  # noqa: BLE001
-                log.warning("Notification send failed (retry)", exc_info=True)
-
-    def _get_notify_strategy(self, parent_job_id: str | None) -> str:
-        """Return the notification strategy for a pipeline parent.
-
-        The strategy is stored in ``parent.params`` (fixed at parent
-        creation), not ``parent.result`` (only available after
-        ``mark_succeeded``).  Reading from params makes the strategy
-        visible to fast-failing children before the parent has been
-        marked succeeded, eliminating a double-write that would
-        otherwise contend with the worker thread on the shared SQLite
-        connection.
-
-        Values:
-          ``"none"`` — caller has no parent; treat as standalone.
-          ``"compressed_success_only"`` (default for legacy parents
-            that do not set a strategy) — failures fire ``_notify_failed``
-            immediately, success fires once via pipeline summary.
-          ``"compressed_all"`` — failures AND successes are deferred
-            to the pipeline summary; one push covers everything.
-        """
-        if not parent_job_id:
-            return "none"
-        parent = self._jobs.get(parent_job_id)
-        if parent is None:
-            return "compressed_success_only"
-        return parent.params.get(
-            "notify_strategy", "compressed_success_only",
-        )
-
-    def _try_pipeline_notification(
-        self, parent_job_id: str, user_id: int | None,
-    ) -> None:
-        """Send one combined notification when all pipeline jobs finish.
-
-        Called by follow-up job runners on completion; the method
-        checks whether all sibling follow-ups have also reached a
-        terminal state. Only the last one to finish actually sends
-        the notification — earlier callers return early because a
-        sibling is still running.
-
-        Behavior depends on the parent's ``notify_strategy``:
-
-        - ``compressed_success_only`` (legacy ingestion pipelines):
-          fires ``_notify_success`` summarising what worked. Failed
-          children already fired their own ``_notify_failed``.
-        - ``compressed_all`` (save-entry edit pipeline): if any child
-          failed, fires ``notify_pipeline_failed`` with a per-stage
-          breakdown. Otherwise fires ``_notify_success`` like the
-          legacy path.
-
-        Concurrent callers (worker thread + the API thread's defensive
-        sweep in ``submit_save_entry_pipeline``) are deduped via
-        ``try_acquire_notification_lock`` — only the first caller
-        actually sends the push.
-        """
-        from journal.services.notifications import (
-            build_pipeline_failure_body,
-        )
-
-        parent = self._jobs.get(parent_job_id)
-        if parent is None or parent.status != "succeeded":
-            return
-
-        parent_result: dict[str, Any] = parent.result or {}
-        follow_up_ids: dict[str, str] = parent_result.get(
-            "follow_up_jobs", {},
-        )
-        if not follow_up_ids:
-            return
-
-        # Gather per-child terminal state.  Bail if any follow-up
-        # hasn't reached a terminal state yet.
-        follow_up_results: dict[str, dict[str, Any]] = {}
-        follow_up_failures: dict[str, str] = {}
-        for key, fj_id in follow_up_ids.items():
-            fj = self._jobs.get(fj_id)
-            if fj is None or fj.status not in ("succeeded", "failed"):
-                return  # still running — wait for next completion
-            if fj.status == "succeeded":
-                follow_up_results[key] = fj.result or {}
-            else:
-                follow_up_failures[key] = (
-                    fj.error_message or "unknown error"
-                )
-
-        combined: dict[str, Any] = dict(parent_result)
-        for key, fj_result in follow_up_results.items():
-            combined[f"{key}_result"] = fj_result
-
-        # Atomically claim the right to fire the notification — guards
-        # against double-firing when the API thread's defensive sweep
-        # races with the last worker's call.
-        if not self._jobs.try_acquire_notification_lock(parent_job_id):
-            return
-
-        strategy = parent.params.get(
-            "notify_strategy", "compressed_success_only",
-        )
-
-        if strategy == "compressed_all" and follow_up_failures:
-            # Per-stage breakdown: list successes with "+", failures
-            # with "-" and the captured error_message.
-            if self._notifications is not None and user_id is not None:
-                try:
-                    body = build_pipeline_failure_body(
-                        parent.type, combined, follow_up_failures,
-                    )
-                    self._notifications.notify_pipeline_failed(
-                        user_id, parent.type, body,
-                    )
-                except Exception:  # noqa: BLE001
-                    log.warning(
-                        "Pipeline failure notification failed",
-                        exc_info=True,
-                    )
-            return
-
-        # All children succeeded (or strategy is the legacy success-only
-        # mode) — fire the success summary using the parent's job type
-        # so the message-builder dispatches correctly.
-        self._notify_success(user_id, parent.type, combined)
 
     def shutdown(self, wait: bool = False) -> None:
         """Stop the executor, cancelling queued-but-not-started tasks.
@@ -630,258 +376,6 @@ class JobRunner:
         `RuntimeError` from the underlying executor.
         """
         self._executor.shutdown(wait=wait, cancel_futures=True)
-
-    # ------------------------------------------------------------------
-    # Worker bodies
-    # ------------------------------------------------------------------
-
-    def _run_entity_extraction(
-        self, job_id: str, params: dict[str, Any]
-    ) -> None:
-        """Execute one entity-extraction job from start to terminal state.
-
-        Must never let an exception escape: a "stuck running" row
-        is strictly worse than a "failed" row for the UI. Any
-        exception raised by the underlying extraction is caught,
-        logged, and recorded via `mark_failed`.
-        """
-        try:
-            self._jobs.mark_running(job_id)
-
-            def progress_callback(current: int, total: int) -> None:
-                self._jobs.update_progress(job_id, current, total)
-
-            entry_id = params.get("entry_id")
-            job_user_id = params.get("user_id")
-            if entry_id is not None:
-                # Single-entry path: extract_from_entry has no
-                # native on_progress hook, so bracket the call with
-                # manual (0, 1) and (1, 1) updates.
-                progress_callback(0, 1)
-                result_obj = self._extraction.extract_from_entry(
-                    int(entry_id)
-                )
-                results = [result_obj]
-                progress_callback(1, 1)
-            else:
-                results = self._extraction.extract_batch(
-                    start_date=params.get("start_date"),
-                    end_date=params.get("end_date"),
-                    stale_only=bool(params.get("stale_only", False)),
-                    on_progress=progress_callback,
-                    user_id=job_user_id,
-                )
-
-            summary: dict[str, Any] = {
-                "entries_processed": len(results),
-                "entities_created": sum(
-                    r.entities_created for r in results
-                ),
-                "entities_matched": sum(
-                    r.entities_matched for r in results
-                ),
-                "entities_deleted": sum(
-                    r.entities_deleted for r in results
-                ),
-                "mentions_created": sum(
-                    r.mentions_created for r in results
-                ),
-                "relationships_created": sum(
-                    r.relationships_created for r in results
-                ),
-                "warnings": [w for r in results for w in r.warnings],
-            }
-            self._jobs.mark_succeeded(job_id, summary)
-            parent_job_id = params.get("parent_job_id")
-            if parent_job_id:
-                self._try_pipeline_notification(parent_job_id, job_user_id)
-            else:
-                self._notify_success(job_user_id, "entity_extraction", summary)
-        except Exception as exc:  # noqa: BLE001 — terminal-state guard
-            log.exception(
-                "Entity extraction job %s failed", job_id
-            )
-            try:
-                friendly = friendly_error(exc)
-                self._jobs.mark_failed(job_id, friendly)
-                parent_job_id = params.get("parent_job_id")
-                # Compressed-all pipelines (edit save) defer the
-                # failure push to the pipeline-level summary so the
-                # user gets one consolidated message instead of one
-                # per stage.
-                if self._get_notify_strategy(parent_job_id) != "compressed_all":
-                    self._notify_failed(
-                        params.get("user_id"), "entity_extraction",
-                        friendly, exc,
-                    )
-                if parent_job_id:
-                    self._try_pipeline_notification(
-                        parent_job_id, params.get("user_id"),
-                    )
-            except Exception:  # noqa: BLE001 — last-resort bookkeeping
-                log.exception(
-                    "Failed to record failure for job %s", job_id
-                )
-
-    def _run_entity_reembed(
-        self, job_id: str, params: dict[str, Any]
-    ) -> None:
-        """Execute one entity-reembed job from start to terminal state.
-
-        Same exception-safety guarantee as ``_run_entity_extraction``:
-        a stuck-running row is strictly worse than a failed row, so
-        every exit path lands in ``mark_succeeded`` or ``mark_failed``.
-        """
-        try:
-            self._jobs.mark_running(job_id)
-            self._jobs.update_progress(job_id, 0, 1)
-            entity_id = int(params["entity_id"])
-            job_user_id = int(params["user_id"])
-
-            summary = self._reembedder.reembed_entity_for_description(
-                entity_id, user_id=job_user_id,
-            )
-            self._jobs.update_progress(job_id, 1, 1)
-            self._jobs.mark_succeeded(job_id, summary)
-            self._notify_success(job_user_id, "entity_reembed", summary)
-        except Exception as exc:  # noqa: BLE001 — terminal-state guard
-            log.exception("Entity reembed job %s failed", job_id)
-            try:
-                friendly = friendly_error(exc)
-                self._jobs.mark_failed(job_id, friendly)
-                self._notify_failed(
-                    params.get("user_id"), "entity_reembed", friendly, exc,
-                )
-            except Exception:  # noqa: BLE001 — last-resort bookkeeping
-                log.exception(
-                    "Failed to record failure for job %s", job_id
-                )
-
-    def _run_image_ingestion(
-        self, job_id: str, params: dict[str, Any]
-    ) -> None:
-        """Execute one image-ingestion job from start to terminal state.
-
-        Transient API errors (503 overload, 429 rate limit) trigger
-        automatic retries with exponential backoff (3 min, 6 min, 12 min).
-        The job stays in ``running`` state during waits and
-        ``status_detail`` shows the next retry time so the webapp can
-        display it.
-        """
-        try:
-            self._jobs.mark_running(job_id)
-            images_with_names = self._pending_images.pop(job_id, [])
-            if not images_with_names:
-                self._jobs.mark_failed(job_id, "No image data found for job")
-                return
-            if self._ingestion is None:
-                self._jobs.mark_failed(job_id, "Ingestion service not available")
-                return
-
-            # Strip filenames — IngestionService expects (bytes, media_type)
-            images: list[tuple[bytes, str]] = [
-                (data, media_type) for data, media_type, _filename in images_with_names
-            ]
-            entry_date = params["entry_date"]
-            job_user_id: int | None = params.get("user_id")
-            total = len(images)
-
-            def progress_callback(current: int, total_pages: int) -> None:
-                self._jobs.update_progress(job_id, current, total)
-
-            last_exc: Exception | None = None
-            for attempt in range(len(RETRY_DELAYS_SECONDS) + 1):
-                try:
-                    if attempt > 0:
-                        self._jobs.update_status_detail(job_id, None)
-                        log.info(
-                            "Image ingestion job %s — retry attempt %d",
-                            job_id, attempt,
-                        )
-
-                    if len(images) == 1:
-                        self._jobs.update_progress(job_id, 0, total)
-                        entry = self._ingestion.ingest_image(
-                            images[0][0], images[0][1], entry_date,
-                            skip_mood=True, user_id=job_user_id or 1,
-                        )
-                        self._jobs.update_progress(job_id, 1, total)
-                    else:
-                        self._jobs.update_progress(job_id, 0, total)
-                        entry = self._ingestion.ingest_multi_page_entry(
-                            images, entry_date, skip_mood=True,
-                            on_progress=progress_callback,
-                            user_id=job_user_id or 1,
-                        )
-                    last_exc = None
-                    break  # success
-                except Exception as exc:  # noqa: BLE001
-                    last_exc = exc
-                    if not is_transient(exc) or attempt >= len(RETRY_DELAYS_SECONDS):
-                        break  # non-transient or out of retries
-                    delay = RETRY_DELAYS_SECONDS[attempt]
-                    delay_minutes = delay // 60
-                    retry_at_local = datetime.now().astimezone() + timedelta(seconds=delay)
-                    retry_time = retry_at_local.strftime("%H:%M")
-                    friendly = friendly_error(exc)
-                    detail = f"{friendly}, retrying in {delay_minutes} minutes at {retry_time}"
-                    log.warning(
-                        "Image ingestion job %s — transient error, "
-                        "retrying in %ds (attempt %d): %s",
-                        job_id, delay, attempt + 1, exc,
-                    )
-                    self._jobs.update_status_detail(job_id, detail)
-                    # Notify on first retry only
-                    if attempt == 0:
-                        self._notify_retrying(
-                            job_user_id, "ingest_images", attempt + 1,
-                            delay, friendly, exc,
-                        )
-                    time.sleep(delay)
-
-            if last_exc is not None:
-                raise last_exc
-
-            self._jobs.update_progress(job_id, total, total)
-
-            # Queue follow-up jobs: mood scoring + entity extraction.
-            follow_up_ids = self._queue_post_ingestion_jobs(
-                job_id, "Image", entry.id, job_user_id,
-            )
-
-            result: dict[str, Any] = {
-                "entry_id": entry.id,
-                "entry_date": entry.entry_date,
-                "source_type": entry.source_type,
-                "word_count": entry.word_count,
-                "chunk_count": entry.chunk_count,
-                "page_count": total,
-                "follow_up_jobs": follow_up_ids,
-            }
-            self._jobs.mark_succeeded(job_id, result)
-            if follow_up_ids:
-                # Combined pipeline notification fires when the last
-                # follow-up job (mood/entity) completes.
-                pass
-            else:
-                # No follow-ups were queued (e.g. executor shutting
-                # down) — notify directly so the user learns the
-                # entry was created.
-                self._notify_success(job_user_id, "ingest_images", result)
-        except Exception as exc:  # noqa: BLE001 — terminal-state guard
-            log.exception("Image ingestion job %s failed", job_id)
-            # Clean up any remaining image data
-            self._pending_images.pop(job_id, None)
-            try:
-                friendly = friendly_error(exc)
-                if is_transient(exc):
-                    friendly += " — please try again later"
-                self._jobs.mark_failed(job_id, friendly)
-                self._notify_failed(
-                    job_user_id, "ingest_images", friendly, exc,
-                )
-            except Exception:  # noqa: BLE001 — last-resort bookkeeping
-                log.exception("Failed to record failure for job %s", job_id)
 
     def _queue_post_ingestion_jobs(
         self,
@@ -895,25 +389,30 @@ class JobRunner:
         Returns a mapping of follow-up label → job ID for each
         successfully queued job (e.g. ``{"mood_scoring": "abc-123",
         "entity_extraction": "def-456"}``).
+
+        Lives on ``JobRunner`` (rather than as a free function) so it
+        has access to the runner's submit_* methods, which do the
+        param-validation + executor.submit dance the workers' follow-
+        up flow needs.
         """
         follow_up_ids: dict[str, str] = {}
         for label, key, submit in [
-            ("mood scoring", "mood_scoring", lambda: self.submit_mood_score_entry(
-                entry_id, user_id=user_id, parent_job_id=parent_job_id,
-            )),
-            ("entity extraction", "entity_extraction", lambda: self.submit_entity_extraction(
-                {"entry_id": entry_id, "parent_job_id": parent_job_id},
-                user_id=user_id,
-            )),
+            ("mood scoring", "mood_scoring",
+             lambda: self.submit_mood_score_entry(
+                 entry_id, user_id=user_id, parent_job_id=parent_job_id,
+             )),
+            ("entity extraction", "entity_extraction",
+             lambda: self.submit_entity_extraction(
+                 {"entry_id": entry_id, "parent_job_id": parent_job_id},
+                 user_id=user_id,
+             )),
         ]:
             try:
                 fj = submit()
                 follow_up_ids[key] = fj.id
                 log.info(
-                    "%s ingestion job %s — queued %s %s"
-                    " for entry %d",
-                    kind, parent_job_id, label, fj.id,
-                    entry_id,
+                    "%s ingestion job %s — queued %s %s for entry %d",
+                    kind, parent_job_id, label, fj.id, entry_id,
                 )
             except Exception:  # noqa: BLE001
                 log.warning(
@@ -922,293 +421,3 @@ class JobRunner:
                     exc_info=True,
                 )
         return follow_up_ids
-
-    def _run_mood_score_entry(
-        self, job_id: str, params: dict[str, Any]
-    ) -> None:
-        """Score a single entry's mood dimensions."""
-        try:
-            self._jobs.mark_running(job_id)
-            self._jobs.update_progress(job_id, 0, 1)
-
-            entry_id = params["entry_id"]
-            parent_job_id = params.get("parent_job_id")
-            entry = self._entries.get_entry(entry_id)
-            if entry is None:
-                error_msg = f"Entry {entry_id} not found"
-                self._jobs.mark_failed(job_id, error_msg)
-                if self._get_notify_strategy(parent_job_id) != "compressed_all":
-                    self._notify_failed(
-                        params.get("user_id"), "mood_score_entry",
-                        error_msg,
-                    )
-                if parent_job_id:
-                    self._try_pipeline_notification(
-                        parent_job_id, params.get("user_id"),
-                    )
-                return
-
-            text = entry.final_text or entry.raw_text
-            if not text or not text.strip():
-                error_msg = f"Entry {entry_id} has no text"
-                self._jobs.mark_failed(job_id, error_msg)
-                if self._get_notify_strategy(parent_job_id) != "compressed_all":
-                    self._notify_failed(
-                        params.get("user_id"), "mood_score_entry",
-                        error_msg,
-                    )
-                if parent_job_id:
-                    self._try_pipeline_notification(
-                        parent_job_id, params.get("user_id"),
-                    )
-                return
-
-            count = self._mood_scoring.score_entry(entry_id, text)
-            self._jobs.update_progress(job_id, 1, 1)
-            result = {"entry_id": entry_id, "scores_written": count}
-            self._jobs.mark_succeeded(job_id, result)
-            parent_job_id = params.get("parent_job_id")
-            if parent_job_id:
-                self._try_pipeline_notification(
-                    parent_job_id, params.get("user_id"),
-                )
-            else:
-                self._notify_success(
-                    params.get("user_id"), "mood_score_entry", result,
-                )
-        except Exception as exc:  # noqa: BLE001 — terminal-state guard
-            log.exception("Mood score entry job %s failed", job_id)
-            try:
-                friendly = friendly_error(exc)
-                self._jobs.mark_failed(job_id, friendly)
-                parent_job_id = params.get("parent_job_id")
-                if self._get_notify_strategy(parent_job_id) != "compressed_all":
-                    self._notify_failed(
-                        params.get("user_id"), "mood_score_entry",
-                        friendly, exc,
-                    )
-                if parent_job_id:
-                    self._try_pipeline_notification(
-                        parent_job_id, params.get("user_id"),
-                    )
-            except Exception:  # noqa: BLE001 — last-resort bookkeeping
-                log.exception("Failed to record failure for job %s", job_id)
-
-    def _run_reprocess_embeddings(
-        self, job_id: str, params: dict[str, Any]
-    ) -> None:
-        """Re-chunk and re-embed an entry's text in the background."""
-        parent_job_id = params.get("parent_job_id")
-        try:
-            self._jobs.mark_running(job_id)
-            self._jobs.update_progress(job_id, 0, 1)
-
-            entry_id = params["entry_id"]
-            if self._ingestion is None:
-                error_msg = "Ingestion service not available"
-                self._jobs.mark_failed(job_id, error_msg)
-                if self._get_notify_strategy(parent_job_id) != "compressed_all":
-                    self._notify_failed(
-                        params.get("user_id"), "reprocess_embeddings",
-                        error_msg,
-                    )
-                if parent_job_id:
-                    self._try_pipeline_notification(
-                        parent_job_id, params.get("user_id"),
-                    )
-                return
-
-            chunk_count = self._ingestion.reprocess_embeddings(entry_id)
-            self._jobs.update_progress(job_id, 1, 1)
-            result = {"entry_id": entry_id, "chunk_count": chunk_count}
-            self._jobs.mark_succeeded(job_id, result)
-            if parent_job_id:
-                # Part of a save-entry pipeline — defer to the
-                # consolidated pipeline notification.
-                self._try_pipeline_notification(
-                    parent_job_id, params.get("user_id"),
-                )
-            else:
-                self._notify_success(
-                    params.get("user_id"), "reprocess_embeddings", result,
-                )
-        except Exception as exc:  # noqa: BLE001 — terminal-state guard
-            log.exception("Reprocess embeddings job %s failed", job_id)
-            try:
-                friendly = friendly_error(exc)
-                self._jobs.mark_failed(job_id, friendly)
-                if self._get_notify_strategy(parent_job_id) != "compressed_all":
-                    self._notify_failed(
-                        params.get("user_id"), "reprocess_embeddings",
-                        friendly, exc,
-                    )
-                if parent_job_id:
-                    self._try_pipeline_notification(
-                        parent_job_id, params.get("user_id"),
-                    )
-            except Exception:  # noqa: BLE001 — last-resort bookkeeping
-                log.exception("Failed to record failure for job %s", job_id)
-
-    def _run_mood_backfill(
-        self, job_id: str, params: dict[str, Any]
-    ) -> None:
-        """Execute one mood-backfill job from start to terminal state.
-
-        Same guarantee as `_run_entity_extraction`: always reaches a
-        terminal state, never lets exceptions escape the executor.
-        """
-        try:
-            self._jobs.mark_running(job_id)
-
-            def progress_callback(current: int, total: int) -> None:
-                self._jobs.update_progress(job_id, current, total)
-
-            backfill_result = self._mood_backfill(
-                repository=self._entries,
-                mood_scoring=self._mood_scoring,
-                mode=params["mode"],
-                start_date=params.get("start_date"),
-                end_date=params.get("end_date"),
-                on_progress=progress_callback,
-                user_id=params.get("user_id"),
-            )
-
-            summary: dict[str, Any] = {
-                "scored": backfill_result.scored,
-                "skipped": backfill_result.skipped,
-                "errors": list(backfill_result.errors),
-            }
-            self._jobs.mark_succeeded(job_id, summary)
-            self._notify_success(
-                params.get("user_id"), "mood_backfill", summary,
-            )
-        except Exception as exc:  # noqa: BLE001 — terminal-state guard
-            log.exception("Mood backfill job %s failed", job_id)
-            try:
-                friendly = friendly_error(exc)
-                self._jobs.mark_failed(job_id, friendly)
-                self._notify_failed(
-                    params.get("user_id"), "mood_backfill", friendly, exc,
-                )
-            except Exception:  # noqa: BLE001 — last-resort bookkeeping
-                log.exception(
-                    "Failed to record failure for job %s", job_id
-                )
-
-    def _run_audio_ingestion(
-        self, job_id: str, params: dict[str, Any]
-    ) -> None:
-        """Execute one audio-ingestion job from start to terminal state.
-
-        Transient API errors (429 rate limit) trigger automatic retries
-        with exponential backoff, mirroring ``_run_image_ingestion``.
-        """
-        try:
-            self._jobs.mark_running(job_id)
-            recordings_with_names = self._pending_audio.pop(job_id, [])
-            if not recordings_with_names:
-                self._jobs.mark_failed(job_id, "No audio data found for job")
-                return
-            if self._ingestion is None:
-                self._jobs.mark_failed(job_id, "Ingestion service not available")
-                return
-
-            # Strip filenames — IngestionService expects (bytes, media_type)
-            recordings: list[tuple[bytes, str]] = [
-                (data, media_type)
-                for data, media_type, _filename in recordings_with_names
-            ]
-            entry_date = params["entry_date"]
-            job_user_id: int | None = params.get("user_id")
-            total = len(recordings)
-
-            def progress_callback(current: int, total_recs: int) -> None:
-                self._jobs.update_progress(job_id, current, total)
-
-            last_exc: Exception | None = None
-            for attempt in range(len(RETRY_DELAYS_SECONDS) + 1):
-                try:
-                    if attempt > 0:
-                        self._jobs.update_status_detail(job_id, None)
-                        log.info(
-                            "Audio ingestion job %s — retry attempt %d",
-                            job_id, attempt,
-                        )
-
-                    self._jobs.update_progress(job_id, 0, total)
-                    entry = self._ingestion.ingest_multi_voice(
-                        recordings, entry_date,
-                        source_type=params.get("source_type", "voice"),
-                        skip_mood=True,
-                        on_progress=progress_callback,
-                        user_id=job_user_id or 1,
-                    )
-                    last_exc = None
-                    break  # success
-                except Exception as exc:  # noqa: BLE001
-                    last_exc = exc
-                    if not is_transient(exc) or attempt >= len(RETRY_DELAYS_SECONDS):
-                        break  # non-transient or out of retries
-                    delay = RETRY_DELAYS_SECONDS[attempt]
-                    delay_minutes = delay // 60
-                    retry_at_local = datetime.now().astimezone() + timedelta(seconds=delay)
-                    retry_time = retry_at_local.strftime("%H:%M")
-                    friendly = friendly_error(exc)
-                    detail = f"{friendly}, retrying in {delay_minutes} minutes at {retry_time}"
-                    log.warning(
-                        "Audio ingestion job %s — transient error, "
-                        "retrying in %ds (attempt %d): %s",
-                        job_id, delay, attempt + 1, exc,
-                    )
-                    self._jobs.update_status_detail(job_id, detail)
-                    # Notify on first retry only
-                    if attempt == 0:
-                        self._notify_retrying(
-                            job_user_id, "ingest_audio", attempt + 1,
-                            delay, friendly, exc,
-                        )
-                    time.sleep(delay)
-
-            if last_exc is not None:
-                raise last_exc
-
-            self._jobs.update_progress(job_id, total, total)
-
-            # Queue follow-up jobs: mood scoring + entity extraction.
-            follow_up_ids = self._queue_post_ingestion_jobs(
-                job_id, "Audio", entry.id, job_user_id,
-            )
-
-            result: dict[str, Any] = {
-                "entry_id": entry.id,
-                "entry_date": entry.entry_date,
-                "source_type": entry.source_type,
-                "word_count": entry.word_count,
-                "chunk_count": entry.chunk_count,
-                "recording_count": total,
-                "follow_up_jobs": follow_up_ids,
-            }
-            self._jobs.mark_succeeded(job_id, result)
-            if follow_up_ids:
-                # Combined pipeline notification fires when the last
-                # follow-up job (mood/entity) completes.
-                pass
-            else:
-                # No follow-ups were queued (e.g. executor shutting
-                # down) — notify directly so the user learns the
-                # entry was created.
-                self._notify_success(job_user_id, "ingest_audio", result)
-        except Exception as exc:  # noqa: BLE001 — terminal-state guard
-            log.exception("Audio ingestion job %s failed", job_id)
-            # Clean up any remaining audio data
-            self._pending_audio.pop(job_id, None)
-            try:
-                friendly = friendly_error(exc)
-                if is_transient(exc):
-                    friendly += " — please try again later"
-                self._jobs.mark_failed(job_id, friendly)
-                self._notify_failed(
-                    job_user_id, "ingest_audio", friendly, exc,
-                )
-            except Exception:  # noqa: BLE001 — last-resort bookkeeping
-                log.exception("Failed to record failure for job %s", job_id)

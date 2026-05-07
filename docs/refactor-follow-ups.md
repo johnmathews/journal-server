@@ -85,76 +85,37 @@ decision is "accept and document".
 
 ---
 
-### 2. `services/jobs/runner.py` — worker-class extraction
+### 2. ~~`services/jobs/runner.py` — worker-class extraction~~ — RESOLVED 2026-05-07
 
-**Where:** `src/journal/services/jobs/runner.py` (1163 lines as of
-2026-05-07).
+`services/jobs/runner.py` 1214 → **423 lines** (target was ≤ 500).
 
-**What landed in Unit 4:** File split into a package; `errors.py` and
-`validation.py` extracted; `_friendly_error` / `_is_transient` /
-`_validate_params` / `*_KEYS` constants moved out and renamed without
-the underscore prefix. `JobRunner` itself stayed monolithic.
+`WorkerContext` dataclass (option 2 from the design table) bundles
+the dependencies. Each worker is now a free function under
+`services/jobs/workers/<name>.py` taking
+`(ctx, job_id, params)`. New supporting modules:
 
-**What did NOT land in Unit 4:** The plan's DoD called for "no file in
-`services/jobs/` over ~500 lines" and "worker functions individually
-unit-testable (called directly without going through `JobRunner`)".
-Both bullets are unmet. Reasons recorded in
-`journal/260507-units-3-and-4.md` § "Acknowledged exception".
+- `services/jobs/notifier.py` (208 lines) — `JobNotifier` wraps
+  `notify_success`/`notify_failed`/`notify_retrying`/`get_notify_strategy`/
+  `try_pipeline_notification`. Dropped underscore prefixes; the
+  notifier is constructed once by `JobRunner.__init__`.
+- `services/jobs/retry.py` (96 lines) — `run_with_retry[T]` shared by
+  the image + audio workers. Same exponential-backoff loop with
+  status-detail updates and "notify on first retry only" rule.
+- `services/jobs/save_pipeline.py` (186 lines) — the
+  `submit_save_entry_pipeline` orchestrator (parent + 3 children +
+  deferred dispatch + defensive sweep). `JobRunner.submit_save_entry_pipeline`
+  is now a thin shim over the free function.
 
-**Goal:** Extract each `_run_*` worker as a free function under
-`services/jobs/workers/<name>.py` so workers are independently testable
-and `runner.py` shrinks to submission + dispatch + notification glue.
+Direct unit test for the smallest worker added at
+`tests/test_services/test_jobs/test_worker_entity_reembed.py` — 4
+tests building a minimal `WorkerContext` and calling
+`run_entity_reembed` without instantiating `JobRunner`.
 
-**Worker inventory (audit done in Unit 4):**
+Verified: 1800 unit tests pass (was 1796; +4 new). The
+`max_workers=1` invariant docstring is preserved verbatim on both
+the module header and the `JobRunner` class.
 
-| Worker | Lines | Notes |
-|---|---:|---|
-| `_run_entity_extraction` | ~88 | Single-entry + batch paths in one method |
-| `_run_entity_reembed` | ~34 | Smallest; uses the `EntityReembedder` Protocol from Unit 3 |
-| `_run_image_ingestion` | ~126 | Has retry loop + pipeline-notify logic |
-| `_run_mood_score_entry` | ~71 | |
-| `_run_reprocess_embeddings` | ~55 | |
-| `_run_mood_backfill` | ~46 | |
-| `_run_audio_ingestion` | ~115 | Same retry/pipeline shape as image |
-
-**Approach:**
-
-1. Decide the dependency-passing shape. Two options:
-   1. **Free functions with explicit kwargs.** Each worker takes the
-      specific deps it needs. Verbose at the dispatch site but minimal
-      at the worker site.
-   2. **`WorkerContext` dataclass.** A single bundle holding `jobs_repo`,
-      `extraction`, `reembedder`, `mood_scoring`, `mood_backfill`,
-      `entries`, `ingestion`, `notify_success`, `notify_failed`,
-      `notify_retrying`, `try_pipeline_notification`. Workers take one
-      argument; tests build a minimal context.
-   - Recommend option 2 — it scales better as workers gain dependencies
-     and reads cleaner at the dispatch site.
-2. Extract `JobNotifier` first (the four `_notify_*` methods plus
-   `_get_notify_strategy` and `_try_pipeline_notification`) into
-   `services/jobs/notifier.py`. Most workers need it.
-3. Start with the smallest worker (`reembed`, 34 lines) to validate the
-   pattern. Add a direct unit test that constructs the context with
-   fakes and calls `run_entity_reembed(ctx, job_id, params)`.
-4. Move the others in size order. Image and audio share the retry
-   helper — extract that to `services/jobs/retry.py` and have both
-   workers call it.
-5. `runner.py`'s `_run_*` methods become 3-line dispatchers that hand
-   off to the workers. Or remove them entirely and have
-   `submit_*` use `self._executor.submit(run_<name>, ctx, job_id, params)`.
-
-**Acceptance:**
-- Every worker has a dedicated module under `services/jobs/workers/`.
-- At least one worker has a direct unit test instantiated without
-  `JobRunner`.
-- `runner.py` ≤ 500 lines.
-- All existing tests pass; the `max_workers=1` invariant docstring
-  is preserved verbatim.
-
-**Session size:** Probably one full session. Image / audio retry
-extraction is the trickiest part.
-
-**Pointer:** `journal/260507-units-3-and-4.md` § "Acknowledged exception".
+See `journal/260507-item-2-worker-extraction.md`.
 
 ---
 
@@ -282,7 +243,7 @@ speculatively.
 | `api/entities.py` | 717 | Split into `entities.py` (CRUD) + `entity_merge.py` (merge / merge-candidates / quarantine / aliases) | `journal/260507-api-py-split-unit-1a.md` |
 | `api/dashboard.py` | 609 | Already minor over-cap; leave as one module unless growth | Same |
 | `services/entity_extraction/service.py` | 808 | Orchestrator stays large by design; further trim would need an `ExtractionContext` refactor or a 10-arg free-function `_resolve_entity` | `journal/260507-unit-2-entity-extraction-split.md` |
-| `services/jobs/runner.py` | 1163 | See item 2 in this doc | `journal/260507-units-3-and-4.md` |
+| ~~`services/jobs/runner.py`~~ | ~~1163~~ → 423 | Resolved by item 2 | `journal/260507-item-2-worker-extraction.md` |
 
 ---
 
