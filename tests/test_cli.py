@@ -425,7 +425,7 @@ def test_cmd_backfill_entity_embeddings_dry_run(tmp_path, capsys):
 
     config = Config(db_path=db_path, openai_api_key="sk-test")
 
-    with patch("journal.cli.OpenAIEmbeddingsProvider") as mock_cls:
+    with patch("journal.cli.entities.OpenAIEmbeddingsProvider") as mock_cls:
         mock_cls.return_value = MagicMock()
         cmd_backfill_entity_embeddings(
             MagicMock(user_id=None, dry_run=True), config,
@@ -466,7 +466,7 @@ def test_cmd_backfill_entity_embeddings_writes_embeddings(
     fake_provider = MagicMock()
     fake_provider.embed_query = MagicMock(return_value=[0.5] * 4)
     with patch(
-        "journal.cli.OpenAIEmbeddingsProvider", return_value=fake_provider,
+        "journal.cli.entities.OpenAIEmbeddingsProvider", return_value=fake_provider,
     ):
         cmd_backfill_entity_embeddings(
             MagicMock(user_id=None, dry_run=False), config,
@@ -514,7 +514,7 @@ def test_cmd_backfill_entity_embeddings_user_id_filter(
     fake_provider = MagicMock()
     fake_provider.embed_query = MagicMock(return_value=[0.1])
     with patch(
-        "journal.cli.OpenAIEmbeddingsProvider", return_value=fake_provider,
+        "journal.cli.entities.OpenAIEmbeddingsProvider", return_value=fake_provider,
     ):
         cmd_backfill_entity_embeddings(
             MagicMock(user_id=2, dry_run=False), config,
@@ -552,7 +552,7 @@ def test_cmd_backfill_entity_embeddings_continues_on_per_row_failure(
         side_effect=[RuntimeError("rate limit"), [0.7]],
     )
     with patch(
-        "journal.cli.OpenAIEmbeddingsProvider", return_value=fake_provider,
+        "journal.cli.entities.OpenAIEmbeddingsProvider", return_value=fake_provider,
     ):
         cmd_backfill_entity_embeddings(
             MagicMock(user_id=None, dry_run=False), config,

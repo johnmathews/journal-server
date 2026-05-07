@@ -1,85 +1,42 @@
-"""CLI interface for the journal analysis tool."""
+"""CLI interface for the journal analysis tool.
+
+The package's ``main`` is the argparse entry point wired up in
+``pyproject.toml`` (``journal = "journal.cli:main"``). Per-command
+bodies live in this module unless the command is large or
+self-contained; the bulkier ones split out:
+
+- ``journal extract-entities`` / ``backfill-entity-embeddings`` /
+  ``repair-entity-names`` → ``cli/entities.py``.
+- ``journal backfill-mood`` → ``cli/mood.py``.
+- ``journal seed`` reads its sample data from ``cli/_seed_samples.py``.
+
+The shared service-construction helper lives in ``cli/_services.py``
+so per-command modules can import it without pulling the whole
+package.
+"""
 
 import argparse
 import sys
 from datetime import date
 from pathlib import Path
 
+from journal.cli._services import build_services as _build_services
+from journal.cli.entities import (
+    cmd_backfill_entity_embeddings,
+    cmd_extract_entities,
+    cmd_repair_entity_names,
+)
+from journal.cli.mood import cmd_backfill_mood
 from journal.config import load_config
 from journal.db.connection import get_connection
 from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
-from journal.entitystore.store import SQLiteEntityStore
 from journal.logging import setup_logging
 from journal.providers.embeddings import OpenAIEmbeddingsProvider
-from journal.providers.extraction import AnthropicExtractionProvider
-from journal.providers.ocr import build_ocr_provider
-from journal.providers.transcription import build_transcription_provider
 from journal.services.backfill import backfill_chunk_counts, rechunk_entries
 from journal.services.chunking import build_chunker
 from journal.services.chunking_eval import evaluate_chunking
-from journal.services.entity_extraction import EntityExtractionService
-from journal.services.ingestion import IngestionService
-from journal.services.query import QueryService
 from journal.vectorstore.store import ChromaVectorStore
-
-
-def _build_services(config):
-    conn = get_connection(config.db_path)
-    run_migrations(conn)
-    repo = SQLiteEntryRepository(conn)
-
-    vector_store = ChromaVectorStore(
-        host=config.chromadb_host,
-        port=config.chromadb_port,
-        collection_name=config.chromadb_collection,
-    )
-
-    ocr = build_ocr_provider(config)
-    transcription = build_transcription_provider(config)
-    embeddings = OpenAIEmbeddingsProvider(
-        api_key=config.openai_api_key,
-        model=config.embedding_model,
-        dimensions=config.embedding_dimensions,
-    )
-
-    chunker = build_chunker(config, embeddings)
-
-    ingestion = IngestionService(
-        repository=repo,
-        vector_store=vector_store,
-        ocr_provider=ocr,
-        transcription_provider=transcription,
-        embeddings_provider=embeddings,
-        chunker=chunker,
-        embed_metadata_prefix=config.chunking_embed_metadata_prefix,
-        preprocess_images=config.preprocess_images,
-    )
-    query = QueryService(
-        repository=repo,
-        vector_store=vector_store,
-        embeddings_provider=embeddings,
-    )
-
-    entity_store = SQLiteEntityStore(conn)
-    extraction_provider = AnthropicExtractionProvider(
-        api_key=config.anthropic_api_key,
-        model=config.entity_extraction_model,
-        max_tokens=config.entity_extraction_max_tokens,
-    )
-    entity_extraction = EntityExtractionService(
-        repository=repo,
-        entity_store=entity_store,
-        extraction_provider=extraction_provider,
-        embeddings_provider=embeddings,
-        author_name=config.journal_author_name,
-        dedup_similarity_threshold=config.entity_dedup_similarity_threshold,
-        llm_candidate_top_k=config.entity_llm_candidate_top_k,
-        llm_candidate_threshold=config.entity_llm_candidate_threshold,
-        llm_match_min_cosine=config.entity_llm_match_min_cosine,
-    )
-
-    return ingestion, query, entity_extraction
 
 
 def cmd_ingest(args, config):
@@ -308,7 +265,7 @@ def cmd_seed(args, config):
     run_migrations(conn)
     repo = SQLiteEntryRepository(conn)
 
-    from journal.cli_seed_samples import SEED_SAMPLES
+    from journal.cli._seed_samples import SEED_SAMPLES
     samples = SEED_SAMPLES
 
     # Seeding does not have access to an embeddings provider (no API keys
@@ -347,227 +304,6 @@ def cmd_seed(args, config):
     print("No embeddings generated (re-ingest entries if you want semantic search).")
 
 
-def cmd_extract_entities(args, config):
-    """Run the on-demand entity extraction batch job.
-
-    Accepts a single `--entry-id` to extract one entry, or filter by
-    `--start-date`/`--end-date`/`--stale-only` to pick a batch.
-    """
-    _, _, extraction = _build_services(config)
-
-    if args.entry_id is not None:
-        try:
-            results = [extraction.extract_from_entry(args.entry_id)]
-        except ValueError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        results = extraction.extract_batch(
-            start_date=args.start_date,
-            end_date=args.end_date,
-            stale_only=args.stale_only,
-        )
-
-    if not results:
-        print("No entries matched the filter — nothing to extract.")
-        return
-
-    total_new = sum(r.entities_created for r in results)
-    total_matched = sum(r.entities_matched for r in results)
-    total_mentions = sum(r.mentions_created for r in results)
-    total_rels = sum(r.relationships_created for r in results)
-    total_warnings = sum(len(r.warnings) for r in results)
-
-    print(f"Extracted entities for {len(results)} entries:")
-    print(f"  Entities created:       {total_new}")
-    print(f"  Entities matched:       {total_matched}")
-    print(f"  Mentions recorded:      {total_mentions}")
-    print(f"  Relationships recorded: {total_rels}")
-    print(f"  Warnings:               {total_warnings}")
-    if total_warnings:
-        print()
-        for r in results:
-            for w in r.warnings:
-                print(f"  [entry {r.entry_id}] {w}")
-
-
-def cmd_backfill_entity_embeddings(args, config):
-    """Re-embed every entity whose description is non-empty.
-
-    The entity's stored embedding (from migration 0004's
-    ``embedding_json`` column) feeds stage-c similarity matching during
-    entity extraction. Without this command, the embedding is computed
-    once at entity creation from name + description and never refreshed
-    — so descriptions edited via the webapp after creation don't
-    influence future recognition.
-
-    Filters:
-    - ``--user-id N`` — restrict to one user.
-    - ``--dry-run`` — count candidates without making OpenAI calls.
-
-    Idempotent. Safe to re-run. Cost is small: at
-    text-embedding-3-large pricing ($0.13/M tokens, ~50 tokens per
-    entity), 500 entities is roughly $0.003.
-    """
-    conn = get_connection(config.db_path)
-    run_migrations(conn)
-    entity_store = SQLiteEntityStore(conn)
-    embeddings = OpenAIEmbeddingsProvider(
-        api_key=config.openai_api_key,
-        model=config.embedding_model,
-        dimensions=config.embedding_dimensions,
-    )
-
-    sql = (
-        "SELECT id, user_id, canonical_name, description"
-        " FROM entities"
-        " WHERE description IS NOT NULL"
-        " AND TRIM(description) != ''"
-    )
-    params: list[object] = []
-    if args.user_id is not None:
-        sql += " AND user_id = ?"
-        params.append(args.user_id)
-    sql += " ORDER BY id"
-    rows = list(conn.execute(sql, params).fetchall())
-
-    scope = (
-        f"user {args.user_id}" if args.user_id is not None else "all users"
-    )
-    print(f"Backfill scope: {scope}")
-    print(f"Candidates with non-empty description: {len(rows)}")
-
-    if args.dry_run:
-        print("Dry run: no embeddings will be generated.")
-        return
-
-    if not rows:
-        return
-
-    succeeded = 0
-    failed = 0
-    for row in rows:
-        entity_id = int(row["id"])
-        text = f"{row['canonical_name']} {row['description']}".strip()
-        try:
-            vec = embeddings.embed_query(text)
-            entity_store.set_entity_embedding(entity_id, vec)
-            succeeded += 1
-        except Exception as exc:  # noqa: BLE001 — keep going on per-row error
-            failed += 1
-            print(f"  ! entity {entity_id}: {exc}", file=sys.stderr)
-
-    print(f"Re-embedded: {succeeded}")
-    print(f"Failed:      {failed}")
-
-
-def cmd_repair_entity_names(args, config):
-    """Find and optionally repair entities whose ``canonical_name``
-    looks like an LLM-clipped form of a longer token in their mention
-    quotes (e.g. ``"Nautilin"`` for a quote ``"Nautiline, ..."``).
-
-    Default is dry-run — pass ``--apply`` to actually update rows.
-    Skips proposed repairs that would collide with an existing entity
-    of the same canonical_name.
-    """
-    from journal.providers.extraction import _repair_canonical_name
-
-    conn = get_connection(config.db_path)
-    run_migrations(conn)
-    entity_store = SQLiteEntityStore(conn)
-
-    # Pull every entity, paginating in case the corpus is large.
-    all_entities: list = []
-    offset = 0
-    page_size = 500
-    while True:
-        page = entity_store.list_entities(limit=page_size, offset=offset)
-        all_entities.extend(page)
-        if len(page) < page_size:
-            break
-        offset += page_size
-
-    # Pre-build a lookup for collision detection. Collisions are checked
-    # by (user_id, canonical_name) since canonical names are scoped per
-    # user.
-    by_name: dict[tuple[int, str], int] = {
-        (e.user_id, e.canonical_name): e.id for e in all_entities
-    }
-
-    repairs: list[tuple[object, str]] = []  # (entity, proposed_name)
-    skipped_collisions: list[tuple[object, str]] = []
-
-    for entity in all_entities:
-        # First quote that produces a repair wins. Iterate mentions in
-        # order so the output is deterministic.
-        mentions = entity_store.get_mentions_for_entity(entity.id)
-        proposed: str | None = None
-        for mention in mentions:
-            repaired, was_repaired = _repair_canonical_name(
-                entity.canonical_name, mention.quote,
-            )
-            if was_repaired:
-                proposed = repaired
-                break
-        if proposed is None:
-            continue
-
-        if (entity.user_id, proposed) in by_name and by_name[
-            (entity.user_id, proposed)
-        ] != entity.id:
-            skipped_collisions.append((entity, proposed))
-            continue
-        repairs.append((entity, proposed))
-
-    if not repairs and not skipped_collisions:
-        print("No entities need repair.")
-        return
-
-    print(f"Proposed repairs ({len(repairs)}):")
-    for entity, proposed in repairs:
-        print(
-            f"  [{entity.id}] {entity.canonical_name!r} -> "
-            f"{proposed!r}  (type={entity.entity_type}, "
-            f"user_id={entity.user_id})"
-        )
-    if skipped_collisions:
-        print()
-        print(
-            f"Skipped due to collision with existing entity "
-            f"({len(skipped_collisions)}):"
-        )
-        for entity, proposed in skipped_collisions:
-            existing_id = by_name[(entity.user_id, proposed)]
-            print(
-                f"  [{entity.id}] {entity.canonical_name!r} -> "
-                f"{proposed!r} would collide with entity #"
-                f"{existing_id}"
-            )
-
-    if not args.apply:
-        print()
-        print("Dry-run only. Pass --apply to make these changes.")
-        return
-
-    print()
-    print(f"Applying {len(repairs)} repair(s)...")
-    applied = 0
-    for entity, proposed in repairs:
-        try:
-            entity_store.update_entity(
-                entity.id,
-                canonical_name=proposed,
-                user_id=entity.user_id,
-            )
-            applied += 1
-        except Exception as exc:  # noqa: BLE001
-            print(
-                f"  Failed to update entity {entity.id}: {exc}",
-                file=sys.stderr,
-            )
-    print(f"Applied {applied}/{len(repairs)} repair(s).")
-
-
 def cmd_migrate_chromadb(args, config):
     """Add user_id to all ChromaDB vectors for multi-tenant migration."""
     from journal.db.chromadb_migration import backfill_user_id
@@ -594,94 +330,6 @@ def cmd_stats(args, config):
     print(f"  Total words:            {stats.total_words:,}")
     print(f"  Avg words per entry:    {stats.avg_words_per_entry:.0f}")
     print(f"  Entries per month:      {stats.entries_per_month:.1f}")
-
-
-def cmd_backfill_mood(args, config):
-    """Run the mood-score backfill against the currently-loaded
-    dimension set.
-
-    Modes:
-
-    - `--stale-only` (default): score entries missing at least one
-      currently-configured dimension. Idempotent.
-    - `--force`: rescore every entry in the selected date range,
-      regardless of existing state. Use after editing a
-      dimension's labels or notes.
-
-    Flags:
-
-    - `--prune-retired`: delete `mood_scores` rows whose dimension
-      is not in the current tuple. Off by default. Combined with
-      `--dry-run` it reports what would be deleted.
-    - `--dry-run`: count what would change without making any
-      network or DB writes.
-    - `--start-date` / `--end-date`: ISO-8601 window (inclusive).
-
-    The CLI prints an estimated cost using public Sonnet-4.5
-    pricing so the user can decide whether to proceed on a large
-    corpus.
-    """
-    from journal.providers.mood_scorer import AnthropicMoodScorer
-    from journal.services.backfill import backfill_mood_scores
-    from journal.services.mood_dimensions import load_mood_dimensions
-    from journal.services.mood_scoring import MoodScoringService
-
-    try:
-        dimensions = load_mood_dimensions(config.mood_dimensions_path)
-    except Exception as e:
-        print(
-            f"Error: failed to load mood dimensions: {e}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    conn = get_connection(config.db_path)
-    run_migrations(conn)
-    repo = SQLiteEntryRepository(conn)
-
-    scorer = AnthropicMoodScorer(
-        api_key=config.anthropic_api_key,
-        model=config.mood_scorer_model,
-        max_tokens=config.mood_scorer_max_tokens,
-    )
-    service = MoodScoringService(scorer, repo, dimensions)
-
-    mode = "force" if args.force else "stale-only"
-    print(f"Mood backfill — mode={mode}, dimensions={len(dimensions)}")
-    for d in dimensions:
-        print(f"  - {d.name} ({d.scale_type})")
-    if args.dry_run:
-        print("Dry run: no scoring or writes will occur.")
-
-    result = backfill_mood_scores(
-        repository=repo,
-        mood_scoring=service,
-        mode=mode,
-        start_date=args.start_date,
-        end_date=args.end_date,
-        prune_retired=args.prune_retired,
-        dry_run=args.dry_run,
-    )
-
-    prefix = "[dry-run] " if result.dry_run else ""
-    print(f"{prefix}Scored:          {result.scored}")
-    print(f"{prefix}Skipped:         {result.skipped}")
-    if args.prune_retired:
-        print(f"{prefix}Pruned retired:  {result.pruned}")
-    if result.errors:
-        print(f"\nErrors ({len(result.errors)}):")
-        for err in result.errors:
-            print(f"  {err}")
-
-    # Rough cost estimate using public Sonnet 4.5 pricing: $3/M
-    # input tokens, $15/M output. Per-entry call is ~1250 input
-    # tokens (prompt ~500 + ~750 for a 500-word entry) + ~150
-    # output tokens. Adjust if you change the model.
-    if result.scored and not result.dry_run:
-        input_cost = result.scored * 1250 * 3.0 / 1_000_000
-        output_cost = result.scored * 150 * 15.0 / 1_000_000
-        total = input_cost + output_cost
-        print(f"\nEstimated cost for this run: ${total:.4f}")
 
 
 def cmd_health(args, config):
