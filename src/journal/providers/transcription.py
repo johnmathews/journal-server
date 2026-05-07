@@ -484,6 +484,14 @@ class RetryingTranscriptionProvider:
         self._base_delay = base_delay
         self._max_delay = max_delay
 
+    @property
+    def primary(self) -> TranscriptionProvider:
+        return self._primary
+
+    @property
+    def fallback(self) -> TranscriptionProvider | None:
+        return self._fallback
+
     def transcribe(
         self,
         audio_data: bytes,
@@ -563,6 +571,14 @@ class ShadowTranscriptionProvider:
         self._primary = primary
         self._shadow = shadow
         self._shadow_label = shadow_label
+
+    @property
+    def primary(self) -> TranscriptionProvider:
+        return self._primary
+
+    @property
+    def shadow(self) -> TranscriptionProvider:
+        return self._shadow
 
     def transcribe(
         self,

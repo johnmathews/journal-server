@@ -749,8 +749,8 @@ class TestBuildOcrProvider:
         config = self._make_config(ocr_dual_pass=True, ocr_model="gemini-2.5-pro")
         provider = build_ocr_provider(config)
         assert isinstance(provider, DualPassOCRProvider)
-        assert provider._primary.model == _DEFAULT_MODELS["anthropic"]
-        assert provider._secondary.model == _DEFAULT_MODELS["gemini"]
+        assert provider.primary.model == _DEFAULT_MODELS["anthropic"]
+        assert provider.secondary.model == _DEFAULT_MODELS["gemini"]
 
 
 # ---------------------------------------------------------------------------

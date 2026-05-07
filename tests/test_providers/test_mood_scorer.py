@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -50,6 +50,21 @@ def _text_block(text: str) -> MagicMock:
     block.type = "text"
     block.text = text
     return block
+
+
+def _make_scorer(client: MagicMock) -> AnthropicMoodScorer:
+    """Build an AnthropicMoodScorer wired up to ``client`` for tests.
+
+    Patches ``anthropic.Anthropic`` so the constructor's
+    ``self._client = anthropic.Anthropic(...)`` line picks up the fake
+    instead of a real SDK client. Replaces the older pattern of
+    ``scorer = AnthropicMoodScorer(...); scorer._client = client``.
+    """
+    with patch(
+        "journal.providers.mood_scorer.anthropic.Anthropic",
+        return_value=client,
+    ):
+        return AnthropicMoodScorer(api_key="test-key")
 
 
 class TestBuildSystemPrompt:
@@ -121,8 +136,7 @@ class TestScoreHappyPath:
                 )
             ]
         )
-        scorer = AnthropicMoodScorer(api_key="test-key")
-        scorer._client = client
+        scorer = _make_scorer(client)
 
         results = scorer.score("Today was pretty good.", dims)
 
@@ -145,8 +159,7 @@ class TestScoreHappyPath:
                 )
             ]
         )
-        scorer = AnthropicMoodScorer(api_key="test-key")
-        scorer._client = client
+        scorer = _make_scorer(client)
 
         results = scorer.score("...", dims)
 
@@ -165,8 +178,7 @@ class TestScoreHappyPath:
                 )
             ]
         )
-        scorer = AnthropicMoodScorer(api_key="test-key")
-        scorer._client = client
+        scorer = _make_scorer(client)
 
         results = scorer.score("...", dims)
         by_name = {r.dimension_name: r for r in results}
@@ -180,23 +192,20 @@ class TestScoreEdgeCases:
         self,
     ) -> None:
         client = MagicMock()
-        scorer = AnthropicMoodScorer(api_key="test-key")
-        scorer._client = client
+        scorer = _make_scorer(client)
         assert scorer.score("text", ()) == []
         client.messages.create.assert_not_called()
 
     def test_response_with_no_tool_use_returns_empty(self, dims) -> None:
         client = MagicMock()
         client.messages.create.return_value = MagicMock(content=[])
-        scorer = AnthropicMoodScorer(api_key="test-key")
-        scorer._client = client
+        scorer = _make_scorer(client)
         assert scorer.score("text", dims) == []
 
     def test_response_with_none_message_returns_empty(self, dims) -> None:
         client = MagicMock()
         client.messages.create.return_value = None
-        scorer = AnthropicMoodScorer(api_key="test-key")
-        scorer._client = client
+        scorer = _make_scorer(client)
         assert scorer.score("text", dims) == []
 
     def test_missing_facet_is_skipped_with_warning(
@@ -206,8 +215,7 @@ class TestScoreEdgeCases:
         client.messages.create.return_value = MagicMock(
             content=[_tool_block({"joy_sadness": {"value": 0.5}})]
         )
-        scorer = AnthropicMoodScorer(api_key="test-key")
-        scorer._client = client
+        scorer = _make_scorer(client)
 
         with caplog.at_level("WARNING"):
             results = scorer.score("text", dims)
@@ -227,8 +235,7 @@ class TestScoreEdgeCases:
                 )
             ]
         )
-        scorer = AnthropicMoodScorer(api_key="test-key")
-        scorer._client = client
+        scorer = _make_scorer(client)
 
         results = scorer.score("text", dims)
         assert len(results) == 1
@@ -248,8 +255,7 @@ class TestJSONFallback:
                 )
             ]
         )
-        scorer = AnthropicMoodScorer(api_key="test-key")
-        scorer._client = client
+        scorer = _make_scorer(client)
 
         results = scorer.score("text", dims)
         assert len(results) == 2
@@ -262,8 +268,7 @@ class TestJSONFallback:
         client.messages.create.return_value = MagicMock(
             content=[_text_block("No JSON here sorry.")]
         )
-        scorer = AnthropicMoodScorer(api_key="test-key")
-        scorer._client = client
+        scorer = _make_scorer(client)
         assert scorer.score("text", dims) == []
 
 
@@ -317,8 +322,7 @@ class TestRationaleParsing:
                 )
             ]
         )
-        scorer = AnthropicMoodScorer(api_key="test-key")
-        scorer._client = client
+        scorer = _make_scorer(client)
 
         results = scorer.score("Got a promotion and led a new project.", dims)
 
@@ -343,8 +347,7 @@ class TestRationaleParsing:
                 )
             ]
         )
-        scorer = AnthropicMoodScorer(api_key="test-key")
-        scorer._client = client
+        scorer = _make_scorer(client)
 
         results = scorer.score("A normal day.", dims)
 
@@ -378,8 +381,7 @@ class TestRationaleParsing:
                 )
             ]
         )
-        scorer = AnthropicMoodScorer(api_key="test-key")
-        scorer._client = client
+        scorer = _make_scorer(client)
 
         results = scorer.score("Went for a walk today.", dims)
 

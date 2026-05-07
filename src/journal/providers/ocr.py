@@ -663,6 +663,14 @@ class DualPassOCRProvider:
         self._primary = primary
         self._secondary = secondary
 
+    @property
+    def primary(self) -> OCRProvider:
+        return self._primary
+
+    @property
+    def secondary(self) -> OCRProvider:
+        return self._secondary
+
     def extract(self, image_data: bytes, media_type: str) -> OCRResult:
         from concurrent.futures import ThreadPoolExecutor
 

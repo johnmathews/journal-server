@@ -1260,17 +1260,10 @@ class TestPipelineNotification:
     def test_both_followups_fail_message_content(
         self, jobs_repo: SQLiteJobRepository,
     ) -> None:
-        """Verify _build_success_message does NOT say 'All processing
-        complete' when follow-ups were queued but both failed."""
-        from unittest.mock import MagicMock
+        """build_success_message must NOT say 'All processing complete'
+        when follow-ups were queued but both failed."""
+        from journal.services.notifications import build_success_message
 
-        from journal.services.notifications import PushoverNotificationService
-
-        svc = PushoverNotificationService(
-            user_repo=MagicMock(),
-            default_user_key="k",
-            default_app_token="t",
-        )
         # Simulate the combined result when both follow-ups failed:
         # follow_up_jobs is non-empty but no *_result keys are present.
         combined = {
@@ -1280,7 +1273,7 @@ class TestPipelineNotification:
                 "entity_extraction": "def",
             },
         }
-        msg = svc._build_success_message("ingest_audio", combined)
+        msg = build_success_message("ingest_audio", combined)
         assert "Entry 42" in msg
         assert "all processing complete" not in msg.lower()
 

@@ -11,6 +11,7 @@ from journal.services.notifications import (
     PRIORITY_NORMAL,
     TOPICS,
     PushoverNotificationService,
+    build_success_message,
 )
 
 
@@ -465,15 +466,13 @@ class TestHasCredentials:
 
 
 class TestBuildSuccessMessage:
-    def test_ingestion_message_without_followups(self, svc: PushoverNotificationService) -> None:
-        msg = svc._build_success_message("ingest_images", {"entry_id": 42})
+    def test_ingestion_message_without_followups(self) -> None:
+        msg = build_success_message("ingest_images", {"entry_id": 42})
         assert "- Created Entry 42" in msg
         # Bullet-formatted: every line starts with "- "
         assert all(line.startswith("- ") for line in msg.splitlines())
 
-    def test_ingestion_message_with_pipeline_results(
-        self, svc: PushoverNotificationService,
-    ) -> None:
+    def test_ingestion_message_with_pipeline_results(self) -> None:
         """Combined pipeline result includes mood + entity summaries."""
         result = {
             "entry_id": 76,
@@ -483,7 +482,7 @@ class TestBuildSuccessMessage:
                 "mentions_created": 18,
             },
         }
-        msg = svc._build_success_message("ingest_audio", result)
+        msg = build_success_message("ingest_audio", result)
         assert "- Created Entry 76" in msg
         assert "- Created 8 entities" in msg
         assert "- Recorded 18 mentions" in msg
@@ -494,8 +493,8 @@ class TestBuildSuccessMessage:
         # Should NOT contain the generic fallback when follow-up results exist
         assert "completed all processing" not in msg.lower()
 
-    def test_entity_extraction_message(self, svc: PushoverNotificationService) -> None:
-        msg = svc._build_success_message(
+    def test_entity_extraction_message(self) -> None:
+        msg = build_success_message(
             "entity_extraction",
             {"entries_processed": 5, "entities_created": 3, "mentions_created": 10},
         )
@@ -503,38 +502,32 @@ class TestBuildSuccessMessage:
         assert "- Created 3 entities" in msg
         assert "- Recorded 10 mentions" in msg
 
-    def test_mood_backfill_message(self, svc: PushoverNotificationService) -> None:
-        msg = svc._build_success_message(
+    def test_mood_backfill_message(self) -> None:
+        msg = build_success_message(
             "mood_backfill", {"scored": 10, "skipped": 2},
         )
         assert "- Scored 10 entries" in msg
         assert "- Skipped 2 entries" in msg
 
-    def test_mood_score_entry_message_omits_constant_count(
-        self, svc: PushoverNotificationService,
-    ) -> None:
+    def test_mood_score_entry_message_omits_constant_count(self) -> None:
         """Per-entry mood scoring always produces the same fixed number
         of scores (one per mood dimension), so the count is not shown."""
-        msg = svc._build_success_message(
+        msg = build_success_message(
             "mood_score_entry", {"scores_written": 7},
         )
         assert msg == "- Calculated mood scores"
 
-    def test_reprocess_embeddings_message(
-        self, svc: PushoverNotificationService,
-    ) -> None:
-        msg = svc._build_success_message(
+    def test_reprocess_embeddings_message(self) -> None:
+        msg = build_success_message(
             "reprocess_embeddings", {"chunk_count": 4},
         )
         assert msg == "- Reprocessed 4 chunks"
 
-    def test_fallback_message(self, svc: PushoverNotificationService) -> None:
-        msg = svc._build_success_message("unknown_type", {})
+    def test_fallback_message(self) -> None:
+        msg = build_success_message("unknown_type", {})
         assert msg == "- Completed successfully"
 
-    def test_save_entry_pipeline_success_message(
-        self, svc: PushoverNotificationService,
-    ) -> None:
+    def test_save_entry_pipeline_success_message(self) -> None:
         """Save-entry pipeline (edit flow) success summary covers all 3 stages
         with explicit per-line bullets."""
         result = {
@@ -556,7 +549,7 @@ class TestBuildSuccessMessage:
             },
             "mood_scoring_result": {"entry_id": 76, "scores_written": 3},
         }
-        msg = svc._build_success_message("save_entry_pipeline", result)
+        msg = build_success_message("save_entry_pipeline", result)
         assert "- Updated Entry 76" in msg
         assert "- Reprocessed 4 chunks" in msg
         assert "- Created 2 entities" in msg
@@ -568,9 +561,7 @@ class TestBuildSuccessMessage:
         assert "- Calculated mood scores" in msg
         assert "Mood scores: 3" not in msg
 
-    def test_save_entry_pipeline_message_handles_missing_entities_deleted(
-        self, svc: PushoverNotificationService,
-    ) -> None:
+    def test_save_entry_pipeline_message_handles_missing_entities_deleted(self) -> None:
         """Older-format payloads without entities_deleted default the line
         to 0 rather than crashing."""
         result = {
@@ -585,13 +576,11 @@ class TestBuildSuccessMessage:
             },
             "mood_scoring_result": {"scores_written": 3},
         }
-        msg = svc._build_success_message("save_entry_pipeline", result)
+        msg = build_success_message("save_entry_pipeline", result)
         assert "- Deleted 0 entities" in msg
         assert "- Total: 2 entities" in msg
 
-    def test_save_entry_pipeline_message_omits_missing_stages(
-        self, svc: PushoverNotificationService,
-    ) -> None:
+    def test_save_entry_pipeline_message_omits_missing_stages(self) -> None:
         """If a stage has no result (e.g. mood disabled), it's omitted."""
         result = {
             "entry_id": 76,
@@ -605,7 +594,7 @@ class TestBuildSuccessMessage:
             },
             # No mood_scoring_result
         }
-        msg = svc._build_success_message("save_entry_pipeline", result)
+        msg = build_success_message("save_entry_pipeline", result)
         assert "- Updated Entry 76" in msg
         assert "mood" not in msg.lower()
 

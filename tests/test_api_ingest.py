@@ -610,10 +610,10 @@ class TestApiIngestWithFactory:
             factory_built_transcription, RetryingTranscriptionProvider,
         )
         assert isinstance(
-            factory_built_transcription._primary, OpenAITranscribeProvider,
+            factory_built_transcription.primary, OpenAITranscribeProvider,
         )
         assert isinstance(
-            factory_built_transcription._fallback, OpenAITranscribeProvider,
+            factory_built_transcription.fallback, OpenAITranscribeProvider,
         )
 
         # Patch the OpenAI SDK so any background-job execution that
