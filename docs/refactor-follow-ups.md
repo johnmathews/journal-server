@@ -59,29 +59,59 @@ deterministic regression test asserts pipeline `mark_succeeded`
 precedes every `executor.submit`. See
 `journal/260507-item-1-save-pipeline-race-fix.md`.
 
-### 1.1 Cross-call connection-sharing race (newly surfaced)
+### 1.1 ~~Cross-call connection-sharing race~~ — ACCEPTED + DOCUMENTED 2026-05-07
 
-While reproducing item 1, a 20× PATCH loop test exposed a separate
-issue: iteration N's API-thread writes can race iteration N-1's
-worker-thread writes on the shared connection (the worker is still
-draining when the next PATCH lands). The within-call fix does not
-address this — it is a property of "one SQLite connection shared by
-two writer threads", which the runner module's docstring claims is
-safe but isn't.
+Investigated; landed on "accept and document" after the structural
+fix proved bigger than the bug warranted.
 
-**Goal:** Decide whether to fix structurally (write lock around the
-connection, or connection-per-thread) or to accept the residual risk
-and update the runner docstring to stop claiming safety it doesn't
-provide.
+**What was tried:** A `LockedConnection` wrapper that serialised
+``execute`` / ``executemany`` / ``commit`` calls behind an RLock,
+plus ``with self._conn:`` blocks around every multi-step write
+(``create_entry``, ``create_entity``, ``create_mention``,
+``create_relationship``, ``store_source_file``). All 1800 unit
+tests pass with that wrapper, BUT a 20× PATCH-loop regression test
+still failed intermittently. Diagnostic logging showed
+``cursor.lastrowid`` pointed at a real rowid and the row existed
+inside the locked ``with`` block, but a subsequent SELECT (via
+``get_entry()``) returned ``None`` — the in-flight cursor / fetch
+state on the shared connection was being clobbered by the worker
+thread's concurrent operations during the unlocked window between
+``execute()`` returning a Cursor and the caller's
+``cursor.fetchone()`` / ``lastrowid`` read.
 
-**Symptom:** `sqlite3.OperationalError: not an error` raised from any
-write that interleaves with another thread's write. Not currently
-observed in production logs but not implausible under load.
+Closing every such window requires either:
 
-**Session size:** Half-day if structural fix; 15 minutes if the
-decision is "accept and document".
+1. Per-thread connections (each thread opens its own
+   ``sqlite3.Connection``; SQLite's WAL handles cross-connection
+   coordination correctly). Substantial architectural change —
+   services and repos currently share a single connection
+   instance, so this rewires every constructor and every test
+   fixture.
+2. A connection-wide write lock held across the *entire* multi-step
+   operation (each repo method explicitly acquires/releases). Many
+   sites, deep changes.
 
-**Pointer:** `journal/260507-item-1-save-pipeline-race-fix.md` § "Out of scope".
+**Decision:** accept the residual risk. The within-call race
+fixed in item 1 was the only one we have actually observed in
+practice (test or production). Cross-call races are theoretical
+— workers spend almost all their time in LLM calls, not SQLite,
+so the concurrent-write window is small and short.
+
+**What changed in this commit:**
+- ``db/connection.py`` docstring rewritten to honestly describe
+  the threading hazard, the two real fix options, and the explicit
+  decision to accept the risk.
+- ``services/jobs/runner.py`` docstrings (module + ``JobRunner``
+  class) updated to stop claiming the single-worker executor makes
+  the connection safe — it doesn't, because the API thread is also
+  a writer.
+
+**Reopen if:** ``sqlite3.OperationalError: not an error`` shows up
+in production logs, OR a future change increases the rate of
+worker-thread DB writes (anything pulling more SQLite work into
+the workers, especially in the hot ingestion paths).
+
+**Pointer:** `journal/260507-item-1-save-pipeline-race-fix.md` § "Out of scope" for the within-call fix.
 
 ---
 

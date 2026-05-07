@@ -19,12 +19,47 @@ def get_connection(
     the one that created it — needed for the background JobRunner,
     which executes queued work on a single-worker executor thread.
 
-    WARNING: `check_same_thread=False` is only safe when callers
-    serialise writes externally. The JobRunner achieves this by
-    funnelling every job through one worker, but any other caller
-    that sets this flag must guarantee the same property or risk
-    SQLite-level data corruption. Do not toggle it just to paper
-    over threading errors.
+    WARNING — known threading hazard:
+
+    `check_same_thread=False` is needed for the MCP server (the
+    request thread + the JobRunner's single-worker thread share
+    one connection), but Python's sqlite3 module is not actually
+    thread-safe at the connection level. Multiple operations
+    that access the connection touch shared state:
+
+      - ``execute()`` / ``executemany()`` mutate the connection's
+        transaction state.
+      - ``cursor.lastrowid`` reads ``sqlite3_last_insert_rowid()``,
+        which is per-connection. A concurrent INSERT from another
+        thread can update it before this thread's lastrowid read.
+      - ``cursor.fetchone()`` / ``fetchall()`` read from a result set
+        that the cursor binds to its statement, but the underlying
+        statement handle is owned by the connection.
+
+    A re-entrant lock around individual ``execute`` / ``commit``
+    calls (attempted in item 1.1) is *not* sufficient — the
+    multi-step "execute → fetch" or "execute → lastrowid → commit"
+    windows are still exposed. Properly closing every gap requires
+    either:
+
+      1. Per-thread connections (each thread opens its own
+         ``sqlite3.Connection``; SQLite's WAL handles cross-
+         connection coordination correctly). Big architectural
+         change — services and repos currently share one connection
+         instance.
+      2. Holding a connection-wide lock for the entire duration of
+         every multi-step read/write (every repo method must
+         acquire and release explicitly).
+
+    Today we accept the residual risk: the only race we have
+    actually observed (the within-call race in
+    ``submit_save_entry_pipeline``) was fixed in item 1 by deferring
+    worker dispatch until the API thread's writes complete. Cross-
+    call races are theoretical — workers spend most of their time
+    in LLM calls, not SQLite, so concurrent SQLite writes are rare.
+    Revisit if production logs surface fresh
+    ``sqlite3.OperationalError: not an error`` reports. See
+    ``docs/refactor-follow-ups.md`` item 1.1.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=check_same_thread)

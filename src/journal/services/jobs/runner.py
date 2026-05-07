@@ -13,20 +13,23 @@ It owns:
   -> (succeeded | failed), with per-step progress updates driven by
   the `on_progress` callback contract added in Work Unit 1.
 - A single-worker `ThreadPoolExecutor` that serialises every
-  submitted job. One worker gives us three things at once:
+  submitted job. One worker gives us two things:
     1. Predictable LLM rate usage (no contention for tokens).
-    2. A clean story for the shared SQLite connection opened with
-       `check_same_thread=False` — only one thread writes at a time,
-       so WAL + NORMAL synchronous stays safe.
-    3. Simpler failure reasoning: jobs cannot be racing each other.
+    2. Simpler failure reasoning: jobs cannot be racing each other.
 
-IMPORTANT: bumping `max_workers` above 1 is a serious change. The
-SQLite connection opened by the server for jobs use is shared
-across threads under the explicit assumption that this executor
-serialises access to it (see `db/connection.py` docstring). If that
-invariant is relaxed, writes from multiple worker threads on a
-single connection with WAL + NORMAL synchronous is NOT safe and
-the schema access pattern must be redesigned first.
+  A third thing it does *not* fully give us is SQLite safety.
+  The shared connection opened with `check_same_thread=False`
+  is also touched by the API request thread, so the runner's
+  worker thread is not the only writer. See `db/connection.py`
+  for the full hazard analysis.
+
+IMPORTANT: bumping `max_workers` above 1 is a serious change. With
+one worker plus the API thread there are already TWO writer
+threads on the shared connection — multiple worker threads would
+add more, compounding the residual race risk documented in
+`db/connection.py`. The schema access pattern must be redesigned
+(per-thread connections or a connection-wide write lock holding
+across multi-step transactions) before any concurrency increase.
 
 Worker bodies live in ``services/jobs/workers/<name>.py``. Each one
 is a free function ``run_<name>(ctx, job_id, params)`` taking a
@@ -106,15 +109,22 @@ class EntityReembedder(Protocol):
 class JobRunner:
     """Run background batch jobs serialised on a single worker.
 
-    Uses a single-worker `ThreadPoolExecutor` so jobs are serialised
-    — this keeps LLM rate-limiting simple and guarantees the shared
-    SQLite connection (opened with `check_same_thread=False`) only
-    receives one writer at a time.
+    Uses a single-worker `ThreadPoolExecutor` so jobs are
+    serialised — this keeps LLM rate-limiting simple and reasoning
+    about job-vs-job interactions tractable.
 
-    IMPORTANT: if `max_workers` is ever bumped above 1, the SQLite
-    threading assumption (see `db/connection.py` docstring) must be
-    re-examined. Writes from multiple threads on a single
-    connection with WAL + NORMAL synchronous is NOT safe.
+    NOTE: the API thread is also a writer to the shared SQLite
+    connection (the MCP server opens it with
+    `check_same_thread=False` so this runner can use it). The
+    "single worker" only constrains background concurrency, not
+    overall connection concurrency — see `db/connection.py` for
+    the residual cross-thread race notes.
+
+    IMPORTANT: if `max_workers` is ever bumped above 1, the
+    threading hazard documented in `db/connection.py` becomes
+    materially worse — multiple worker threads + the API thread
+    on one connection compounds the existing risk and the access
+    pattern must be redesigned before any change.
     """
 
     def __init__(
