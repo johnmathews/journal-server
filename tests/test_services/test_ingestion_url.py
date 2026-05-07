@@ -27,7 +27,7 @@ def _ocr_result(text: str, spans: list[tuple[int, int]] | None = None) -> OCRRes
 
 @pytest.fixture(autouse=True)
 def _skip_ssrf_validation():
-    with patch("journal.services.ingestion._validate_public_url"):
+    with patch("journal.services.ingestion.service._validate_public_url"):
         yield
 
 
@@ -101,7 +101,7 @@ def _mock_urlopen(data: bytes, content_type: str = "image/jpeg"):
 
 
 class TestIngestImageFromUrl:
-    @patch("journal.services.ingestion.urlopen")
+    @patch("journal.services.ingestion.service.urlopen")
     def test_downloads_and_ingests(self, mock_url, ingestion_service, mock_ocr):
         mock_url.return_value = _mock_urlopen(b"fake image bytes")
 
@@ -114,7 +114,7 @@ class TestIngestImageFromUrl:
         assert entry.source_type == "photo"
         mock_ocr.extract.assert_called_once_with(b"fake image bytes", "image/jpeg")
 
-    @patch("journal.services.ingestion.urlopen")
+    @patch("journal.services.ingestion.service.urlopen")
     def test_uses_explicit_media_type(self, mock_url, ingestion_service, mock_ocr):
         mock_url.return_value = _mock_urlopen(b"png data", content_type="application/octet-stream")
 
@@ -126,7 +126,7 @@ class TestIngestImageFromUrl:
 
         mock_ocr.extract.assert_called_once_with(b"png data", "image/png")
 
-    @patch("journal.services.ingestion.urlopen")
+    @patch("journal.services.ingestion.service.urlopen")
     def test_infers_media_type_from_response(self, mock_url, ingestion_service, mock_ocr):
         mock_url.return_value = _mock_urlopen(b"data", content_type="image/webp")
 
@@ -137,7 +137,7 @@ class TestIngestImageFromUrl:
 
         mock_ocr.extract.assert_called_once_with(b"data", "image/webp")
 
-    @patch("journal.services.ingestion.urlopen")
+    @patch("journal.services.ingestion.service.urlopen")
     def test_download_failure_raises(self, mock_url, ingestion_service):
         mock_url.side_effect = URLError("Connection refused")
 
@@ -147,7 +147,7 @@ class TestIngestImageFromUrl:
                 date="2026-03-22",
             )
 
-    @patch("journal.services.ingestion.urlopen")
+    @patch("journal.services.ingestion.service.urlopen")
     def test_http_error_raises(self, mock_url, ingestion_service):
         mock_url.side_effect = HTTPError(
             url="https://example.com/forbidden",
@@ -163,7 +163,7 @@ class TestIngestImageFromUrl:
                 date="2026-03-22",
             )
 
-    @patch("journal.services.ingestion.urlopen")
+    @patch("journal.services.ingestion.service.urlopen")
     def test_duplicate_detection(self, mock_url, ingestion_service):
         mock_url.return_value = _mock_urlopen(b"same image data")
 
@@ -182,7 +182,7 @@ class TestIngestImageFromUrl:
 
 
 class TestSlackUrlAuth:
-    @patch("journal.services.ingestion.urlopen")
+    @patch("journal.services.ingestion.service.urlopen")
     def test_adds_bearer_header_for_slack_urls(
         self, mock_url, ingestion_service_with_slack,
     ):
@@ -196,7 +196,7 @@ class TestSlackUrlAuth:
         req = mock_url.call_args[0][0]
         assert req.get_header("Authorization") == "Bearer xoxb-test-token-123"
 
-    @patch("journal.services.ingestion.urlopen")
+    @patch("journal.services.ingestion.service.urlopen")
     def test_no_auth_header_for_non_slack_urls(
         self, mock_url, ingestion_service_with_slack,
     ):
@@ -210,7 +210,7 @@ class TestSlackUrlAuth:
         req = mock_url.call_args[0][0]
         assert req.get_header("Authorization") is None
 
-    @patch("journal.services.ingestion.urlopen")
+    @patch("journal.services.ingestion.service.urlopen")
     def test_no_auth_header_when_token_not_configured(
         self, mock_url, ingestion_service,
     ):
@@ -226,7 +226,7 @@ class TestSlackUrlAuth:
 
 
 class TestIngestMultiPageFromUrls:
-    @patch("journal.services.ingestion.urlopen")
+    @patch("journal.services.ingestion.service.urlopen")
     def test_downloads_all_pages_and_creates_single_entry(
         self, mock_url, ingestion_service, mock_ocr,
     ):
@@ -257,7 +257,7 @@ class TestIngestMultiPageFromUrls:
         assert mock_ocr.extract.call_count == 2
         assert mock_url.call_count == 2
 
-    @patch("journal.services.ingestion.urlopen")
+    @patch("journal.services.ingestion.service.urlopen")
     def test_respects_per_url_media_type_override(
         self, mock_url, ingestion_service, mock_ocr,
     ):
@@ -279,7 +279,7 @@ class TestIngestMultiPageFromUrls:
         second_call = mock_ocr.extract.call_args_list[1]
         assert second_call[0][1] == "image/jpeg"
 
-    @patch("journal.services.ingestion.urlopen")
+    @patch("journal.services.ingestion.service.urlopen")
     def test_empty_urls_raises(self, mock_url, ingestion_service):
         with pytest.raises(ValueError, match="At least one URL"):
             ingestion_service.ingest_multi_page_entry_from_urls(
@@ -287,7 +287,7 @@ class TestIngestMultiPageFromUrls:
             )
         mock_url.assert_not_called()
 
-    @patch("journal.services.ingestion.urlopen")
+    @patch("journal.services.ingestion.service.urlopen")
     def test_mismatched_media_types_length_raises(
         self, mock_url, ingestion_service,
     ):
@@ -299,7 +299,7 @@ class TestIngestMultiPageFromUrls:
             )
         mock_url.assert_not_called()
 
-    @patch("journal.services.ingestion.urlopen")
+    @patch("journal.services.ingestion.service.urlopen")
     def test_previously_ingested_page_raises(
         self, mock_url, ingestion_service,
     ):
@@ -327,7 +327,7 @@ class TestIngestMultiPageFromUrls:
                 date="2026-04-10",
             )
 
-    @patch("journal.services.ingestion.urlopen")
+    @patch("journal.services.ingestion.service.urlopen")
     def test_slack_urls_get_bearer_header(
         self, mock_url, ingestion_service_with_slack,
     ):
@@ -350,7 +350,7 @@ class TestIngestMultiPageFromUrls:
 
 
 class TestIngestVoiceFromUrl:
-    @patch("journal.services.ingestion.urlopen")
+    @patch("journal.services.ingestion.service.urlopen")
     def test_downloads_and_transcribes(self, mock_url, ingestion_service, mock_transcription):
         mock_url.return_value = _mock_urlopen(b"fake audio bytes", content_type="audio/mp3")
 
@@ -365,7 +365,7 @@ class TestIngestVoiceFromUrl:
             b"fake audio bytes", "audio/mp3", "en",
         )
 
-    @patch("journal.services.ingestion.urlopen")
+    @patch("journal.services.ingestion.service.urlopen")
     def test_passes_language(self, mock_url, ingestion_service, mock_transcription):
         mock_url.return_value = _mock_urlopen(b"audio", content_type="audio/m4a")
 
