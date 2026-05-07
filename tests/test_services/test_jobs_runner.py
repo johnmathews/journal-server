@@ -521,7 +521,7 @@ class TestEntityExtractionParamValidation:
 
         # Query the runner's own connection — db_conn points at a
         # different SQLite file and would pass trivially.
-        count = jobs_repo._conn.execute(
+        count = jobs_repo.connection.execute(
             "SELECT COUNT(*) AS c FROM jobs"
         ).fetchone()["c"]
         assert count == 0
@@ -531,7 +531,7 @@ class TestEntityExtractionParamValidation:
         with pytest.raises(ValueError, match="stale_only"):
             runner.submit_entity_extraction({"stale_only": "yes"})
 
-        count = jobs_repo._conn.execute(
+        count = jobs_repo.connection.execute(
             "SELECT COUNT(*) AS c FROM jobs"
         ).fetchone()["c"]
         assert count == 0
@@ -548,7 +548,7 @@ class TestMoodBackfillParamValidation:
         with pytest.raises(ValueError, match="mode"):
             runner.submit_mood_backfill({"mode": "turbo"})
 
-        count = jobs_repo._conn.execute(
+        count = jobs_repo.connection.execute(
             "SELECT COUNT(*) AS c FROM jobs"
         ).fetchone()["c"]
         assert count == 0
@@ -558,7 +558,7 @@ class TestMoodBackfillParamValidation:
         with pytest.raises(ValueError, match="mode"):
             runner.submit_mood_backfill({})
 
-        count = jobs_repo._conn.execute(
+        count = jobs_repo.connection.execute(
             "SELECT COUNT(*) AS c FROM jobs"
         ).fetchone()["c"]
         assert count == 0

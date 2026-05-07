@@ -87,12 +87,12 @@ class QueryService:
     def connection(self) -> sqlite3.Connection:
         """SQLite connection backing the repository, exposed for liveness checks.
 
-        Reaches through the SQLite implementation's `_conn`. Only call when
-        you need the raw connection for a check that takes a sqlite3 handle
-        (e.g. `journal.services.liveness.check_sqlite`); for anything else,
-        prefer the named query methods on this service.
+        Delegates to ``EntryRepository.connection``. Only call when you
+        need the raw connection for a check that takes a sqlite3 handle
+        (e.g. ``journal.services.liveness.check_sqlite``); for anything
+        else, prefer the named query methods on this service.
         """
-        return self._repo._conn  # type: ignore[attr-defined]
+        return self._repo.connection  # type: ignore[attr-defined]
 
     def _timed(self, query_type: str, fn: Callable[[], T]) -> T:
         """Run `fn()` and record its latency under `query_type`.

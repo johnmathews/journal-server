@@ -105,14 +105,14 @@ def services(
         vector_store=mock_vector_store,
         embeddings_provider=mock_embeddings,
     )
-    entity_store = SQLiteEntityStore(repo._conn)
-    job_repository = SQLiteJobRepository(repo._conn)
+    entity_store = SQLiteEntityStore(repo.connection)
+    job_repository = SQLiteJobRepository(repo.connection)
 
     from journal.config import Config
     from journal.services.runtime_settings import RuntimeSettings
 
     config = Config()
-    runtime = RuntimeSettings(repo._conn, config)
+    runtime = RuntimeSettings(repo.connection, config)
 
     return {
         "ingestion": ingestion,
@@ -121,7 +121,7 @@ def services(
         "job_repository": job_repository,
         "config": config,
         "runtime_settings": runtime,
-        "db_conn": repo._conn,
+        "db_conn": repo.connection,
     }
 
 
@@ -852,11 +852,11 @@ class TestGetEntryTokens:
         raw = "raw has a typo"
         entry = repo.create_entry("2026-03-22", "photo", raw, 4)
         # Simulate a correction by updating final_text directly on the row.
-        repo._conn.execute(
+        repo.connection.execute(
             "UPDATE entries SET final_text = ? WHERE id = ?",
             ("corrected text without any typo", entry.id),
         )
-        repo._conn.commit()
+        repo.connection.commit()
         response = client.get(f"/api/entries/{entry.id}/tokens")
         data = response.json()
         reconstructed = "".join(t["text"] for t in data["tokens"])

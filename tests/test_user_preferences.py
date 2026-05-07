@@ -104,14 +104,14 @@ def services(
         vector_store=mock_vector_store,
         embeddings_provider=mock_embeddings,
     )
-    entity_store = SQLiteEntityStore(api_repo._conn)
-    job_repository = SQLiteJobRepository(api_repo._conn)
+    entity_store = SQLiteEntityStore(api_repo.connection)
+    job_repository = SQLiteJobRepository(api_repo.connection)
 
     from journal.config import Config
     from journal.services.runtime_settings import RuntimeSettings
 
     config = Config()
-    runtime = RuntimeSettings(api_repo._conn, config)
+    runtime = RuntimeSettings(api_repo.connection, config)
 
     return {
         "ingestion": ingestion,

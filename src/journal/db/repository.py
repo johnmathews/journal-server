@@ -302,6 +302,17 @@ class SQLiteEntryRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """Underlying SQLite connection.
+
+        Exposed for tests (post-write assertions, custom seed inserts) and
+        diagnostics callers that need to issue raw SQL the repository
+        doesn't surface as a method. Production code paths should prefer
+        the named methods on this class.
+        """
+        return self._conn
+
     def create_entry(
         self, entry_date: str, source_type: str, raw_text: str, word_count: int,
         final_text: str | None = None,

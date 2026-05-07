@@ -68,6 +68,15 @@ class SQLiteJobRepository:
         self._conn = conn
         self._lock = threading.Lock()
 
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """Underlying SQLite connection. Same rationale as
+        ``EntryRepository.connection`` — exposed for test setup /
+        post-write assertions and operational diagnostics. Production
+        callers should prefer the named methods on this class.
+        """
+        return self._conn
+
     def create(
         self,
         job_type: str,

@@ -51,7 +51,7 @@ def test_vector_store_property_returns_store(
 def test_connection_property_returns_repo_conn(
     service: QueryService, repo: MagicMock,
 ) -> None:
-    repo._conn = sentinel.connection
+    repo.connection = sentinel.connection
     assert service.connection is sentinel.connection
 
 

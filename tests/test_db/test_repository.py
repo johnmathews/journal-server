@@ -381,7 +381,7 @@ class TestPeopleAndPlaces:
             "SELECT p.name FROM entry_people ep"
             " JOIN people p ON p.id = ep.person_id WHERE ep.entry_id = ?"
         )
-        rows = repo._conn.execute(sql, (entry.id,)).fetchall()
+        rows = repo.connection.execute(sql, (entry.id,)).fetchall()
         names = {r["name"] for r in rows}
         assert names == {"Atlas", "Luna"}
 
@@ -393,7 +393,7 @@ class TestPeopleAndPlaces:
             "SELECT p.name FROM entry_places ep"
             " JOIN places p ON p.id = ep.place_id WHERE ep.entry_id = ?"
         )
-        rows = repo._conn.execute(sql, (entry.id,)).fetchall()
+        rows = repo.connection.execute(sql, (entry.id,)).fetchall()
         names = {r["name"] for r in rows}
         assert names == {"Vienna", "Graz"}
 
@@ -405,7 +405,7 @@ class TestPeopleAndPlaces:
             "SELECT t.name FROM entry_tags et"
             " JOIN tags t ON t.id = et.tag_id WHERE et.entry_id = ?"
         )
-        rows = repo._conn.execute(sql, (entry.id,)).fetchall()
+        rows = repo.connection.execute(sql, (entry.id,)).fetchall()
         names = {r["name"] for r in rows}
         assert names == {"reflection", "philosophy"}
 
@@ -415,7 +415,7 @@ class TestMoodScores:
         entry = repo.create_entry("2026-03-22", "photo", "Feeling great", 2)
         repo.add_mood_score(entry.id, "overall", 0.8, confidence=0.9)
 
-        row = repo._conn.execute(
+        row = repo.connection.execute(
             "SELECT * FROM mood_scores WHERE entry_id = ?", (entry.id,)
         ).fetchone()
         assert row["dimension"] == "overall"
@@ -729,13 +729,13 @@ class TestEntryPages:
     def test_add_entry_page_with_source_file(self, repo):
         entry = repo.create_entry("2026-03-22", "photo", "Text", 1)
         # Create a source file first
-        repo._conn.execute(
+        repo.connection.execute(
             "INSERT INTO source_files (entry_id, file_path, file_type, file_hash)"
             " VALUES (?, ?, ?, ?)",
             (entry.id, "image.jpg", "image/jpeg", "abc123"),
         )
-        repo._conn.commit()
-        row = repo._conn.execute(
+        repo.connection.commit()
+        row = repo.connection.execute(
             "SELECT id FROM source_files WHERE file_hash = 'abc123'"
         ).fetchone()
         sf_id = row["id"]
@@ -982,9 +982,9 @@ class TestEntityDistribution:
     def test_returns_mention_counts(self, repo):
         e1 = repo.create_entry("2026-04-01", "photo", "met Alice", 2)
         e2 = repo.create_entry("2026-04-02", "photo", "saw Alice again", 3)
-        alice_id = self._insert_entity(repo._conn, "person", "Alice")
-        self._insert_mention(repo._conn, alice_id, e1.id)
-        self._insert_mention(repo._conn, alice_id, e2.id)
+        alice_id = self._insert_entity(repo.connection, "person", "Alice")
+        self._insert_mention(repo.connection, alice_id, e1.id)
+        self._insert_mention(repo.connection, alice_id, e2.id)
 
         results = repo.get_entity_distribution()
         assert len(results) == 1
@@ -993,10 +993,10 @@ class TestEntityDistribution:
 
     def test_filters_by_entity_type(self, repo):
         e = repo.create_entry("2026-04-01", "photo", "trip to Vienna", 3)
-        alice_id = self._insert_entity(repo._conn, "person", "Alice")
-        vienna_id = self._insert_entity(repo._conn, "place", "Vienna")
-        self._insert_mention(repo._conn, alice_id, e.id)
-        self._insert_mention(repo._conn, vienna_id, e.id)
+        alice_id = self._insert_entity(repo.connection, "person", "Alice")
+        vienna_id = self._insert_entity(repo.connection, "place", "Vienna")
+        self._insert_mention(repo.connection, alice_id, e.id)
+        self._insert_mention(repo.connection, vienna_id, e.id)
 
         results = repo.get_entity_distribution(entity_type="place")
         assert len(results) == 1
@@ -1006,9 +1006,9 @@ class TestEntityDistribution:
     def test_filters_by_date_range(self, repo):
         e1 = repo.create_entry("2026-03-01", "photo", "old entry", 2)
         e2 = repo.create_entry("2026-04-15", "photo", "new entry", 2)
-        alice_id = self._insert_entity(repo._conn, "person", "Alice")
-        self._insert_mention(repo._conn, alice_id, e1.id)
-        self._insert_mention(repo._conn, alice_id, e2.id)
+        alice_id = self._insert_entity(repo.connection, "person", "Alice")
+        self._insert_mention(repo.connection, alice_id, e1.id)
+        self._insert_mention(repo.connection, alice_id, e2.id)
 
         results = repo.get_entity_distribution(start_date="2026-04-01", end_date="2026-04-30")
         assert len(results) == 1
@@ -1017,12 +1017,12 @@ class TestEntityDistribution:
     def test_ordered_by_mention_count_descending(self, repo):
         e1 = repo.create_entry("2026-04-01", "photo", "busy day", 2)
         e2 = repo.create_entry("2026-04-02", "photo", "another day", 2)
-        alice_id = self._insert_entity(repo._conn, "person", "Alice")
-        bob_id = self._insert_entity(repo._conn, "person", "Bob")
+        alice_id = self._insert_entity(repo.connection, "person", "Alice")
+        bob_id = self._insert_entity(repo.connection, "person", "Bob")
         # Alice: 2 mentions, Bob: 1 mention
-        self._insert_mention(repo._conn, alice_id, e1.id)
-        self._insert_mention(repo._conn, alice_id, e2.id)
-        self._insert_mention(repo._conn, bob_id, e1.id)
+        self._insert_mention(repo.connection, alice_id, e1.id)
+        self._insert_mention(repo.connection, alice_id, e2.id)
+        self._insert_mention(repo.connection, bob_id, e1.id)
 
         results = repo.get_entity_distribution()
         assert len(results) == 2
@@ -1034,8 +1034,8 @@ class TestEntityDistribution:
     def test_respects_limit(self, repo):
         e = repo.create_entry("2026-04-01", "photo", "lots of people", 3)
         for name in ["Alice", "Bob", "Charlie"]:
-            eid = self._insert_entity(repo._conn, "person", name)
-            self._insert_mention(repo._conn, eid, e.id)
+            eid = self._insert_entity(repo.connection, "person", name)
+            self._insert_mention(repo.connection, eid, e.id)
 
         results = repo.get_entity_distribution(limit=2)
         assert len(results) == 2
