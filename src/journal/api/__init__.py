@@ -21,6 +21,7 @@ from journal.api._legacy import _register_legacy_routes
 # from journal.api._shared instead.
 from journal.api._shared import _convert_heic_to_jpeg, _runtime_get
 from journal.api.health import register_health_routes
+from journal.api.search import register_search_routes
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -40,6 +41,7 @@ def register_api_routes(
             (with 'query' and 'ingestion' keys).
     """
     register_health_routes(mcp, services_getter)
+    register_search_routes(mcp, services_getter)
     _register_legacy_routes(mcp, services_getter)
 
 

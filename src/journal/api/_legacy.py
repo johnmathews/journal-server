@@ -13,7 +13,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import sqlite3
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -33,7 +32,6 @@ from journal.api._shared import (
     _pricing_to_dict,
     _relationship_dict,
     _runtime_get,
-    _search_result_dict,
     _token_encoder,
 )
 from journal.auth import get_authenticated_user
@@ -1407,124 +1405,6 @@ def _register_legacy_routes(
                 "bucket_size": bucket_size,
                 "buckets": [asdict(b) for b in buckets],
                 "stats": asdict(stats),
-            }
-        )
-
-    @mcp.custom_route("/api/search", methods=["GET"], name="api_search")
-    async def search(request: Request) -> JSONResponse:
-        """Hybrid search across journal entries.
-
-        Combines BM25 (SQLite FTS5) and dense (embedding) retrieval,
-        fuses the candidates with Reciprocal Rank Fusion, then reranks
-        the top fan-out with the configured reranker. Bearer-
-        authenticated via the app-wide auth middleware.
-
-        Each result item populates `snippet` (when BM25 contributed —
-        an FTS5 excerpt with `\\x02`/`\\x03` control chars wrapping
-        matched terms) and `matching_chunks` (when dense retrieval
-        contributed — chunks carry `char_start`/`char_end`/`chunk_index`
-        for in-place highlight rendering). Either or both may be
-        present per item.
-
-        The `mode` query parameter has been retired. Passing it is a
-        client bug — the response is 400 `mode_removed` so the bug is
-        visible.
-        """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
-
-        query_svc: QueryService = services["query"]
-        user = get_authenticated_user(request)
-        user_id = user.user_id
-
-        q = (request.query_params.get("q") or "").strip()
-        if not q:
-            return JSONResponse(
-                {
-                    "error": "missing_query",
-                    "message": "'q' query parameter is required",
-                },
-                status_code=400,
-            )
-
-        if "mode" in request.query_params:
-            return JSONResponse(
-                {
-                    "error": "mode_removed",
-                    "message": (
-                        "The 'mode' parameter was removed when hybrid search "
-                        "shipped. Drop it from your request — every search "
-                        "now combines keyword and semantic retrieval."
-                    ),
-                },
-                status_code=400,
-            )
-
-        start_date = request.query_params.get("start_date")
-        end_date = request.query_params.get("end_date")
-
-        try:
-            limit = min(max(int(request.query_params.get("limit", "10")), 1), 50)
-        except ValueError:
-            limit = 10
-        try:
-            offset = max(int(request.query_params.get("offset", "0")), 0)
-        except ValueError:
-            offset = 0
-
-        sort = request.query_params.get("sort", "relevance")
-        if sort not in ("relevance", "date_desc", "date_asc"):
-            return JSONResponse(
-                {
-                    "error": "invalid_sort",
-                    "message": (
-                        "'sort' must be one of: relevance, date_desc, date_asc"
-                    ),
-                },
-                status_code=400,
-            )
-
-        try:
-            results = query_svc.search_entries(
-                query=q,
-                start_date=start_date,
-                end_date=end_date,
-                limit=limit,
-                offset=offset,
-                user_id=user_id,
-                sort=sort,
-            )
-        except sqlite3.OperationalError as e:
-            # FTS5 raises this on malformed queries (unterminated
-            # quotes, bare operators like `AND`, etc.). Surface as a
-            # 400 rather than a 500 so clients can tell the user.
-            log.info("GET /api/search — invalid FTS5 query %r: %s", q, e)
-            return JSONResponse(
-                {
-                    "error": "invalid_query",
-                    "message": f"Query could not be parsed: {e}",
-                },
-                status_code=400,
-            )
-
-        # The reranker name comes from the running service so clients
-        # can tell which L2 stage produced the order — useful for
-        # debugging and for cache busting on the webapp side.
-        reranker_name = type(query_svc.hybrid.reranker).__name__
-
-        log.info(
-            "GET /api/search — q=%r reranker=%s returned %d results",
-            q, reranker_name, len(results),
-        )
-        return JSONResponse(
-            {
-                "query": q,
-                "limit": limit,
-                "offset": offset,
-                "sort": sort,
-                "reranker": reranker_name,
-                "items": [_search_result_dict(r) for r in results],
             }
         )
 
