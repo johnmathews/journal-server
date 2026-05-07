@@ -266,50 +266,60 @@ speculatively.
 
 ---
 
-### 7. Production reach-in pattern: hot-swap of providers via `_attr =`
+### 7. ~~Production reach-in pattern~~ — RESOLVED 2026-05-07
 
-**Where:** `src/journal/services/reload.py`, `src/journal/cli.py:290`,
-plus the matching test fixtures in `tests/test_auth_api.py` and
-the reload-endpoint tests in `tests/test_admin_api.py` /
-`tests/test_auth_api.py`.
+The reload + runtime-settings swap surfaces now live as named
+methods on the affected services. Every previous
+`services["ingestion"]._ocr =` / `._transcription =` /
+`._mood_scoring =` / `._formatter =` / `._heading_detector =` /
+`._preprocess_images =` write — and the matching
+`services["job_runner"]._mood_scoring =` — is gone from `src/`.
 
-**What:** The reload endpoints rebind `services["ingestion"]._ocr`,
-`._transcription`, `._mood_scoring`, `._repo`, and
-`services["job_runner"]._mood_scoring` directly via attribute
-assignment. The pattern works (Python attribute writes are atomic) but
-it is the only place in production where one component reaches across
-the public service boundary. Every test that verifies a reload
-landed has to mirror the pattern, and the residual ~22 reach-ins from
-item 3 all live here.
+**Public surfaces added:**
 
-**Goal:** Promote the swap surface to a public method on each
-affected service. Concrete shape (sketch):
+`IngestionService`:
+- `replace_ocr(provider)`, `replace_transcription(provider)`,
+  `replace_mood_scoring(scoring | None)`,
+  `replace_formatter(formatter | None)`,
+  `replace_heading_detector(detector | None)`,
+  `set_preprocess_images(enabled)`
+- read accessors: `ocr` (no, those stay private — only
+  `repository` and `mood_scoring` were exposed since `reload.py`
+  needs to read them; OCR / transcription writes don't need
+  read-back, so the underscore-prefixed attributes stay)
+  *Actually: `repository` and `mood_scoring` properties added.*
 
-```python
-class IngestionService:
-    def replace_ocr(self, provider: OCRProvider) -> None: ...
-    def replace_transcription(self, provider: TranscriptionProvider) -> None: ...
-    def replace_mood_scoring(self, scoring: MoodScoringService | None) -> None: ...
+`JobRunner`:
+- `mood_scoring` property + `replace_mood_scoring(scoring | None)`
+  method that writes through `self._ctx.mood_scoring` (the live
+  handle workers actually read). Earlier reload code wrote
+  `self._mood_scoring` directly which silently became a phantom
+  attribute after item 2 moved the field onto `WorkerContext` —
+  this commit fixes that latent bug too.
 
-class JobRunner:
-    def replace_mood_scoring(self, scoring: MoodScoringService) -> None: ...
-```
+**Updated callers:**
+- `src/journal/services/reload.py` — every helper uses the new
+  named methods; module docstring rewritten.
+- `src/journal/mcp_server.py` runtime-settings on-change callback
+  — covers all five toggleable hooks (`preprocess_images`,
+  `enable_mood_scoring`, `transcript_formatting`,
+  `date_heading_detection`, plus the OCR pair).
+- `src/journal/cli/__init__.py` — `cmd_rechunk` now uses
+  `ingestion.repository` instead of `ingestion._repo`.
 
-`reload.py` calls those instead of writing `_ocr` etc. The reload
-tests assert `services["ingestion"].ocr is not old_ocr` (or call
-the same `replace_*` again and observe the new instance). The CLI's
-`ingestion._repo` reach-in at `cli.py:290` becomes
-`ingestion.repository` (read-only property, mirroring the existing
-`QueryService.connection` style).
+**Test fixtures retargeted:**
+- `tests/test_services/test_reload.py` and
+  `tests/test_auth_api.py` — Mock fixtures emulate the public
+  surface (`ocr`/`transcription`/`mood_scoring`/`repository`
+  attributes + `replace_*` methods that update them); reload
+  assertions read the public attributes.
 
-**Acceptance:** No `services["ingestion"]._*` writes anywhere in
-`src/`. The `tests/` reach-in count drops to ≤ ~10 (just the
-docstring text and the truly-internal singletons listed in item 3's
-residual breakdown).
-
-**Session size:** 30-60 minutes per service.
-
-**Pointer:** Item 3's residual breakdown.
+**Test reach-in count: 66 → 37.** The 29-site drop covers all of
+the production-mirror residual flagged in item 3's "tolerated
+residual" bucket. Of the remaining 37, 2 are docstring text in
+`ingestion/service.py` and the rest are the legitimately-internal
+test reach-ins enumerated in item 3 part E (jobs._executor,
+job_runner._jobs, mcp_module._services, etc.).
 
 ---
 

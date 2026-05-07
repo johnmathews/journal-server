@@ -387,6 +387,44 @@ class JobRunner:
         """
         self._executor.shutdown(wait=wait, cancel_futures=True)
 
+    @property
+    def mood_scoring(self) -> MoodScoringService | None:
+        """Read-only accessor for the mood-scoring service workers see.
+
+        Lives on ``self._ctx`` post-item-2 (the worker-extraction
+        refactor). Exposed so callers — primarily
+        ``services/reload.py`` — read the live handle instead of
+        reaching into ``self._ctx.mood_scoring``. May return
+        ``None`` if mood scoring was disabled at runtime via
+        ``replace_mood_scoring(None)``.
+        """
+        return self._ctx.mood_scoring
+
+    def replace_mood_scoring(
+        self, scoring: MoodScoringService | None,
+    ) -> None:
+        """Atomically swap the mood-scoring service every worker sees.
+
+        ``services/reload.py`` calls this when the mood-dimension
+        TOML changes — workers picking up the next job read the
+        fresh service from the WorkerContext, while any worker
+        currently mid-call keeps its already-resolved reference.
+
+        Pass ``None`` to disable mood scoring at runtime; workers
+        for mood-related job types should not be submitted while
+        disabled (the api/ submission paths gate on the
+        ``enable_mood_scoring`` runtime flag), so ``None`` is safe
+        for the disabled case even though the WorkerContext field
+        type doesn't advertise it.
+
+        Note: this writes through ``self._ctx.mood_scoring``, the
+        live handle workers actually consume. Earlier reload code
+        wrote ``self._mood_scoring`` directly, which silently
+        became a phantom attribute after item 2 moved the field
+        onto the WorkerContext — fixed by this method.
+        """
+        self._ctx.mood_scoring = scoring  # type: ignore[assignment]
+
     def _queue_post_ingestion_jobs(
         self,
         parent_job_id: str,

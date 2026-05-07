@@ -244,7 +244,7 @@ def cmd_rechunk(args, config):
     ChromaDB or SQLite and without calling the embeddings API.
     """
     ingestion, _, _ = _build_services(config)
-    repo = ingestion._repo  # type: ignore[attr-defined]
+    repo = ingestion.repository
 
     result = rechunk_entries(ingestion, repo, dry_run=args.dry_run)
 

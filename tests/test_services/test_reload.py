@@ -123,13 +123,35 @@ def services(base_config: Config) -> dict[str, Any]:
         dimensions=dims,
     )
 
+    # Mock ingestion/runner expose the public surface the reload
+    # helpers call: read accessors + replace_* methods. The
+    # replace_* methods update the public attribute so the post-
+    # reload assertions can still read the freshly bound provider
+    # via ``services["ingestion"].ocr`` etc.
     ingestion = MagicMock()
-    ingestion._ocr = ocr
-    ingestion._transcription = transcription
-    ingestion._mood_scoring = mood_service
+    ingestion.ocr = ocr
+    ingestion.transcription = transcription
+    ingestion.mood_scoring = mood_service
+    ingestion.repository = repo
+
+    def _replace_ocr(new):
+        ingestion.ocr = new
+    def _replace_transcription(new):
+        ingestion.transcription = new
+    def _replace_mood_scoring(new):
+        ingestion.mood_scoring = new
+
+    ingestion.replace_ocr = _replace_ocr
+    ingestion.replace_transcription = _replace_transcription
+    ingestion.replace_mood_scoring = _replace_mood_scoring
 
     job_runner = MagicMock()
-    job_runner._mood_scoring = mood_service
+    job_runner.mood_scoring = mood_service
+
+    def _runner_replace_mood_scoring(new):
+        job_runner.mood_scoring = new
+
+    job_runner.replace_mood_scoring = _runner_replace_mood_scoring
 
     return {"ingestion": ingestion, "job_runner": job_runner}
 
@@ -141,14 +163,14 @@ def services(base_config: Config) -> dict[str, Any]:
 
 class TestReloadOcrProvider:
     def test_swaps_reference(self, services: dict[str, Any], base_config: Config) -> None:
-        old_ocr = services["ingestion"]._ocr
+        old_ocr = services["ingestion"].ocr
         reload_ocr_provider(services, base_config)
-        assert services["ingestion"]._ocr is not old_ocr
+        assert services["ingestion"].ocr is not old_ocr
 
     def test_picks_up_new_context_files(
         self, services: dict[str, Any], base_config: Config, context_dir: Path
     ) -> None:
-        old_ocr = services["ingestion"]._ocr
+        old_ocr = services["ingestion"].ocr
         assert "Alice Example" in old_ocr._system_text
 
         # Operator edits the context file on disk.
@@ -157,7 +179,7 @@ class TestReloadOcrProvider:
         )
 
         reload_ocr_provider(services, base_config)
-        new_ocr = services["ingestion"]._ocr
+        new_ocr = services["ingestion"].ocr
 
         # The fresh provider sees the edit.
         assert "Bob Newcomer" in new_ocr._system_text
@@ -199,14 +221,14 @@ class TestReloadOcrProvider:
 
 class TestReloadTranscriptionProvider:
     def test_swaps_reference(self, services: dict[str, Any], base_config: Config) -> None:
-        old = services["ingestion"]._transcription
+        old = services["ingestion"].transcription
         reload_transcription_provider(services, base_config)
-        assert services["ingestion"]._transcription is not old
+        assert services["ingestion"].transcription is not old
 
     def test_picks_up_new_context_files(
         self, services: dict[str, Any], base_config: Config, context_dir: Path
     ) -> None:
-        old = services["ingestion"]._transcription
+        old = services["ingestion"].transcription
         old_prompt = old._context_prompt
         assert "Alice Example" in old_prompt
 
@@ -214,7 +236,7 @@ class TestReloadTranscriptionProvider:
             "Bob Newcomer — coworker\n", encoding="utf-8"
         )
         reload_transcription_provider(services, base_config)
-        new = services["ingestion"]._transcription
+        new = services["ingestion"].transcription
 
         assert "Bob Newcomer" in new._context_prompt
         # In-flight reference is untouched.
@@ -239,15 +261,15 @@ class TestReloadMoodDimensions:
     def test_swaps_both_references(
         self, services: dict[str, Any], base_config: Config
     ) -> None:
-        old_ingestion = services["ingestion"]._mood_scoring
-        old_runner = services["job_runner"]._mood_scoring
+        old_ingestion = services["ingestion"].mood_scoring
+        old_runner = services["job_runner"].mood_scoring
         # Sanity: they start as the same instance.
         assert old_ingestion is old_runner
 
         reload_mood_dimensions(services, base_config)
 
-        new_ingestion = services["ingestion"]._mood_scoring
-        new_runner = services["job_runner"]._mood_scoring
+        new_ingestion = services["ingestion"].mood_scoring
+        new_runner = services["job_runner"].mood_scoring
 
         assert new_ingestion is not old_ingestion
         assert new_runner is not old_runner
@@ -257,7 +279,7 @@ class TestReloadMoodDimensions:
     def test_picks_up_new_dimensions(
         self, services: dict[str, Any], base_config: Config, mood_path: Path
     ) -> None:
-        old = services["ingestion"]._mood_scoring
+        old = services["ingestion"].mood_scoring
         assert {d.name for d in old.dimensions} == {"joy_sadness", "agency"}
 
         # Operator adds a third dimension.
@@ -273,7 +295,7 @@ class TestReloadMoodDimensions:
         )
 
         reload_mood_dimensions(services, base_config)
-        new = services["ingestion"]._mood_scoring
+        new = services["ingestion"].mood_scoring
 
         assert {d.name for d in new.dimensions} == {
             "joy_sadness",

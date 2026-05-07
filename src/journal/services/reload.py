@@ -3,16 +3,23 @@
 Three resources are read from disk at startup and otherwise never
 re-read: the OCR context glossary, the transcription context (same
 files, different formatter), and the mood-dimension TOML. Each helper
-here rebuilds one of those resources and rebinds the references held by
-the running services so subsequent requests pick up the new value.
+here rebuilds one of those resources and asks the running services to
+swap their references via the public ``replace_*`` methods on
+``IngestionService`` and ``JobRunner`` — earlier versions of this
+module wrote ``services["ingestion"]._ocr = new`` directly, but those
+private-state writes are exactly the kind of cross-component reach-in
+the rest of the codebase has been moving away from. After item 2's
+worker-extraction the direct write became a real bug for mood
+scoring (the live handle moved to ``runner._ctx.mood_scoring``),
+which prompted the named-method surface.
 
 Concurrency:
-    Python attribute writes (`obj.attr = new`) are atomic. An in-flight
-    request that already resolved `ingestion_service._ocr` keeps its
-    reference to the old provider and finishes against it; the next
-    request resolves the attribute and gets the new one. No locks are
-    required and no special teardown is needed for the old provider —
-    it is garbage-collected once no in-flight code holds a reference.
+    Python attribute writes inside ``replace_*`` are atomic. An
+    in-flight request that already resolved e.g. ``self._ocr``
+    keeps its reference and finishes against it; the next request
+    resolves the attribute and gets the new one. No locks, no
+    special teardown — the old provider is garbage-collected once
+    no in-flight code holds a reference.
 
 Each helper takes the live `services` dict (shaped like the one built
 in `journal.mcp_server._init_services`) and the current `Config`, and
@@ -54,14 +61,9 @@ def _context_stats(config: Config) -> tuple[int, int]:
 
 
 def reload_ocr_provider(services: dict, config: Config) -> dict[str, Any]:
-    """Rebuild the OCR provider and swap it into the ingestion service.
-
-    The pre-reload provider object survives — only the attribute on
-    `ingestion` is rebound. In-flight callers that already resolved
-    ``ingestion._ocr`` keep their reference and finish cleanly.
-    """
+    """Rebuild the OCR provider and swap it into the ingestion service."""
     new_ocr = build_ocr_provider(config)
-    services["ingestion"]._ocr = new_ocr  # atomic attribute write
+    services["ingestion"].replace_ocr(new_ocr)
 
     file_count, char_count = _context_stats(config)
     return {
@@ -78,13 +80,12 @@ def reload_ocr_provider(services: dict, config: Config) -> dict[str, Any]:
 def reload_transcription_provider(services: dict, config: Config) -> dict[str, Any]:
     """Rebuild the transcription provider stack and swap it in.
 
-    Uses the same atomic-attribute-write semantics as the OCR helper.
     The transcription stack may be wrapped (Retrying / Shadow); the
     summary's ``stack`` field is the human-readable stack description
     used in startup logs.
     """
     new_transcription = build_transcription_provider(config)
-    services["ingestion"]._transcription = new_transcription
+    services["ingestion"].replace_transcription(new_transcription)
 
     file_count, char_count = _context_stats(config)
     return {
@@ -99,10 +100,11 @@ def reload_transcription_provider(services: dict, config: Config) -> dict[str, A
 def reload_mood_dimensions(services: dict, config: Config) -> dict[str, Any]:
     """Reload the mood-dimensions TOML and rebuild the scoring service.
 
-    Both ``ingestion._mood_scoring`` and ``job_runner._mood_scoring``
-    are rebound to the *same* fresh ``MoodScoringService`` instance —
-    keeping them in sync is load-bearing because both services score
-    entries against the same dimension set.
+    Both ``IngestionService`` and ``JobRunner`` are pointed at the
+    *same* fresh ``MoodScoringService`` instance via their public
+    ``replace_mood_scoring`` methods — keeping them in sync is
+    load-bearing because both services score entries against the
+    same dimension set.
 
     Raises ``RuntimeError`` if mood scoring is disabled in the current
     config; the caller (an admin endpoint) translates that to a 4xx so
@@ -137,9 +139,12 @@ def reload_mood_dimensions(services: dict, config: Config) -> dict[str, Any]:
     # service's repo when mood scoring was never instantiated (e.g. the
     # operator just enabled it via runtime settings and is now reloading
     # the dimension file).
-    existing = services["ingestion"]._mood_scoring
+    ingestion = services["ingestion"]
+    existing = ingestion.mood_scoring
     repository = (
-        existing._repo if existing is not None else services["ingestion"]._repo
+        existing._repo  # noqa: SLF001 — MoodScoringService doesn't expose a public accessor yet
+        if existing is not None
+        else ingestion.repository
     )
 
     new_service = MoodScoringService(
@@ -147,8 +152,8 @@ def reload_mood_dimensions(services: dict, config: Config) -> dict[str, Any]:
         repository=repository,
         dimensions=dims,
     )
-    services["ingestion"]._mood_scoring = new_service
-    services["job_runner"]._mood_scoring = new_service
+    ingestion.replace_mood_scoring(new_service)
+    services["job_runner"].replace_mood_scoring(new_service)
     services["mood_dimensions"] = dims
     services["mood_dimensions_meta"] = meta
 

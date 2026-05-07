@@ -129,14 +129,40 @@ def services(
         dimensions=dims,
     )
 
+    # ingestion is a MagicMock that emulates the slice of
+    # IngestionService that services/reload.py touches: a
+    # ``repository`` accessor + the ``replace_*`` swap-in methods.
+    # Each replace_* method updates the corresponding read attribute
+    # so the post-reload tests can still assert "the new instance
+    # is bound" by reading ``ingestion.ocr`` etc. directly.
     ingestion = MagicMock()
-    ingestion._ocr = build_ocr_provider(auth_config)
-    ingestion._transcription = build_transcription_provider(auth_config)
-    ingestion._mood_scoring = mood_service
-    ingestion._repo = repo
+    ingestion.ocr = build_ocr_provider(auth_config)
+    ingestion.transcription = build_transcription_provider(auth_config)
+    ingestion.mood_scoring = mood_service
+    ingestion.repository = repo
 
+    def _replace_ocr(new):
+        ingestion.ocr = new
+    def _replace_transcription(new):
+        ingestion.transcription = new
+    def _replace_mood_scoring(new):
+        ingestion.mood_scoring = new
+
+    ingestion.replace_ocr = _replace_ocr
+    ingestion.replace_transcription = _replace_transcription
+    ingestion.replace_mood_scoring = _replace_mood_scoring
+
+    # job_runner mirrors the same pattern for its single replace_*
+    # method. ``replace_mood_scoring`` writes through ``_ctx.mood_scoring``
+    # in production; here it just updates the test-visible
+    # ``mood_scoring`` attribute.
     job_runner = MagicMock()
-    job_runner._mood_scoring = mood_service
+    job_runner.mood_scoring = mood_service
+
+    def _runner_replace_mood_scoring(new):
+        job_runner.mood_scoring = new
+
+    job_runner.replace_mood_scoring = _runner_replace_mood_scoring
 
     return {
         "auth_service": auth_service,
@@ -1195,7 +1221,7 @@ class TestAdminReloadOcrContext:
         services: dict[str, Any],
     ) -> None:
         _admin, session_id = _register_admin(auth_service, user_repo)
-        old_ocr = services["ingestion"]._ocr
+        old_ocr = services["ingestion"].ocr
 
         resp = client.post(self.PATH, cookies={"session_id": session_id})
         assert resp.status_code == 200
@@ -1207,8 +1233,8 @@ class TestAdminReloadOcrContext:
         assert body["context_chars"] > 0
         assert "reloaded_at" in body
 
-        # Endpoint actually rebound the attribute.
-        assert services["ingestion"]._ocr is not old_ocr
+        # Endpoint swapped the OCR provider via replace_ocr.
+        assert services["ingestion"].ocr is not old_ocr
 
 
 class TestAdminReloadTranscriptionContext:
@@ -1238,7 +1264,7 @@ class TestAdminReloadTranscriptionContext:
         services: dict[str, Any],
     ) -> None:
         _admin, session_id = _register_admin(auth_service, user_repo)
-        old = services["ingestion"]._transcription
+        old = services["ingestion"].transcription
 
         resp = client.post(self.PATH, cookies={"session_id": session_id})
         assert resp.status_code == 200
@@ -1246,7 +1272,7 @@ class TestAdminReloadTranscriptionContext:
         body = resp.json()
         assert body["reloaded"] == "transcription-context"
         assert "stack" in body
-        assert services["ingestion"]._transcription is not old
+        assert services["ingestion"].transcription is not old
 
 
 class TestAdminReloadMoodDimensions:
@@ -1276,7 +1302,7 @@ class TestAdminReloadMoodDimensions:
         services: dict[str, Any],
     ) -> None:
         _admin, session_id = _register_admin(auth_service, user_repo)
-        old = services["ingestion"]._mood_scoring
+        old = services["ingestion"].mood_scoring
 
         resp = client.post(self.PATH, cookies={"session_id": session_id})
         assert resp.status_code == 200
@@ -1285,9 +1311,12 @@ class TestAdminReloadMoodDimensions:
         assert body["reloaded"] == "mood-dimensions"
         assert body["dimension_count"] == 1
         assert body["dimensions"] == ["joy_sadness"]
-        assert services["ingestion"]._mood_scoring is not old
-        # Both services swapped to the same fresh instance.
-        assert services["ingestion"]._mood_scoring is services["job_runner"]._mood_scoring
+        assert services["ingestion"].mood_scoring is not old
+        # Both services swapped to the same fresh instance — pre-item-7
+        # the runner's update silently became a phantom attribute
+        # because the live handle moved to ``runner._ctx.mood_scoring``;
+        # the public ``replace_mood_scoring`` writes through to it.
+        assert services["ingestion"].mood_scoring is services["job_runner"].mood_scoring
 
     def test_admin_409_when_disabled(
         self,

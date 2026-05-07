@@ -98,6 +98,92 @@ class IngestionService(
         """
         return self._vector_store
 
+    @property
+    def repository(self) -> EntryRepository:
+        """Read-only accessor for the ``EntryRepository`` instance.
+
+        Public counterpart to the long-standing ``self._repo``.
+        ``services/reload.py`` needs the repository to construct a
+        new ``MoodScoringService`` when reloading mood dimensions
+        (the repository owns the SQLite connection and can't be
+        rebuilt from config); the ``repair_entity_names`` CLI uses
+        it to enumerate entities. Both previously reached into
+        ``ingestion._repo``.
+        """
+        return self._repo
+
+    @property
+    def mood_scoring(self) -> "MoodScoringService | None":
+        """Read-only accessor for the optional mood-scoring service.
+
+        ``reload_mood_dimensions`` reads this to decide whether to
+        reuse the existing scoring service's repository or fall
+        back to ``self._repo``.
+        """
+        return self._mood_scoring
+
+    # ── runtime swap-in for hot-reload --------------------------------
+    #
+    # ``services/reload.py`` rebuilds the OCR / transcription / mood-
+    # scoring providers from disk and rebinds them on the live
+    # service. Python attribute writes are atomic, so a request mid-
+    # call that already resolved e.g. ``self._ocr`` keeps its old
+    # reference and finishes against it; the next request resolves
+    # the attribute and gets the new one. No locks, no special
+    # teardown — the old provider is garbage-collected once no
+    # in-flight code holds a reference.
+    #
+    # These named methods exist so the reload helpers don't have to
+    # write the underscore-prefixed attributes from outside the
+    # class — the previous reach-in pattern was the only place in
+    # production that wrote ``ingestion._ocr`` etc. directly.
+
+    def replace_ocr(self, provider: "OCRProvider") -> None:
+        """Atomically swap the OCR provider used by image ingestion."""
+        self._ocr = provider
+
+    def replace_transcription(
+        self, provider: "TranscriptionProvider",
+    ) -> None:
+        """Atomically swap the transcription provider stack used by
+        voice ingestion. The new provider can be a wrapped
+        Retrying / Shadow stack.
+        """
+        self._transcription = provider
+
+    def replace_mood_scoring(
+        self, scoring: "MoodScoringService | None",
+    ) -> None:
+        """Atomically swap the optional mood-scoring service used at
+        the end of every ingestion path. Pass ``None`` to disable
+        mood scoring at runtime.
+        """
+        self._mood_scoring = scoring
+
+    def replace_formatter(
+        self, formatter: "FormatterProtocol | None",
+    ) -> None:
+        """Atomically swap the optional transcript formatter used by
+        the voice ingest paths. Pass ``None`` to disable.
+        """
+        self._formatter = formatter
+
+    def replace_heading_detector(
+        self, detector: "HeadingDetector | None",
+    ) -> None:
+        """Atomically swap the optional date-heading detector used by
+        OCR + voice paths. Pass ``None`` to disable.
+        """
+        self._heading_detector = detector
+
+    def set_preprocess_images(self, enabled: bool) -> None:
+        """Toggle the image preprocessing flag at runtime.
+
+        Companion to the runtime-settings UI; controls whether the
+        OCR path runs PIL preprocessing before sending to the model.
+        """
+        self._preprocess_images = enabled
+
     def _detect_heading(
         self, text: str, entry_date: str
     ) -> "HeadingDetectionResult":

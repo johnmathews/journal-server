@@ -256,7 +256,7 @@ def _init_services() -> dict:
                 value,
             )
         elif key == "preprocess_images":
-            ingestion_service._preprocess_images = value
+            ingestion_service.set_preprocess_images(value)
             log.info("Preprocessing %s via runtime settings", "enabled" if value else "disabled")
         elif key == "enable_mood_scoring":
             if value:
@@ -276,20 +276,22 @@ def _init_services() -> dict:
                 )
                 log.info("Mood scoring enabled via runtime settings")
             else:
-                ingestion_service._mood_scoring = None
-                job_runner._mood_scoring = None
+                ingestion_service.replace_mood_scoring(None)
+                job_runner.replace_mood_scoring(None)
                 log.info("Mood scoring disabled via runtime settings")
         elif key == "transcript_formatting":
             if value:
                 from journal.providers.formatter import AnthropicFormatter
 
-                ingestion_service._formatter = AnthropicFormatter(
-                    api_key=config.anthropic_api_key,
-                    model=config.transcript_formatter_model,
+                ingestion_service.replace_formatter(
+                    AnthropicFormatter(
+                        api_key=config.anthropic_api_key,
+                        model=config.transcript_formatter_model,
+                    ),
                 )
                 log.info("Transcript formatting enabled via runtime settings")
             else:
-                ingestion_service._formatter = None
+                ingestion_service.replace_formatter(None)
                 log.info("Transcript formatting disabled via runtime settings")
         elif key == "date_heading_detection":
             if value and config.anthropic_api_key:
@@ -297,13 +299,15 @@ def _init_services() -> dict:
                     AnthropicHeadingDetector,
                 )
 
-                ingestion_service._heading_detector = AnthropicHeadingDetector(
-                    api_key=config.anthropic_api_key,
-                    model=config.date_heading_model,
+                ingestion_service.replace_heading_detector(
+                    AnthropicHeadingDetector(
+                        api_key=config.anthropic_api_key,
+                        model=config.date_heading_model,
+                    ),
                 )
                 log.info("Date-heading detection enabled via runtime settings")
             else:
-                ingestion_service._heading_detector = None
+                ingestion_service.replace_heading_detector(None)
                 log.info("Date-heading detection disabled via runtime settings")
 
     runtime_settings = RuntimeSettings(conn, config, on_change=_on_runtime_setting_change)
