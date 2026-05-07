@@ -79,9 +79,15 @@ in 4 documented buckets — verify before acting.
 
 | File | Lines | Reason |
 |---|---:|---|
-| `api/entities.py` | 717 | Resource cohesion outweighs split benefit at current size. Planned split: `entities.py` CRUD + `entity_merge.py` for merge / candidates / quarantine / aliases. Source: `journal/260507-api-py-split-unit-1a.md`. |
+| ~~`api/entities.py`~~ | ~~717~~ → split | RESOLVED on 2026-05-08. Split into `api/entities.py` (425, CRUD + read sub-resources) and `api/entity_merge.py` (326, merge/candidates/quarantine/merge-history). See `docs/refactor-item-6-exceptions-plan.md` § Item 1. |
+| `auth_api.py` | 840 | Largest file in the repo. Split proposed in `docs/refactor-item-6-exceptions-plan.md` § Item 3 — package conversion to `auth_api/{__init__,_shared,core,account,profile,api_keys,admin}.py`. Pending an extraction session. |
 | `api/dashboard.py` | 609 | Marginally over-cap; leave as one module unless it grows further. |
-| `services/entity_extraction/service.py` | 808 | Orchestrator stays large by design; further trim would need an `ExtractionContext` refactor or a 10-arg free-function `_resolve_entity`. Source: `journal/260507-unit-2-entity-extraction-split.md`. |
+
+**Acknowledged-permanent (no further split planned):**
+
+| File | Lines | Reason |
+|---|---:|---|
+| `services/entity_extraction/service.py` | 808 | The orchestrator IS the design — already the result of a 1187 → 808 split (round 2 unit 2). `extract_from_entry` is ~300 lines of inherent integration glue; `_resolve_entity` is a 132-line decision tree where extraction would need a 14-arg free function or an `ExtractionContext` dataclass that "moves lines, not eliminates them". Independent re-analysis confirmed this in `docs/refactor-item-6-exceptions-plan.md` § Item 2. **Trigger to revisit:** if the file ever crosses ~1000 lines, redesign the `_resolve_entity` decision tree as a state machine — do not propose another mechanical split. |
 
 ---
 
@@ -210,11 +216,13 @@ not urgency):
 1. **Recommendation 4 (item-3 residual cleanup)** — only worth
    touching if a specific cluster of the 37 reach-ins surfaces real
    friction during unrelated work.
-2. **Item-6 exceptions** — `auth_api.py` (840), `api/entities.py`
-   (717), `services/entity_extraction/service.py` (808). All
-   knowingly-tolerated; the `api/entities.py` planned split into
-   `entities.py` + `entity_merge.py` is sketched in
-   `journal/260507-api-py-split-unit-1a.md`.
+2. **`auth_api.py` split** — proposed in
+   `docs/refactor-item-6-exceptions-plan.md` § Item 3 (package
+   conversion to `auth_api/{__init__,_shared,core,account,profile,
+   api_keys,admin}.py`). Estimated ~3 hours for a focused
+   extraction session — security-sensitive surface, the plan calls
+   for per-cluster code review at commit B and a manual login →
+   me → logout smoke test.
 
 None of these is urgent. **Stop here is also a fine choice** — the
 reach-in grep gate catches regressions in the meantime.
@@ -262,20 +270,20 @@ Residual breakdown (what makes up the 37):
 find src/journal -name '*.py' -exec wc -l {} + | sort -rn | head -10
 ```
 
-Top-10 sizes after Recommendation 3 (2026-05-07):
+Top-10 sizes after the api/entities split (2026-05-08):
 
 | File | Lines | Status |
 |---|---:|---|
-| `auth_api.py` | 840 | Item 6 exception. |
-| `services/entity_extraction/service.py` | 808 | Item 6 exception. |
+| `auth_api.py` | 840 | Item 6 exception (split planned — see refactor-item-6-exceptions-plan.md). |
+| `services/entity_extraction/service.py` | 808 | Acknowledged-permanent (see table above). |
 | `providers/transcription.py` | 778 | Within range. |
 | `providers/ocr.py` | 753 | Within range. |
 | `services/notifications.py` | 744 | Grown by item 3 part E (module helpers). |
-| `api/entities.py` | 717 | Item 6 exception. |
 | `cli/_seed_samples.py` | 679 | Pure data — no edits expected. |
 | `api/dashboard.py` | 609 | Marginally over-cap; item 6 exception. |
 | `cli/__init__.py` | 603 | Within range. |
-| `mcp_server/bootstrap.py` | 475 | Largest file in `mcp_server/` package after Recommendation 2. |
+| `api/ingestion.py` | 591 | Within range. |
+| `providers/extraction.py` | 560 | Within range. |
 
 ### Test counts
 
