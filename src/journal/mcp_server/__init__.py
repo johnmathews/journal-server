@@ -1,71 +1,68 @@
-"""MCP server package — facade re-exporting symbols from `_legacy`.
+"""MCP server package — facade re-exporting symbols from the submodules.
 
-This shim exists during the in-progress mcp_server.py split. The real
-implementation lives in `_legacy.py`; subsequent commits carve it into
-`bootstrap.py`, `app.py`, `runserver.py`, and `tools/*.py`. Until that
-lands, every external caller (tests, route registrations, the CLI
-entry point) keeps reaching the same names at the same paths.
+The package is split into:
+
+- `bootstrap.py` — `_init_services`, `lifespan`, `_services` global,
+  the runtime-settings on-change callback (closure inside
+  `_init_services`).
+- `app.py` — the singleton `mcp = FastMCP(...)` instance plus the
+  three REST `register_*_routes(mcp, ...)` registrations.
+- `runserver.py` — `main()`, the uvicorn boot path.
+- `tools/` — every `@mcp.tool()` registration. Importing the
+  submodules has the side effect of registering the tools against
+  the `mcp` instance from `app.py`.
+
+This `__init__.py` re-exports the public surface so existing callers
+keep working at the same paths (`journal.mcp_server.lifespan`,
+`journal.mcp_server.journal_ingest_text`, etc.). Tests that monkeypatch
+implementation details (`load_config`, `ChromaVectorStore`) must target
+the originating module — `journal.mcp_server.bootstrap.X` — because
+re-exports do not share binding with their source.
 """
 
-from journal.mcp_server._legacy import (
-    ChromaVectorStore,
-    Context,
-    EntityExtractionService,
-    FastMCP,
-    IngestionService,
-    JobRunner,
-    QueryService,
-    SQLiteEntityStore,
-    SQLiteJobRepository,
-    TransportSecuritySettings,
+from journal.mcp_server.app import mcp
+from journal.mcp_server.bootstrap import _init_services, _services, lifespan
+from journal.mcp_server.runserver import main
+from journal.mcp_server.tools._ctx import (
     _get_entity_extraction,
     _get_entity_store,
     _get_ingestion,
     _get_job_repository,
     _get_job_runner,
     _get_query,
-    _init_services,
-    _job_to_tool_dict,
-    _poll_job_until_terminal,
-    _services,
     _user_id,
-    journal_backfill_mood_scores_batch,
+)
+from journal.mcp_server.tools.entities import (
     journal_extract_entities,
-    journal_extract_entities_batch,
     journal_get_entity_mentions,
     journal_get_entity_relationships,
-    journal_get_entries_by_date,
-    journal_get_job_status,
-    journal_get_mood_trends,
-    journal_get_statistics,
-    journal_get_topic_frequency,
+    journal_list_entities,
+)
+from journal.mcp_server.tools.ingestion import (
     journal_ingest_media,
     journal_ingest_media_from_url,
     journal_ingest_multi_page,
     journal_ingest_multi_page_from_url,
     journal_ingest_text,
-    journal_list_entities,
+    journal_update_entry_text,
+)
+from journal.mcp_server.tools.jobs import (
+    _job_to_tool_dict,
+    _poll_job_until_terminal,
+    journal_backfill_mood_scores_batch,
+    journal_extract_entities_batch,
+    journal_get_job_status,
+)
+from journal.mcp_server.tools.queries import (
+    journal_get_entries_by_date,
+    journal_get_mood_trends,
+    journal_get_statistics,
+    journal_get_topic_frequency,
     journal_list_entries,
     journal_search_entries,
-    journal_update_entry_text,
-    lifespan,
-    load_config,
-    log,
-    main,
-    mcp,
 )
 
 __all__ = [
-    "ChromaVectorStore",
-    "Context",
-    "EntityExtractionService",
-    "FastMCP",
-    "IngestionService",
-    "JobRunner",
-    "QueryService",
-    "SQLiteEntityStore",
-    "SQLiteJobRepository",
-    "TransportSecuritySettings",
     "_get_entity_extraction",
     "_get_entity_store",
     "_get_ingestion",
@@ -97,8 +94,6 @@ __all__ = [
     "journal_search_entries",
     "journal_update_entry_text",
     "lifespan",
-    "load_config",
-    "log",
     "main",
     "mcp",
 ]

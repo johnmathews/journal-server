@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import journal.mcp_server._legacy as mcp_module
+import journal.mcp_server.bootstrap as mcp_module
 from journal.mcp_server import lifespan
 
 
@@ -12,7 +12,7 @@ from journal.mcp_server import lifespan
 def _reset_services():
     """Reset the global services singleton between tests.
 
-    Targets `journal.mcp_server._legacy` directly because the package's
+    Targets `journal.mcp_server.bootstrap` directly because the package's
     `__init__.py` only re-exports the name; assigning through the
     facade would not reset the binding `_init_services` actually reads.
     """
@@ -24,13 +24,13 @@ def _reset_services():
 @pytest.fixture
 def _mock_chromadb():
     """Patch ChromaVectorStore so tests don't need a running ChromaDB."""
-    with patch("journal.mcp_server._legacy.ChromaVectorStore") as mock_cls:
+    with patch("journal.mcp_server.bootstrap.ChromaVectorStore") as mock_cls:
         mock_cls.return_value = MagicMock()
         yield mock_cls
 
 
 async def test_first_call_initializes(monkeypatch, config, _mock_chromadb):
-    monkeypatch.setattr("journal.mcp_server._legacy.load_config", lambda: config)
+    monkeypatch.setattr("journal.mcp_server.bootstrap.load_config", lambda: config)
 
     async with lifespan(None) as services:
         assert "ingestion" in services
@@ -49,7 +49,7 @@ async def test_jobs_wired_into_services(
     from journal.db.jobs_repository import SQLiteJobRepository
     from journal.services.jobs import JobRunner
 
-    monkeypatch.setattr("journal.mcp_server._legacy.load_config", lambda: config)
+    monkeypatch.setattr("journal.mcp_server.bootstrap.load_config", lambda: config)
 
     async with lifespan(None) as services:
         assert "job_repository" in services
@@ -77,7 +77,7 @@ async def test_reconcile_stuck_jobs_runs_at_startup(
     seed_repo.mark_running(stuck.id)
     seed_conn.close()
 
-    monkeypatch.setattr("journal.mcp_server._legacy.load_config", lambda: config)
+    monkeypatch.setattr("journal.mcp_server.bootstrap.load_config", lambda: config)
 
     async with lifespan(None) as services:
         repo = services["job_repository"]
@@ -90,7 +90,7 @@ async def test_reconcile_stuck_jobs_runs_at_startup(
 
 
 async def test_second_call_reuses(monkeypatch, config, _mock_chromadb):
-    monkeypatch.setattr("journal.mcp_server._legacy.load_config", lambda: config)
+    monkeypatch.setattr("journal.mcp_server.bootstrap.load_config", lambda: config)
 
     async with lifespan(None) as first:
         pass
@@ -108,7 +108,7 @@ async def test_config_loaded_once(monkeypatch, config, _mock_chromadb):
         call_count += 1
         return original_config
 
-    monkeypatch.setattr("journal.mcp_server._legacy.load_config", counting_load)
+    monkeypatch.setattr("journal.mcp_server.bootstrap.load_config", counting_load)
 
     async with lifespan(None):
         pass
