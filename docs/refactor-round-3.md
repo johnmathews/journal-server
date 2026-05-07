@@ -90,17 +90,13 @@ in 4 documented buckets — verify before acting.
 ### A. Two newly-largest files
 
 While planning item 4, two files surfaced as the new top-of-list size
-outliers. Neither was on the original parked list. They were noted in
-`docs/refactor-follow-ups.md`'s standing-facts table but never scoped
-into an item.
+outliers. `mcp_server.py` was resolved on 2026-05-07 (Recommendation
+2). `db/repository.py` is still pending.
 
-| File | Lines | Notes |
+| File | Lines | Status |
 |---|---:|---|
-| `db/repository.py` | 1603 | Now the single largest source file. Mostly the `SQLiteEntryRepository` class plus a sibling Protocol and `_row_to_*` helpers. The class spans many query families: entry CRUD, chunks, entry pages, uncertain spans, mood scores, mood trends, mood drilldowns, entity distributions, ingestion stats, writing frequency, calendar days, statistics, FTS5 search. Each of those is a coherent group. |
-| `mcp_server.py` | 1513 | Bootstrap (`_init_services`) + route registration + the runtime-settings on-change callback. Item 7 made the on-change callback considerably tidier (5 toggleable hooks now go through public methods) but the file is still ~80 lines of callback embedded in 1500 lines of bootstrap. |
-
-Both are above the original 800-line "smell" threshold and at/near the
-1500-line "problem" threshold (`mcp_server.py` is right on the edge).
+| `db/repository.py` | 1603 | Pending. Largest source file. Mostly the `SQLiteEntryRepository` class plus a sibling Protocol and `_row_to_*` helpers. The class spans many query families: entry CRUD, chunks, entry pages, uncertain spans, mood scores, mood trends, mood drilldowns, entity distributions, ingestion stats, writing frequency, calendar days, statistics, FTS5 search. Each of those is a coherent group. Recommendation 3 below. |
+| ~~`mcp_server.py`~~ | ~~1513~~ → split | RESOLVED on 2026-05-07. Carved into `mcp_server/{bootstrap,app,runserver,__init__,__main__}.py` + `mcp_server/tools/{_ctx,queries,ingestion,entities,jobs}.py`. Largest resulting file is `bootstrap.py` at 475 lines. See `docs/refactor-mcp-server-plan.md` and Recommendation 2 below. |
 
 ### B. Item 3 residual
 
@@ -125,36 +121,32 @@ revisit speculatively.
 
 In rough order of value vs. effort:
 
-### 1. Tidy round 2 docs (15 min, recommended regardless)
+### 1. Tidy round 2 docs (15 min, recommended regardless) — RESOLVED
 
-`docs/refactor-follow-ups.md` § 3 still says "residual: ~66" (it was
-true when item 3 closed, before item 7 cleared the production-mirror
-bucket). Update it to 37 and add a one-line pointer to this doc at
-the top. Five-minute pass.
+Landed 2026-05-07. `docs/refactor-follow-ups.md` now carries a
+top-of-doc pointer to this round-3 doc and the residual count is
+corrected from "~66" to 37 in both the item-3 section and the
+standing-facts table.
 
-### 2. Planning round for `mcp_server.py` (recommended next refactor)
+### 2. Planning round for `mcp_server.py` (recommended next refactor) — RESOLVED
 
-Cleaner shape than `db/repository.py` and the smaller of the two new
-candidates. Likely natural splits:
+Landed 2026-05-07 in three commits (planning + commit A + commit B):
 
-```
-mcp_server/
-  __init__.py            — main + run loop + serving
-  bootstrap.py           — _init_services (the big constructor)
-  routes.py              — route registrations (or split per resource
-                           if there are enough)
-  runtime_settings.py    — the on-change callback that swaps
-                           providers via the public methods landed
-                           in item 7
-```
+- Plan: `docs/refactor-mcp-server-plan.md` — proposed package shape
+  and surfaced six decisions (mcp instance location, test-patch
+  retargets, `__init__.py` re-export surface, on-change callback
+  staying inline, `__main__.py`, three-commit shape).
+- Commit A: `mcp_server.py` → package shell with `_legacy.py`,
+  `__init__.py` re-exports, `__main__.py`, no behavior change.
+- Commit B: `_legacy.py` carved into `bootstrap.py` (475),
+  `app.py` (26), `runserver.py` (93), `tools/_ctx.py` (46),
+  `tools/queries.py` (233), `tools/ingestion.py` (312),
+  `tools/entities.py` (186), `tools/jobs.py` (240). Test patches
+  retargeted to `journal.mcp_server.bootstrap.X`.
 
-Sessions:
-1. **Planning round** (read-only, ~30 min). Read the full file,
-   propose split shapes with line estimates, surface decisions
-   (especially around how routes are registered — those are
-   side-effecting calls into FastMCP that may not move cleanly).
-2. **Extraction sessions** — likely one per module, full test suite
-   after each.
+Outcome: `mcp_server.py` no longer appears in the top-10 size list
+(largest package file is now `bootstrap.py` at 475 lines, well under
+the 500-line target). 1799 unit tests pass; reach-in gates unchanged.
 
 ### 3. Planning round for `db/repository.py` (bigger, also valuable)
 
