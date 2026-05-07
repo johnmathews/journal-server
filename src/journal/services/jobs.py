@@ -35,7 +35,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -50,6 +50,26 @@ if TYPE_CHECKING:
     from journal.services.notifications import PushoverNotificationService
 
 log = logging.getLogger(__name__)
+
+
+class EntityReembedder(Protocol):
+    """Reembed an entity given an edited description. The seam JobRunner
+    uses for the ``entity_reembed`` worker.
+
+    Production wires this to ``EntityExtractionService.reembed_entity_for_description``
+    — the same instance JobRunner already uses for ``extract_from_entry``
+    and ``extract_batch``. The Protocol exists so tests can drive
+    ``_run_entity_reembed`` against a fake without standing up the full
+    extraction pipeline. ``extract_from_entry`` and ``extract_batch``
+    intentionally stay on the concrete ``EntityExtractionService``
+    constructor parameter — they are normal cross-service interactions,
+    not reach-ins, and abstracting them would add boilerplate without
+    meaningful benefit.
+    """
+
+    def reembed_entity_for_description(
+        self, entity_id: int, *, user_id: int,
+    ) -> dict[str, object]: ...
 
 
 def _friendly_error(exc: Exception) -> str:
@@ -214,6 +234,7 @@ class JobRunner:
         *,
         job_repository: SQLiteJobRepository,
         entity_extraction_service: EntityExtractionService,
+        entity_reembedder: EntityReembedder | None = None,
         mood_backfill_callable: Callable[..., MoodBackfillResult],
         mood_scoring_service: MoodScoringService,
         entry_repository: EntryRepository,
@@ -222,6 +243,12 @@ class JobRunner:
     ) -> None:
         self._jobs = job_repository
         self._extraction = entity_extraction_service
+        # Default the reembedder to the extraction service: it implements
+        # the EntityReembedder Protocol via reembed_entity_for_description.
+        # Tests pass a fake to drive _run_entity_reembed in isolation.
+        self._reembedder: EntityReembedder = (
+            entity_reembedder if entity_reembedder is not None else entity_extraction_service
+        )
         self._mood_backfill = mood_backfill_callable
         self._mood_scoring = mood_scoring_service
         self._entries = entry_repository
@@ -785,7 +812,7 @@ class JobRunner:
             entity_id = int(params["entity_id"])
             job_user_id = int(params["user_id"])
 
-            summary = self._extraction.reembed_entity_for_description(
+            summary = self._reembedder.reembed_entity_for_description(
                 entity_id, user_id=job_user_id,
             )
             self._jobs.update_progress(job_id, 1, 1)

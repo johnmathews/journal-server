@@ -251,12 +251,14 @@ def runner_factory(jobs_repo, threadsafe_conn):
         *,
         extraction: FakeEntityExtractionService | None = None,
         mood_backfill: FakeMoodBackfill | None = None,
+        entity_reembedder: Any = None,
     ) -> JobRunner:
         runner = JobRunner(
             job_repository=jobs_repo,
             entity_extraction_service=(
                 extraction or FakeEntityExtractionService()
             ),
+            entity_reembedder=entity_reembedder,
             mood_backfill_callable=mood_backfill or FakeMoodBackfill(),
             mood_scoring_service=object(),  # type: ignore[arg-type]
             entry_repository=object(),  # type: ignore[arg-type]
@@ -1618,3 +1620,39 @@ class TestEntityReembed:
                 _ENTITY_REEMBED_KEYS,
                 job_type="entity_reembed",
             )
+
+    def test_uses_injected_entity_reembedder_when_provided(
+        self, runner_factory, jobs_repo,
+    ) -> None:
+        """Unit 3 seam: when JobRunner is constructed with a separate
+        ``entity_reembedder``, ``_run_entity_reembed`` calls into that
+        instance — *not* the ``EntityExtractionService`` it also holds.
+        """
+
+        class FakeReembedder:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, Any]] = []
+
+            def reembed_entity_for_description(
+                self, entity_id: int, *, user_id: int,
+            ) -> dict[str, Any]:
+                self.calls.append({"entity_id": entity_id, "user_id": user_id})
+                return {"entity_id": entity_id, "embedded": True, "via": "injected"}
+
+        extraction = FakeEntityExtractionService()
+        reembedder = FakeReembedder()
+        runner = runner_factory(extraction=extraction, entity_reembedder=reembedder)
+        job = runner.submit_entity_reembed(11, user_id=1)
+        _wait_terminal(jobs_repo, job.id)
+        runner.shutdown(wait=True)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "succeeded"
+        assert final.result == {
+            "entity_id": 11, "embedded": True, "via": "injected",
+        }
+        # The injected reembedder was used; the extraction service's
+        # reembed path was *not* touched.
+        assert reembedder.calls == [{"entity_id": 11, "user_id": 1}]
+        assert extraction.reembed_calls == []
