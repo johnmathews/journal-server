@@ -90,12 +90,12 @@ in 4 documented buckets — verify before acting.
 ### A. Two newly-largest files
 
 While planning item 4, two files surfaced as the new top-of-list size
-outliers. `mcp_server.py` was resolved on 2026-05-07 (Recommendation
-2). `db/repository.py` is still pending.
+outliers. Both were resolved on 2026-05-07: `mcp_server.py`
+(Recommendation 2) and `db/repository.py` (Recommendation 3).
 
 | File | Lines | Status |
 |---|---:|---|
-| `db/repository.py` | 1603 | Pending. Largest source file. Mostly the `SQLiteEntryRepository` class plus a sibling Protocol and `_row_to_*` helpers. The class spans many query families: entry CRUD, chunks, entry pages, uncertain spans, mood scores, mood trends, mood drilldowns, entity distributions, ingestion stats, writing frequency, calendar days, statistics, FTS5 search. Each of those is a coherent group. Recommendation 3 below. |
+| ~~`db/repository.py`~~ | ~~1603~~ → split | RESOLVED on 2026-05-07. Carved into `db/repository/{__init__,protocol,store,core,pages,chunks,search,mood,stats,analytics}.py`. Largest resulting file is `stats.py` at 357 lines. See `docs/refactor-repository-plan.md` and Recommendation 3 below. |
 | ~~`mcp_server.py`~~ | ~~1513~~ → split | RESOLVED on 2026-05-07. Carved into `mcp_server/{bootstrap,app,runserver,__init__,__main__}.py` + `mcp_server/tools/{_ctx,queries,ingestion,entities,jobs}.py`. Largest resulting file is `bootstrap.py` at 475 lines. See `docs/refactor-mcp-server-plan.md` and Recommendation 2 below. |
 
 ### B. Item 3 residual
@@ -148,45 +148,36 @@ Outcome: `mcp_server.py` no longer appears in the top-10 size list
 (largest package file is now `bootstrap.py` at 475 lines, well under
 the 500-line target). 1799 unit tests pass; reach-in gates unchanged.
 
-### 3. Planning round for `db/repository.py` (bigger, also valuable)
+### 3. Planning round for `db/repository.py` (bigger, also valuable) — RESOLVED
 
-The repository class is the single biggest file in the codebase and
-spans many query families. A split by query family follows the same
-mixin pattern that worked for `IngestionService` and
-`SQLiteEntityStore` in item 4. Suggested clusters (line estimates
-need verification):
+Landed 2026-05-07 in three commits (planning + commit A + commit B):
 
-```
-db/repository/
-  __init__.py             — re-export
-  protocol.py             — EntryRepository Protocol + _row_to_*
-                            helpers
-  repository.py           — class shell, __init__, entry CRUD,
-                            update_final_text, get_entries_by_date,
-                            list_entries
-  search.py mixin         — search_text, search_text_with_snippets,
-                            count_text_matches (FTS5)
-  chunks.py mixin         — replace_chunks, get_chunks,
-                            update_chunk_count
-  pages.py mixin          — add_entry_page, get_entry_pages,
-                            uncertain_spans
-  mood.py mixin           — mood scores, mood trends, mood drilldown,
-                            prune_retired_mood_scores
-  stats.py mixin          — get_statistics, get_ingestion_stats,
-                            get_writing_frequency,
-                            get_entity_distribution, calendar_days,
-                            count_entries
-```
+- Plan: `docs/refactor-repository-plan.md` — proposed package shape
+  (8 cluster files instead of the round-3 doc's 6 — `stats` split
+  on the natural seam between corpus stats and cross-axis
+  analytics) and surfaced 10 decisions including mixin-vs-free-
+  function shape, Protocol + helper placement, the cross-mixin
+  call (`get_topic_frequency` → `search_text`), `__init__.py`
+  re-export surface (required because 22 caller sites import via
+  the package root), legacy `add_people`/`add_places`/`add_tags`
+  placement, transaction-pattern cleanup deferral, and the three-
+  commit shape.
+- Commit A: `db/repository.py` → package shell with `_legacy.py`
+  + `__init__.py` re-exporting `EntryRepository` and
+  `SQLiteEntryRepository`. No behavior change.
+- Commit B: `_legacy.py` carved into `protocol.py` (300),
+  `store.py` (56), `core.py` (185), `pages.py` (134),
+  `chunks.py` (82), `search.py` (109), `mood.py` (272),
+  `stats.py` (357), `analytics.py` (312). All under the 500-line
+  comfortable target. The expected commit C (test patch retargets)
+  was not needed — verified upfront that no test does
+  `patch("journal.db.repository.X")`, so the package re-export
+  keeps every caller's import path working.
 
-Same mixin shape as `entitystore/` from item 4. Methods stay bound to
-`self`. Per-cluster file size estimates probably 200–300 lines each.
-
-Sessions:
-1. **Planning round** — propose the clusters, verify line counts,
-   surface any cross-cluster method dependencies.
-2. **Extraction sessions** — one mixin per commit, full test suite
-   after each. The `protocol.py` step + the move to a package is the
-   biggest single commit.
+Outcome: `db/repository.py` no longer appears in the top-10 size
+list (largest file in the package is now `stats.py` at 357 lines).
+1799 unit tests + 8 integration tests pass; reach-in gates
+unchanged (api 0, tests 37); ruff clean.
 
 ### 4. Item 3 residual cleanup (low priority)
 
@@ -205,18 +196,31 @@ facts) catches regressions in the meantime.
 
 ## My pick for the next session
 
-**Recommendation 1 (doc tidy) + Recommendation 2 (planning round for
-`mcp_server.py`).** That gives the next session:
+All five recommendations from this round are now closed (1, 2, and
+3 RESOLVED; 4 and 5 are deliberately-deferred). The "two newly-
+largest files" table is empty. The standing facts table below is
+the source of truth for what to look at next; the natural follow-
+ups (file by importance, not urgency) are:
 
-- A 15-minute warm-up doing the doc tidy.
-- A focused read-only planning round on the cleaner of the two big
-  files. Bring the proposed split back for sign-off, then start
-  extraction in a follow-up session.
+1. **Recommendation 4 (item-3 residual cleanup)** — only worth
+   touching if a specific cluster of the 37 reach-ins surfaces real
+   friction during unrelated work.
+2. **Item-6 exceptions** — `auth_api.py` (840), `api/entities.py`
+   (717), `services/entity_extraction/service.py` (808). All
+   knowingly-tolerated; the `api/entities.py` planned split into
+   `entities.py` + `entity_merge.py` is sketched in
+   `journal/260507-api-py-split-unit-1a.md`.
+3. **Legacy entity methods on `EntryRepository`** —
+   `add_people` / `add_places` / `add_tags` are tested but never
+   called from production code. Verify and delete in a separate
+   focused session (filed as a follow-up by the repository split
+   plan).
+4. **Transaction-pattern cleanup in the repository package** —
+   standardise on `with self._conn:` everywhere (currently mixed
+   with bare `self._conn.commit()`). Deferred from the split.
 
-Reasons not to combine planning rounds for both files: the planning
-output for `db/repository.py` is its own substantial doc (many query
-clusters, line-count estimates, dependency analysis) and would
-crowd a single session.
+None of these is urgent. **Stop here is also a fine choice** — the
+reach-in grep gate catches regressions in the meantime.
 
 ---
 
@@ -261,12 +265,10 @@ Residual breakdown (what makes up the 37):
 find src/journal -name '*.py' -exec wc -l {} + | sort -rn | head -10
 ```
 
-Top-10 sizes after item 7 (2026-05-07):
+Top-10 sizes after Recommendation 3 (2026-05-07):
 
 | File | Lines | Status |
 |---|---:|---|
-| `db/repository.py` | 1603 | Round-3 candidate (Recommendation 3). |
-| `mcp_server.py` | 1513 | Round-3 candidate (Recommendation 2). |
 | `auth_api.py` | 840 | Item 6 exception. |
 | `services/entity_extraction/service.py` | 808 | Item 6 exception. |
 | `providers/transcription.py` | 778 | Within range. |
@@ -274,6 +276,9 @@ Top-10 sizes after item 7 (2026-05-07):
 | `services/notifications.py` | 744 | Grown by item 3 part E (module helpers). |
 | `api/entities.py` | 717 | Item 6 exception. |
 | `cli/_seed_samples.py` | 679 | Pure data — no edits expected. |
+| `api/dashboard.py` | 609 | Marginally over-cap; item 6 exception. |
+| `cli/__init__.py` | 603 | Within range. |
+| `mcp_server/bootstrap.py` | 475 | Largest file in `mcp_server/` package after Recommendation 2. |
 
 ### Test counts
 

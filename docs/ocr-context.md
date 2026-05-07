@@ -226,7 +226,7 @@ scribble, flag the substituted word"), but that's out of scope for the initial r
 - `src/journal/providers/ocr.py` — `parse_uncertain_markers`, `OCRResult`, sentinel constants, `SYSTEM_PROMPT`
 - `src/journal/services/ingestion.py` — `_strip_and_shift_page_spans` and the single- and multi-page flows
 - `src/journal/db/migrations/0005_uncertain_spans.sql` — schema
-- `src/journal/db/repository.py` — `add_uncertain_spans`, `get_uncertain_spans`
+- `src/journal/db/repository/pages.py` — `add_uncertain_spans`, `get_uncertain_spans`
 - `tests/test_providers/test_ocr.py::TestParseUncertainMarkers` — exhaustive parser tests
 - `tests/test_services/test_ingestion.py::TestUncertainSpansIngestion` — end-to-end coverage including multi-page offset
   arithmetic

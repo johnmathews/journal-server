@@ -12,7 +12,9 @@ or a single entry:
   ``_HEALTH_ROW_COUNT_TABLES`` whitelist so new migrations don't
   silently widen the health surface.
 - ``get_entity_mention_count`` — single-entry mention count.
-- ``get_page_count_for_entry``? lives in ``pages``.
+
+The related ``get_page_count`` (per-entry page count) lives in
+``pages.py`` next to the rest of the page-table operations.
 
 Cross-axis analytics (entity / topic / mood joins, time-bucketed
 trends) live in ``analytics.py``. The split keeps both modules under
