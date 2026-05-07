@@ -27,12 +27,12 @@ class _MoodMixin:
         self, entry_id: int, dimension: str, score: float,
         confidence: float | None = None, rationale: str | None = None,
     ) -> None:
-        self._conn.execute(
-            "INSERT INTO mood_scores (entry_id, dimension, score, confidence, rationale)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (entry_id, dimension, score, confidence, rationale),
-        )
-        self._conn.commit()
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO mood_scores (entry_id, dimension, score, confidence, rationale)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (entry_id, dimension, score, confidence, rationale),
+            )
 
     def replace_mood_scores(
         self,
@@ -160,20 +160,20 @@ class _MoodMixin:
         entirely.
         """
         if not current_names:
-            cursor = self._conn.execute("DELETE FROM mood_scores")
-            self._conn.commit()
+            with self._conn:
+                cursor = self._conn.execute("DELETE FROM mood_scores")
             log.info(
                 "Pruned ALL %d mood_scores rows (empty current set)",
                 cursor.rowcount,
             )
             return cursor.rowcount
         placeholders = ",".join("?" for _ in current_names)
-        cursor = self._conn.execute(
-            f"DELETE FROM mood_scores "
-            f"WHERE dimension NOT IN ({placeholders})",
-            tuple(current_names),
-        )
-        self._conn.commit()
+        with self._conn:
+            cursor = self._conn.execute(
+                f"DELETE FROM mood_scores "
+                f"WHERE dimension NOT IN ({placeholders})",
+                tuple(current_names),
+            )
         log.info(
             "Pruned %d mood_scores rows with retired dimensions",
             cursor.rowcount,

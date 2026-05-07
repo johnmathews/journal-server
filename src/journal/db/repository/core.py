@@ -30,8 +30,8 @@ class _CoreMixin:
             " VALUES (?, ?, ?, ?, ?, ?)"
         )
         params = (user_id, entry_date, source_type, raw_text, actual_final, word_count)
-        cursor = self._conn.execute(sql, params)
-        self._conn.commit()
+        with self._conn:
+            cursor = self._conn.execute(sql, params)
         entry_id = cursor.lastrowid
         log.info("Created entry %d for date %s", entry_id, entry_date)
         return self.get_entry(entry_id)  # type: ignore[return-value]
@@ -87,50 +87,52 @@ class _CoreMixin:
         self, entry_id: int, final_text: str, word_count: int, chunk_count: int,
         user_id: int | None = None,
     ) -> Entry | None:
-        if user_id is not None:
-            self._conn.execute(
-                "UPDATE entries SET final_text = ?, word_count = ?, chunk_count = ?,"
-                " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ? AND user_id = ?",
-                (final_text, word_count, chunk_count, entry_id, user_id),
-            )
-        else:
-            self._conn.execute(
-                "UPDATE entries SET final_text = ?, word_count = ?, chunk_count = ?,"
-                " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
-                (final_text, word_count, chunk_count, entry_id),
-            )
-        self._conn.commit()
+        with self._conn:
+            if user_id is not None:
+                self._conn.execute(
+                    "UPDATE entries SET final_text = ?, word_count = ?, chunk_count = ?,"
+                    " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+                    " WHERE id = ? AND user_id = ?",
+                    (final_text, word_count, chunk_count, entry_id, user_id),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE entries SET final_text = ?, word_count = ?, chunk_count = ?,"
+                    " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+                    (final_text, word_count, chunk_count, entry_id),
+                )
         log.info("Updated final_text for entry %d", entry_id)
         return self.get_entry(entry_id, user_id)
 
     def update_entry_date(
         self, entry_id: int, entry_date: str, user_id: int | None = None,
     ) -> Entry | None:
-        if user_id is not None:
-            self._conn.execute(
-                "UPDATE entries SET entry_date = ?,"
-                " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ? AND user_id = ?",
-                (entry_date, entry_id, user_id),
-            )
-        else:
-            self._conn.execute(
-                "UPDATE entries SET entry_date = ?,"
-                " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
-                (entry_date, entry_id),
-            )
-        self._conn.commit()
+        with self._conn:
+            if user_id is not None:
+                self._conn.execute(
+                    "UPDATE entries SET entry_date = ?,"
+                    " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+                    " WHERE id = ? AND user_id = ?",
+                    (entry_date, entry_id, user_id),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE entries SET entry_date = ?,"
+                    " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+                    (entry_date, entry_id),
+                )
         log.info("Updated entry_date for entry %d to %s", entry_id, entry_date)
         return self.get_entry(entry_id, user_id)
 
     def delete_entry(self, entry_id: int, user_id: int | None = None) -> bool:
         """Delete an entry and all cascading rows. Returns True if a row was deleted."""
-        if user_id is not None:
-            cursor = self._conn.execute(
-                "DELETE FROM entries WHERE id = ? AND user_id = ?", (entry_id, user_id)
-            )
-        else:
-            cursor = self._conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
-        self._conn.commit()
+        with self._conn:
+            if user_id is not None:
+                cursor = self._conn.execute(
+                    "DELETE FROM entries WHERE id = ? AND user_id = ?", (entry_id, user_id)
+                )
+            else:
+                cursor = self._conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
         deleted = cursor.rowcount > 0
         if deleted:
             log.info("Deleted entry %d", entry_id)

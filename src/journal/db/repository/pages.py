@@ -22,12 +22,12 @@ class _PagesMixin:
     def add_entry_page(
         self, entry_id: int, page_number: int, raw_text: str, source_file_id: int | None = None
     ) -> None:
-        self._conn.execute(
-            "INSERT INTO entry_pages (entry_id, page_number, raw_text, source_file_id)"
-            " VALUES (?, ?, ?, ?)",
-            (entry_id, page_number, raw_text, source_file_id),
-        )
-        self._conn.commit()
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO entry_pages (entry_id, page_number, raw_text, source_file_id)"
+                " VALUES (?, ?, ?, ?)",
+                (entry_id, page_number, raw_text, source_file_id),
+            )
         log.info("Added page %d to entry %d", page_number, entry_id)
 
     def get_entry_pages(self, entry_id: int) -> list[EntryPage]:

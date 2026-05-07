@@ -17,11 +17,11 @@ class _ChunksMixin:
     """Chunks methods on SQLiteEntryRepository."""
 
     def update_chunk_count(self, entry_id: int, chunk_count: int) -> None:
-        self._conn.execute(
-            "UPDATE entries SET chunk_count = ? WHERE id = ?",
-            (chunk_count, entry_id),
-        )
-        self._conn.commit()
+        with self._conn:
+            self._conn.execute(
+                "UPDATE entries SET chunk_count = ? WHERE id = ?",
+                (chunk_count, entry_id),
+            )
 
     def replace_chunks(self, entry_id: int, chunks: list[ChunkSpan]) -> None:
         """Replace all persisted chunks for an entry with the given list.
