@@ -1,5 +1,11 @@
 # Refactor follow-ups — open items after the v2 plan landed
 
+> **Round 3 supersedes this doc.** All items below are resolved /
+> accepted+documented as of 2026-05-07 (item 7 was the last to land).
+> For the current punch list see
+> [`docs/refactor-round-3.md`](refactor-round-3.md). This doc is kept
+> as a record of decisions and standing-fact verification commands.
+
 A single punch list for sessions after the original `code-quality-refactor-plan.md`
 (v2) closed out on 2026-05-07. **Load this doc first** in any new session that
 plans to continue the refactor — it has the work list, pointers to the
@@ -169,7 +175,9 @@ reach-in count 254 → 66 (-188 sites). Per-category outcomes:
 | `_vector_store` (~5) | resolved — `IngestionService.vector_store` property added (mirrors `QueryService.vector_store`); test sites switched |
 | `poller._thread` (4) | resolved — added `is_running()` and `wait(timeout=...)` to `HealthPoller` |
 
-**Residual: ~66 reach-ins** — all in one of these tolerated buckets:
+**Residual: 37 reach-ins after item 7** (was ~66 when this section
+was first written; item 7 cleared the production-mirror bucket below).
+All 37 are in one of these tolerated buckets:
 
 1. **Docstring text** (~7 sites in `provider._client`): the helper
    docstrings explicitly mention the old reach-in pattern they
@@ -343,8 +351,9 @@ and should be addressed before unrelated work.
 grep -rE '\._[a-z]' tests/ --include='*.py' | grep -v 'self\._' | grep -v 'import \|from ' | wc -l
 ```
 
-Expected: ~66 after item 3 part E (down from 254). A *rise* means a new
-test reached into private state and should be addressed at the source.
+Expected: 37 after item 7 (down from 254 at the start of round 2 / ~66
+after item 3 part E). A *rise* means a new test reached into private
+state and should be addressed at the source.
 
 ### File sizes vs the soft cap
 
