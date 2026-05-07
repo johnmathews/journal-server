@@ -219,7 +219,14 @@ class TestBuildFullContextInstruction:
 class TestWhisperPromptForwarding:
     """Verify the OpenAI provider passes the context prompt to the API."""
 
-    def test_prompt_forwarded_when_present(self, monkeypatch):
+    def _build_provider(self, context_prompt: str):
+        """Construct an OpenAITranscribeProvider with the SDK call layer
+        replaced by an in-line fake. Replaces an earlier pattern that
+        used ``__new__`` to bypass ``__init__`` and then poked
+        ``provider._client`` / ``_model`` / ``_context_prompt`` directly.
+        """
+        from unittest.mock import patch
+
         from journal.providers.transcription import OpenAITranscribeProvider
 
         captured_kwargs: dict = {}
@@ -232,34 +239,29 @@ class TestWhisperPromptForwarding:
         class _FakeClient:
             audio = type("A", (), {"transcriptions": _FakeTranscriptions()})()
 
-        provider = OpenAITranscribeProvider.__new__(OpenAITranscribeProvider)
-        provider._client = _FakeClient()
-        provider._model = "gpt-4o-transcribe"
-        provider._confidence_threshold = -0.5
-        provider._context_prompt = "Adi Dr. Patel Hampstead Heath"
+        with patch(
+            "journal.providers.transcription.openai.OpenAI",
+            return_value=_FakeClient(),
+        ):
+            provider = OpenAITranscribeProvider(
+                api_key="test-key",
+                model="gpt-4o-transcribe",
+                confidence_threshold=-0.5,
+                context_prompt=context_prompt,
+            )
+        return provider, captured_kwargs
+
+    def test_prompt_forwarded_when_present(self, monkeypatch):
+        provider, captured_kwargs = self._build_provider(
+            "Adi Dr. Patel Hampstead Heath",
+        )
 
         provider.transcribe(b"fake audio", "audio/mp3", "en")
 
         assert captured_kwargs.get("prompt") == "Adi Dr. Patel Hampstead Heath"
 
     def test_prompt_omitted_when_blank(self):
-        from journal.providers.transcription import OpenAITranscribeProvider
-
-        captured_kwargs: dict = {}
-
-        class _FakeTranscriptions:
-            def create(self, **kwargs):
-                captured_kwargs.update(kwargs)
-                return type("R", (), {"text": "hello", "logprobs": None})()
-
-        class _FakeClient:
-            audio = type("A", (), {"transcriptions": _FakeTranscriptions()})()
-
-        provider = OpenAITranscribeProvider.__new__(OpenAITranscribeProvider)
-        provider._client = _FakeClient()
-        provider._model = "gpt-4o-transcribe"
-        provider._confidence_threshold = -0.5
-        provider._context_prompt = ""
+        provider, captured_kwargs = self._build_provider("")
 
         provider.transcribe(b"fake audio", "audio/mp3", "en")
 

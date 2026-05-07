@@ -210,12 +210,9 @@ class TestAnthropicHeadingDetector:
         assert result.body == ""
         assert result.to_text() == "# 28 April 2026\n"
 
-    def test_api_error_returns_unchanged(self):
-        det = AnthropicHeadingDetector.__new__(AnthropicHeadingDetector)
-        det._client = MagicMock()
-        det._model = "claude-haiku-4-5"
-        det._max_tokens = 256
-        det._client.messages.create.side_effect = RuntimeError("API down")
+    def test_api_error_returns_unchanged(self, mock_client):
+        mock_client.messages.create.side_effect = RuntimeError("API down")
+        det = AnthropicHeadingDetector(api_key="k")
 
         result = det.detect("April 28th. Today I went out.")
 

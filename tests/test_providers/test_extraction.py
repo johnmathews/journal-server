@@ -15,30 +15,38 @@ from journal.providers.extraction import (
 )
 
 
-def _make_provider() -> AnthropicExtractionProvider:
-    with patch("journal.providers.extraction.anthropic.Anthropic"):
-        return AnthropicExtractionProvider(
+def _make_provider() -> tuple[AnthropicExtractionProvider, MagicMock]:
+    """Build the provider and return the fake SDK client too, so tests
+    configure ``messages.create`` without reaching into ``provider._client``.
+    """
+    fake_client = MagicMock(name="anthropic.Anthropic")
+    with patch(
+        "journal.providers.extraction.anthropic.Anthropic",
+        return_value=fake_client,
+    ):
+        provider = AnthropicExtractionProvider(
             api_key="test-key",
             model="claude-opus-4-6",
             max_tokens=4096,
         )
+    return provider, fake_client
 
 
 class TestAnthropicExtractionProvider:
     def test_implements_protocol(self) -> None:
-        provider = _make_provider()
+        provider, client = _make_provider()
         assert isinstance(provider, ExtractionProvider)
 
     def test_extract_entities_calls_messages_create_with_tool_choice(
         self,
     ) -> None:
-        provider = _make_provider()
+        provider, client = _make_provider()
         tool_block = MagicMock()
         tool_block.type = "tool_use"
         tool_block.input = {"entities": [], "relationships": []}
         mock_message = MagicMock()
         mock_message.content = [tool_block]
-        provider._client.messages.create.return_value = mock_message
+        client.messages.create.return_value = mock_message
 
         result = provider.extract_entities(
             entry_text="I went to Vienna with Atlas.",
@@ -47,7 +55,7 @@ class TestAnthropicExtractionProvider:
         )
         assert isinstance(result, RawExtractionResult)
 
-        kwargs = provider._client.messages.create.call_args.kwargs
+        kwargs = client.messages.create.call_args.kwargs
         assert kwargs["model"] == "claude-opus-4-6"
         assert kwargs["tool_choice"] == {
             "type": "tool",
@@ -59,7 +67,7 @@ class TestAnthropicExtractionProvider:
         assert "John" in kwargs["system"][0]["text"]
 
     def test_response_parsing_round_trip(self) -> None:
-        provider = _make_provider()
+        provider, client = _make_provider()
         tool_block = MagicMock()
         tool_block.type = "tool_use"
         tool_block.input = {
@@ -85,7 +93,7 @@ class TestAnthropicExtractionProvider:
         }
         mock_message = MagicMock()
         mock_message.content = [tool_block]
-        provider._client.messages.create.return_value = mock_message
+        client.messages.create.return_value = mock_message
 
         result = provider.extract_entities(
             "I went to Vienna with Atlas.", "2026-03-22", "John"
@@ -98,13 +106,13 @@ class TestAnthropicExtractionProvider:
         assert result.relationships[0]["predicate"] == "visited"
 
     def test_empty_entities_and_relationships_handled(self) -> None:
-        provider = _make_provider()
+        provider, client = _make_provider()
         tool_block = MagicMock()
         tool_block.type = "tool_use"
         tool_block.input = {"entities": [], "relationships": []}
         mock_message = MagicMock()
         mock_message.content = [tool_block]
-        provider._client.messages.create.return_value = mock_message
+        client.messages.create.return_value = mock_message
 
         result = provider.extract_entities("nothing here", "2026-03-22", "John")
         assert result.entities == []
@@ -124,13 +132,13 @@ class TestAnthropicExtractionProvider:
         assert "Do not force a match" in prompt or "do not force a match" in prompt.lower()
 
     def test_known_entities_appear_in_user_message(self) -> None:
-        provider = _make_provider()
+        provider, client = _make_provider()
         tool_block = MagicMock()
         tool_block.type = "tool_use"
         tool_block.input = {"entities": [], "relationships": []}
         mock_message = MagicMock()
         mock_message.content = [tool_block]
-        provider._client.messages.create.return_value = mock_message
+        client.messages.create.return_value = mock_message
 
         provider.extract_entities(
             entry_text="I called Mum",
@@ -147,7 +155,7 @@ class TestAnthropicExtractionProvider:
             ],
         )
 
-        kwargs = provider._client.messages.create.call_args.kwargs
+        kwargs = client.messages.create.call_args.kwargs
         user_msg_text = kwargs["messages"][0]["content"][0]["text"]
         assert "known entities" in user_msg_text.lower()
         assert "Sarah" in user_msg_text
@@ -157,18 +165,18 @@ class TestAnthropicExtractionProvider:
         assert "Sarah" not in kwargs["system"][0]["text"]
 
     def test_no_known_entities_block_when_empty(self) -> None:
-        provider = _make_provider()
+        provider, client = _make_provider()
         tool_block = MagicMock()
         tool_block.type = "tool_use"
         tool_block.input = {"entities": [], "relationships": []}
         mock_message = MagicMock()
         mock_message.content = [tool_block]
-        provider._client.messages.create.return_value = mock_message
+        client.messages.create.return_value = mock_message
 
         provider.extract_entities(
             entry_text="text", entry_date="2026-05-01", author_name="John",
         )
-        kwargs = provider._client.messages.create.call_args.kwargs
+        kwargs = client.messages.create.call_args.kwargs
         user_msg_text = kwargs["messages"][0]["content"][0]["text"]
         # No need to pollute the user message when nothing was retrieved.
         assert "known entities" not in user_msg_text.lower()

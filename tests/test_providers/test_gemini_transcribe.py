@@ -29,22 +29,30 @@ def _mock_response(parsed: _GeminiTranscriptionResponse | None, text: str = "") 
 
 
 def _make_provider(context_dir: Path | None = None) -> tuple[GeminiTranscribeProvider, MagicMock]:
-    with patch("journal.providers.transcription.genai.Client") as mock_client_cls:
+    """Build the provider; return the fake genai client instance the
+    constructor wired up so tests configure ``models.generate_content``
+    without reaching into ``provider._client``.
+    """
+    fake_client = MagicMock(name="genai.Client")
+    with patch(
+        "journal.providers.transcription.genai.Client",
+        return_value=fake_client,
+    ):
         provider = GeminiTranscribeProvider(
             api_key="test-key",
             model="gemini-2.5-pro",
             context_dir=context_dir,
         )
-    return provider, mock_client_cls
+    return provider, fake_client
 
 
 class TestGeminiTranscribeProvider:
     def test_implements_protocol(self) -> None:
-        provider, _ = _make_provider()
+        provider, client = _make_provider()
         assert isinstance(provider, TranscriptionProvider)
 
     def test_returns_transcription_result_happy_path(self) -> None:
-        provider, _ = _make_provider()
+        provider, client = _make_provider()
         text = "I went hiking with Saoirse and saw the Cuillin ridge."
         parsed = _GeminiTranscriptionResponse(
             text=text,
@@ -53,7 +61,7 @@ class TestGeminiTranscribeProvider:
                 _GeminiUncertainPhrase(phrase="Cuillin", reason="unclear audio"),
             ],
         )
-        provider._client.models.generate_content.return_value = _mock_response(parsed)
+        client.models.generate_content.return_value = _mock_response(parsed)
 
         result = provider.transcribe(b"fake-audio", "audio/mpeg")
 
@@ -66,9 +74,9 @@ class TestGeminiTranscribeProvider:
         assert len(result.uncertain_spans) == 2
 
     def test_no_uncertain_phrases(self) -> None:
-        provider, _ = _make_provider()
+        provider, client = _make_provider()
         parsed = _GeminiTranscriptionResponse(text="A clean transcript.", uncertain_phrases=[])
-        provider._client.models.generate_content.return_value = _mock_response(parsed)
+        client.models.generate_content.return_value = _mock_response(parsed)
 
         result = provider.transcribe(b"fake-audio", "audio/mpeg")
 
@@ -78,7 +86,7 @@ class TestGeminiTranscribeProvider:
     def test_phrase_not_found_in_text_skipped(
         self, caplog: pytest.LogCaptureFixture,
     ) -> None:
-        provider, _ = _make_provider()
+        provider, client = _make_provider()
         text = "Hello world."
         parsed = _GeminiTranscriptionResponse(
             text=text,
@@ -87,7 +95,7 @@ class TestGeminiTranscribeProvider:
                 _GeminiUncertainPhrase(phrase="totally-absent-phrase"),
             ],
         )
-        provider._client.models.generate_content.return_value = _mock_response(parsed)
+        client.models.generate_content.return_value = _mock_response(parsed)
 
         with caplog.at_level(logging.WARNING, logger="journal.providers.transcription"):
             result = provider.transcribe(b"fake-audio", "audio/mpeg")
@@ -96,13 +104,13 @@ class TestGeminiTranscribeProvider:
         assert any("totally-absent-phrase" in r.message for r in caplog.records)
 
     def test_phrase_appears_multiple_times_first_wins(self) -> None:
-        provider, _ = _make_provider()
+        provider, client = _make_provider()
         text = "cat dog cat dog"
         parsed = _GeminiTranscriptionResponse(
             text=text,
             uncertain_phrases=[_GeminiUncertainPhrase(phrase="cat")],
         )
-        provider._client.models.generate_content.return_value = _mock_response(parsed)
+        client.models.generate_content.return_value = _mock_response(parsed)
 
         result = provider.transcribe(b"fake-audio", "audio/mpeg")
 
@@ -119,15 +127,15 @@ class TestGeminiTranscribeProvider:
                 _GeminiUncertainPhrase(phrase="beta gamma"),
             ],
         )
-        provider, _ = _make_provider()
-        provider._client.models.generate_content.return_value = _mock_response(parsed)
+        provider, client = _make_provider()
+        client.models.generate_content.return_value = _mock_response(parsed)
 
         result = provider.transcribe(b"fake-audio", "audio/mpeg")
 
         assert result.uncertain_spans == [(0, len(text))]
 
     def test_empty_audio_raises(self) -> None:
-        provider, _ = _make_provider()
+        provider, client = _make_provider()
         with pytest.raises(ValueError, match="Audio data is empty"):
             provider.transcribe(b"", "audio/mpeg")
 
@@ -137,43 +145,43 @@ class TestGeminiTranscribeProvider:
         ctx_file = tmp_path / "people.md"
         ctx_file.write_text("# people\n\n- **Saoirse Ronan** — actress\n")
 
-        provider, _ = _make_provider(context_dir=tmp_path)
+        provider, client = _make_provider(context_dir=tmp_path)
 
         parsed = _GeminiTranscriptionResponse(text="ok", uncertain_phrases=[])
-        provider._client.models.generate_content.return_value = _mock_response(parsed)
+        client.models.generate_content.return_value = _mock_response(parsed)
         provider.transcribe(b"fake-audio", "audio/mpeg")
 
-        call_kwargs = provider._client.models.generate_content.call_args.kwargs
+        call_kwargs = client.models.generate_content.call_args.kwargs
         config = call_kwargs["config"]
         assert "Saoirse Ronan" in config.system_instruction
 
     def test_default_system_used_when_no_context(self) -> None:
-        provider, _ = _make_provider(context_dir=None)
+        provider, client = _make_provider(context_dir=None)
         parsed = _GeminiTranscriptionResponse(text="ok", uncertain_phrases=[])
-        provider._client.models.generate_content.return_value = _mock_response(parsed)
+        client.models.generate_content.return_value = _mock_response(parsed)
         provider.transcribe(b"fake-audio", "audio/mpeg")
 
-        call_kwargs = provider._client.models.generate_content.call_args.kwargs
+        call_kwargs = client.models.generate_content.call_args.kwargs
         config = call_kwargs["config"]
         assert "careful transcription engine" in config.system_instruction.lower()
 
     def test_audio_over_20mb_uses_files_api(self) -> None:
-        provider, _ = _make_provider()
+        provider, client = _make_provider()
         big_audio = b"\x00" * (21 * 1024 * 1024)
         parsed = _GeminiTranscriptionResponse(text="ok", uncertain_phrases=[])
-        provider._client.models.generate_content.return_value = _mock_response(parsed)
-        provider._client.files.upload.return_value = MagicMock(name="UploadedFile")
+        client.models.generate_content.return_value = _mock_response(parsed)
+        client.files.upload.return_value = MagicMock(name="UploadedFile")
 
         provider.transcribe(big_audio, "audio/mpeg")
 
-        provider._client.files.upload.assert_called_once()
-        upload_kwargs = provider._client.files.upload.call_args.kwargs
+        client.files.upload.assert_called_once()
+        upload_kwargs = client.files.upload.call_args.kwargs
         assert "file" in upload_kwargs
         assert upload_kwargs["config"].mime_type == "audio/mpeg"
 
     def test_falls_back_to_response_text_when_parsed_is_none(self) -> None:
-        provider, _ = _make_provider()
-        provider._client.models.generate_content.return_value = _mock_response(
+        provider, client = _make_provider()
+        client.models.generate_content.return_value = _mock_response(
             parsed=None,
             text='{"text": "hi", "uncertain_phrases": []}',
         )
@@ -184,8 +192,8 @@ class TestGeminiTranscribeProvider:
         assert result.uncertain_spans == []
 
     def test_raises_when_parsed_and_text_both_unusable(self) -> None:
-        provider, _ = _make_provider()
-        provider._client.models.generate_content.return_value = _mock_response(
+        provider, client = _make_provider()
+        client.models.generate_content.return_value = _mock_response(
             parsed=None, text="",
         )
 

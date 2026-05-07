@@ -53,25 +53,19 @@ class TestAnthropicFormatter:
         result = formatter.format_paragraphs(original)
         assert result == original
 
-    def test_returns_original_on_api_exception(self):
-        formatter = AnthropicFormatter.__new__(AnthropicFormatter)
-        formatter._client = MagicMock()
-        formatter._model = "claude-haiku-4-5"
-        formatter._max_tokens = 8192
-        formatter._client.messages.create.side_effect = RuntimeError("API down")
+    def test_returns_original_on_api_exception(self, mock_client):
+        mock_client.messages.create.side_effect = RuntimeError("API down")
+        formatter = AnthropicFormatter(api_key="test-key")
 
         result = formatter.format_paragraphs("Some text here.")
         assert result == "Some text here."
 
-    def test_empty_text_returned_as_is(self):
-        formatter = AnthropicFormatter.__new__(AnthropicFormatter)
-        formatter._client = MagicMock()
-        formatter._model = "claude-haiku-4-5"
-        formatter._max_tokens = 8192
+    def test_empty_text_returned_as_is(self, mock_client):
+        formatter = AnthropicFormatter(api_key="test-key")
 
         assert formatter.format_paragraphs("") == ""
         assert formatter.format_paragraphs("   ") == "   "
-        formatter._client.messages.create.assert_not_called()
+        mock_client.messages.create.assert_not_called()
 
     def test_identical_text_returned_unchanged(self, mock_client):
         text = "Already good."

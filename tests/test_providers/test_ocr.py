@@ -33,8 +33,15 @@ class TestAnthropicOCRProvider:
         self,
         context_dir: Path | None = None,
         cache_ttl: str = "5m",
-    ) -> AnthropicOCRProvider:
-        with patch("journal.providers.ocr.anthropic.Anthropic"):
+    ) -> tuple[AnthropicOCRProvider, MagicMock]:
+        """Build the provider; return the fake SDK client too so tests
+        configure ``messages.create`` without reaching into ``provider._client``.
+        """
+        fake_client = MagicMock(name="anthropic.Anthropic")
+        with patch(
+            "journal.providers.ocr.anthropic.Anthropic",
+            return_value=fake_client,
+        ):
             provider = AnthropicOCRProvider(
                 api_key="test-key",
                 model="claude-opus-4-6",
@@ -42,31 +49,31 @@ class TestAnthropicOCRProvider:
                 context_dir=context_dir,
                 cache_ttl=cache_ttl,
             )
-        return provider
+        return provider, fake_client
 
     def test_implements_protocol(self) -> None:
-        provider = self._make_provider()
+        provider, client = self._make_provider()
         assert isinstance(provider, OCRProvider)
 
     def test_extract_returns_ocr_result(self) -> None:
-        provider = self._make_provider()
+        provider, client = self._make_provider()
         mock_message = MagicMock()
         mock_message.content = [MagicMock(text="Hello world from handwriting")]
-        provider._client.messages.create.return_value = mock_message
+        client.messages.create.return_value = mock_message
 
         result = provider.extract(b"fake-image-data", "image/png")
 
         assert isinstance(result, OCRResult)
         assert result.text == "Hello world from handwriting"
         assert result.uncertain_spans == []
-        provider._client.messages.create.assert_called_once()
+        client.messages.create.assert_called_once()
 
     def test_extract_strips_sentinels_and_records_spans(self) -> None:
-        provider = self._make_provider()
+        provider, client = self._make_provider()
         raw = f"Today I met {UNCERTAIN_OPEN}Ritsya{UNCERTAIN_CLOSE} at the park."
         mock_message = MagicMock()
         mock_message.content = [MagicMock(text=raw)]
-        provider._client.messages.create.return_value = mock_message
+        client.messages.create.return_value = mock_message
 
         result = provider.extract(b"data", "image/png")
 
@@ -77,11 +84,11 @@ class TestAnthropicOCRProvider:
         assert UNCERTAIN_CLOSE not in result.text
 
     def test_extract_text_wrapper_returns_clean_string(self) -> None:
-        provider = self._make_provider()
+        provider, client = self._make_provider()
         raw = f"plain {UNCERTAIN_OPEN}foo{UNCERTAIN_CLOSE} bar"
         mock_message = MagicMock()
         mock_message.content = [MagicMock(text=raw)]
-        provider._client.messages.create.return_value = mock_message
+        client.messages.create.return_value = mock_message
 
         result = provider.extract_text(b"fake-image-data", "image/png")
 
@@ -90,14 +97,14 @@ class TestAnthropicOCRProvider:
         assert UNCERTAIN_CLOSE not in result
 
     def test_system_prompt_included_without_context(self) -> None:
-        provider = self._make_provider()
+        provider, client = self._make_provider()
         mock_message = MagicMock()
         mock_message.content = [MagicMock(text="extracted")]
-        provider._client.messages.create.return_value = mock_message
+        client.messages.create.return_value = mock_message
 
         provider.extract_text(b"fake-image-data", "image/jpeg")
 
-        call_kwargs = provider._client.messages.create.call_args.kwargs
+        call_kwargs = client.messages.create.call_args.kwargs
         system = call_kwargs["system"]
         assert len(system) == 1
         # Without a context dir, the system block is the unchanged
@@ -117,15 +124,15 @@ class TestAnthropicOCRProvider:
         assert "sparingly" in SYSTEM_PROMPT.lower()
 
     def test_image_is_base64_encoded(self) -> None:
-        provider = self._make_provider()
+        provider, client = self._make_provider()
         mock_message = MagicMock()
         mock_message.content = [MagicMock(text="extracted")]
-        provider._client.messages.create.return_value = mock_message
+        client.messages.create.return_value = mock_message
 
         image_data = b"fake-image-data"
         provider.extract_text(image_data, "image/png")
 
-        call_kwargs = provider._client.messages.create.call_args.kwargs
+        call_kwargs = client.messages.create.call_args.kwargs
         messages = call_kwargs["messages"]
         image_block = messages[0]["content"][0]
         expected_b64 = base64.standard_b64encode(image_data).decode("utf-8")
@@ -144,15 +151,15 @@ class TestAnthropicOCRProvider:
             "- Vienna — first met Atlas here\n"
         )
 
-        provider = self._make_provider(context_dir=context)
+        provider, client = self._make_provider(context_dir=context)
         mock_message = MagicMock()
         mock_message.content = [MagicMock(text="extracted")]
-        provider._client.messages.create.return_value = mock_message
+        client.messages.create.return_value = mock_message
 
         provider.extract_text(b"data", "image/png")
 
         system_text = (
-            provider._client.messages.create.call_args.kwargs["system"][0]["text"]
+            client.messages.create.call_args.kwargs["system"][0]["text"]
         )
         # Start matches the original prompt.
         assert system_text.startswith(SYSTEM_PROMPT)
@@ -173,14 +180,14 @@ class TestAnthropicOCRProvider:
     ) -> None:
         # Point at a dir that doesn't exist — provider must fall back.
         missing = tmp_path / "nope"
-        provider = self._make_provider(context_dir=missing)
+        provider, client = self._make_provider(context_dir=missing)
         mock_message = MagicMock()
         mock_message.content = [MagicMock(text="extracted")]
-        provider._client.messages.create.return_value = mock_message
+        client.messages.create.return_value = mock_message
         provider.extract_text(b"data", "image/png")
 
         system_text = (
-            provider._client.messages.create.call_args.kwargs["system"][0]["text"]
+            client.messages.create.call_args.kwargs["system"][0]["text"]
         )
         assert system_text == SYSTEM_PROMPT
 
@@ -189,26 +196,26 @@ class TestAnthropicOCRProvider:
     ) -> None:
         empty = tmp_path / "empty"
         empty.mkdir()
-        provider = self._make_provider(context_dir=empty)
+        provider, client = self._make_provider(context_dir=empty)
         mock_message = MagicMock()
         mock_message.content = [MagicMock(text="extracted")]
-        provider._client.messages.create.return_value = mock_message
+        client.messages.create.return_value = mock_message
         provider.extract_text(b"data", "image/png")
 
         system_text = (
-            provider._client.messages.create.call_args.kwargs["system"][0]["text"]
+            client.messages.create.call_args.kwargs["system"][0]["text"]
         )
         assert system_text == SYSTEM_PROMPT
 
     def test_cache_ttl_1h(self) -> None:
-        provider = self._make_provider(cache_ttl="1h")
+        provider, client = self._make_provider(cache_ttl="1h")
         mock_message = MagicMock()
         mock_message.content = [MagicMock(text="extracted")]
-        provider._client.messages.create.return_value = mock_message
+        client.messages.create.return_value = mock_message
         provider.extract_text(b"data", "image/png")
 
         cache_control = (
-            provider._client.messages.create.call_args.kwargs["system"][0][
+            client.messages.create.call_args.kwargs["system"][0][
                 "cache_control"
             ]
         )
@@ -506,38 +513,46 @@ class TestGeminiOCRProvider:
     def _make_provider(
         self,
         context_dir: Path | None = None,
-    ) -> GeminiOCRProvider:
-        with patch("journal.providers.ocr.genai.Client"):
+    ) -> tuple[GeminiOCRProvider, MagicMock]:
+        """Build the provider; return the fake genai client instance the
+        constructor wired up so tests configure ``models.generate_content``
+        without reaching into ``provider._client``.
+        """
+        fake_client = MagicMock(name="genai.Client")
+        with patch(
+            "journal.providers.ocr.genai.Client",
+            return_value=fake_client,
+        ):
             provider = GeminiOCRProvider(
                 api_key="test-google-key",
                 model="gemini-2.5-pro",
                 context_dir=context_dir,
             )
-        return provider
+        return provider, fake_client
 
     def test_implements_protocol(self) -> None:
-        provider = self._make_provider()
+        provider, client = self._make_provider()
         assert isinstance(provider, OCRProvider)
 
     def test_extract_returns_ocr_result(self) -> None:
-        provider = self._make_provider()
+        provider, client = self._make_provider()
         mock_response = MagicMock()
         mock_response.text = "Hello world from handwriting"
-        provider._client.models.generate_content.return_value = mock_response
+        client.models.generate_content.return_value = mock_response
 
         result = provider.extract(b"fake-image-data", "image/png")
 
         assert isinstance(result, OCRResult)
         assert result.text == "Hello world from handwriting"
         assert result.uncertain_spans == []
-        provider._client.models.generate_content.assert_called_once()
+        client.models.generate_content.assert_called_once()
 
     def test_extract_strips_sentinels_and_records_spans(self) -> None:
-        provider = self._make_provider()
+        provider, client = self._make_provider()
         raw = f"Today I met {UNCERTAIN_OPEN}Ritsya{UNCERTAIN_CLOSE} at the park."
         mock_response = MagicMock()
         mock_response.text = raw
-        provider._client.models.generate_content.return_value = mock_response
+        client.models.generate_content.return_value = mock_response
 
         result = provider.extract(b"data", "image/png")
 
@@ -545,31 +560,31 @@ class TestGeminiOCRProvider:
         assert result.uncertain_spans == [(12, 18)]
 
     def test_system_prompt_passed_to_gemini(self) -> None:
-        provider = self._make_provider()
+        provider, client = self._make_provider()
         mock_response = MagicMock()
         mock_response.text = "extracted"
-        provider._client.models.generate_content.return_value = mock_response
+        client.models.generate_content.return_value = mock_response
 
         provider.extract(b"data", "image/jpeg")
 
-        call_kwargs = provider._client.models.generate_content.call_args.kwargs
+        call_kwargs = client.models.generate_content.call_args.kwargs
         assert call_kwargs["config"].system_instruction == SYSTEM_PROMPT
 
     def test_extract_text_wrapper(self) -> None:
-        provider = self._make_provider()
+        provider, client = self._make_provider()
         mock_response = MagicMock()
         mock_response.text = "plain text"
-        provider._client.models.generate_content.return_value = mock_response
+        client.models.generate_content.return_value = mock_response
 
         assert provider.extract_text(b"data", "image/png") == "plain text"
 
     def test_extract_reflows_single_newlines(self) -> None:
         """Gemini preserves physical line breaks — extract() should
         collapse them into spaces while keeping paragraph breaks."""
-        provider = self._make_provider()
+        provider, client = self._make_provider()
         mock_response = MagicMock()
         mock_response.text = "Today I went\nto the store.\n\nThen I came home."
-        provider._client.models.generate_content.return_value = mock_response
+        client.models.generate_content.return_value = mock_response
 
         result = provider.extract(b"data", "image/png")
 
@@ -577,13 +592,13 @@ class TestGeminiOCRProvider:
 
     def test_extract_reflow_preserves_uncertain_span_offsets(self) -> None:
         """Uncertain spans must still point at the right text after reflow."""
-        provider = self._make_provider()
+        provider, client = self._make_provider()
         # "Ritsya" starts at char 12 after sentinel removal, and reflow
         # doesn't change that because \n→space is 1-for-1.
         raw = f"Today I met\n{UNCERTAIN_OPEN}Ritsya{UNCERTAIN_CLOSE} at the park."
         mock_response = MagicMock()
         mock_response.text = raw
-        provider._client.models.generate_content.return_value = mock_response
+        client.models.generate_content.return_value = mock_response
 
         result = provider.extract(b"data", "image/png")
 
@@ -602,14 +617,14 @@ class TestGeminiOCRProvider:
             "- Vienna — first met Atlas here\n"
         )
 
-        provider = self._make_provider(context_dir=context)
+        provider, client = self._make_provider(context_dir=context)
         mock_response = MagicMock()
         mock_response.text = "extracted"
-        provider._client.models.generate_content.return_value = mock_response
+        client.models.generate_content.return_value = mock_response
 
         provider.extract(b"data", "image/png")
 
-        call_kwargs = provider._client.models.generate_content.call_args.kwargs
+        call_kwargs = client.models.generate_content.call_args.kwargs
         system_text = call_kwargs["config"].system_instruction
         assert system_text.startswith(SYSTEM_PROMPT)
         assert CONTEXT_USAGE_INSTRUCTIONS.strip() in system_text
@@ -627,13 +642,13 @@ class TestGeminiOCRProvider:
         self, tmp_path: Path
     ) -> None:
         missing = tmp_path / "nope"
-        provider = self._make_provider(context_dir=missing)
+        provider, client = self._make_provider(context_dir=missing)
         mock_response = MagicMock()
         mock_response.text = "extracted"
-        provider._client.models.generate_content.return_value = mock_response
+        client.models.generate_content.return_value = mock_response
         provider.extract(b"data", "image/png")
 
-        call_kwargs = provider._client.models.generate_content.call_args.kwargs
+        call_kwargs = client.models.generate_content.call_args.kwargs
         assert call_kwargs["config"].system_instruction == SYSTEM_PROMPT
 
     def test_context_dir_empty_falls_back_to_system_prompt(
@@ -641,13 +656,13 @@ class TestGeminiOCRProvider:
     ) -> None:
         empty = tmp_path / "empty"
         empty.mkdir()
-        provider = self._make_provider(context_dir=empty)
+        provider, client = self._make_provider(context_dir=empty)
         mock_response = MagicMock()
         mock_response.text = "extracted"
-        provider._client.models.generate_content.return_value = mock_response
+        client.models.generate_content.return_value = mock_response
         provider.extract(b"data", "image/png")
 
-        call_kwargs = provider._client.models.generate_content.call_args.kwargs
+        call_kwargs = client.models.generate_content.call_args.kwargs
         assert call_kwargs["config"].system_instruction == SYSTEM_PROMPT
 
 
