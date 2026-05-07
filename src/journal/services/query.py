@@ -12,18 +12,30 @@ optionally record latency through `StatsCollector`.
 """
 
 import logging
+import sqlite3
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import TypeVar
 
 from journal.db.repository import EntryRepository
 from journal.models import (
+    CalendarDay,
+    ChunkSpan,
+    EntityDistributionBin,
+    EntityTrendBin,
     Entry,
     EntryPage,
+    IngestionStats,
+    MoodDrilldownEntry,
+    MoodEntityCorrelation,
     MoodTrend,
     SearchResult,
     Statistics,
     TopicFrequency,
+    WordCountBucket,
+    WordCountStats,
+    WritingFrequencyBin,
 )
 from journal.providers.embeddings import EmbeddingsProvider
 from journal.providers.reranker import NoopReranker, Reranker
@@ -65,6 +77,22 @@ class QueryService:
     def hybrid(self) -> HybridSearchService:
         """Expose the underlying hybrid service for diagnostics and admin."""
         return self._hybrid
+
+    @property
+    def vector_store(self) -> VectorStore:
+        """Vector store handle, exposed for liveness checks and diagnostics."""
+        return self._vector_store
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """SQLite connection backing the repository, exposed for liveness checks.
+
+        Reaches through the SQLite implementation's `_conn`. Only call when
+        you need the raw connection for a check that takes a sqlite3 handle
+        (e.g. `journal.services.liveness.check_sqlite`); for anything else,
+        prefer the named query methods on this service.
+        """
+        return self._repo._conn  # type: ignore[attr-defined]
 
     def _timed(self, query_type: str, fn: Callable[[], T]) -> T:
         """Run `fn()` and record its latency under `query_type`.
@@ -172,3 +200,173 @@ class QueryService:
 
     def get_entry_pages(self, entry_id: int) -> list[EntryPage]:
         return self._repo.get_entry_pages(entry_id)
+
+    # ──────────────────────────────────────────────────────────────────
+    # Public entry reads / writes / metadata.
+    #
+    # These thin pass-throughs replace the `query_svc._repo.<method>`
+    # reach-ins that the api/ layer used before Unit 1b. They exist so
+    # callers (REST routes, MCP tools, CLI) can grep for the operation
+    # by name without learning the repository structure. Do NOT extend
+    # this section by adding speculative methods — only add when there
+    # is a concrete caller that would otherwise reach into `_repo`.
+    # ──────────────────────────────────────────────────────────────────
+
+    def get_entry(self, entry_id: int, *, user_id: int | None = None) -> Entry | None:
+        return self._repo.get_entry(entry_id, user_id=user_id)
+
+    def count_entries(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        *,
+        user_id: int | None = None,
+    ) -> int:
+        return self._repo.count_entries(start_date, end_date, user_id=user_id)
+
+    def update_entry_date(
+        self, entry_id: int, entry_date: str, *, user_id: int | None = None,
+    ) -> Entry | None:
+        return self._repo.update_entry_date(entry_id, entry_date, user_id=user_id)
+
+    def verify_doubts(self, entry_id: int, *, user_id: int | None = None) -> bool:
+        return self._repo.verify_doubts(entry_id, user_id=user_id)
+
+    def get_page_count(self, entry_id: int) -> int:
+        return self._repo.get_page_count(entry_id)
+
+    def get_uncertain_span_count(self, entry_id: int) -> int:
+        return self._repo.get_uncertain_span_count(entry_id)
+
+    def get_uncertain_spans(self, entry_id: int) -> list[tuple[int, int]]:
+        return self._repo.get_uncertain_spans(entry_id)
+
+    def get_entity_mention_count(self, entry_id: int) -> int:
+        return self._repo.get_entity_mention_count(entry_id)
+
+    def get_chunks(self, entry_id: int) -> list[ChunkSpan]:
+        return self._repo.get_chunks(entry_id)
+
+    def get_ingestion_stats(
+        self, *, now: datetime | None = None, user_id: int | None = None,
+    ) -> IngestionStats:
+        return self._repo.get_ingestion_stats(now or datetime.now(UTC), user_id=user_id)
+
+    # ──────────────────────────────────────────────────────────────────
+    # Public dashboard aggregations.
+    #
+    # Each method maps 1:1 to a `/api/dashboard/*` endpoint's underlying
+    # query. Same rule as above: extend only when there is a concrete
+    # caller.
+    # ──────────────────────────────────────────────────────────────────
+
+    def get_writing_frequency(
+        self,
+        start_date: str | None,
+        end_date: str | None,
+        granularity: str,
+        *,
+        user_id: int | None = None,
+    ) -> list[WritingFrequencyBin]:
+        return self._repo.get_writing_frequency(
+            start_date=start_date,
+            end_date=end_date,
+            granularity=granularity,
+            user_id=user_id,
+        )
+
+    def get_mood_drilldown(
+        self,
+        dimension: str,
+        period_start: str,
+        period_end: str,
+        *,
+        user_id: int | None = None,
+    ) -> list[MoodDrilldownEntry]:
+        return self._repo.get_mood_drilldown(
+            dimension=dimension,
+            period_start=period_start,
+            period_end=period_end,
+            user_id=user_id,
+        )
+
+    def get_entity_distribution(
+        self,
+        entity_type: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        limit: int = 50,
+        *,
+        user_id: int | None = None,
+    ) -> list[EntityDistributionBin]:
+        return self._repo.get_entity_distribution(
+            entity_type=entity_type,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit,
+            user_id=user_id,
+        )
+
+    def get_calendar_heatmap(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        *,
+        user_id: int | None = None,
+    ) -> list[CalendarDay]:
+        return self._repo.get_calendar_heatmap(
+            start_date=start_date, end_date=end_date, user_id=user_id,
+        )
+
+    def get_entity_trends(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        granularity: str = "month",
+        entity_type: str | None = None,
+        limit: int = 8,
+        *,
+        user_id: int | None = None,
+    ) -> tuple[list[str], list[EntityTrendBin]]:
+        return self._repo.get_entity_trends(
+            start_date=start_date,
+            end_date=end_date,
+            granularity=granularity,
+            entity_type=entity_type,
+            limit=limit,
+            user_id=user_id,
+        )
+
+    def get_mood_entity_correlation(
+        self,
+        dimension: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        entity_type: str | None = None,
+        limit: int = 10,
+        *,
+        user_id: int | None = None,
+    ) -> tuple[float, list[MoodEntityCorrelation]]:
+        return self._repo.get_mood_entity_correlation(
+            dimension=dimension,
+            start_date=start_date,
+            end_date=end_date,
+            entity_type=entity_type,
+            limit=limit,
+            user_id=user_id,
+        )
+
+    def get_word_count_distribution(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        bucket_size: int = 100,
+        *,
+        user_id: int | None = None,
+    ) -> tuple[list[WordCountBucket], WordCountStats]:
+        return self._repo.get_word_count_distribution(
+            start_date=start_date,
+            end_date=end_date,
+            bucket_size=bucket_size,
+            user_id=user_id,
+        )

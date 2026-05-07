@@ -1653,3 +1653,39 @@ class TestIngestionWithProviderStack:
         assert spans == [(0, 5)]
         assert entry.raw_text[0:5] == "hello"
 
+
+class TestIngestionPublicAPI:
+    """Public methods added in Unit 1b so api/ingestion.py doesn't reach
+    into ``ingestion_svc._repo`` or call the private ``_store_source_file``.
+    """
+
+    def test_get_page_count_delegates(self, ingestion_service):
+        entry = ingestion_service.ingest_image(
+            image_data=b"only-page", media_type="image/jpeg", date="2026-03-22",
+        )
+        # Single-image ingest creates one page.
+        assert ingestion_service.get_page_count(entry.id) == 1
+
+    def test_get_page_count_for_text_entry_is_zero(self, ingestion_service):
+        # Text ingestion creates no pages (pages are an OCR artefact).
+        entry = ingestion_service.ingest_text(
+            text="hello world", date="2026-03-22", source_type="text_entry",
+        )
+        assert ingestion_service.get_page_count(entry.id) == 0
+
+    def test_store_source_file_inserts_row(self, ingestion_service):
+        entry = ingestion_service.ingest_text(
+            text="any text", date="2026-03-22", source_type="text_entry",
+        )
+        source_id = ingestion_service.store_source_file(
+            entry.id, "upload:notes.md", "text/markdown", "deadbeef",
+        )
+        assert isinstance(source_id, int) and source_id > 0
+        # And it shows up in the source_files table for that entry.
+        row = ingestion_service._repo._conn.execute(  # noqa: SLF001 — direct DB peek for assertion
+            "SELECT file_path, file_type, file_hash FROM source_files WHERE id = ?",
+            (source_id,),
+        ).fetchone()
+        assert row["file_path"] == "upload:notes.md"
+        assert row["file_type"] == "text/markdown"
+        assert row["file_hash"] == "deadbeef"

@@ -76,7 +76,7 @@ def register_health_routes(
 
         # Ingestion stats block — pure SQL aggregation.
         try:
-            ingestion = query_svc._repo.get_ingestion_stats(now=datetime.now(UTC))
+            ingestion = query_svc.get_ingestion_stats(now=datetime.now(UTC))
             ingestion_dict: dict[str, Any] = asdict(ingestion)
         except sqlite3.Error as e:
             log.warning("GET /health — ingestion stats failed: %s", e)
@@ -108,8 +108,8 @@ def register_health_routes(
         # Liveness checks. Each is independent and returns a
         # ComponentCheck so the overall rollup can be computed at the end.
         checks = [
-            check_sqlite(query_svc._repo._conn),
-            check_chromadb(query_svc._vector_store),
+            check_sqlite(query_svc.connection),
+            check_chromadb(query_svc.vector_store),
         ]
         if config is not None:
             checks.append(check_api_key("anthropic", config.anthropic_api_key))

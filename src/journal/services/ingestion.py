@@ -267,7 +267,7 @@ class IngestionService:
             date, "photo", raw_text, word_count, user_id=user_id,
             final_text=final_text,
         )
-        source_file_id = self._store_source_file(
+        source_file_id = self.store_source_file(
             entry.id, f"image_{date}", media_type, file_hash,
         )
 
@@ -339,7 +339,7 @@ class IngestionService:
             date, source_type, raw_text, word_count, user_id=user_id,
             final_text=formatted_body if formatted_body != raw_text else None,
         )
-        self._store_source_file(entry.id, f"voice_{date}", media_type, file_hash)
+        self.store_source_file(entry.id, f"voice_{date}", media_type, file_hash)
 
         # Record uncertain spans from transcription confidence data.
         uncertain_spans = getattr(result, "uncertain_spans", [])
@@ -467,7 +467,7 @@ class IngestionService:
         for i, (file_hash, media_type) in enumerate(
             zip(file_hashes, file_media_types, strict=True)
         ):
-            self._store_source_file(
+            self.store_source_file(
                 entry.id, f"voice_{date}_part{i + 1}", media_type, file_hash
             )
 
@@ -823,7 +823,7 @@ class IngestionService:
 
         # Store source files and pages
         for i, (_image_data, _) in enumerate(images):
-            source_file_id = self._store_source_file(
+            source_file_id = self.store_source_file(
                 entry.id, f"image_{date}_p{i + 1}", page_media_types[i], page_hashes[i],
             )
             # Per-page raw_text preserves the verbatim extracted text
@@ -965,7 +965,14 @@ class IngestionService:
         self._repo.update_chunk_count(entry_id, chunk_count)
         return chunk_count
 
-    def _store_source_file(
+    def get_page_count(self, entry_id: int) -> int:
+        """Per-entry page count. Public pass-through; same shape as
+        ``QueryService.get_page_count`` so api/ ingest routes don't need to
+        reach into ``self._repo`` to enrich the response payload.
+        """
+        return self._repo.get_page_count(entry_id)
+
+    def store_source_file(
         self, entry_id: int, file_path: str, file_type: str, file_hash: str
     ) -> int | None:
         """Store source file metadata. Returns the source_file id."""

@@ -144,7 +144,7 @@ def register_ingestion_routes(
                 exc_info=True,
             )
 
-        page_count = ingestion_svc._repo.get_page_count(entry.id)
+        page_count = ingestion_svc.get_page_count(entry.id)
         log.info(
             "POST /api/entries/ingest/text — created entry %d (%d words)",
             entry.id,
@@ -248,7 +248,7 @@ def register_ingestion_routes(
 
         # Store source file metadata for dedup
         file_hash = hashlib.sha256(uploaded.data).hexdigest()
-        ingestion_svc._store_source_file(
+        ingestion_svc.store_source_file(
             entry.id,
             f"upload:{uploaded.filename}",
             uploaded.content_type,
@@ -278,7 +278,7 @@ def register_ingestion_routes(
                 exc_info=True,
             )
 
-        page_count = ingestion_svc._repo.get_page_count(entry.id)
+        page_count = ingestion_svc.get_page_count(entry.id)
         log.info(
             "POST /api/entries/ingest/file — created entry %d from %s (%d words)",
             entry.id,

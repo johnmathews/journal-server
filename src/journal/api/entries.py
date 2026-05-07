@@ -81,13 +81,13 @@ def register_entries_routes(
             offset = 0
 
         entries = query_svc.list_entries(start_date, end_date, limit, offset, user_id=user_id)
-        total = query_svc._repo.count_entries(start_date, end_date, user_id=user_id)
+        total = query_svc.count_entries(start_date, end_date, user_id=user_id)
 
         items = []
         for entry in entries:
-            page_count = query_svc._repo.get_page_count(entry.id)
-            span_count = query_svc._repo.get_uncertain_span_count(entry.id)
-            entity_count = query_svc._repo.get_entity_mention_count(entry.id)
+            page_count = query_svc.get_page_count(entry.id)
+            span_count = query_svc.get_uncertain_span_count(entry.id)
+            entity_count = query_svc.get_entity_mention_count(entry.id)
             items.append(_entry_summary(entry, page_count, span_count, entity_count))
 
         log.info("GET /api/entries — returned %d/%d entries (offset=%d)", len(items), total, offset)
@@ -126,12 +126,12 @@ def register_entries_routes(
 
     async def _get_entry(services: dict, entry_id: int, user_id: int) -> JSONResponse:
         query_svc: QueryService = services["query"]
-        entry = query_svc._repo.get_entry(entry_id, user_id=user_id)
+        entry = query_svc.get_entry(entry_id, user_id=user_id)
         if entry is None:
             log.warning("GET /api/entries/%d — not found", entry_id)
             return JSONResponse({"error": f"Entry {entry_id} not found"}, status_code=404)
-        page_count = query_svc._repo.get_page_count(entry_id)
-        uncertain_spans = query_svc._repo.get_uncertain_spans(entry_id)
+        page_count = query_svc.get_page_count(entry_id)
+        uncertain_spans = query_svc.get_uncertain_spans(entry_id)
         log.info("GET /api/entries/%d — %s, %d words", entry_id, entry.entry_date, entry.word_count)
         return JSONResponse(_entry_to_dict(entry, page_count, uncertain_spans))
 
@@ -142,7 +142,7 @@ def register_entries_routes(
         ingestion_svc: IngestionService = services["ingestion"]
 
         # Verify entry exists
-        entry = query_svc._repo.get_entry(entry_id, user_id=user_id)
+        entry = query_svc.get_entry(entry_id, user_id=user_id)
         if entry is None:
             return JSONResponse({"error": f"Entry {entry_id} not found"}, status_code=404)
 
@@ -179,7 +179,7 @@ def register_entries_routes(
                     {"error": "'entry_date' must be a valid ISO 8601 date (YYYY-MM-DD)"},
                     status_code=400,
                 )
-            updated = query_svc._repo.update_entry_date(entry_id, new_date, user_id=user_id)
+            updated = query_svc.update_entry_date(entry_id, new_date, user_id=user_id)
 
         # Update text if provided
         entity_extraction_job_id: str | None = None
@@ -235,8 +235,8 @@ def register_entries_routes(
                         exc_info=True,
                     )
 
-        page_count = query_svc._repo.get_page_count(entry_id)
-        uncertain_spans = query_svc._repo.get_uncertain_spans(entry_id)
+        page_count = query_svc.get_page_count(entry_id)
+        uncertain_spans = query_svc.get_uncertain_spans(entry_id)
         log.info("PATCH /api/entries/%d — updated", entry_id)
         resp = _entry_to_dict(updated, page_count, uncertain_spans)
         if entity_extraction_job_id is not None:
@@ -319,14 +319,14 @@ def register_entries_routes(
         user_id = user.user_id
         entry_id = int(request.path_params["entry_id"])
 
-        ok = query_svc._repo.verify_doubts(entry_id, user_id=user_id)
+        ok = query_svc.verify_doubts(entry_id, user_id=user_id)
         if not ok:
             log.warning("POST /api/entries/%d/verify-doubts — not found", entry_id)
             return JSONResponse({"error": f"Entry {entry_id} not found"}, status_code=404)
 
         log.info("POST /api/entries/%d/verify-doubts — doubts verified", entry_id)
-        entry = query_svc._repo.get_entry(entry_id, user_id=user_id)
-        page_count = query_svc._repo.get_page_count(entry_id)
+        entry = query_svc.get_entry(entry_id, user_id=user_id)
+        page_count = query_svc.get_page_count(entry_id)
         return JSONResponse(_entry_to_dict(entry, page_count, uncertain_spans=[]))
 
     @mcp.custom_route(
@@ -351,7 +351,7 @@ def register_entries_routes(
         user_id = user.user_id
         entry_id = int(request.path_params["entry_id"])
 
-        entry = query_svc._repo.get_entry(entry_id, user_id=user_id)
+        entry = query_svc.get_entry(entry_id, user_id=user_id)
         if entry is None:
             log.warning("GET /api/entries/%d/chunks — entry not found", entry_id)
             return JSONResponse(
@@ -362,7 +362,7 @@ def register_entries_routes(
                 status_code=404,
             )
 
-        chunks = query_svc._repo.get_chunks(entry_id)
+        chunks = query_svc.get_chunks(entry_id)
         if not chunks:
             log.info(
                 "GET /api/entries/%d/chunks — no chunks persisted (pre-backfill entry)",
@@ -421,7 +421,7 @@ def register_entries_routes(
         user_id = user.user_id
         entry_id = int(request.path_params["entry_id"])
 
-        entry = query_svc._repo.get_entry(entry_id, user_id=user_id)
+        entry = query_svc.get_entry(entry_id, user_id=user_id)
         if entry is None:
             log.warning("GET /api/entries/%d/tokens — entry not found", entry_id)
             return JSONResponse(
@@ -481,7 +481,7 @@ def register_entries_routes(
         user_id = user.user_id
         entry_id = int(request.path_params["entry_id"])
 
-        entry = query_svc._repo.get_entry(entry_id, user_id=user_id)
+        entry = query_svc.get_entry(entry_id, user_id=user_id)
         if entry is None:
             return JSONResponse({"error": f"Entry {entry_id} not found"}, status_code=404)
 

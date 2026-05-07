@@ -155,7 +155,7 @@ def register_entities_routes(
         )
         mention_payload: list[dict[str, Any]] = []
         for m in mentions:
-            entry = query_svc._repo.get_entry(m.entry_id, user_id=user_id)
+            entry = query_svc.get_entry(m.entry_id, user_id=user_id)
             entry_date = entry.entry_date if entry else None
             mention_payload.append(_mention_dict(m, entry_date))
         log.info(

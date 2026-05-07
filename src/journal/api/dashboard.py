@@ -76,7 +76,7 @@ def register_dashboard_routes(
         end_date = request.query_params.get("to")
 
         try:
-            bins = query_svc._repo.get_writing_frequency(
+            bins = query_svc.get_writing_frequency(
                 start_date=start_date,
                 end_date=end_date,
                 granularity=bin_param,
@@ -275,7 +275,7 @@ def register_dashboard_routes(
                 status_code=400,
             )
 
-        entries = query_svc._repo.get_mood_drilldown(
+        entries = query_svc.get_mood_drilldown(
             dimension=dimension,
             period_start=period_start,
             period_end=period_end,
@@ -345,7 +345,7 @@ def register_dashboard_routes(
         except ValueError:
             limit = 50
 
-        bins = query_svc._repo.get_entity_distribution(
+        bins = query_svc.get_entity_distribution(
             entity_type=entity_type,
             start_date=start_date,
             end_date=end_date,
@@ -395,7 +395,7 @@ def register_dashboard_routes(
         start_date = request.query_params.get("from")
         end_date = request.query_params.get("to")
 
-        days = query_svc._repo.get_calendar_heatmap(
+        days = query_svc.get_calendar_heatmap(
             start_date=start_date,
             end_date=end_date,
             user_id=user_id,
@@ -447,7 +447,7 @@ def register_dashboard_routes(
             limit = 8
 
         try:
-            entity_names, bins = query_svc._repo.get_entity_trends(
+            entity_names, bins = query_svc.get_entity_trends(
                 start_date=start_date,
                 end_date=end_date,
                 granularity=bin_param,
@@ -528,7 +528,7 @@ def register_dashboard_routes(
         except ValueError:
             limit = 10
 
-        overall_avg, items = query_svc._repo.get_mood_entity_correlation(
+        overall_avg, items = query_svc.get_mood_entity_correlation(
             dimension=dimension,
             start_date=start_date,
             end_date=end_date,
@@ -584,7 +584,7 @@ def register_dashboard_routes(
         except ValueError:
             bucket_size = 100
 
-        buckets, stats = query_svc._repo.get_word_count_distribution(
+        buckets, stats = query_svc.get_word_count_distribution(
             start_date=start_date,
             end_date=end_date,
             bucket_size=bucket_size,
