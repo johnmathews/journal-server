@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from journal.services.ingestion.service import _validate_public_url
+from journal.services.ingestion.url_sources import _validate_public_url
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
