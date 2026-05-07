@@ -22,6 +22,7 @@ from journal.api._legacy import _register_legacy_routes
 from journal.api._shared import _convert_heic_to_jpeg, _runtime_get
 from journal.api.health import register_health_routes
 from journal.api.jobs import register_jobs_routes
+from journal.api.notifications import register_notifications_routes
 from journal.api.search import register_search_routes
 
 if TYPE_CHECKING:
@@ -44,6 +45,7 @@ def register_api_routes(
     register_health_routes(mcp, services_getter)
     register_search_routes(mcp, services_getter)
     register_jobs_routes(mcp, services_getter)
+    register_notifications_routes(mcp, services_getter)
     _register_legacy_routes(mcp, services_getter)
 
 
