@@ -972,6 +972,23 @@ class IngestionService:
         """
         return self._repo.get_page_count(entry_id)
 
+    def update_entry_date(
+        self, entry_id: int, entry_date: str, *, user_id: int | None = None,
+    ) -> Entry | None:
+        """Update an entry's date. Write — lives on IngestionService rather
+        than QueryService so api/ routes use the service that owns mutating
+        operations (Unit 1b carryover from refactor-follow-ups item 5).
+        """
+        return self._repo.update_entry_date(entry_id, entry_date, user_id=user_id)
+
+    def verify_doubts(
+        self, entry_id: int, *, user_id: int | None = None,
+    ) -> bool:
+        """Mark all uncertain spans on an entry as verified. Write — same
+        ownership rationale as ``update_entry_date``.
+        """
+        return self._repo.verify_doubts(entry_id, user_id=user_id)
+
     def store_source_file(
         self, entry_id: int, file_path: str, file_type: str, file_hash: str
     ) -> int | None:

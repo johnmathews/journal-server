@@ -81,20 +81,11 @@ def test_count_entries_delegates(service: QueryService, repo: MagicMock) -> None
     )
 
 
-def test_update_entry_date_delegates(
-    service: QueryService, repo: MagicMock,
-) -> None:
-    repo.update_entry_date.return_value = sentinel.updated
-    out = service.update_entry_date(5, "2026-04-01", user_id=2)
-    assert out is sentinel.updated
-    repo.update_entry_date.assert_called_once_with(5, "2026-04-01", user_id=2)
-
-
-def test_verify_doubts_delegates(service: QueryService, repo: MagicMock) -> None:
-    repo.verify_doubts.return_value = True
-    out = service.verify_doubts(11, user_id=1)
-    assert out is True
-    repo.verify_doubts.assert_called_once_with(11, user_id=1)
+# `update_entry_date` and `verify_doubts` were originally added here in
+# Unit 1b to match the existing call-site service handle, but they are
+# writes — not queries — and were moved to IngestionService in
+# refactor-follow-ups item 5. Their delegate tests live alongside the
+# other write pass-throughs in test_ingestion.py::TestIngestionPublicAPI.
 
 
 # ── per-entry metadata ───────────────────────────────────────────────

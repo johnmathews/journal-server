@@ -224,14 +224,6 @@ class QueryService:
     ) -> int:
         return self._repo.count_entries(start_date, end_date, user_id=user_id)
 
-    def update_entry_date(
-        self, entry_id: int, entry_date: str, *, user_id: int | None = None,
-    ) -> Entry | None:
-        return self._repo.update_entry_date(entry_id, entry_date, user_id=user_id)
-
-    def verify_doubts(self, entry_id: int, *, user_id: int | None = None) -> bool:
-        return self._repo.verify_doubts(entry_id, user_id=user_id)
-
     def get_page_count(self, entry_id: int) -> int:
         return self._repo.get_page_count(entry_id)
 

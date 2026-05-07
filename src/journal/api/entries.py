@@ -179,7 +179,7 @@ def register_entries_routes(
                     {"error": "'entry_date' must be a valid ISO 8601 date (YYYY-MM-DD)"},
                     status_code=400,
                 )
-            updated = query_svc.update_entry_date(entry_id, new_date, user_id=user_id)
+            updated = ingestion_svc.update_entry_date(entry_id, new_date, user_id=user_id)
 
         # Update text if provided
         entity_extraction_job_id: str | None = None
@@ -315,11 +315,12 @@ def register_entries_routes(
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
 
         query_svc: QueryService = services["query"]
+        ingestion_svc: IngestionService = services["ingestion"]
         user = get_authenticated_user(request)
         user_id = user.user_id
         entry_id = int(request.path_params["entry_id"])
 
-        ok = query_svc.verify_doubts(entry_id, user_id=user_id)
+        ok = ingestion_svc.verify_doubts(entry_id, user_id=user_id)
         if not ok:
             log.warning("POST /api/entries/%d/verify-doubts — not found", entry_id)
             return JSONResponse({"error": f"Entry {entry_id} not found"}, status_code=404)

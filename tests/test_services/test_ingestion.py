@@ -1689,3 +1689,27 @@ class TestIngestionPublicAPI:
         assert row["file_path"] == "upload:notes.md"
         assert row["file_type"] == "text/markdown"
         assert row["file_hash"] == "deadbeef"
+
+    def test_update_entry_date_changes_date(self, ingestion_service):
+        entry = ingestion_service.ingest_text(
+            text="some text", date="2026-03-22", source_type="text_entry",
+        )
+        updated = ingestion_service.update_entry_date(entry.id, "2026-04-15")
+        assert updated is not None
+        assert updated.entry_date == "2026-04-15"
+
+    def test_update_entry_date_returns_none_for_missing_entry(
+        self, ingestion_service,
+    ):
+        assert ingestion_service.update_entry_date(999_999, "2026-04-15") is None
+
+    def test_verify_doubts_marks_entry_verified(self, ingestion_service):
+        entry = ingestion_service.ingest_text(
+            text="some text", date="2026-03-22", source_type="text_entry",
+        )
+        assert ingestion_service.verify_doubts(entry.id) is True
+
+    def test_verify_doubts_returns_false_for_missing_entry(
+        self, ingestion_service,
+    ):
+        assert ingestion_service.verify_doubts(999_999) is False

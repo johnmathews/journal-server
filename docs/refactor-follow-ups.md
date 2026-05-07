@@ -250,32 +250,17 @@ new journal entry.
 
 ---
 
-### 5. Unit 1b carryover — write-method ownership
+### 5. ~~Unit 1b carryover — write-method ownership~~ — RESOLVED 2026-05-07
 
-**Where:** `src/journal/services/query.py`,
-`src/journal/api/entries.py:182, 322`.
-
-**What:** `update_entry_date` and `verify_doubts` are *writes* but
-landed on `QueryService` in Unit 1b to match the existing call-site
-service handle. Semantically they belong on `IngestionService`.
-
-**Goal:** Move both to `IngestionService` and update the api/
-call sites to use `ingestion_svc.update_entry_date` /
-`ingestion_svc.verify_doubts`.
-
-**Approach:** Mechanical move. Both methods are pure delegations to
-`self._repo.<method>` with no extra logic. No tests should change
-behaviour-wise; some test mocks may need to switch from `query_svc`
-to `ingestion_svc`.
-
-**Acceptance:** `update_entry_date` and `verify_doubts` removed from
-`QueryService`; added to `IngestionService`; api/entries.py call
-sites updated; tests pass.
-
-**Session size:** 15-30 minutes. Tack onto another unit's session.
-
-**Pointer:** `journal/260507-unit-1b-remove-api-reach-ins.md` §
-"Decisions worth remembering" item 2.
+`update_entry_date` and `verify_doubts` moved from `QueryService` to
+`IngestionService`. API call sites in `api/entries.py` (PATCH date
+update; `POST /verify-doubts`) now use `ingestion_svc.<method>`. The
+two delegate-style tests were removed from
+`tests/test_services/test_query_service_public_api.py`; equivalent
+behavioural tests added under
+`tests/test_services/test_ingestion.py::TestIngestionPublicAPI`. All
+1797 unit tests pass. See
+`journal/260507-item-5-write-method-ownership.md`.
 
 ---
 
