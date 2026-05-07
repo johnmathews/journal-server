@@ -20,6 +20,7 @@ from journal.api._legacy import _register_legacy_routes
 # helpers directly from the old single-file api module. New code should import
 # from journal.api._shared instead.
 from journal.api._shared import _convert_heic_to_jpeg, _runtime_get
+from journal.api.dashboard import register_dashboard_routes
 from journal.api.health import register_health_routes
 from journal.api.jobs import register_jobs_routes
 from journal.api.notifications import register_notifications_routes
@@ -50,6 +51,7 @@ def register_api_routes(
     register_notifications_routes(mcp, services_getter)
     register_users_routes(mcp, services_getter)
     register_settings_routes(mcp, services_getter)
+    register_dashboard_routes(mcp, services_getter)
     _register_legacy_routes(mcp, services_getter)
 
 
