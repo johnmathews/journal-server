@@ -175,45 +175,34 @@ for the full breakdown of decisions per category.
 
 ---
 
-### 4. Parked oversized files (planning round needed)
+### 4. ~~Parked oversized files~~ — RESOLVED 2026-05-07
 
-The original review flagged three files over the 800-line smell
-threshold that were intentionally out of scope for the v2 plan. Each
-needs a planning round (read the file, propose a split, surface
-decisions) **before** any extraction work.
+All three files split into per-resource packages with mixin classes
+(ingestion, entitystore) or per-command modules (cli). Every
+resulting file under the 600-line soft cap except
+``cli/_seed_samples.py`` (679 lines, all literal data — no edits
+expected).
 
-**The plan's "Out of scope" section** in
-`docs/code-quality-refactor-plan.md` § "Out of scope — parked for a
-future round" remains the canonical entry point. Current sizes (verify
-before planning):
-
-| File | Lines | Notes |
+| File | Was | Now |
 |---|---:|---|
-| `services/ingestion.py` | 985 | Over the smell threshold. Already gained one method in Unit 1b (`store_source_file`, `get_page_count`). |
-| `entitystore/store.py` | 1074 | Over the smell threshold. |
-| `cli.py` | 1621 | Over the *problem* threshold (1500). CLI files are conventionally inline-style, but this is past comfort for agent context windows. |
+| ``services/ingestion.py`` | 985 | ``ingestion/`` package: service.py 375, image.py 280, voice.py 270, text.py 70, url_sources.py 206 |
+| ``entitystore/store.py`` | 1074 | ``entitystore/`` package: protocol.py 263, store.py 408, mentions.py 195, merge.py 325 |
+| ``cli.py`` | 1621 | ``cli/`` package: __init__.py 603, _seed_samples.py 679 (data), _services.py 96, entities.py 251, mood.py 108 |
 
-**Approach for each:**
+The originally-proposed free-function shape from Decision 2 was
+reversed for ingestion and entitystore once the dependency surface
+was visible — methods on those classes reach 5+ instance fields
+each, and threading those through a context dataclass would have
+duplicated the constructor signature for no real test-isolation
+gain. Mixin classes keep the methods bound to ``self`` and only
+move the file-organisation needle, which was the actual goal.
+CLI commands kept the free-function shape (they take
+``(args, config)`` and have no shared state).
 
-1. **Planning session first.** Read the whole file, propose a
-   resource-by-resource (or command-by-command for cli.py) split with
-   line-count estimates, surface decision points to the user, get
-   sign-off. Same shape as the conversation that opened Unit 1a.
-2. **Extraction sessions.** Once the split shape is agreed, execute
-   one resource per commit, full test suite after each. Same playbook
-   as Unit 1a.
-
-**Recommended order:** `services/ingestion.py` first — it has the
-clearest sub-responsibilities (image vs voice vs text vs URL paths
-each have their own ingest method) and the most existing test
-coverage to lean on. `cli.py` last — biggest, command-shaped, and
-the one most likely to need cross-cutting design decisions.
-
-**Acceptance per file:** No file in the resulting package over ~600
-lines (matching the api/ cap from Unit 1a). All tests pass.
-`docs/code-quality-refactor-plan.md`'s "Out of scope" section gets
-the corresponding bullet struck through and a pointer added to the
-new journal entry.
+See:
+- ``journal/260507-item-4-ingestion-split.md``
+- ``journal/260507-item-4-entitystore-split.md``
+- ``journal/260507-item-4-cli-split.md``
 
 ---
 
@@ -323,8 +312,19 @@ test reached into private state and should be addressed at the source.
 find src/journal -name '*.py' -exec wc -l {} + | sort -rn | head -10
 ```
 
-Anything new over ~600 lines that is not already on the exception list
-warrants attention.
+Top-10 sizes after item 4 (2026-05-07):
+
+| File | Lines | Status |
+|---|---:|---|
+| `db/repository.py` | 1603 | New: not previously flagged. Worth a planning round if it grows further. |
+| `mcp_server.py` | 1509 | New: bootstrap + route wiring; on the cusp of the problem threshold. |
+| `auth_api.py` | 840 | Unchanged from item 6's exception list. |
+| `services/entity_extraction/service.py` | 808 | Item 6 exception. |
+| `providers/transcription.py` | 778 | Within range; multiple wrapper classes. |
+| `providers/ocr.py` | 753 | Within range; dual-pass + per-provider classes. |
+| `services/notifications.py` | 744 | Grown by item 3 part E (module helpers). |
+| `api/entities.py` | 717 | Item 6 exception. |
+| `cli/_seed_samples.py` | 679 | Pure data — no edits expected. |
 
 ### Test counts
 
