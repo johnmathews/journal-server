@@ -20,6 +20,7 @@ from journal.api._legacy import _register_legacy_routes
 # helpers directly from the old single-file api module. New code should import
 # from journal.api._shared instead.
 from journal.api._shared import _convert_heic_to_jpeg, _runtime_get
+from journal.api.health import register_health_routes
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -38,6 +39,7 @@ def register_api_routes(
         services_getter: A callable that returns the services dict
             (with 'query' and 'ingestion' keys).
     """
+    register_health_routes(mcp, services_getter)
     _register_legacy_routes(mcp, services_getter)
 
 

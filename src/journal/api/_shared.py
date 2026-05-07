@@ -25,9 +25,8 @@ from typing import TYPE_CHECKING, Any
 import tiktoken
 from PIL import Image
 
-from journal.db.pricing import PricingEntry
-
 if TYPE_CHECKING:
+    from journal.db.pricing import PricingEntry
     from journal.models import Job
 
 # Cache the encoding at module load — tiktoken.get_encoding is not free
