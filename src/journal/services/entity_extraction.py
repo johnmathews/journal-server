@@ -264,13 +264,6 @@ class EntityExtractionService:
         self._llm_candidate_top_k = llm_candidate_top_k
         self._llm_candidate_threshold = llm_candidate_threshold
         self._llm_match_min_cosine = llm_match_min_cosine
-        # Per-call scratch space populated by ``extract_from_entry``
-        # before the LLM call. ``_resolve_entity`` reads these for
-        # guard B (membership) and guard D (cosine) on stage-0
-        # LLM-asserted matches. Empty in tests that drive
-        # ``_resolve_entity`` directly.
-        self._current_candidate_ids: set[int] = set()
-        self._current_candidate_embeddings: dict[int, list[float]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -423,16 +416,14 @@ class EntityExtractionService:
             "Extraction candidate set for entry %d: %d known entities",
             entry_id, len(known_entities),
         )
-        # Stash for the duration of this call so ``_resolve_entity``
-        # can use the candidate set + per-id embeddings for guard B
-        # (membership) and guard D (cosine sanity) in WU4-D. Cleared
-        # in the finally block below.
-        self._current_candidate_ids: set[int] = {
-            int(c["id"]) for c in known_entities
-        }
-        self._current_candidate_embeddings: dict[int, list[float]] = (
-            candidate_embeddings
-        )
+        # Local scratch for this extraction call — threaded explicitly
+        # through ``_resolve_entity`` and ``_try_llm_asserted_match`` so
+        # guard B (membership) and guard D (cosine) on stage-0
+        # LLM-asserted matches can read them without reaching for state
+        # on ``self``. Empty in unit tests that drive ``_resolve_entity``
+        # directly with no candidates.
+        candidate_ids: set[int] = {int(c["id"]) for c in known_entities}
+        candidate_embeddings_by_id: dict[int, list[float]] = candidate_embeddings
 
         raw = self._extractor.extract_entities(
             entry_text=entry_text,
@@ -503,6 +494,8 @@ class EntityExtractionService:
                 user_id=user_id,
                 matches_known_id=matches_known_id,
                 match_justification=match_justification,
+                candidate_ids=candidate_ids,
+                candidate_embeddings=candidate_embeddings_by_id,
             )
             touched_entity_ids.add(entity_id)
             if created:
@@ -837,6 +830,8 @@ class EntityExtractionService:
         user_id: int | None = None,
         matches_known_id: int | None = None,
         match_justification: str | None = None,
+        candidate_ids: set[int] | None = None,
+        candidate_embeddings: dict[int, list[float]] | None = None,
     ) -> tuple[
         int,
         bool,
@@ -884,6 +879,8 @@ class EntityExtractionService:
                 description=description,
                 user_id=user_id,
                 justification=match_justification,
+                candidate_ids=candidate_ids or set(),
+                candidate_embeddings=candidate_embeddings or {},
             )
             if asserted_id is not None:
                 return asserted_id, False, None, None, signature_matches, "llm_asserted"
@@ -962,6 +959,8 @@ class EntityExtractionService:
         description: str,
         user_id: int | None,
         justification: str | None,
+        candidate_ids: set[int],
+        candidate_embeddings: dict[int, list[float]],
     ) -> int | None:
         """Run the four-guard hybrid sanity check on an LLM-asserted
         match (WU4-D). Returns the entity id if accepted, ``None``
@@ -993,7 +992,7 @@ class EntityExtractionService:
             return None
 
         # Guard B: candidate-list membership.
-        if asserted_id not in self._current_candidate_ids:
+        if asserted_id not in candidate_ids:
             log.info(
                 "LLM-asserted match rejected (guard B: not in candidate "
                 "set): id=%s, canonical=%r, justification=%r",
@@ -1012,7 +1011,7 @@ class EntityExtractionService:
             return None
 
         # Guard D: cosine sanity.
-        target_vec = self._current_candidate_embeddings.get(asserted_id)
+        target_vec = candidate_embeddings.get(asserted_id)
         if target_vec is None:
             # No embedding for the candidate — fall back to the store
             # to avoid blanket-failing legitimate matches.
