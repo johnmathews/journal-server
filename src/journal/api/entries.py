@@ -1,11 +1,20 @@
-"""Legacy single-file home for routes still awaiting per-resource extraction.
+"""Entry routes — list, detail, verify-doubts, chunks, tokens, entry/entities.
 
-Each unit of the api.py split moves a resource group out of this module
-into its own module under `journal/api/`. When this file is empty it
-will be deleted.
+Six routes under ``/api/entries/...``:
 
-The function defined here is private to the package — `__init__.py`
-calls it from `register_api_routes`.
+- ``GET    /api/entries`` — paginated list with date filters.
+- ``GET    /api/entries/{id}`` — entry detail with uncertain spans.
+- ``PATCH  /api/entries/{id}`` — update final_text and/or entry_date.
+- ``DELETE /api/entries/{id}`` — soft-blocked while entry has active jobs.
+- ``POST   /api/entries/{id}/verify-doubts`` — mark all OCR doubts verified.
+- ``GET    /api/entries/{id}/chunks`` — persisted chunks with offsets.
+- ``GET    /api/entries/{id}/tokens`` — on-demand tiktoken cl100k tokens.
+- ``GET    /api/entries/{id}/entities`` — entities mentioned in this entry
+  (cross-resource handler placed here because the URL prefix root is
+  ``entries``).
+
+Entry *creation* lives in ``ingestion.py`` per the responsibility-override
+routing rule (see ``_shared.py`` / ``ingestion.py`` docstrings).
 """
 
 from __future__ import annotations
@@ -41,11 +50,11 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def _register_legacy_routes(
+def register_entries_routes(
     mcp: FastMCP,
     services_getter: Callable[[], dict | None],
 ) -> None:
-    """Register the routes that have not yet been extracted to per-resource modules."""
+    """Register the ``/api/entries/...`` read/CRUD routes."""
 
     @mcp.custom_route("/api/entries", methods=["GET"], name="api_list_entries")
     async def list_entries(request: Request) -> JSONResponse:
