@@ -1,9 +1,16 @@
-"""REST API endpoints for the journal webapp."""
+"""Legacy single-file home for routes still awaiting per-resource extraction.
+
+Each unit of the api.py split moves a resource group out of this module
+into its own module under `journal/api/`. When this file is empty it
+will be deleted.
+
+The function defined here is private to the package — `__init__.py`
+calls it from `register_api_routes`.
+"""
 
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import logging
 import sqlite3
@@ -11,26 +18,33 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-import tiktoken
-from PIL import Image
 from starlette.responses import JSONResponse
 
+from journal.api._shared import (
+    _TOKEN_ENCODING_NAME,
+    _TOKEN_MODEL_HINT,
+    _chunk_match_dict,
+    _convert_heic_to_jpeg,
+    _entity_detail,
+    _entity_summary,
+    _entry_summary,
+    _entry_to_dict,
+    _job_to_dict,
+    _mention_dict,
+    _pricing_to_dict,
+    _relationship_dict,
+    _runtime_get,
+    _search_result_dict,
+    _token_encoder,
+)
 from journal.auth import get_authenticated_user
-from journal.db.pricing import PricingEntry, get_all_pricing, update_pricing
+from journal.db.pricing import get_all_pricing, update_pricing
 from journal.services.liveness import (
     check_api_key,
     check_chromadb,
     check_sqlite,
     overall_status,
 )
-
-# Cache the encoding at module load — tiktoken.get_encoding is not free
-# and the tokens endpoint may be called repeatedly as the user switches
-# overlays. cl100k_base matches text-embedding-3-large, which is the
-# embedding model the chunker's token counts are computed against.
-_TOKEN_ENCODING_NAME = "cl100k_base"
-_TOKEN_MODEL_HINT = "text-embedding-3-large"
-_token_encoder = tiktoken.get_encoding(_TOKEN_ENCODING_NAME)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -40,7 +54,6 @@ if TYPE_CHECKING:
 
     from journal.db.jobs_repository import SQLiteJobRepository
     from journal.entitystore.store import EntityStore
-    from journal.models import Job
     from journal.services.ingestion import IngestionService
     from journal.services.jobs import JobRunner
     from journal.services.query import QueryService
@@ -48,224 +61,11 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def _convert_heic_to_jpeg(data: bytes, quality: int = 92) -> tuple[bytes, str]:
-    """Convert HEIC/HEIF image bytes to JPEG. Returns (jpeg_bytes, 'image/jpeg')."""
-    import pillow_heif  # noqa: F811 — register HEIF opener with Pillow
-
-    pillow_heif.register_heif_opener()
-    img = Image.open(io.BytesIO(data))
-    buf = io.BytesIO()
-    img.convert("RGB").save(buf, format="JPEG", quality=quality)
-    return buf.getvalue(), "image/jpeg"
-
-
-def _runtime_get(services: dict, key: str) -> Any:
-    """Read a runtime setting, falling back to the frozen Config."""
-    runtime = services.get("runtime_settings")
-    if runtime is not None:
-        try:
-            return runtime.get(key)
-        except KeyError:
-            pass
-    config = services.get("config")
-    return getattr(config, key, None) if config else None
-
-
-def _pricing_to_dict(entry: PricingEntry) -> dict[str, object]:
-    """Convert a PricingEntry to a JSON-serializable dict."""
-    return {
-        "model": entry.model,
-        "category": entry.category,
-        "input_cost_per_mtok": entry.input_cost_per_mtok,
-        "output_cost_per_mtok": entry.output_cost_per_mtok,
-        "cost_per_minute": entry.cost_per_minute,
-        "last_verified": entry.last_verified,
-    }
-
-
-def _entry_to_dict(
-    entry: Any,
-    page_count: int = 0,
-    uncertain_spans: list[tuple[int, int]] | None = None,
-) -> dict[str, Any]:
-    """Convert an Entry to a JSON-serializable dict.
-
-    `uncertain_spans` is a list of `(char_start, char_end)` pairs in
-    ``entries.raw_text`` coordinates, flagged by the OCR model at
-    ingestion time. They power the webapp's Review toggle. Callers
-    that don't have the span list (or don't need it — e.g. the list
-    endpoint) omit the argument; the serializer then emits an empty
-    array so the field is always present in the response shape.
-
-    When ``entry.doubts_verified`` is true, spans are suppressed —
-    the user has confirmed all doubts are correct.
-    """
-    verified = getattr(entry, "doubts_verified", False)
-    return {
-        "id": entry.id,
-        "entry_date": entry.entry_date,
-        "source_type": entry.source_type,
-        "raw_text": entry.raw_text,
-        "final_text": entry.final_text,
-        "word_count": entry.word_count,
-        "chunk_count": entry.chunk_count,
-        "page_count": page_count,
-        "language": entry.language,
-        "created_at": entry.created_at,
-        "updated_at": entry.updated_at,
-        "doubts_verified": verified,
-        "uncertain_spans": []
-        if verified
-        else [{"char_start": start, "char_end": end} for start, end in (uncertain_spans or [])],
-    }
-
-
-def _entity_summary(
-    entity: Any,
-    mention_count: int = 0,
-    last_seen: str = "",
-    quotes: list[str] | None = None,
-) -> dict[str, Any]:
-    """Convert an Entity to a JSON-serialisable summary dict."""
-    d: dict[str, Any] = {
-        "id": entity.id,
-        "canonical_name": entity.canonical_name,
-        "entity_type": entity.entity_type,
-        "aliases": list(entity.aliases),
-        "mention_count": mention_count,
-        "first_seen": entity.first_seen,
-        "last_seen": last_seen,
-        "is_quarantined": bool(getattr(entity, "is_quarantined", False)),
-        "quarantine_reason": getattr(entity, "quarantine_reason", "") or "",
-        "quarantined_at": getattr(entity, "quarantined_at", "") or "",
-    }
-    if quotes is not None:
-        d["quotes"] = quotes
-    return d
-
-
-def _entity_detail(entity: Any) -> dict[str, Any]:
-    """Convert an Entity to a full JSON-serialisable dict."""
-    return {
-        "id": entity.id,
-        "canonical_name": entity.canonical_name,
-        "entity_type": entity.entity_type,
-        "aliases": list(entity.aliases),
-        "description": entity.description,
-        "first_seen": entity.first_seen,
-        "created_at": entity.created_at,
-        "updated_at": entity.updated_at,
-        "is_quarantined": bool(getattr(entity, "is_quarantined", False)),
-        "quarantine_reason": getattr(entity, "quarantine_reason", "") or "",
-        "quarantined_at": getattr(entity, "quarantined_at", "") or "",
-    }
-
-
-def _mention_dict(mention: Any, entry_date: str | None = None) -> dict[str, Any]:
-    return {
-        "id": mention.id,
-        "entity_id": mention.entity_id,
-        "entry_id": mention.entry_id,
-        "entry_date": entry_date,
-        "quote": mention.quote,
-        "confidence": mention.confidence,
-        "extraction_run_id": mention.extraction_run_id,
-        "created_at": mention.created_at,
-    }
-
-
-def _relationship_dict(rel: Any) -> dict[str, Any]:
-    return {
-        "id": rel.id,
-        "subject_entity_id": rel.subject_entity_id,
-        "predicate": rel.predicate,
-        "object_entity_id": rel.object_entity_id,
-        "quote": rel.quote,
-        "entry_id": rel.entry_id,
-        "confidence": rel.confidence,
-        "extraction_run_id": rel.extraction_run_id,
-        "created_at": rel.created_at,
-    }
-
-
-def _job_to_dict(job: Job) -> dict[str, Any]:
-    """Convert a Job dataclass to a JSON-serialisable dict.
-
-    Mirrors the canonical serialised shape the webapp consumes for
-    jobs — every field is always present, even when null, so the
-    client can rely on a fixed schema.
-    """
-    return {
-        "id": job.id,
-        "type": job.type,
-        "status": job.status,
-        "params": job.params,
-        "progress_current": job.progress_current,
-        "progress_total": job.progress_total,
-        "result": job.result,
-        "error_message": job.error_message,
-        "status_detail": job.status_detail,
-        "created_at": job.created_at,
-        "started_at": job.started_at,
-        "finished_at": job.finished_at,
-    }
-
-
-def _entry_summary(
-    entry: Any,
-    page_count: int = 0,
-    uncertain_span_count: int = 0,
-    entity_mention_count: int = 0,
-) -> dict[str, Any]:
-    """Convert an Entry to a summary dict (no text fields)."""
-    return {
-        "id": entry.id,
-        "entry_date": entry.entry_date,
-        "source_type": entry.source_type,
-        "word_count": entry.word_count,
-        "chunk_count": entry.chunk_count,
-        "page_count": page_count,
-        "uncertain_span_count": uncertain_span_count,
-        "doubts_verified": getattr(entry, "doubts_verified", False),
-        "created_at": entry.created_at,
-        "language": getattr(entry, "language", "en"),
-        "updated_at": getattr(entry, "updated_at", ""),
-        "entity_mention_count": entity_mention_count,
-    }
-
-
-def _chunk_match_dict(cm: Any) -> dict[str, Any]:
-    return {
-        "text": cm.text,
-        "score": cm.score,
-        "chunk_index": cm.chunk_index,
-        "char_start": cm.char_start,
-        "char_end": cm.char_end,
-    }
-
-
-def _search_result_dict(result: Any) -> dict[str, Any]:
-    return {
-        "entry_id": result.entry_id,
-        "entry_date": result.entry_date,
-        "text": result.text,
-        "score": result.score,
-        "snippet": result.snippet,
-        "matching_chunks": [_chunk_match_dict(c) for c in result.matching_chunks],
-    }
-
-
-def register_api_routes(
+def _register_legacy_routes(
     mcp: FastMCP,
     services_getter: Callable[[], dict | None],
 ) -> None:
-    """Register REST API routes on the MCP server.
-
-    Args:
-        mcp: The FastMCP instance.
-        services_getter: A callable that returns the services dict
-            (with 'query' and 'ingestion' keys).
-    """
+    """Register the routes that have not yet been extracted to per-resource modules."""
 
     @mcp.custom_route("/api/entries", methods=["GET"], name="api_list_entries")
     async def list_entries(request: Request) -> JSONResponse:
@@ -1857,9 +1657,6 @@ def register_api_routes(
     # Ingestion routes (entry creation)
     # -----------------------------------------------------------------
 
-    def _require_services() -> dict | None:
-        svcs = services_getter()
-        return svcs
 
     @mcp.custom_route(
         "/api/entries/ingest/text",
@@ -1876,7 +1673,7 @@ def register_api_routes(
 
         Returns 201 with the created entry and an optional mood_job_id.
         """
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
 
@@ -1976,7 +1773,7 @@ def register_api_routes(
         """
         from journal.api_utils import parse_multipart_request
 
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
 
@@ -2111,7 +1908,7 @@ def register_api_routes(
         """
         from journal.api_utils import parse_multipart_request
 
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
@@ -2213,7 +2010,7 @@ def register_api_routes(
         """
         from journal.api_utils import parse_multipart_request
 
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
@@ -2322,7 +2119,7 @@ def register_api_routes(
         poll ``GET /api/jobs/{job_id}`` to observe progress and
         result.
         """
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
@@ -2363,7 +2160,7 @@ def register_api_routes(
         or bad types return 400. Returns 202 with
         ``{"job_id", "status"}``.
         """
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
@@ -2398,7 +2195,7 @@ def register_api_routes(
     )
     async def list_jobs(request: Request) -> JSONResponse:
         """List jobs with optional filters, ordered newest first."""
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
@@ -2449,7 +2246,7 @@ def register_api_routes(
         404 if the job id is unknown. Otherwise returns the full
         serialised job dict (``_job_to_dict`` shape).
         """
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
@@ -2471,7 +2268,7 @@ def register_api_routes(
 
     @mcp.custom_route("/api/entities", methods=["GET"], name="api_list_entities")
     async def list_entities_route(request: Request) -> JSONResponse:
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
@@ -2516,7 +2313,7 @@ def register_api_routes(
         name="api_entity_detail",
     )
     async def entity_detail(request: Request) -> JSONResponse:
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
@@ -2537,7 +2334,7 @@ def register_api_routes(
         name="api_entity_mentions",
     )
     async def entity_mentions(request: Request) -> JSONResponse:
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
@@ -2589,7 +2386,7 @@ def register_api_routes(
         name="api_entity_relationships",
     )
     async def entity_relationships(request: Request) -> JSONResponse:
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
@@ -2627,7 +2424,7 @@ def register_api_routes(
         name="api_update_entity",
     )
     async def update_entity(request: Request) -> JSONResponse:
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
@@ -2716,7 +2513,7 @@ def register_api_routes(
         name="api_delete_entity",
     )
     async def delete_entity_route(request: Request) -> JSONResponse:
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
@@ -2738,7 +2535,7 @@ def register_api_routes(
         name="api_merge_entities",
     )
     async def merge_entities_route(request: Request) -> JSONResponse:
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
@@ -2801,7 +2598,7 @@ def register_api_routes(
         name="api_lookup_alias",
     )
     async def lookup_alias(request: Request) -> JSONResponse:
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
@@ -2831,7 +2628,7 @@ def register_api_routes(
         name="api_add_entity_alias",
     )
     async def add_entity_alias(request: Request) -> JSONResponse:
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
@@ -2879,7 +2676,7 @@ def register_api_routes(
         name="api_delete_entity_alias",
     )
     async def delete_entity_alias(request: Request) -> JSONResponse:
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
@@ -2912,7 +2709,7 @@ def register_api_routes(
         name="api_list_quarantined_entities",
     )
     async def list_quarantined_entities_route(request: Request) -> JSONResponse:
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
@@ -2932,7 +2729,7 @@ def register_api_routes(
         name="api_quarantine_entity",
     )
     async def quarantine_entity_route(request: Request) -> JSONResponse:
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
@@ -2981,7 +2778,7 @@ def register_api_routes(
         name="api_release_quarantine_entity",
     )
     async def release_quarantine_route(request: Request) -> JSONResponse:
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
@@ -3020,7 +2817,7 @@ def register_api_routes(
     async def list_merge_candidates_route(
         request: Request,
     ) -> JSONResponse:
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
@@ -3061,7 +2858,7 @@ def register_api_routes(
     async def resolve_merge_candidate_route(
         request: Request,
     ) -> JSONResponse:
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
@@ -3108,7 +2905,7 @@ def register_api_routes(
         name="api_entity_merge_history",
     )
     async def entity_merge_history(request: Request) -> JSONResponse:
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
@@ -3136,7 +2933,7 @@ def register_api_routes(
         name="api_entry_entities",
     )
     async def entry_entities(request: Request) -> JSONResponse:
-        services = _require_services()
+        services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
