@@ -14,7 +14,8 @@ from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
 from journal.models import ExtractionResult
 from journal.services.backfill import MoodBackfillResult
-from journal.services.jobs import JobRunner, _friendly_error, _is_transient
+from journal.services.jobs import JobRunner
+from journal.services.jobs.errors import friendly_error, is_transient
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -286,7 +287,7 @@ class TestFriendlyError:
             "503 UNAVAILABLE. {'error': {'message': 'This model is currently "
             "experiencing high demand.'}}"
         )
-        msg = _friendly_error(exc)
+        msg = friendly_error(exc)
         assert msg == "OCR service overloaded"
 
     def test_google_429_rate_limit(self) -> None:
@@ -294,7 +295,7 @@ class TestFriendlyError:
             "429 RESOURCE_EXHAUSTED. {'error': {'message': 'You exceeded your "
             "current quota'}}"
         )
-        msg = _friendly_error(exc)
+        msg = friendly_error(exc)
         assert msg == "Google API rate limit exceeded"
 
     def test_google_404_model_not_found(self) -> None:
@@ -302,12 +303,12 @@ class TestFriendlyError:
             "404 NOT_FOUND. {'error': {'message': 'models/gemini-99 "
             "is not found for API version v1beta'}}"
         )
-        msg = _friendly_error(exc)
+        msg = friendly_error(exc)
         assert "OCR_MODEL" in msg
 
     def test_unknown_error_passes_through(self) -> None:
         exc = Exception("something completely unexpected")
-        assert _friendly_error(exc) == "something completely unexpected"
+        assert friendly_error(exc) == "something completely unexpected"
 
 
 class TestIsTransient:
@@ -315,19 +316,19 @@ class TestIsTransient:
 
     def test_google_503(self) -> None:
         exc = Exception("503 UNAVAILABLE. high demand")
-        assert _is_transient(exc) is True
+        assert is_transient(exc) is True
 
     def test_google_429(self) -> None:
         exc = Exception("429 RESOURCE_EXHAUSTED. quota exceeded")
-        assert _is_transient(exc) is True
+        assert is_transient(exc) is True
 
     def test_not_transient(self) -> None:
         exc = Exception("404 NOT_FOUND. model not found")
-        assert _is_transient(exc) is False
+        assert is_transient(exc) is False
 
     def test_unknown_not_transient(self) -> None:
         exc = Exception("something unexpected")
-        assert _is_transient(exc) is False
+        assert is_transient(exc) is False
 
 
 # Happy path — entity extraction
@@ -1613,11 +1614,11 @@ class TestEntityReembed:
         # The public submit signature only accepts entity_id + user_id;
         # there is no path for stray params, so we exercise the
         # validation directly via the underlying allowed-keys map.
-        from journal.services.jobs import _ENTITY_REEMBED_KEYS, _validate_params
+        from journal.services.jobs.validation import ENTITY_REEMBED_KEYS, validate_params
         with pytest.raises(ValueError, match="Unknown params"):
-            _validate_params(
+            validate_params(
                 {"entity_id": 1, "user_id": 1, "extra": "bad"},
-                _ENTITY_REEMBED_KEYS,
+                ENTITY_REEMBED_KEYS,
                 job_type="entity_reembed",
             )
 

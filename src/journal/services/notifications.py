@@ -19,7 +19,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from journal.services.jobs import _is_transient
+from journal.services.jobs.errors import is_transient
 
 if TYPE_CHECKING:
     from journal.db.user_repository import SQLiteUserRepository
@@ -308,7 +308,7 @@ class PushoverNotificationService:
                 return
 
             label = _JOB_TYPE_LABELS.get(job_type, job_type)
-            is_external = _is_transient(exc) if exc is not None else False
+            is_external = is_transient(exc) if exc is not None else False
             cause = "external API issue" if is_external else "transient error"
             delay_min = delay_seconds // 60
 
@@ -345,7 +345,7 @@ class PushoverNotificationService:
                 return
 
             label = _JOB_TYPE_LABELS.get(job_type, job_type)
-            is_external = _is_transient(exc) if exc is not None else False
+            is_external = is_transient(exc) if exc is not None else False
             cause_tag = "External API issue" if is_external else "Internal error"
 
             title = f"{label} failed"
@@ -415,7 +415,7 @@ class PushoverNotificationService:
         """
         try:
             label = _JOB_TYPE_LABELS.get(job_type, job_type)
-            is_external = _is_transient(exc) if exc is not None else False
+            is_external = is_transient(exc) if exc is not None else False
             cause_tag = "External API issue" if is_external else "Internal error"
 
             title = f"[Admin] {label} failed for user {job_owner_user_id}"

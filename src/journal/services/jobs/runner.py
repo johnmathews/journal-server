@@ -49,6 +49,24 @@ if TYPE_CHECKING:
     from journal.services.mood_scoring import MoodScoringService
     from journal.services.notifications import PushoverNotificationService
 
+from journal.services.jobs.errors import (
+    RETRY_DELAYS_SECONDS,
+    friendly_error,
+    is_transient,
+)
+from journal.services.jobs.validation import (
+    ENTITY_EXTRACTION_KEYS,
+    ENTITY_REEMBED_KEYS,
+    INGEST_AUDIO_KEYS,
+    INGEST_IMAGES_KEYS,
+    MOOD_BACKFILL_KEYS,
+    MOOD_BACKFILL_MODES,
+    MOOD_SCORE_ENTRY_KEYS,
+    REPROCESS_EMBEDDINGS_KEYS,
+    SAVE_ENTRY_PIPELINE_KEYS,
+    validate_params,
+)
+
 log = logging.getLogger(__name__)
 
 
@@ -70,149 +88,6 @@ class EntityReembedder(Protocol):
     def reembed_entity_for_description(
         self, entity_id: int, *, user_id: int,
     ) -> dict[str, object]: ...
-
-
-def _friendly_error(exc: Exception) -> str:
-    """Map known external-service exceptions to user-friendly messages.
-
-    The raw exception is already logged by the caller; this produces a
-    short message suitable for display in the webapp UI.
-    """
-    msg = str(exc)
-    # Google Gemini API errors
-    if "503" in msg and ("UNAVAILABLE" in msg or "high demand" in msg):
-        return "OCR service overloaded"
-    if "429" in msg and "RESOURCE_EXHAUSTED" in msg:
-        return "Google API rate limit exceeded"
-    if "404" in msg and "is not found for API version" in msg:
-        return (
-            "The configured OCR model was not found. "
-            "Check the OCR_MODEL setting."
-        )
-    # OpenAI API errors
-    if "openai" in msg.lower() and ("rate_limit" in msg.lower() or "429" in msg):
-        return "OpenAI rate limit exceeded"
-    # Anthropic API errors
-    if "overloaded" in msg.lower() and ("anthropic" in msg.lower() or "529" in msg):
-        return "Anthropic API overloaded"
-    # Fall through — return the raw message for unexpected errors
-    return msg
-
-
-def _is_transient(exc: Exception) -> bool:
-    """Return True if the exception looks like a temporary API issue worth retrying."""
-    msg = str(exc)
-    if "503" in msg and ("UNAVAILABLE" in msg or "high demand" in msg):
-        return True
-    if "429" in msg and ("RESOURCE_EXHAUSTED" in msg or "rate_limit" in msg.lower()):
-        return True
-    return "overloaded" in msg.lower() and ("529" in msg or "anthropic" in msg.lower())
-
-
-# Retry schedule: 3 min, 6 min, 12 min (exponential backoff)
-_RETRY_DELAYS_SECONDS = [180, 360, 720, 1440, 2880]
-
-
-# --------------------------------------------------------------------
-# Param validation
-# --------------------------------------------------------------------
-
-_ENTITY_EXTRACTION_KEYS: dict[str, type | tuple[type, ...]] = {
-    "entry_id": int,
-    "start_date": str,
-    "end_date": str,
-    "stale_only": bool,
-    "user_id": int,
-    "parent_job_id": str,
-}
-
-_MOOD_BACKFILL_KEYS: dict[str, type | tuple[type, ...]] = {
-    "mode": str,
-    "start_date": str,
-    "end_date": str,
-    "user_id": int,
-}
-
-_MOOD_BACKFILL_MODES = frozenset({"stale-only", "force"})
-
-_INGEST_IMAGES_KEYS: dict[str, type | tuple[type, ...]] = {
-    "entry_date": str,
-    "user_id": int,
-}
-
-_MOOD_SCORE_ENTRY_KEYS: dict[str, type | tuple[type, ...]] = {
-    "entry_id": int,
-    "user_id": int,
-    "parent_job_id": str,
-}
-
-_REPROCESS_EMBEDDINGS_KEYS: dict[str, type | tuple[type, ...]] = {
-    "entry_id": int,
-    "user_id": int,
-    "parent_job_id": str,
-}
-
-_SAVE_ENTRY_PIPELINE_KEYS: dict[str, type | tuple[type, ...]] = {
-    "entry_id": int,
-    "user_id": int,
-    "notify_strategy": str,
-}
-
-_INGEST_AUDIO_KEYS: dict[str, type | tuple[type, ...]] = {
-    "entry_date": str,
-    "source_type": str,
-    "user_id": int,
-}
-
-_ENTITY_REEMBED_KEYS: dict[str, type | tuple[type, ...]] = {
-    "entity_id": int,
-    "user_id": int,
-}
-
-
-def _validate_params(
-    params: dict[str, Any],
-    allowed: dict[str, type | tuple[type, ...]],
-    *,
-    job_type: str,
-) -> None:
-    """Reject params with unknown keys or wrong value types.
-
-    Booleans are a subclass of int in Python, so `stale_only=True`
-    would incorrectly satisfy `int` typing. We handle that by
-    checking bool BEFORE the generic isinstance when int is allowed
-    but bool is not, and vice versa.
-    """
-    unknown = set(params) - set(allowed)
-    if unknown:
-        raise ValueError(
-            f"Unknown params for {job_type}: {sorted(unknown)}"
-        )
-    for key, value in params.items():
-        expected = allowed[key]
-        # Python quirk: bool is a subclass of int. Disallow the
-        # cross-type acceptance that isinstance would otherwise
-        # silently allow.
-        if expected is int and isinstance(value, bool):
-            raise ValueError(
-                f"Param {key!r} for {job_type} must be int, "
-                f"got bool ({value!r})"
-            )
-        if expected is bool and not isinstance(value, bool):
-            raise ValueError(
-                f"Param {key!r} for {job_type} must be bool, "
-                f"got {type(value).__name__} ({value!r})"
-            )
-        if not isinstance(value, expected):  # type: ignore[arg-type]
-            raise ValueError(
-                f"Param {key!r} for {job_type} must be "
-                f"{expected}, got {type(value).__name__} ({value!r})"
-            )
-
-
-# --------------------------------------------------------------------
-# JobRunner
-# --------------------------------------------------------------------
 
 
 class JobRunner:
@@ -283,8 +158,8 @@ class JobRunner:
         run_params = {**params}
         if user_id is not None:
             run_params["user_id"] = user_id
-        _validate_params(
-            run_params, _ENTITY_EXTRACTION_KEYS, job_type="entity_extraction"
+        validate_params(
+            run_params, ENTITY_EXTRACTION_KEYS, job_type="entity_extraction"
         )
         job = self._jobs.create("entity_extraction", run_params, user_id=user_id)
         self._executor.submit(self._run_entity_extraction, job.id, run_params)
@@ -303,17 +178,17 @@ class JobRunner:
         run_params = {**params}
         if user_id is not None:
             run_params["user_id"] = user_id
-        _validate_params(
-            run_params, _MOOD_BACKFILL_KEYS, job_type="mood_backfill"
+        validate_params(
+            run_params, MOOD_BACKFILL_KEYS, job_type="mood_backfill"
         )
         if "mode" not in run_params:
             raise ValueError(
                 "Param 'mode' is required for mood_backfill"
             )
-        if run_params["mode"] not in _MOOD_BACKFILL_MODES:
+        if run_params["mode"] not in MOOD_BACKFILL_MODES:
             raise ValueError(
                 f"Param 'mode' must be one of "
-                f"{sorted(_MOOD_BACKFILL_MODES)}, got {run_params['mode']!r}"
+                f"{sorted(MOOD_BACKFILL_MODES)}, got {run_params['mode']!r}"
             )
         job = self._jobs.create("mood_backfill", run_params, user_id=user_id)
         self._executor.submit(self._run_mood_backfill, job.id, run_params)
@@ -337,7 +212,7 @@ class JobRunner:
         params: dict[str, Any] = {"entry_date": entry_date}
         if user_id is not None:
             params["user_id"] = user_id
-        _validate_params(params, _INGEST_IMAGES_KEYS, job_type="ingest_images")
+        validate_params(params, INGEST_IMAGES_KEYS, job_type="ingest_images")
         job = self._jobs.create(
             "ingest_images", {**params, "page_count": len(images)}, user_id=user_id,
         )
@@ -360,7 +235,7 @@ class JobRunner:
             params["user_id"] = user_id
         if parent_job_id is not None:
             params["parent_job_id"] = parent_job_id
-        _validate_params(params, _MOOD_SCORE_ENTRY_KEYS, job_type="mood_score_entry")
+        validate_params(params, MOOD_SCORE_ENTRY_KEYS, job_type="mood_score_entry")
         job = self._jobs.create("mood_score_entry", params, user_id=user_id)
         self._executor.submit(self._run_mood_score_entry, job.id, params)
         return job
@@ -385,7 +260,7 @@ class JobRunner:
             params["user_id"] = user_id
         if parent_job_id is not None:
             params["parent_job_id"] = parent_job_id
-        _validate_params(params, _REPROCESS_EMBEDDINGS_KEYS, job_type="reprocess_embeddings")
+        validate_params(params, REPROCESS_EMBEDDINGS_KEYS, job_type="reprocess_embeddings")
         job = self._jobs.create("reprocess_embeddings", params, user_id=user_id)
         self._executor.submit(self._run_reprocess_embeddings, job.id, params)
         return job
@@ -434,8 +309,8 @@ class JobRunner:
         }
         if user_id is not None:
             params["user_id"] = user_id
-        _validate_params(
-            params, _SAVE_ENTRY_PIPELINE_KEYS, job_type="save_entry_pipeline",
+        validate_params(
+            params, SAVE_ENTRY_PIPELINE_KEYS, job_type="save_entry_pipeline",
         )
 
         parent = self._jobs.create(
@@ -500,7 +375,7 @@ class JobRunner:
             "entity_id": entity_id,
             "user_id": user_id,
         }
-        _validate_params(params, _ENTITY_REEMBED_KEYS, job_type="entity_reembed")
+        validate_params(params, ENTITY_REEMBED_KEYS, job_type="entity_reembed")
         job = self._jobs.create("entity_reembed", params, user_id=user_id)
         self._executor.submit(self._run_entity_reembed, job.id, params)
         return job
@@ -525,7 +400,7 @@ class JobRunner:
         params: dict[str, Any] = {"entry_date": entry_date, "source_type": source_type}
         if user_id is not None:
             params["user_id"] = user_id
-        _validate_params(params, _INGEST_AUDIO_KEYS, job_type="ingest_audio")
+        validate_params(params, INGEST_AUDIO_KEYS, job_type="ingest_audio")
         job = self._jobs.create(
             "ingest_audio", {**params, "recording_count": len(recordings)},
             user_id=user_id,
@@ -776,7 +651,7 @@ class JobRunner:
                 "Entity extraction job %s failed", job_id
             )
             try:
-                friendly = _friendly_error(exc)
+                friendly = friendly_error(exc)
                 self._jobs.mark_failed(job_id, friendly)
                 parent_job_id = params.get("parent_job_id")
                 # Compressed-all pipelines (edit save) defer the
@@ -821,7 +696,7 @@ class JobRunner:
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Entity reembed job %s failed", job_id)
             try:
-                friendly = _friendly_error(exc)
+                friendly = friendly_error(exc)
                 self._jobs.mark_failed(job_id, friendly)
                 self._notify_failed(
                     params.get("user_id"), "entity_reembed", friendly, exc,
@@ -864,7 +739,7 @@ class JobRunner:
                 self._jobs.update_progress(job_id, current, total)
 
             last_exc: Exception | None = None
-            for attempt in range(len(_RETRY_DELAYS_SECONDS) + 1):
+            for attempt in range(len(RETRY_DELAYS_SECONDS) + 1):
                 try:
                     if attempt > 0:
                         self._jobs.update_status_detail(job_id, None)
@@ -891,13 +766,13 @@ class JobRunner:
                     break  # success
                 except Exception as exc:  # noqa: BLE001
                     last_exc = exc
-                    if not _is_transient(exc) or attempt >= len(_RETRY_DELAYS_SECONDS):
+                    if not is_transient(exc) or attempt >= len(RETRY_DELAYS_SECONDS):
                         break  # non-transient or out of retries
-                    delay = _RETRY_DELAYS_SECONDS[attempt]
+                    delay = RETRY_DELAYS_SECONDS[attempt]
                     delay_minutes = delay // 60
                     retry_at_local = datetime.now().astimezone() + timedelta(seconds=delay)
                     retry_time = retry_at_local.strftime("%H:%M")
-                    friendly = _friendly_error(exc)
+                    friendly = friendly_error(exc)
                     detail = f"{friendly}, retrying in {delay_minutes} minutes at {retry_time}"
                     log.warning(
                         "Image ingestion job %s — transient error, "
@@ -947,8 +822,8 @@ class JobRunner:
             # Clean up any remaining image data
             self._pending_images.pop(job_id, None)
             try:
-                friendly = _friendly_error(exc)
-                if _is_transient(exc):
+                friendly = friendly_error(exc)
+                if is_transient(exc):
                     friendly += " — please try again later"
                 self._jobs.mark_failed(job_id, friendly)
                 self._notify_failed(
@@ -1053,7 +928,7 @@ class JobRunner:
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Mood score entry job %s failed", job_id)
             try:
-                friendly = _friendly_error(exc)
+                friendly = friendly_error(exc)
                 self._jobs.mark_failed(job_id, friendly)
                 parent_job_id = params.get("parent_job_id")
                 if self._get_notify_strategy(parent_job_id) != "compressed_all":
@@ -1109,7 +984,7 @@ class JobRunner:
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Reprocess embeddings job %s failed", job_id)
             try:
-                friendly = _friendly_error(exc)
+                friendly = friendly_error(exc)
                 self._jobs.mark_failed(job_id, friendly)
                 if self._get_notify_strategy(parent_job_id) != "compressed_all":
                     self._notify_failed(
@@ -1159,7 +1034,7 @@ class JobRunner:
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Mood backfill job %s failed", job_id)
             try:
-                friendly = _friendly_error(exc)
+                friendly = friendly_error(exc)
                 self._jobs.mark_failed(job_id, friendly)
                 self._notify_failed(
                     params.get("user_id"), "mood_backfill", friendly, exc,
@@ -1200,7 +1075,7 @@ class JobRunner:
                 self._jobs.update_progress(job_id, current, total)
 
             last_exc: Exception | None = None
-            for attempt in range(len(_RETRY_DELAYS_SECONDS) + 1):
+            for attempt in range(len(RETRY_DELAYS_SECONDS) + 1):
                 try:
                     if attempt > 0:
                         self._jobs.update_status_detail(job_id, None)
@@ -1221,13 +1096,13 @@ class JobRunner:
                     break  # success
                 except Exception as exc:  # noqa: BLE001
                     last_exc = exc
-                    if not _is_transient(exc) or attempt >= len(_RETRY_DELAYS_SECONDS):
+                    if not is_transient(exc) or attempt >= len(RETRY_DELAYS_SECONDS):
                         break  # non-transient or out of retries
-                    delay = _RETRY_DELAYS_SECONDS[attempt]
+                    delay = RETRY_DELAYS_SECONDS[attempt]
                     delay_minutes = delay // 60
                     retry_at_local = datetime.now().astimezone() + timedelta(seconds=delay)
                     retry_time = retry_at_local.strftime("%H:%M")
-                    friendly = _friendly_error(exc)
+                    friendly = friendly_error(exc)
                     detail = f"{friendly}, retrying in {delay_minutes} minutes at {retry_time}"
                     log.warning(
                         "Audio ingestion job %s — transient error, "
@@ -1277,8 +1152,8 @@ class JobRunner:
             # Clean up any remaining audio data
             self._pending_audio.pop(job_id, None)
             try:
-                friendly = _friendly_error(exc)
-                if _is_transient(exc):
+                friendly = friendly_error(exc)
+                if is_transient(exc):
                     friendly += " — please try again later"
                 self._jobs.mark_failed(job_id, friendly)
                 self._notify_failed(
