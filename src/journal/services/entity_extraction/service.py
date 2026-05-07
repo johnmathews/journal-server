@@ -1,27 +1,34 @@
-"""Entity extraction service.
+"""Entity extraction service — LLM extraction + dedup + sanity sweep.
 
-Orchestrates the on-demand batch job that reads each entry's text,
-calls an LLM-backed extraction provider, resolves extracted entities
-against the existing store (via exact name -> alias -> embedding
-similarity fallbacks), and persists mentions and relationships.
+The orchestrator class lives in this module. Self-contained helpers live
+in sibling modules under ``services/entity_extraction/``:
 
-Storage is accessed exclusively through the `EntityStore` Protocol so
-a graph-DB backend can be swapped in later without touching this
-file. External LLM calls go through `ExtractionProvider` for the same
-reason.
+- ``signature.py`` — string-signature heuristic for merge candidates
+  that pure embedding distance misses.
+- ``matching.py`` — stage-0 LLM-asserted match (WU4-D four-guard sanity
+  check) and ``cosine_similarity``.
+- ``sanity.py`` — post-extraction sanity sweep that quarantines entities
+  whose canonical name is unsupported by their quotes / entry text.
+
+``extract_from_entry`` is the orchestrator that ties them together. It
+remains relatively large by design — it is the integration point.
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
-import math
-import re
 import sqlite3
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from journal.models import Entity, ExtractionResult
+from journal.models import ExtractionResult
+from journal.services.entity_extraction.matching import (
+    cosine_similarity,
+    try_llm_asserted_match,
+)
+from journal.services.entity_extraction.sanity import run_sanity_sweep
+from journal.services.entity_extraction.signature import find_signature_matches
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -34,189 +41,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Return the cosine similarity of two equal-length float vectors.
-
-    Returns 0.0 if either vector is empty or has zero magnitude. Does
-    not pull in numpy — an entry-level extraction run compares at most
-    a few hundred vectors, so a pure-Python loop is plenty fast.
-    """
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = 0.0
-    norm_a = 0.0
-    norm_b = 0.0
-    for x, y in zip(a, b, strict=True):
-        dot += x * y
-        norm_a += x * x
-        norm_b += y * y
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 0.0
-    return dot / (math.sqrt(norm_a) * math.sqrt(norm_b))
-
-
-# Synthetic similarity scores assigned to merge candidates surfaced via
-# the relaxed string-signature heuristic. We pick values close to 1.0 so
-# the candidates float to the top of the merge-review UI (which sorts by
-# similarity DESC) — the heuristic is high-confidence on near-duplicate
-# place names that the embedding distance happens to miss.
-_SIGNATURE_EXACT_MATCH_SCORE = 1.0
-_SIGNATURE_SHORT_DIFF_SCORE = 0.95
-
-
-def _normalized_signature(name: str) -> str:
-    """Lowercase, strip whitespace runs, drop trivial punctuation.
-
-    Designed so OCR-driven splits like ``Zij Kanaal`` vs ``Zijkanaal``
-    or ``St. Mary`` vs ``St Mary`` collapse to the same string. We keep
-    this conservative — only commas, periods, and hyphens are stripped
-    so names that intentionally contain other punctuation aren't merged
-    by accident.
-    """
-    s = name.lower().strip()
-    s = re.sub(r"\s+", "", s)
-    s = re.sub(r"[\.,\-]", "", s)
-    return s
-
-
-def _is_short_difference(longer: str, shorter: str) -> bool:
-    """Return True when ``shorter`` is a substring of ``longer`` and the
-    leftover after removing it is small enough to suggest a near-duplicate.
-
-    We treat "small" as either ``<= 6 characters`` or a single token
-    (no whitespace). Both cases catch trailing/leading qualifiers like
-    ``" Weg"``, ``" Zuid"``, or ``"St "`` that distinguish near-duplicate
-    place names without producing false positives on long sentences that
-    happen to contain a short common substring.
-    """
-    if shorter not in longer:
-        return False
-    leftover = longer.replace(shorter, "", 1).strip()
-    return len(leftover) <= 6 or " " not in leftover
-
-
-def _common_prefix_len(a: str, b: str) -> int:
-    """Length of the longest common prefix of ``a`` and ``b``."""
-    n = min(len(a), len(b))
-    i = 0
-    while i < n and a[i] == b[i]:
-        i += 1
-    return i
-
-
-def _common_suffix_len(a: str, b: str) -> int:
-    """Length of the longest common suffix of ``a`` and ``b``."""
-    n = min(len(a), len(b))
-    i = 0
-    while i < n and a[-1 - i] == b[-1 - i]:
-        i += 1
-    return i
-
-
-def _is_signature_match(name_a: str, name_b: str) -> bool:
-    """True if two entity names should be flagged as merge candidates by
-    the relaxed string-signature heuristic.
-
-    Three cases trigger a match:
-      1. Normalized signatures (lowercased, whitespace-stripped, trivial
-         punctuation removed) are identical.
-      2. One signature is a substring of the other and the leftover is
-         short (≤ 6 chars or a single token).
-      3. The two signatures share a long common prefix or suffix
-         (≥ 60% of the shorter name and ≥ 4 chars) and each unique tail
-         is short (≤ 6 chars or a single token).
-
-    Case 3 catches near-duplicates whose trailing/leading qualifiers
-    differ (e.g. ``Zij Kanaal C Weg`` vs ``Zij Kanaal C Zuid``) which
-    pure substring containment misses.
-
-    The caller is responsible for filtering out same-id pairs and
-    enforcing same-``entity_type``.
-    """
-    # Degenerate inputs: skip to avoid false positives on empty strings
-    # or single-character names that would substring-match anything.
-    if not name_a.strip() or not name_b.strip():
-        return False
-    if min(len(name_a.strip()), len(name_b.strip())) < 2:
-        return False
-
-    sig_a = _normalized_signature(name_a)
-    sig_b = _normalized_signature(name_b)
-    if not sig_a or not sig_b:
-        return False
-    if sig_a == sig_b:
-        return True
-
-    # Case 2: substring + short-leftover. Compare the
-    # whitespace-collapsed but case-preserved variants so the leftover
-    # length reflects the original strings, not the case-folded
-    # signatures.
-    collapsed_a = re.sub(r"\s+", "", name_a.strip())
-    collapsed_b = re.sub(r"\s+", "", name_b.strip())
-    if sig_b in sig_a and _is_short_difference(collapsed_a, collapsed_b):
-        return True
-    if sig_a in sig_b and _is_short_difference(collapsed_b, collapsed_a):
-        return True
-
-    # Case 3: long common prefix or suffix with short divergent tails.
-    # Operate on the signatures so case/whitespace differences don't
-    # truncate the common region. We require:
-    #   - the common region to be ≥ 8 chars (avoids "Amsterdam" /
-    #     "Rotterdam" sharing a 6-char "terdam" suffix);
-    #   - the common region to be at least twice the max tail length
-    #     (so the shared portion clearly dominates the divergence);
-    #   - both divergent tails to be short (≤ 6 chars).
-    prefix = _common_prefix_len(sig_a, sig_b)
-    if prefix >= 8:
-        tail_a = sig_a[prefix:]
-        tail_b = sig_b[prefix:]
-        max_tail = max(len(tail_a), len(tail_b))
-        if (
-            _is_short_tail(tail_a)
-            and _is_short_tail(tail_b)
-            and prefix >= 2 * max_tail
-        ):
-            return True
-
-    suffix = _common_suffix_len(sig_a, sig_b)
-    if suffix >= 8:
-        tail_a = sig_a[: len(sig_a) - suffix]
-        tail_b = sig_b[: len(sig_b) - suffix]
-        max_tail = max(len(tail_a), len(tail_b))
-        if (
-            _is_short_tail(tail_a)
-            and _is_short_tail(tail_b)
-            and suffix >= 2 * max_tail
-        ):
-            return True
-
-    return False
-
-
-def _is_short_tail(tail: str) -> bool:
-    """Whether a divergent tail string counts as 'short' for the
-    common-prefix/suffix heuristic.
-
-    A tail of ≤ 6 characters is always short. Longer tails are only
-    accepted when they're empty or a single token — but since we've
-    already collapsed whitespace, this collapses to the length check.
-    """
-    return len(tail) <= 6
-
-
-def _signature_match_score(name_a: str, name_b: str) -> float | None:
-    """Return a synthetic similarity score for the heuristic, or None.
-
-    ``_SIGNATURE_EXACT_MATCH_SCORE`` for identical signatures (case /
-    whitespace / trivial-punctuation differences only),
-    ``_SIGNATURE_SHORT_DIFF_SCORE`` for short-substring near-duplicates.
-    """
-    if not _is_signature_match(name_a, name_b):
-        return None
-    if _normalized_signature(name_a) == _normalized_signature(name_b):
-        return _SIGNATURE_EXACT_MATCH_SCORE
-    return _SIGNATURE_SHORT_DIFF_SCORE
 
 
 def _report_progress(
@@ -371,7 +195,7 @@ class EntityExtractionService:
 
         scored: list[tuple[float, Any, list[float]]] = []
         for entity, vec in all_with_embeddings:
-            score = _cosine_similarity(entry_vec, vec)
+            score = cosine_similarity(entry_vec, vec)
             if score < self._llm_candidate_threshold:
                 continue
             scored.append((score, entity, vec))
@@ -651,44 +475,19 @@ class EntityExtractionService:
         else:
             orphans_deleted = 0
 
-        # Post-extraction sanity sweep: any entity touched in this run
-        # whose canonical name can't be found anywhere in its mention
-        # quotes or any mentioned entry's final_text gets soft-
-        # quarantined. Catches LLM hallucinations that survived the
-        # provider-level repair stage and zombie-rebound entities (e.g.
-        # a hallucinated name re-bound to a corrected quote via
-        # embedding similarity).
-        #
-        # The author entity is exempt: first-person prose ("I went...")
-        # legitimately produces an "author" mention whose canonical
-        # (the user's display name) is never written verbatim. Skip it.
-        author_lower = author_name.lower()
-        for touched_id in touched_entity_ids:
-            entity = self._store.get_entity(touched_id)
-            if entity is None or entity.is_quarantined:
-                # Already quarantined (either pre-existing or by the
-                # pending_quarantine_reason path above) or deleted by
-                # orphan cleanup — nothing to do.
-                continue
-            if entity.canonical_name.lower() == author_lower:
-                continue
-            if not self._canonical_name_supported(entity):
-                reason = (
-                    f"canonical name {entity.canonical_name!r} not found "
-                    f"in any mention quote or entry text after extraction "
-                    f"run {run_id}"
-                )
-                try:
-                    self._store.quarantine_entity(touched_id, reason=reason)
-                    log.info(
-                        "Quarantined entity %d (sanity sweep): %s",
-                        touched_id, reason,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    log.warning(
-                        "Sanity-sweep quarantine failed for entity %d: %s",
-                        touched_id, exc,
-                    )
+        # Post-extraction sanity sweep — see services/entity_extraction/sanity.py
+        # for the rationale (quarantines hallucinated / zombie-rebound entities
+        # whose canonical name isn't supported by any mention quote or entry
+        # text). The author entity is exempt: first-person prose ("I went...")
+        # legitimately produces an "author" mention whose canonical (the user's
+        # display name) is never written verbatim.
+        run_sanity_sweep(
+            self._store,
+            self._repo,
+            touched_entity_ids=touched_entity_ids,
+            author_name=author_name,
+            run_id=run_id,
+        )
 
         self._store.mark_entry_extracted(entry_id)
 
@@ -864,15 +663,17 @@ class EntityExtractionService:
         # entity (regardless of whether the current extraction matches
         # one of them via stage a/b or proceeds to stage c). This is the
         # source of merge candidates that the embedding distance misses.
-        signature_matches = self._find_signature_matches(
-            canonical, entity_type, user_id=user_id,
+        signature_matches = find_signature_matches(
+            self._store, canonical, entity_type, user_id=user_id,
         )
 
         # Stage 0: LLM asserted a match against a known entity.
         # Accept only if all four guards (A: user-scope, B: candidate
         # membership, C: type match, D: cosine ≥ floor) pass.
         if matches_known_id is not None:
-            asserted_id = self._try_llm_asserted_match(
+            asserted_id = try_llm_asserted_match(
+                self._store,
+                self._embeddings,
                 asserted_id=int(matches_known_id),
                 canonical=canonical,
                 entity_type=entity_type,
@@ -881,6 +682,7 @@ class EntityExtractionService:
                 justification=match_justification,
                 candidate_ids=candidate_ids or set(),
                 candidate_embeddings=candidate_embeddings or {},
+                min_cosine=self._llm_match_min_cosine,
             )
             if asserted_id is not None:
                 return asserted_id, False, None, None, signature_matches, "llm_asserted"
@@ -918,7 +720,7 @@ class EntityExtractionService:
         best_score = 0.0
         best_name = ""
         for candidate, vec in candidates:
-            score = _cosine_similarity(new_embedding, vec)
+            score = cosine_similarity(new_embedding, vec)
             if score > best_score:
                 best_score = score
                 best_id = candidate.id
@@ -949,134 +751,6 @@ class EntityExtractionService:
             near_miss = (best_id, best_score)
 
         return entity.id, True, None, near_miss, signature_matches, None
-
-    def _try_llm_asserted_match(
-        self,
-        *,
-        asserted_id: int,
-        canonical: str,
-        entity_type: str,
-        description: str,
-        user_id: int | None,
-        justification: str | None,
-        candidate_ids: set[int],
-        candidate_embeddings: dict[int, list[float]],
-    ) -> int | None:
-        """Run the four-guard hybrid sanity check on an LLM-asserted
-        match (WU4-D). Returns the entity id if accepted, ``None``
-        otherwise. Rejections are logged so the threshold can be
-        retuned from real data.
-
-        - Guard A: the asserted entity belongs to ``user_id``. Rejects
-          cross-user references and hallucinated ids that don't exist.
-        - Guard B: the asserted id was in the candidate set we passed
-          to the LLM. Anything outside the catalog is by definition a
-          hallucination.
-        - Guard C: the asserted entity's ``entity_type`` matches what
-          the LLM is claiming for this mention.
-        - Guard D: cosine similarity between the new mention's
-          embedding (computed from canonical + description) and the
-          asserted match's stored embedding is ≥
-          ``llm_match_min_cosine``. Catches semantic drift / over-
-          attribution where the LLM picks a known entity that is
-          weakly related at best.
-        """
-        # Guard A: ownership.
-        target = self._store.get_entity(asserted_id, user_id=user_id)
-        if target is None:
-            log.info(
-                "LLM-asserted match rejected (guard A: not found for "
-                "user %s): id=%s, canonical=%r, justification=%r",
-                user_id, asserted_id, canonical, justification,
-            )
-            return None
-
-        # Guard B: candidate-list membership.
-        if asserted_id not in candidate_ids:
-            log.info(
-                "LLM-asserted match rejected (guard B: not in candidate "
-                "set): id=%s, canonical=%r, justification=%r",
-                asserted_id, canonical, justification,
-            )
-            return None
-
-        # Guard C: type match.
-        if target.entity_type != entity_type:
-            log.info(
-                "LLM-asserted match rejected (guard C: type mismatch "
-                "%s vs %s): id=%s, canonical=%r, justification=%r",
-                target.entity_type, entity_type, asserted_id,
-                canonical, justification,
-            )
-            return None
-
-        # Guard D: cosine sanity.
-        target_vec = candidate_embeddings.get(asserted_id)
-        if target_vec is None:
-            # No embedding for the candidate — fall back to the store
-            # to avoid blanket-failing legitimate matches.
-            target_vec = self._store.get_entity_embedding(asserted_id)
-        if target_vec is None:
-            log.info(
-                "LLM-asserted match rejected (guard D: no stored "
-                "embedding to compare against): id=%s, canonical=%r",
-                asserted_id, canonical,
-            )
-            return None
-        new_embedding = self._embeddings.embed_query(
-            f"{canonical} {description}".strip()
-        )
-        cosine = _cosine_similarity(new_embedding, target_vec)
-        if cosine < self._llm_match_min_cosine:
-            log.info(
-                "LLM-asserted match rejected (guard D: cosine %.3f < "
-                "%.3f): id=%s, canonical=%r, justification=%r",
-                cosine, self._llm_match_min_cosine, asserted_id,
-                canonical, justification,
-            )
-            return None
-
-        log.info(
-            "LLM-asserted match accepted: id=%s, canonical=%r, "
-            "cosine=%.3f, justification=%r",
-            asserted_id, canonical, cosine, justification,
-        )
-        return target.id
-
-    def _find_signature_matches(
-        self,
-        canonical: str,
-        entity_type: str,
-        user_id: int | None = None,
-    ) -> list[tuple[int, float]]:
-        """Scan existing same-type entities for string-signature matches.
-
-        Returns a list of ``(entity_id, score)`` for every existing entity
-        whose canonical name pairs with ``canonical`` under
-        ``_is_signature_match``. Empty when nothing matches.
-
-        We pull the entity rows via ``list_entities`` (not the embedding
-        variant) so the heuristic still works for entities that were
-        somehow stored without an embedding. The list is bounded to a
-        large but finite limit — same-type collections are small in
-        practice.
-        """
-        if not canonical or not canonical.strip():
-            return []
-        # 5000 is well above any realistic same-type cardinality but caps
-        # us in case of pathological data.
-        existing = self._store.list_entities(
-            entity_type=entity_type, limit=5000, user_id=user_id,
-        )
-        matches: list[tuple[int, float]] = []
-        for candidate in existing:
-            if candidate.canonical_name == canonical:
-                # Same name — that's stage-a territory, not a candidate.
-                continue
-            score = _signature_match_score(canonical, candidate.canonical_name)
-            if score is not None:
-                matches.append((candidate.id, score))
-        return matches
 
     def _resolve_for_relationship(
         self,
@@ -1126,59 +800,6 @@ class EntityExtractionService:
             f"skipped relationship — {name!r} not in extracted entities",
         )
 
-    def _canonical_name_supported(self, entity: Entity) -> bool:
-        """True if the entity's canonical name appears in at least one
-        of its mention quotes, or in the ``final_text`` of any entry
-        the entity is mentioned in.
-
-        Comparison is **case-insensitive** and **whitespace-tolerant**:
-        whitespace runs on both sides are collapsed to a single space
-        before substring matching. This mirrors the provider-level
-        repair so a canonical that only shows up with extra/missing
-        whitespace is still considered supported.
-        """
-        canonical = (entity.canonical_name or "").strip()
-        if not canonical:
-            # An empty canonical can't be 'found' anywhere meaningful;
-            # don't quarantine on that signal alone.
-            return True
-        canonical_lower = re.sub(r"\s+", " ", canonical.lower())
-
-        # 1. Mention quotes — there may be many across all entries.
-        # We pull a generous limit; in practice an entity has a handful
-        # of mentions, and even active power users top out in the low
-        # hundreds. The limit is a safety belt, not an expected boundary.
-        mentions = self._store.get_mentions_for_entity(
-            entity.id, limit=10_000, offset=0,
-        )
-        for m in mentions:
-            quote = m.quote or ""
-            if not quote:
-                continue
-            quote_lower = re.sub(r"\s+", " ", quote.lower())
-            if canonical_lower in quote_lower:
-                return True
-
-        # 2. Entry final_text for any entry the entity is mentioned in.
-        # final_text is already populated for OCR'd entries (it falls
-        # back to raw_text in the repository hydrator).
-        seen_entry_ids: set[int] = set()
-        for m in mentions:
-            seen_entry_ids.add(m.entry_id)
-        for entry_id in seen_entry_ids:
-            entry = self._repo.get_entry(entry_id)
-            if entry is None:
-                continue
-            text = entry.final_text or entry.raw_text or ""
-            if not text:
-                continue
-            text_lower = re.sub(r"\s+", " ", text.lower())
-            if canonical_lower in text_lower:
-                return True
-
-        return False
-
-    # Unused but provided for completeness when adapter tests want to
     # prod internal state.
     def _debug(self) -> dict[str, Any]:
         return {
