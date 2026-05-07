@@ -68,11 +68,10 @@ class _VoiceIngestMixin:
         if extracted:
             date = extracted
 
-        # Detect a leading date and strip it from the body when found —
-        # the entry's title already shows the date, so a duplicate at the
-        # start of the body would just be redundant. The formatter then
-        # runs on the BODY only, so its word-preservation contract is
-        # unaffected by any heading characters that no longer appear.
+        # Detect a leading date — used to drive the entry's filing date
+        # (the title renders from `entry_date`), not removed from the
+        # body. The body keeps the date phrase intact so the entry text
+        # reads naturally with the date as its first line.
         # If the detector resolved an ISO date, it overrides any earlier
         # extraction — it sees the entry_date hint and can resolve
         # spelled-out / relative phrases the regex can't.
@@ -209,11 +208,12 @@ class _VoiceIngestMixin:
         # Heading detection runs against the combined raw text — the
         # date typically appears at the very start of the first
         # recording, so this catches it the same way single-voice does.
-        # When a date is found we strip it entirely (the entry's title
-        # is already the date — a markdown heading would just duplicate
-        # it). If the detector resolved an ISO date, it overrides — the
-        # LLM handles spelled-out and relative phrases the regex can't.
-        # Formatter then operates on the body only.
+        # The detected date drives the entry's filing date (and thus the
+        # title); it is NOT removed from the body, which keeps the date
+        # phrase intact so the entry text reads naturally with the date
+        # as its first line. If the detector resolved an ISO date, it
+        # overrides — the LLM handles spelled-out and relative phrases
+        # the regex can't.
         det = self._detect_heading(raw_text, date)  # type: ignore[attr-defined]
         if det.date_iso:
             date = det.date_iso

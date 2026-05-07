@@ -90,8 +90,9 @@ Where:
   input AND entry_date is not provided, return is_heading=false instead of guessing.
   Never include the time component — the date is calendar-day only.
 - source_phrase: the EXACT verbatim substring from the start of the input text that became
-  the heading, INCLUDING any trailing punctuation and whitespace that should be stripped
-  from the body. The remainder of the input AFTER source_phrase is the body.
+  the heading, INCLUDING any trailing punctuation and whitespace. This is used as a
+  bounds check (it must be a verbatim prefix of the input) — it is NOT removed from the
+  body, which keeps the date phrase intact as the user wrote it.
   Example — input "April 28th. Today I went...", source_phrase is "April 28th. "
   (eleven characters plus a trailing space, total 12 chars).
 """
@@ -102,9 +103,9 @@ class HeadingDetectionResult:
     """Outcome of running the heading detector on a piece of text.
 
     `heading_text` is the canonical heading form (e.g. ``"28 April 2026"``) when a heading
-    was detected, otherwise the empty string. `body` is the remainder of the input — the
-    text after the detected date phrase, with heading-area leading whitespace stripped.
-    When no heading is detected, `body` is the original input verbatim.
+    was detected, otherwise the empty string. `body` is the input with heading-area leading
+    whitespace dropped — the date phrase itself is left in place. When no heading is
+    detected, `body` is the original input verbatim.
 
     `date_iso` is the detected date in ISO 8601 ``YYYY-MM-DD`` form when the LLM resolved
     one (including relative phrases like "today" / "yesterday" against the entry_date hint).
@@ -120,14 +121,6 @@ class HeadingDetectionResult:
     @property
     def has_heading(self) -> bool:
         return bool(self.heading_text)
-
-    def to_text(self) -> str:
-        """Recombine into a single markdown string."""
-        if not self.has_heading:
-            return self.body
-        if self.body:
-            return f"# {self.heading_text}\n\n{self.body}"
-        return f"# {self.heading_text}\n"
 
 
 @runtime_checkable
@@ -242,7 +235,12 @@ class AnthropicHeadingDetector:
         # so callers fall back to other date sources (regex, caller-provided).
         date_iso = _validate_iso_date(iso_date_raw)
 
-        body = stripped[len(source_phrase):].lstrip()
+        # body keeps the source_phrase intact — the title is driven by
+        # heading_text / date_iso, but the body is left as the user wrote
+        # it (date as the first line, then whatever followed). Only the
+        # leading whitespace before the heading is dropped (via `stripped`);
+        # the source_phrase prefix check above guarantees we still know
+        # where the date phrase begins for the rare caller that needs it.
         return HeadingDetectionResult(
-            heading_text=heading_text.strip(), body=body, date_iso=date_iso,
+            heading_text=heading_text.strip(), body=stripped, date_iso=date_iso,
         )

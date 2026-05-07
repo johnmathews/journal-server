@@ -46,22 +46,16 @@ def _set_response(client: MagicMock, text: str) -> None:
 
 
 class TestHeadingDetectionResult:
-    def test_no_heading_to_text_returns_body(self):
+    def test_no_heading_has_heading_false(self):
         result = HeadingDetectionResult(heading_text="", body="hello world")
         assert result.has_heading is False
-        assert result.to_text() == "hello world"
 
-    def test_heading_with_body(self):
+    def test_heading_text_present_has_heading_true(self):
         result = HeadingDetectionResult(
-            heading_text="28 April 2026", body="Today I went out."
+            heading_text="28 April 2026",
+            body="April 28th. Today I went out.",
         )
         assert result.has_heading is True
-        assert result.to_text() == "# 28 April 2026\n\nToday I went out."
-
-    def test_heading_without_body(self):
-        result = HeadingDetectionResult(heading_text="28 April 2026", body="")
-        assert result.has_heading is True
-        assert result.to_text() == "# 28 April 2026\n"
 
 
 class TestNullHeadingDetector:
@@ -70,7 +64,6 @@ class TestNullHeadingDetector:
         result = det.detect("April 28th. Today I went out.", entry_date="2026-04-28")
         assert result.has_heading is False
         assert result.body == "April 28th. Today I went out."
-        assert result.to_text() == "April 28th. Today I went out."
 
     def test_empty_text(self):
         det = NullHeadingDetector()
@@ -124,8 +117,9 @@ class TestAnthropicHeadingDetector:
 
         assert result.has_heading is True
         assert result.heading_text == "28 April 2026"
-        assert result.body == "Today I went for a long run."
-        assert result.to_text() == "# 28 April 2026\n\nToday I went for a long run."
+        # Date phrase remains in body — title is driven by heading_text /
+        # date_iso, the body keeps the entry's original text untouched.
+        assert result.body == "April 28th. Today I went for a long run."
 
     def test_relative_date_resolves_using_entry_date(self, mock_client):
         # The LLM is told entry_date=2026-04-28, so "Today" → "28 April 2026".
@@ -142,7 +136,8 @@ class TestAnthropicHeadingDetector:
         result = det.detect("Today, I had breakfast at home.", entry_date="2026-04-28")
 
         assert result.heading_text == "28 April 2026"
-        assert result.body == "I had breakfast at home."
+        # Body keeps the date phrase intact.
+        assert result.body == "Today, I had breakfast at home."
 
     def test_date_with_time(self, mock_client):
         _set_response(
@@ -158,7 +153,7 @@ class TestAnthropicHeadingDetector:
         result = det.detect("28th April, 9am — woke up early and read a book.")
 
         assert result.heading_text == "28 April 2026, 9am"
-        assert result.body == "woke up early and read a book."
+        assert result.body == "28th April, 9am — woke up early and read a book."
 
     def test_mid_sentence_date_returns_unchanged(self, mock_client):
         _set_response(mock_client, _llm_json(is_heading=False))
@@ -169,7 +164,6 @@ class TestAnthropicHeadingDetector:
 
         assert result.has_heading is False
         assert result.body == text
-        assert result.to_text() == text
 
     def test_already_a_heading_short_circuits(self, mock_client):
         det = AnthropicHeadingDetector(api_key="k")
@@ -207,8 +201,9 @@ class TestAnthropicHeadingDetector:
         result = det.detect("April 28th 2026.")
 
         assert result.has_heading is True
-        assert result.body == ""
-        assert result.to_text() == "# 28 April 2026\n"
+        # Even when the entire entry is a date, the body keeps it — the
+        # date is part of what the user wrote.
+        assert result.body == "April 28th 2026."
 
     def test_api_error_returns_unchanged(self, mock_client):
         mock_client.messages.create.side_effect = RuntimeError("API down")
@@ -302,11 +297,13 @@ class TestAnthropicHeadingDetector:
         )
 
         det = AnthropicHeadingDetector(api_key="k")
-        # Real OCR sometimes returns text with leading whitespace.
+        # Real OCR sometimes returns text with leading whitespace —
+        # that part is dropped so the date is the first character of the
+        # body, but the date phrase itself stays in.
         result = det.detect("   April 28th. Today I went out.")
 
         assert result.has_heading is True
-        assert result.body == "Today I went out."
+        assert result.body == "April 28th. Today I went out."
 
     def test_only_first_window_chars_sent(self, mock_client):
         _set_response(mock_client, _llm_json(is_heading=False))

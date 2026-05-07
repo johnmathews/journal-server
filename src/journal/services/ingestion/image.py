@@ -101,15 +101,15 @@ class _ImageIngestMixin:
         if extracted:
             date = extracted
 
-        # Optional date-heading detection. When a leading date is found
-        # we strip it from the body entirely — the entry's title already
-        # shows the date, so reproducing it as a markdown heading or
-        # leaving it as the first line would just be a redundant duplicate
-        # of the title. raw_text is left verbatim so the OCR overlay /
-        # audit trail still points at exactly what the model returned.
-        # If the detector resolved an ISO date (covers spelled-out and
-        # relative phrases the regex can't), it overrides — the LLM is
-        # the more capable of the two extractors.
+        # Optional date-heading detection. The detected date drives the
+        # entry's filing date; it is NOT removed from the body, which
+        # keeps the date phrase as the user wrote it (so the entry text
+        # reads naturally with the date as its first line). raw_text is
+        # left verbatim so the OCR overlay / audit trail still points
+        # at exactly what the model returned. If the detector resolved
+        # an ISO date (covers spelled-out and relative phrases the regex
+        # can't), it overrides — the LLM is the more capable of the two
+        # extractors.
         det = self._detect_heading(raw_text, date)  # type: ignore[attr-defined]
         if det.date_iso:
             date = det.date_iso
@@ -233,12 +233,11 @@ class _ImageIngestMixin:
         if extracted:
             date = extracted
 
-        # Optional date-heading detection — same as single-page OCR. A
-        # detected leading date is stripped from the body entirely,
-        # never promoted to a markdown heading: the entry's title
-        # already shows the date, so a heading would just duplicate the
-        # title. The detector's ISO date (if any) overrides the regex
-        # result for the same reason as the single-page path.
+        # Optional date-heading detection — same contract as single-page
+        # OCR. The detected date drives the entry's filing date but is
+        # NOT removed from the body; the body keeps the date phrase as
+        # the user wrote it. The detector's ISO date (if any) overrides
+        # the regex result for the same reason as the single-page path.
         det = self._detect_heading(combined_text, date)  # type: ignore[attr-defined]
         if det.date_iso:
             date = det.date_iso
