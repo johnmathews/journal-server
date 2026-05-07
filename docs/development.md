@@ -14,6 +14,32 @@ cd journal-server
 uv sync
 ```
 
+### Renaming the working directory
+
+If you rename the directory after `uv sync` (e.g. cloning as
+`journal-server` and then renaming locally to `server` — the layout
+this repo's parent `journal/` workspace uses), the existing `.venv/`
+contains scripts with absolute-path shebangs that point at the *old*
+directory. Symptoms: `uv run` succeeds but `python -m journal.mcp_server`
+or `journal` (the CLI script) prints a no-such-file error from
+`/path/to/old-name/.venv/bin/python` even though the file is sitting
+right there at the new path.
+
+Fix:
+
+```bash
+rm -rf .venv && uv sync
+```
+
+uv will rebuild the virtualenv with shebangs that resolve against the
+current path. Re-running `uv sync` without first deleting `.venv` does
+not rewrite the shebangs.
+
+If you have a habit of moving repos around, consider adding to your
+shell startup a guard that nukes `.venv` when the directory's
+canonical path changes. The 30 seconds of `uv sync` is much shorter
+than the loop of "why does this fail?" diagnostics.
+
 ## Running Tests
 
 ```bash
