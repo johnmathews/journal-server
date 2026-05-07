@@ -31,6 +31,12 @@ packages = ["src/journal"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Strict markers — typos in @pytest.mark.* fail collection rather than
+# silently sliding through. Add new markers below before using them.
+addopts = "--strict-markers"
+markers = [
+    "integration: tests that need a real external service (e.g. ChromaDB). Skipped by default; opt in via `pytest -m integration`.",
+]
 
 [tool.coverage.run]
 source = ["src/journal"]

@@ -17,7 +17,7 @@ uv sync
 ## Running Tests
 
 ```bash
-# All tests
+# Default — unit suite only; integration tests are excluded.
 uv run pytest
 
 # With coverage
@@ -29,6 +29,29 @@ uv run pytest tests/test_db/test_repository.py -v
 # Single test
 uv run pytest tests/test_db/test_repository.py::TestFTS::test_search_text -v
 ```
+
+### Test markers
+
+The suite uses `--strict-markers`; new markers are registered in
+`pyproject.toml` under `[tool.pytest.ini_options].markers` before being
+used. Currently registered:
+
+- `integration` — tests that need a real external service (ChromaDB,
+  today). Skipped by default. Opt in:
+
+```bash
+# Run only the integration suite (needs ChromaDB on CHROMA_HOST:CHROMA_PORT,
+# defaults to localhost:8000). Locally, point at the dev container:
+CHROMA_HOST=localhost CHROMA_PORT=8401 uv run pytest -m integration -v
+
+# Combined run — unit + integration:
+CHROMA_HOST=localhost CHROMA_PORT=8401 uv run pytest -v
+```
+
+CI runs the integration suite as a separate job (`integration-test`)
+that brings up a `chromadb/chroma:latest` service container, polls its
+heartbeat endpoint, and then runs `pytest -m integration`. Build/push
+is gated on both the unit and integration jobs being green.
 
 ## Linting
 

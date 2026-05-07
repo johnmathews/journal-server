@@ -32,10 +32,59 @@ jobs:
         run: uv run ruff check src/ tests/
 
       - name: Test
-        run: uv run pytest --cov --cov-report=term-missing
+        run: uv run pytest -m "not integration" --cov --cov-report=term-missing
+
+  integration-test:
+    runs-on: ubuntu-latest
+    needs: test
+    services:
+      # ChromaVectorStore.__init__ connects synchronously, so the
+      # workflow must wait for ChromaDB to be ready before invoking
+      # the integration suite (Unit 5 of the code-quality refactor
+      # plan calls this out explicitly). We poll the heartbeat
+      # endpoint from the runner instead of relying on Docker's
+      # built-in healthcheck — the chroma image historically lacked
+      # curl, and a wait loop on the runner is straightforward and
+      # self-contained.
+      chromadb:
+        image: chromadb/chroma:latest
+        ports:
+          - 8000:8000
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: "latest"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Wait for ChromaDB heartbeat
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/api/v2/heartbeat >/dev/null 2>&1; then
+              echo "ChromaDB ready after ${attempt} attempt(s)"
+              exit 0
+            fi
+            echo "ChromaDB not ready yet (attempt ${attempt}/30)..."
+            sleep 2
+          done
+          echo "ChromaDB did not become ready within 60s"
+          exit 1
+
+      - name: Integration tests (Chroma)
+        env:
+          CHROMA_HOST: localhost
+          CHROMA_PORT: "8000"
+        run: uv run pytest -m integration -v
 
   build-and-push:
-    needs: test
+    needs: [test, integration-test]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
