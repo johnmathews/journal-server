@@ -198,9 +198,14 @@ facts) catches regressions in the meantime.
 
 All five recommendations from this round are now closed (1, 2, and
 3 RESOLVED; 4 and 5 are deliberately-deferred). The "two newly-
-largest files" table is empty. The standing facts table below is
-the source of truth for what to look at next; the natural follow-
-ups (file by importance, not urgency) are:
+largest files" table is empty. Both filed follow-ups from the
+repository-split plan have also landed (legacy entity-method
+deletion + transaction-pattern standardisation, see
+`journal/260507-repository-cleanup-followups.md`).
+
+The standing facts table below is the source of truth for what to
+look at next. Remaining natural follow-ups (file by importance,
+not urgency):
 
 1. **Recommendation 4 (item-3 residual cleanup)** — only worth
    touching if a specific cluster of the 37 reach-ins surfaces real
@@ -210,14 +215,6 @@ ups (file by importance, not urgency) are:
    knowingly-tolerated; the `api/entities.py` planned split into
    `entities.py` + `entity_merge.py` is sketched in
    `journal/260507-api-py-split-unit-1a.md`.
-3. **Legacy entity methods on `EntryRepository`** —
-   `add_people` / `add_places` / `add_tags` are tested but never
-   called from production code. Verify and delete in a separate
-   focused session (filed as a follow-up by the repository split
-   plan).
-4. **Transaction-pattern cleanup in the repository package** —
-   standardise on `with self._conn:` everywhere (currently mixed
-   with bare `self._conn.commit()`). Deferred from the split.
 
 None of these is urgent. **Stop here is also a fine choice** — the
 reach-in grep gate catches regressions in the meantime.
