@@ -372,44 +372,6 @@ class TestStatistics:
         assert stats.total_entries == 1
 
 
-class TestPeopleAndPlaces:
-    def test_add_people(self, repo):
-        entry = repo.create_entry("2026-03-22", "photo", "Met Atlas and Luna today", 5)
-        repo.add_people(entry.id, ["Atlas", "Luna"])
-
-        sql = (
-            "SELECT p.name FROM entry_people ep"
-            " JOIN people p ON p.id = ep.person_id WHERE ep.entry_id = ?"
-        )
-        rows = repo.connection.execute(sql, (entry.id,)).fetchall()
-        names = {r["name"] for r in rows}
-        assert names == {"Atlas", "Luna"}
-
-    def test_add_places(self, repo):
-        entry = repo.create_entry("2026-03-22", "photo", "Visited Vienna and Graz", 4)
-        repo.add_places(entry.id, ["Vienna", "Graz"])
-
-        sql = (
-            "SELECT p.name FROM entry_places ep"
-            " JOIN places p ON p.id = ep.place_id WHERE ep.entry_id = ?"
-        )
-        rows = repo.connection.execute(sql, (entry.id,)).fetchall()
-        names = {r["name"] for r in rows}
-        assert names == {"Vienna", "Graz"}
-
-    def test_add_tags(self, repo):
-        entry = repo.create_entry("2026-03-22", "photo", "Reflection on life", 3)
-        repo.add_tags(entry.id, ["reflection", "philosophy"])
-
-        sql = (
-            "SELECT t.name FROM entry_tags et"
-            " JOIN tags t ON t.id = et.tag_id WHERE et.entry_id = ?"
-        )
-        rows = repo.connection.execute(sql, (entry.id,)).fetchall()
-        names = {r["name"] for r in rows}
-        assert names == {"reflection", "philosophy"}
-
-
 class TestMoodScores:
     def test_add_mood_score(self, repo):
         entry = repo.create_entry("2026-03-22", "photo", "Feeling great", 2)

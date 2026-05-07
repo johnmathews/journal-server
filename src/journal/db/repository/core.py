@@ -2,11 +2,7 @@
 
 Owns the core entry table operations: create, fetch, list (paginated
 or by date), update text/word/chunk counts, update entry date,
-delete. Also holds the legacy entity-attach methods
-(``add_people`` / ``add_places`` / ``add_tags``) that predate the
-modern ``entitystore/`` package — those are tested but no longer
-called from production code; they live here unchanged for this split
-and are filed as a follow-up for separate verification + deletion.
+delete.
 
 Methods stay bound to ``self`` so they keep using ``self._conn``.
 """
@@ -139,47 +135,3 @@ class _CoreMixin:
         if deleted:
             log.info("Deleted entry %d", entry_id)
         return deleted
-
-    def add_people(self, entry_id: int, names: list[str]) -> None:
-        people_sql = (
-            "INSERT OR IGNORE INTO people (name, first_seen)"
-            " VALUES (?, (SELECT entry_date FROM entries WHERE id = ?))"
-        )
-        for name in names:
-            self._conn.execute(people_sql, (name, entry_id))
-            person_id = self._conn.execute(
-                "SELECT id FROM people WHERE name = ?", (name,)
-            ).fetchone()["id"]
-            self._conn.execute(
-                "INSERT OR IGNORE INTO entry_people (entry_id, person_id) VALUES (?, ?)",
-                (entry_id, person_id),
-            )
-        self._conn.commit()
-
-    def add_places(self, entry_id: int, names: list[str]) -> None:
-        places_sql = (
-            "INSERT OR IGNORE INTO places (name, first_seen)"
-            " VALUES (?, (SELECT entry_date FROM entries WHERE id = ?))"
-        )
-        for name in names:
-            self._conn.execute(places_sql, (name, entry_id))
-            place_id = self._conn.execute(
-                "SELECT id FROM places WHERE name = ?", (name,)
-            ).fetchone()["id"]
-            self._conn.execute(
-                "INSERT OR IGNORE INTO entry_places (entry_id, place_id) VALUES (?, ?)",
-                (entry_id, place_id),
-            )
-        self._conn.commit()
-
-    def add_tags(self, entry_id: int, tags: list[str]) -> None:
-        for tag in tags:
-            self._conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag,))
-            tag_id = self._conn.execute(
-                "SELECT id FROM tags WHERE name = ?", (tag,)
-            ).fetchone()["id"]
-            self._conn.execute(
-                "INSERT OR IGNORE INTO entry_tags (entry_id, tag_id) VALUES (?, ?)",
-                (entry_id, tag_id),
-            )
-        self._conn.commit()
