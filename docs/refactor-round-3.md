@@ -80,7 +80,7 @@ in 4 documented buckets — verify before acting.
 | File | Lines | Reason |
 |---|---:|---|
 | ~~`api/entities.py`~~ | ~~717~~ → split | RESOLVED on 2026-05-08. Split into `api/entities.py` (425, CRUD + read sub-resources) and `api/entity_merge.py` (326, merge/candidates/quarantine/merge-history). See `docs/refactor-item-6-exceptions-plan.md` § Item 1. |
-| `auth_api.py` | 840 | Largest file in the repo. Split proposed in `docs/refactor-item-6-exceptions-plan.md` § Item 3 — package conversion to `auth_api/{__init__,_shared,core,account,profile,api_keys,admin}.py`. Pending an extraction session. |
+| ~~`auth_api.py`~~ | ~~840~~ → split | RESOLVED on 2026-05-08. Carved into `auth_api/{__init__,_shared,core,account,profile,api_keys,admin}.py`. Largest resulting file is `account.py` at 355 lines (under the 400-line target). Two inline `from journal.api import _runtime_get` imports in `auth_register` and `auth_config` were hoisted to module-level on the way out (no circular-import risk). See `docs/refactor-item-6-exceptions-plan.md` § Item 3. |
 | `api/dashboard.py` | 609 | Marginally over-cap; leave as one module unless it grows further. |
 
 **Acknowledged-permanent (no further split planned):**
@@ -216,16 +216,15 @@ not urgency):
 1. **Recommendation 4 (item-3 residual cleanup)** — only worth
    touching if a specific cluster of the 37 reach-ins surfaces real
    friction during unrelated work.
-2. **`auth_api.py` split** — proposed in
-   `docs/refactor-item-6-exceptions-plan.md` § Item 3 (package
-   conversion to `auth_api/{__init__,_shared,core,account,profile,
-   api_keys,admin}.py`). Estimated ~3 hours for a focused
-   extraction session — security-sensitive surface, the plan calls
-   for per-cluster code review at commit B and a manual login →
-   me → logout smoke test.
 
-None of these is urgent. **Stop here is also a fine choice** — the
-reach-in grep gate catches regressions in the meantime.
+The `auth_api.py` split landed on 2026-05-08; with it, all three
+item-6 exceptions are dispositioned (split, split, or
+acknowledged-permanent) and there is no remaining file in the
+"acknowledged-but-pending" bucket.
+
+None of the remaining points is urgent. **Stop here is also a fine
+choice** — the reach-in grep gate catches regressions in the
+meantime.
 
 ---
 
@@ -270,11 +269,10 @@ Residual breakdown (what makes up the 37):
 find src/journal -name '*.py' -exec wc -l {} + | sort -rn | head -10
 ```
 
-Top-10 sizes after the api/entities split (2026-05-08):
+Top-10 sizes after the auth_api split (2026-05-08):
 
 | File | Lines | Status |
 |---|---:|---|
-| `auth_api.py` | 840 | Item 6 exception (split planned — see refactor-item-6-exceptions-plan.md). |
 | `services/entity_extraction/service.py` | 808 | Acknowledged-permanent (see table above). |
 | `providers/transcription.py` | 778 | Within range. |
 | `providers/ocr.py` | 753 | Within range. |
@@ -284,6 +282,9 @@ Top-10 sizes after the api/entities split (2026-05-08):
 | `cli/__init__.py` | 603 | Within range. |
 | `api/ingestion.py` | 591 | Within range. |
 | `providers/extraction.py` | 560 | Within range. |
+
+Largest `auth_api/` file is `account.py` at 355 lines (does not
+make the top-10).
 
 ### Test counts
 
