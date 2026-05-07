@@ -700,13 +700,13 @@ class TestBuildOcrProvider:
     def test_default_model_anthropic(self, _mock: MagicMock) -> None:
         config = self._make_config(ocr_provider="anthropic", ocr_model="")
         provider = build_ocr_provider(config)
-        assert provider._model == _DEFAULT_MODELS["anthropic"]
+        assert provider.model == _DEFAULT_MODELS["anthropic"]
 
     @patch("journal.providers.ocr.genai.Client")
     def test_default_model_gemini(self, _mock: MagicMock) -> None:
         config = self._make_config(ocr_provider="gemini", ocr_model="")
         provider = build_ocr_provider(config)
-        assert provider._model == _DEFAULT_MODELS["gemini"]
+        assert provider.model == _DEFAULT_MODELS["gemini"]
 
     @patch("journal.providers.ocr.anthropic.Anthropic")
     def test_explicit_model_override(self, _mock: MagicMock) -> None:
@@ -714,7 +714,7 @@ class TestBuildOcrProvider:
             ocr_provider="anthropic", ocr_model="claude-sonnet-4-5"
         )
         provider = build_ocr_provider(config)
-        assert provider._model == "claude-sonnet-4-5"
+        assert provider.model == "claude-sonnet-4-5"
 
     def test_unknown_provider_raises(self) -> None:
         config = self._make_config(ocr_provider="openai")
@@ -749,8 +749,8 @@ class TestBuildOcrProvider:
         config = self._make_config(ocr_dual_pass=True, ocr_model="gemini-2.5-pro")
         provider = build_ocr_provider(config)
         assert isinstance(provider, DualPassOCRProvider)
-        assert provider._primary._model == _DEFAULT_MODELS["anthropic"]
-        assert provider._secondary._model == _DEFAULT_MODELS["gemini"]
+        assert provider._primary.model == _DEFAULT_MODELS["anthropic"]
+        assert provider._secondary.model == _DEFAULT_MODELS["gemini"]
 
 
 # ---------------------------------------------------------------------------

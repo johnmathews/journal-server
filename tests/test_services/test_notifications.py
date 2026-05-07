@@ -71,32 +71,95 @@ class TestCredentialResolution:
         assert token == ""
 
 
-class TestTopicEnabled:
-    def test_returns_default_when_no_preference(
-        self, svc: PushoverNotificationService, mock_user_repo: MagicMock
-    ) -> None:
-        mock_user_repo.get_preference.return_value = None
-        # notif_job_failed defaults to True
-        assert svc._is_topic_enabled(1, "notif_job_failed") is True
-        # notif_admin_job_failed defaults to True
-        assert svc._is_topic_enabled(1, "notif_admin_job_failed") is True
+class TestTopicGating:
+    """Topic-preference gating, exercised through the public notify_* API.
 
-    def test_respects_explicit_false(
-        self, svc: PushoverNotificationService, mock_user_repo: MagicMock
+    Each notify_* method calls the internal topic-enabled predicate
+    against a fixed topic key; if the user has opted out, no Pushover
+    POST happens. We assert the side effect (POST attempted or not)
+    instead of poking the predicate directly.
+    """
+
+    @patch("journal.services.notifications.urllib.request.urlopen")
+    def test_default_true_topic_posts_when_no_preference(
+        self,
+        mock_urlopen: MagicMock,
+        svc: PushoverNotificationService,
+        mock_user_repo: MagicMock,
+    ) -> None:
+        # notif_job_failed defaults to True; with no preference set the
+        # gating must allow the post.
+        mock_user_repo.get_preference.return_value = None
+        mock_urlopen.return_value = _make_urlopen_response({"status": 1})
+
+        svc.notify_job_failed(
+            user_id=1, job_type="ingest_images", error_message="boom",
+        )
+
+        # urlopen called → topic was enabled (no preference, fell back to default).
+        # Filter to the POST that carries credentials so we don't trip
+        # on incidental urlopen calls from other layers.
+        post_calls = [c for c in mock_urlopen.call_args_list if c.args]
+        assert post_calls, "expected notify_job_failed to POST to Pushover"
+
+    @patch("journal.services.notifications.urllib.request.urlopen")
+    def test_explicit_false_skips_post(
+        self,
+        mock_urlopen: MagicMock,
+        svc: PushoverNotificationService,
+        mock_user_repo: MagicMock,
     ) -> None:
         mock_user_repo.get_preference.return_value = False
-        assert svc._is_topic_enabled(1, "notif_job_failed") is False
 
-    def test_respects_explicit_true(
-        self, svc: PushoverNotificationService, mock_user_repo: MagicMock
-    ) -> None:
-        mock_user_repo.get_preference.return_value = True
-        assert svc._is_topic_enabled(1, "notif_job_retrying") is True
+        svc.notify_job_failed(
+            user_id=1, job_type="ingest_images", error_message="boom",
+        )
 
-    def test_unknown_topic_returns_false(
-        self, svc: PushoverNotificationService
+        assert not mock_urlopen.called, (
+            "user opted out of notif_job_failed but a POST was attempted"
+        )
+
+    @patch("journal.services.notifications.urllib.request.urlopen")
+    def test_explicit_true_posts_even_for_default_off_topic(
+        self,
+        mock_urlopen: MagicMock,
+        svc: PushoverNotificationService,
+        mock_user_repo: MagicMock,
     ) -> None:
-        assert svc._is_topic_enabled(1, "notif_nonexistent") is False
+        # notif_job_success_entity_reembed defaults to False. Explicit
+        # True should flip the gate open and let the POST through. This
+        # exercises both "default off" and "explicit override" branches
+        # in one assertion.
+        reembed_default = next(
+            t for t in TOPICS
+            if t["key"] == "notif_job_success_entity_reembed"
+        )["default"]
+        assert reembed_default is False, (
+            "fixture invalidated — notif_job_success_entity_reembed "
+            "default changed; pick another default-False topic"
+        )
+
+        # Stub credentials so the POST path doesn't bail on missing key.
+        def _pref(_user_id: int, key: str) -> object:
+            if key == "notif_job_success_entity_reembed":
+                return True
+            if key in ("pushover_user_key", "pushover_app_token"):
+                # Fall through to the service's defaults so credentials resolve.
+                return None
+            return None
+
+        mock_user_repo.get_preference.side_effect = _pref
+        mock_urlopen.return_value = _make_urlopen_response({"status": 1})
+
+        svc.notify_job_success(
+            user_id=1, job_type="entity_reembed",
+            result={"entity_id": 7, "name": "Alice"},
+        )
+
+        assert mock_urlopen.called, (
+            "user explicitly enabled notif_job_success_entity_reembed "
+            "but no POST was attempted"
+        )
 
 
 class TestPostToPushover:

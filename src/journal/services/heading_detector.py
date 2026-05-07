@@ -168,6 +168,10 @@ class AnthropicHeadingDetector:
         self._model = model
         self._max_tokens = max_tokens
 
+    @property
+    def model(self) -> str:
+        return self._model
+
     def detect(
         self, text: str, entry_date: str | None = None
     ) -> HeadingDetectionResult:

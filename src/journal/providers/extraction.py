@@ -225,6 +225,10 @@ class AnthropicExtractionProvider:
         self._model = model
         self._max_tokens = max_tokens
 
+    @property
+    def model(self) -> str:
+        return self._model
+
     def extract_entities(
         self,
         entry_text: str,

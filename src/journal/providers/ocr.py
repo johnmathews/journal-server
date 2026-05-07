@@ -286,6 +286,10 @@ class AnthropicOCRProvider:
 
         self._warn_if_below_cache_minimum()
 
+    @property
+    def model(self) -> str:
+        return self._model
+
     def _warn_if_below_cache_minimum(self) -> None:
         """Log a loud warning if the composed system text won't cache.
 
@@ -411,6 +415,10 @@ class GeminiOCRProvider:
             )
         else:
             self._system_text = SYSTEM_PROMPT
+
+    @property
+    def model(self) -> str:
+        return self._model
 
     def extract(self, image_data: bytes, media_type: str) -> OCRResult:
         """Extract text from an image via Google's Gemini vision API.

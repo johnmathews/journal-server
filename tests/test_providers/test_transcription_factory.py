@@ -56,9 +56,9 @@ class TestDefaultConfig:
 
         assert isinstance(provider, RetryingTranscriptionProvider)
         assert isinstance(provider._primary, OpenAITranscribeProvider)
-        assert provider._primary._model == "gpt-4o-transcribe"
+        assert provider._primary.model == "gpt-4o-transcribe"
         assert isinstance(provider._fallback, OpenAITranscribeProvider)
-        assert provider._fallback._model == "whisper-1"
+        assert provider._fallback.model == "whisper-1"
 
     def test_fallback_disabled_returns_bare_openai(
         self, monkeypatch: pytest.MonkeyPatch
@@ -68,7 +68,7 @@ class TestDefaultConfig:
         provider = _build(Config())
 
         assert isinstance(provider, OpenAITranscribeProvider)
-        assert provider._model == "gpt-4o-transcribe"
+        assert provider.model == "gpt-4o-transcribe"
 
 
 class TestGeminiPrimary:
@@ -79,9 +79,9 @@ class TestGeminiPrimary:
 
         assert isinstance(provider, RetryingTranscriptionProvider)
         assert isinstance(provider._primary, GeminiTranscribeProvider)
-        assert provider._primary._model == "gemini-2.5-pro"
+        assert provider._primary.model == "gemini-2.5-pro"
         assert isinstance(provider._fallback, OpenAITranscribeProvider)
-        assert provider._fallback._model == "whisper-1"
+        assert provider._fallback.model == "whisper-1"
 
     def test_gemini_with_explicit_model(
         self, monkeypatch: pytest.MonkeyPatch
@@ -93,7 +93,7 @@ class TestGeminiPrimary:
 
         assert isinstance(provider, RetryingTranscriptionProvider)
         assert isinstance(provider._primary, GeminiTranscribeProvider)
-        assert provider._primary._model == "gemini-2.5-flash"
+        assert provider._primary.model == "gemini-2.5-flash"
 
 
 class TestSelfFallbackAvoidance:
@@ -108,7 +108,7 @@ class TestSelfFallbackAvoidance:
 
         # Identical primary + fallback config → no retry wrapper.
         assert isinstance(provider, OpenAITranscribeProvider)
-        assert provider._model == "whisper-1"
+        assert provider.model == "whisper-1"
 
 
 class TestShadow:
@@ -121,12 +121,12 @@ class TestShadow:
 
         assert isinstance(provider, ShadowTranscriptionProvider)
         assert isinstance(provider._shadow, GeminiTranscribeProvider)
-        assert provider._shadow._model == "gemini-2.5-pro"
+        assert provider._shadow.model == "gemini-2.5-pro"
         # Inside: retrying(openai/gpt-4o-transcribe, fb=whisper-1)
         assert isinstance(provider._primary, RetryingTranscriptionProvider)
         inner = provider._primary
         assert isinstance(inner._primary, OpenAITranscribeProvider)
-        assert inner._primary._model == "gpt-4o-transcribe"
+        assert inner._primary.model == "gpt-4o-transcribe"
 
     def test_shadow_disabled_no_wrapper(
         self, monkeypatch: pytest.MonkeyPatch
@@ -171,7 +171,7 @@ class TestModelResolution:
 
         assert isinstance(provider, RetryingTranscriptionProvider)
         assert isinstance(provider._primary, GeminiTranscribeProvider)
-        assert provider._primary._model == "gemini-2.5-pro"
+        assert provider._primary.model == "gemini-2.5-pro"
         # An INFO record should mention the override.
         assert any(
             "not compatible with provider=gemini" in rec.getMessage()

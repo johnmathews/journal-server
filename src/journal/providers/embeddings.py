@@ -25,6 +25,10 @@ class OpenAIEmbeddingsProvider:
         self._model = model
         self._dimensions = dimensions
 
+    @property
+    def model(self) -> str:
+        return self._model
+
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """Embed a list of texts and return their embedding vectors."""
         logger.info("Embedding %d texts via OpenAI (model=%s)", len(texts), self._model)

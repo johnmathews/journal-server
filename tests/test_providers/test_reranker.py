@@ -53,9 +53,18 @@ class TestNoopReranker:
 
 
 class TestAnthropicReranker:
-    def _make(self) -> AnthropicReranker:
-        with patch("journal.providers.reranker.anthropic.Anthropic"):
-            return AnthropicReranker(api_key="test-key", model="claude-haiku-4-5")
+    def _make(self) -> tuple[AnthropicReranker, MagicMock]:
+        """Build the reranker with the SDK class patched, and return the
+        fake client alongside it so tests can configure ``messages.create``
+        without reaching into ``rr._client``.
+        """
+        fake_client = MagicMock(name="anthropic.Anthropic")
+        with patch(
+            "journal.providers.reranker.anthropic.Anthropic",
+            return_value=fake_client,
+        ):
+            rr = AnthropicReranker(api_key="test-key", model="claude-haiku-4-5")
+        return rr, fake_client
 
     def _mock_response(self, payload: dict) -> MagicMock:
         response = MagicMock()
@@ -65,23 +74,24 @@ class TestAnthropicReranker:
         return response
 
     def test_implements_protocol(self) -> None:
-        assert isinstance(self._make(), Reranker)
+        rr, _client = self._make()
+        assert isinstance(rr, Reranker)
 
     def test_empty_candidates_returns_empty(self) -> None:
-        rr = self._make()
-        rr._client.messages.create.assert_not_called()
+        rr, client = self._make()
+        client.messages.create.assert_not_called()
         assert rr.rerank("q", [], top_k=5) == []
         # Still should not have called the API.
-        rr._client.messages.create.assert_not_called()
+        client.messages.create.assert_not_called()
 
     def test_zero_top_k_returns_empty(self) -> None:
-        rr = self._make()
+        rr, client = self._make()
         assert rr.rerank("q", _candidates("a"), top_k=0) == []
-        rr._client.messages.create.assert_not_called()
+        client.messages.create.assert_not_called()
 
     def test_parses_well_formed_response(self) -> None:
-        rr = self._make()
-        rr._client.messages.create.return_value = self._mock_response(
+        rr, client = self._make()
+        client.messages.create.return_value = self._mock_response(
             {
                 "ranking": [
                     {"index": 2, "score": 0.91, "reason": "directly answers"},
@@ -97,12 +107,12 @@ class TestAnthropicReranker:
         assert results[0].reason == "directly answers"
 
     def test_passes_query_and_candidates_to_api(self) -> None:
-        rr = self._make()
-        rr._client.messages.create.return_value = self._mock_response(
+        rr, client = self._make()
+        client.messages.create.return_value = self._mock_response(
             {"ranking": [{"index": 1, "score": 0.5, "reason": "match"}]}
         )
         rr.rerank("vienna trip", _candidates("trip to vienna in march"), top_k=1)
-        kwargs = rr._client.messages.create.call_args.kwargs
+        kwargs = client.messages.create.call_args.kwargs
         assert kwargs["model"] == "claude-haiku-4-5"
         # System prompt is passed as a list with cache_control set.
         assert isinstance(kwargs["system"], list)
@@ -113,8 +123,8 @@ class TestAnthropicReranker:
         assert "[1] trip to vienna in march" in user_msg
 
     def test_ignores_indices_out_of_range(self) -> None:
-        rr = self._make()
-        rr._client.messages.create.return_value = self._mock_response(
+        rr, client = self._make()
+        client.messages.create.return_value = self._mock_response(
             {
                 "ranking": [
                     {"index": 99, "score": 1.0, "reason": "fake"},
@@ -127,8 +137,8 @@ class TestAnthropicReranker:
         assert [r.id for r in results] == ["1"]
 
     def test_ignores_duplicate_indices(self) -> None:
-        rr = self._make()
-        rr._client.messages.create.return_value = self._mock_response(
+        rr, client = self._make()
+        client.messages.create.return_value = self._mock_response(
             {
                 "ranking": [
                     {"index": 1, "score": 0.9, "reason": "first"},
@@ -142,8 +152,8 @@ class TestAnthropicReranker:
         assert [r.id for r in results] == ["1", "2"]
 
     def test_falls_back_to_noop_on_api_error(self) -> None:
-        rr = self._make()
-        rr._client.messages.create.side_effect = anthropic.APIError(
+        rr, client = self._make()
+        client.messages.create.side_effect = anthropic.APIError(
             request=MagicMock(), message="boom", body=None,
         )
         cands = _candidates("a", "b")
@@ -152,24 +162,24 @@ class TestAnthropicReranker:
         assert [r.id for r in results] == ["1", "2"]
 
     def test_falls_back_on_malformed_json(self) -> None:
-        rr = self._make()
+        rr, client = self._make()
         bad = MagicMock()
         bad_block = MagicMock()
         bad_block.text = "not json at all"
         bad.content = [bad_block]
-        rr._client.messages.create.return_value = bad
+        client.messages.create.return_value = bad
         results = rr.rerank("q", _candidates("a", "b"), top_k=2)
         assert [r.id for r in results] == ["1", "2"]
 
     def test_falls_back_when_ranking_missing(self) -> None:
-        rr = self._make()
-        rr._client.messages.create.return_value = self._mock_response({"items": []})
+        rr, client = self._make()
+        client.messages.create.return_value = self._mock_response({"items": []})
         results = rr.rerank("q", _candidates("a", "b"), top_k=2)
         assert [r.id for r in results] == ["1", "2"]
 
     def test_tolerates_prose_around_json(self) -> None:
         # Models occasionally wrap output despite the system prompt.
-        rr = self._make()
+        rr, client = self._make()
         bad = MagicMock()
         block = MagicMock()
         block.text = (
@@ -178,19 +188,19 @@ class TestAnthropicReranker:
             "Hope that helps!"
         )
         bad.content = [block]
-        rr._client.messages.create.return_value = bad
+        client.messages.create.return_value = bad
         results = rr.rerank("q", _candidates("a"), top_k=1)
         assert [r.id for r in results] == ["1"]
         assert results[0].score == pytest.approx(0.8)
 
     def test_truncates_long_candidate_text(self) -> None:
-        rr = self._make()
-        rr._client.messages.create.return_value = self._mock_response(
+        rr, client = self._make()
+        client.messages.create.return_value = self._mock_response(
             {"ranking": [{"index": 1, "score": 0.5, "reason": "ok"}]}
         )
         long_text = "x" * 5000
         rr.rerank("q", [RerankCandidate(id="1", text=long_text)], top_k=1)
-        user_msg = rr._client.messages.create.call_args.kwargs["messages"][0][
+        user_msg = client.messages.create.call_args.kwargs["messages"][0][
             "content"
         ]
         # The full 5000 chars must not appear verbatim — truncated with ellipsis.

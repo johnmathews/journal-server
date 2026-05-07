@@ -172,6 +172,10 @@ class OpenAITranscribeProvider:
         # means "no prompt" — preserves prior behaviour.
         self._context_prompt = context_prompt
 
+    @property
+    def model(self) -> str:
+        return self._model
+
     def transcribe(
         self,
         audio_data: bytes,
@@ -335,6 +339,10 @@ class GeminiTranscribeProvider:
         self._model = model
         instruction = build_full_context_instruction(context_dir)
         self._system_instruction = instruction or _GEMINI_DEFAULT_SYSTEM_INSTRUCTION
+
+    @property
+    def model(self) -> str:
+        return self._model
 
     def transcribe(
         self,

@@ -253,6 +253,7 @@ def runner_factory(jobs_repo, threadsafe_conn):
         extraction: FakeEntityExtractionService | None = None,
         mood_backfill: FakeMoodBackfill | None = None,
         entity_reembedder: Any = None,
+        ingestion: Any = None,
     ) -> JobRunner:
         runner = JobRunner(
             job_repository=jobs_repo,
@@ -263,6 +264,7 @@ def runner_factory(jobs_repo, threadsafe_conn):
             mood_backfill_callable=mood_backfill or FakeMoodBackfill(),
             mood_scoring_service=object(),  # type: ignore[arg-type]
             entry_repository=object(),  # type: ignore[arg-type]
+            ingestion_service=ingestion,
         )
         created.append(runner)
         return runner
@@ -721,8 +723,7 @@ class TestImageIngestionProgress:
         self, runner_factory, jobs_repo
     ):
         ingestion = FakeIngestionService()
-        runner = runner_factory()
-        runner._ingestion = ingestion  # type: ignore[attr-defined]
+        runner = runner_factory(ingestion=ingestion)
 
         images = [(b"img1", "image/jpeg", "page1.jpg")]
         job = runner.submit_image_ingestion(images, "2026-04-13")
@@ -738,8 +739,7 @@ class TestImageIngestionProgress:
         self, runner_factory, jobs_repo
     ):
         ingestion = FakeIngestionService()
-        runner = runner_factory()
-        runner._ingestion = ingestion  # type: ignore[attr-defined]
+        runner = runner_factory(ingestion=ingestion)
 
         images = [
             (b"img1", "image/jpeg", "page1.jpg"),
@@ -767,8 +767,7 @@ class TestImageIngestionProgress:
     ):
         """Verify every progress update has current <= total."""
         ingestion = FakeIngestionService()
-        runner = runner_factory()
-        runner._ingestion = ingestion  # type: ignore[attr-defined]
+        runner = runner_factory(ingestion=ingestion)
 
         # Patch update_progress to record all calls
         updates: list[tuple[str, int, int]] = []
@@ -811,8 +810,7 @@ class TestAudioIngestion:
 
     def test_single_recording_succeeds(self, runner_factory, jobs_repo):
         ingestion = FakeIngestionService()
-        runner = runner_factory()
-        runner._ingestion = ingestion
+        runner = runner_factory(ingestion=ingestion)
 
         recordings = [(b"audio1", "audio/webm", "rec1.webm")]
         job = runner.submit_audio_ingestion(recordings, "2026-04-14")
@@ -831,8 +829,7 @@ class TestAudioIngestion:
 
     def test_multiple_recordings_succeeds(self, runner_factory, jobs_repo):
         ingestion = FakeIngestionService()
-        runner = runner_factory()
-        runner._ingestion = ingestion
+        runner = runner_factory(ingestion=ingestion)
 
         recordings = [
             (b"audio1", "audio/webm", "rec1.webm"),
@@ -855,8 +852,7 @@ class TestAudioIngestion:
 
     def test_job_type_is_ingest_audio(self, runner_factory, jobs_repo):
         ingestion = FakeIngestionService()
-        runner = runner_factory()
-        runner._ingestion = ingestion
+        runner = runner_factory(ingestion=ingestion)
 
         recordings = [(b"audio1", "audio/webm", "rec.webm")]
         job = runner.submit_audio_ingestion(recordings, "2026-04-14")
@@ -865,8 +861,7 @@ class TestAudioIngestion:
 
     def test_recording_count_in_params(self, runner_factory, jobs_repo):
         ingestion = FakeIngestionService()
-        runner = runner_factory()
-        runner._ingestion = ingestion
+        runner = runner_factory(ingestion=ingestion)
 
         recordings = [
             (b"a1", "audio/webm", "r1.webm"),
@@ -877,8 +872,8 @@ class TestAudioIngestion:
         runner.shutdown(wait=True)
 
     def test_no_ingestion_service_fails(self, runner_factory, jobs_repo):
+        # No ingestion= kwarg → JobRunner gets ingestion_service=None.
         runner = runner_factory()
-        runner._ingestion = None
 
         recordings = [(b"audio1", "audio/webm", "rec.webm")]
         job = runner.submit_audio_ingestion(recordings, "2026-04-14")
@@ -898,8 +893,7 @@ class TestAudioIngestion:
 class TestReprocessEmbeddings:
     def test_reprocess_job_runs_to_success(self, runner_factory, jobs_repo):
         ingestion = FakeIngestionService()
-        runner = runner_factory()
-        runner._ingestion = ingestion  # type: ignore[attr-defined]
+        runner = runner_factory(ingestion=ingestion)
 
         job = runner.submit_reprocess_embeddings(42)
         runner.shutdown(wait=True)
@@ -915,8 +909,8 @@ class TestReprocessEmbeddings:
     def test_reprocess_without_ingestion_service_fails(
         self, runner_factory, jobs_repo
     ):
+        # No ingestion= kwarg → JobRunner gets ingestion_service=None.
         runner = runner_factory()
-        # runner._ingestion is None by default (not set on fixture)
 
         job = runner.submit_reprocess_embeddings(1)
         runner.shutdown(wait=True)
