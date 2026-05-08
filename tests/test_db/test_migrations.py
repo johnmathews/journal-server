@@ -282,6 +282,134 @@ class TestMergeCandidatesPairUniqueMigration:
     """Migration 0022 rebuilds entity_merge_candidates with per-pair
     UNIQUE and a CHECK(entity_id_a < entity_id_b)."""
 
+    @staticmethod
+    def _run_migrations_up_to(conn, max_version: int) -> None:
+        """Apply migration files with version <= max_version.
+
+        Mirrors ``run_migrations`` but stops early so we can drop
+        custom state in before the next migration runs — needed to
+        reproduce prod conditions for migration 0022.
+        """
+        from journal.db.migrations import (
+            get_current_version,
+            get_migration_files,
+        )
+        current = get_current_version(conn)
+        for path in get_migration_files():
+            file_version = int(path.stem.split("_")[0])
+            if file_version <= current:
+                continue
+            if file_version > max_version:
+                break
+            conn.executescript(path.read_text())
+            conn.execute(f"PRAGMA user_version = {file_version}")
+            current = file_version
+
+    @staticmethod
+    def _run_migration_file(conn, version: int) -> None:
+        """Apply a single migration file by version number."""
+        from journal.db.migrations import get_migration_files
+        for path in get_migration_files():
+            if int(path.stem.split("_")[0]) == version:
+                conn.executescript(path.read_text())
+                conn.execute(f"PRAGMA user_version = {version}")
+                return
+        raise AssertionError(f"Migration {version} not found")
+
+    def test_runs_against_orphan_source_rows(self, tmp_db_path):
+        """Regression for prod failure: migration 0022 used to crash with
+        ``FOREIGN KEY constraint failed`` when the source table contained
+        a row referencing an entity that had been deleted out from under
+        it. Real prod data had exactly one such orphan."""
+        from journal.db.connection import get_connection
+
+        conn = get_connection(tmp_db_path)
+        self._run_migrations_up_to(conn, 21)
+
+        # Seed two valid entities (A,B) and a candidate referencing them,
+        # plus one orphan candidate where entity_id_b points at id=999
+        # (no such entity). FK is toggled off for the orphan insert
+        # because the source table itself enforces the FK; orphans only
+        # exist in real DBs because something bypassed FK in the past.
+        conn.execute(
+            "INSERT INTO entities (id, user_id, entity_type, canonical_name)"
+            " VALUES (1, 1, 'person', 'A'), (2, 1, 'person', 'B'),"
+            "        (3, 1, 'person', 'C')"
+        )
+        conn.execute(
+            "INSERT INTO entity_merge_candidates"
+            " (entity_id_a, entity_id_b, similarity, extraction_run_id)"
+            " VALUES (1, 2, 0.9, 'run-1'),"
+            "        (1, 3, 0.85, 'run-1')"
+        )
+        conn.commit()
+        # PRAGMA foreign_keys is a no-op inside a transaction, so commit
+        # first, then toggle, insert the orphan, and toggle back.
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute(
+            "INSERT INTO entity_merge_candidates"
+            " (entity_id_a, entity_id_b, similarity, extraction_run_id)"
+            " VALUES (1, 999, 0.7, 'run-1')"
+        )
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys = ON")
+
+        # Sanity-check we wrote 3 rows including the orphan.
+        n_before = conn.execute(
+            "SELECT COUNT(*) FROM entity_merge_candidates"
+        ).fetchone()[0]
+        assert n_before == 3
+
+        self._run_migration_file(conn, 22)
+
+        # Orphan dropped, valid pairs preserved (one row per pair).
+        rows = conn.execute(
+            "SELECT entity_id_a, entity_id_b, similarity"
+            " FROM entity_merge_candidates"
+            " ORDER BY entity_id_a, entity_id_b"
+        ).fetchall()
+        assert len(rows) == 2
+        assert (rows[0]["entity_id_a"], rows[0]["entity_id_b"]) == (1, 2)
+        assert (rows[1]["entity_id_a"], rows[1]["entity_id_b"]) == (1, 3)
+
+        # Sanity-check schema version + new constraints in place.
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 22
+        conn.close()
+
+    def test_idempotent_after_partial_failure(self, tmp_db_path):
+        """Regression for prod failure: when 0022 crashed mid-script
+        (orphan FK violation), the freshly-created
+        ``entity_merge_candidates_new`` table survived. Re-running the
+        migration must drop the leftover table cleanly."""
+        from journal.db.connection import get_connection
+
+        conn = get_connection(tmp_db_path)
+        self._run_migrations_up_to(conn, 21)
+
+        # Simulate the post-crash state: a leftover ``_new`` table.
+        conn.execute(
+            "CREATE TABLE entity_merge_candidates_new ("
+            " id INTEGER PRIMARY KEY,"
+            " entity_id_a INTEGER, entity_id_b INTEGER,"
+            " similarity REAL, status TEXT, extraction_run_id TEXT,"
+            " created_at TEXT, updated_at TEXT, resolved_at TEXT)"
+        )
+        conn.commit()
+
+        # Migration must succeed despite the leftover.
+        self._run_migration_file(conn, 22)
+
+        # Final table is the renamed-from-new one; the leftover is gone.
+        tables = {
+            r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+                " AND name LIKE 'entity_merge_candidates%'"
+            ).fetchall()
+        }
+        assert tables == {"entity_merge_candidates"}
+        conn.close()
+
     def test_unique_per_pair(self, db_conn):
         db_conn.execute(
             "INSERT INTO entities (user_id, entity_type, canonical_name)"

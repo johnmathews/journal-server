@@ -15,6 +15,14 @@
 -- During the rebuild we collapse historical rows by pair, taking the
 -- highest similarity and a sensible aggregate status (accepted >
 -- dismissed > pending) so resolution history is preserved.
+--
+-- Idempotency: Python's sqlite3 ``executescript`` does not roll back on
+-- mid-script failure (each statement is autocommitted). If a prior run
+-- of this migration crashed partway, the ``_new`` table will still be
+-- present and the next attempt would die at "table already exists".
+-- Drop the leftover up-front so a retry can succeed cleanly.
+
+DROP TABLE IF EXISTS entity_merge_candidates_new;
 
 CREATE TABLE entity_merge_candidates_new (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,24 +42,33 @@ CREATE TABLE entity_merge_candidates_new (
 -- Collapse rows by normalised pair. MIN/MAX establish the (lo, hi) ordering
 -- enforced by the new CHECK constraint. Status precedence is hand-rolled
 -- since SQLite has no MAX over arbitrary string ordering.
+--
+-- INNER JOINs against ``entities`` filter out orphan rows whose
+-- entity_id_a or entity_id_b references a deleted entity — the new
+-- table's FK constraints would reject them and abort the migration.
+-- Orphans should not exist (the source table has ON DELETE CASCADE on
+-- both sides) but real prod DBs accumulate them when something has
+-- bypassed FK enforcement at any point in their history.
 INSERT INTO entity_merge_candidates_new
     (entity_id_a, entity_id_b, similarity, status,
      extraction_run_id, created_at, updated_at, resolved_at)
 SELECT
-    MIN(entity_id_a, entity_id_b),
-    MAX(entity_id_a, entity_id_b),
-    MAX(similarity),
+    MIN(c.entity_id_a, c.entity_id_b),
+    MAX(c.entity_id_a, c.entity_id_b),
+    MAX(c.similarity),
     CASE
-        WHEN SUM(CASE WHEN status = 'accepted'  THEN 1 ELSE 0 END) > 0 THEN 'accepted'
-        WHEN SUM(CASE WHEN status = 'dismissed' THEN 1 ELSE 0 END) > 0 THEN 'dismissed'
+        WHEN SUM(CASE WHEN c.status = 'accepted'  THEN 1 ELSE 0 END) > 0 THEN 'accepted'
+        WHEN SUM(CASE WHEN c.status = 'dismissed' THEN 1 ELSE 0 END) > 0 THEN 'dismissed'
         ELSE 'pending'
     END,
-    MAX(extraction_run_id),
-    MIN(created_at),
-    MAX(COALESCE(resolved_at, created_at)),
-    MAX(resolved_at)
-FROM entity_merge_candidates
-GROUP BY MIN(entity_id_a, entity_id_b), MAX(entity_id_a, entity_id_b);
+    MAX(c.extraction_run_id),
+    MIN(c.created_at),
+    MAX(COALESCE(c.resolved_at, c.created_at)),
+    MAX(c.resolved_at)
+FROM entity_merge_candidates c
+INNER JOIN entities ea ON ea.id = c.entity_id_a
+INNER JOIN entities eb ON eb.id = c.entity_id_b
+GROUP BY MIN(c.entity_id_a, c.entity_id_b), MAX(c.entity_id_a, c.entity_id_b);
 
 DROP TABLE entity_merge_candidates;
 ALTER TABLE entity_merge_candidates_new RENAME TO entity_merge_candidates;
