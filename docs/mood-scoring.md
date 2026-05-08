@@ -13,8 +13,8 @@ entry is always saved even if scoring fails.
 ## Runtime toggle
 
 The `enable_mood_scoring` setting is editable at runtime from the webapp's Settings page. The runtime settings callback
-in `mcp_server.py` creates or clears the `MoodScoringService` on both `IngestionService` and `JobRunner` immediately —
-no server restart required. When disabled, inline mood scoring during image/audio ingestion is skipped and
+in `mcp_server/bootstrap.py` creates or clears the `MoodScoringService` on both `IngestionService` and `JobRunner`
+immediately — no server restart required. When disabled, inline mood scoring during image/audio ingestion is skipped and
 `mood_score_entry` jobs will fail with an error. When re-enabled, a new scorer is constructed with the current config
 (model, dimensions, API key) and subsequent ingestions score normally.
 
@@ -46,9 +46,9 @@ Fields:
 
 ### Bipolar vs unipolar
 
-The scale type is per-facet because some emotional axes are genuinely bipolar (`joy ↔ sadness`: the opposite of joy is a
-real feeling, not absence) while others are unipolar (`agency vs apathy`: the opposite of agency is felt as _absence_ of
-agency, not an active opposing feeling).
+The scale type is per-facet because some emotional axes are genuinely bipolar while others are not. `joy ↔ sadness` is
+bipolar: the opposite of joy is a real feeling, not its absence. `agency` is unipolar: the opposite of agency is felt as
+the _absence_ of agency, not an active opposing feeling.
 
 - **Bipolar** scores range `[-1.0, +1.0]`. `0.0` means neither pole dominates — a calm, flat mood. `-1.0` is maximum
   negative pole, `+1.0` is maximum positive pole.
@@ -63,8 +63,9 @@ into a single shape. The backend stores all scores in the existing `mood_scores`
 
 Each score is accompanied by a brief rationale (1-2 sentences) explaining why the LLM assigned that score. The rationale
 is stored in the `mood_scores.rationale` column (added in migration 0014) and surfaced in the drill-down panel on both
-the Dashboard and Insights pages when the user clicks a mood chart data point. The LLM is instructed to be concrete — quoting or paraphrasing the entry rather than restating the scale
-definition.
+the Dashboard and Insights pages when the user clicks a mood chart data point.
+
+The LLM is instructed to be concrete — quoting or paraphrasing the entry rather than restating the scale definition.
 
 Entries scored before migration 0014 have `rationale = NULL`. Run `journal backfill-mood --force` to populate rationales
 for all entries.
@@ -84,8 +85,8 @@ The facets shipped in `config/mood-dimensions.toml` at the time of writing are:
 | `proactive_reactive` | bipolar  | Proactive/initiating vs reactive. More stance than mood.                    |
 
 `frustration` is the only facet where a higher stored score means a worse mood. The dashboard inverts it at render
-time — the line is labelled "calm" and the score is plotted as `1 - x` — so the chart stays "higher = better" across
-every line. Storage and the LLM prompt are unchanged; the inversion is a render-time helper in
+time so the chart stays "higher = better" across every line: the line is labelled "calm" and the score is plotted as
+`1 - score`. Storage and the LLM prompt operate on the un-inverted value; the inversion is a render-time helper in
 `webapp/src/utils/mood-display.ts`.
 
 This is a **starting set**, not a committed schema. After ~60-100 entries, run the correlation / factor analysis
@@ -93,8 +94,8 @@ described in the [Post-hoc analysis](#post-hoc-analysis) section to decide which
 
 ## Cadence
 
-Scoring runs per journal entry. Assume one entry per day (the "morning pages" practice), which gives ~30 scored entries
-per month. No batching — each entry fires one LLM call at ingestion time.
+Scoring runs per journal entry. Assume one entry per day (the daily freewriting practice), which gives ~30 scored
+entries per month. No batching — each entry fires one LLM call at ingestion time.
 
 Skipping days or writing partial entries is fine. The `mood_scores` table is sparse by `(entry_id, dimension)`, so a
 missed day simply has no row. Adding a new facet later does not require rewriting old entries — they remain validly
@@ -102,7 +103,7 @@ scored against the previous set and return `null` for the new facet until you ru
 
 ## Regeneration
 
-All four typical edits are cheap:
+Four common edit patterns, all cheap:
 
 ### Adding a facet
 
@@ -131,8 +132,8 @@ All four typical edits are cheap:
 
 ### Reordering facets
 
-Ordering in the TOML file is load-bearing only for chart display (the dashboard renders lines in the order defined).
-Reordering is a one-file edit with no backfill required.
+TOML ordering only affects chart display — the dashboard renders lines in the order they appear in the file.
+Reordering needs no backfill.
 
 ## `journal backfill-mood` CLI
 
@@ -148,7 +149,7 @@ usage: journal backfill-mood [--force] [--prune-retired] [--dry-run]
   `--prune-retired`, it reports how many rows would be deleted.
 - `--start-date` / `--end-date` — inclusive ISO-8601 window (optional).
 
-Dry-run output is safe to run on a large corpus; the real run prints a per-run cost estimate based on public Sonnet 4.5
+Dry-run is safe to use on a large corpus; the real run prints a per-run cost estimate based on public Sonnet 4.5
 pricing so you can decide whether to proceed.
 
 ## Cost
@@ -162,8 +163,8 @@ Per-entry cost with Sonnet 4.5 (`claude-sonnet-4-5`), ~500-word entry:
 - **Total: ~$0.006 per entry**
 
 Scaling: one entry per day ≈ 30 entries per month ≈ **$0.18/month**. Backfilling 100 historical entries is ~$0.60. If you
-switch to Claude Haiku 4.5 (via `MOOD_SCORER_MODEL=claude-haiku-4-5-20251001`), cost drops by ~5× to ~$0.03/month, at the
-price of slightly less calibrated subjective scoring on short entries.
+switch to Claude Haiku 4.5 (via `MOOD_SCORER_MODEL=claude-haiku-4-5`), cost drops ~3× to ~$0.06/month, at the price of
+slightly less calibrated subjective scoring on short entries.
 
 ## Post-hoc analysis
 
@@ -185,7 +186,7 @@ a few weeks first to produce meaningful data.
 
 ## Endpoint surfaces
 
-The webapp consumes two new endpoints, both bearer-authenticated via the app-wide middleware:
+The webapp consumes two endpoints, both bearer-authenticated via the app-wide middleware:
 
 - `GET /api/dashboard/mood-dimensions` — returns the currently loaded facet definitions (name, scale type, poles, notes).
   The frontend queries this on page load so adding a facet in the TOML file flows through to the UI on the next request
@@ -196,7 +197,5 @@ The webapp consumes two new endpoints, both bearer-authenticated via the app-wid
 
 ## MCP tool
 
-`journal_get_mood_trends` (LLM-facing MCP tool) still accepts `day / week / month / quarter / year` as granularity. The
-`period` field in its response is now a canonical ISO date instead of a `%Y-W%W` format string, matching the REST shape.
-Existing LLM consumers that displayed the field as-is should still render correctly — the format is human-readable in
-both shapes.
+`journal_get_mood_trends` (LLM-facing MCP tool) accepts `day / week / month / quarter / year` as granularity. The
+`period` field in its response is a canonical ISO date, matching the REST shape.

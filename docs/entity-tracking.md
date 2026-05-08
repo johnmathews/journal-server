@@ -28,7 +28,7 @@ times.
 Kicked off via:
 
 - `journal extract-entities --entry-id N` — single entry
-- `journal extract-entities --start-date YYYY-MM-DD --end-date ...` — batch
+- `journal extract-entities --start-date YYYY-MM-DD --end-date YYYY-MM-DD` — batch
 - `journal extract-entities --stale-only` — only entries whose text changed since their last extraction run
 - `POST /api/entities/extract` with `{entry_id?, start_date?, end_date?, stale_only?}`
 - MCP tool `journal_extract_entities(...)`
@@ -37,7 +37,7 @@ Kicked off via:
   when a job is queued.
 
 Every invocation assigns a fresh UUID `extraction_run_id` which is written on every mention and relationship row the run
-produces. Re- running extraction for the same entry is safe — the service deletes any existing mentions and relationships
+produces. Re-running extraction for the same entry is safe — the service deletes any existing mentions and relationships
 for that `entry_id` before writing new ones, so the count can never double.
 
 A trigger on `entries.final_text` sets the `entity_extraction_stale` flag back to `1` whenever an entry is edited. The
@@ -46,35 +46,35 @@ processed and not touched since.
 
 ## Dedup strategy
 
-Entity consolidation is the hardest part — the LLM will happily produce "Atlas", "atlas", and "Atlas Wong" as three
-separate entities unless we push back. The service runs four stages per extracted entity:
+Entity consolidation is the hardest part. Without explicit deduplication the LLM will produce "Atlas", "atlas", and
+"Atlas Wong" as three separate entities. The service runs four stages per extracted entity:
 
-1. **Stage 0 — LLM-asserted match (WU4).** Before the extraction call, the service vector-pre-filters the user's
-   curated entities to a small candidate set (top `ENTITY_LLM_CANDIDATE_TOP_K` by cosine similarity to the entry text,
-   above `ENTITY_LLM_CANDIDATE_THRESHOLD`) and passes them to the LLM as a `known_entities` JSON block. The model can
-   set `matches_known_id` on any extracted entity to declare a link. The service accepts the link only after running
-   four guards:
+- **Stage 0 — LLM-asserted match.** Before the extraction call, the service vector-pre-filters the user's curated
+  entities to a small candidate set (top `ENTITY_LLM_CANDIDATE_TOP_K` by cosine similarity to the entry text, above
+  `ENTITY_LLM_CANDIDATE_THRESHOLD`) and passes them to the LLM as a `known_entities` JSON block. The model can set
+  `matches_known_id` on any extracted entity to declare a link. The service accepts the link only after running four
+  guards:
 
-   - **Guard A — ownership:** the asserted id resolves to an entity owned by the current user.
-   - **Guard B — candidate-set membership:** the asserted id was in the catalog we passed to the LLM. Anything outside
-     is hallucination by definition.
-   - **Guard C — type match:** the asserted entity's `entity_type` equals the type the LLM is claiming for this mention.
-   - **Guard D — cosine sanity:** cosine of the new mention's embedding against the asserted match's stored embedding
-     is ≥ `ENTITY_LLM_MATCH_MIN_COSINE` (default `0.3`). Catches semantic drift where the LLM picks the closest available
-     candidate even when none is genuinely a match.
+  - **Guard A — ownership:** the asserted id resolves to an entity owned by the current user.
+  - **Guard B — candidate-set membership:** the asserted id was in the catalog passed to the LLM. Any id outside this
+    set is a hallucination and is rejected.
+  - **Guard C — type match:** the asserted entity's `entity_type` equals the type the LLM is claiming for this mention.
+  - **Guard D — cosine sanity:** cosine of the new mention's embedding against the asserted match's stored embedding
+    is ≥ `ENTITY_LLM_MATCH_MIN_COSINE` (default `0.3`). Catches semantic drift where the LLM picks the closest available
+    candidate even when none is genuinely a match.
 
-   On any guard failure the assertion is rejected, the failure is logged with the LLM's `match_justification`, and
-   resolution falls through to stages a/b/c.
-2. **Stage a — exact canonical name.** Case-insensitive lookup against `entities.canonical_name` filtered by
-   `entity_type`. This catches the common case where the LLM produces the same canonical form across runs.
-3. **Stage b — alias match.** Lookup against `entity_aliases.alias_normalised` (lowercased, stripped). The service
-   searches for the new canonical form itself first, then each alias the LLM suggested. This catches "Atlas" matching a
-   previously-seen entity whose canonical is "Atlas Wong" with "atlas" recorded as an alias.
-4. **Stage c — embedding similarity fallback.** If all above fail, the service asks the embeddings provider to encode
-   `f"{canonical_name} {description}"` as a single vector, then computes cosine similarity against every existing entity
-   of the same type that has an embedding stored. If the best match is at or above `ENTITY_DEDUP_SIMILARITY_THRESHOLD`
-   (default `0.88`), the service reuses that entity and adds a **warning** to the extraction result so the user can audit
-   the merge. Below the threshold, a brand-new entity row is written and its embedding saved for future stage-c lookups.
+  On any guard failure the assertion is rejected, the failure is logged with the LLM's `match_justification`, and
+  resolution falls through to stages a/b/c.
+- **Stage a — exact canonical name.** Case-insensitive lookup against `entities.canonical_name` filtered by
+  `entity_type`. This catches the common case where the LLM produces the same canonical form across runs.
+- **Stage b — alias match.** Lookup against `entity_aliases.alias_normalised` (lowercased, stripped). The service
+  searches for the new canonical form itself first, then each alias the LLM suggested. This catches "Atlas" matching a
+  previously-seen entity whose canonical is "Atlas Wong" with "atlas" recorded as an alias.
+- **Stage c — embedding similarity fallback.** If all above fail, the service asks the embeddings provider to encode
+  `f"{canonical_name} {description}"` as a single vector, then computes cosine similarity against every existing entity
+  of the same type that has an embedding stored. If the best match is at or above `ENTITY_DEDUP_SIMILARITY_THRESHOLD`
+  (default `0.88`), the service reuses that entity and adds a **warning** to the extraction result so the user can audit
+  the merge. Below the threshold, a brand-new entity row is written and its embedding saved for future stage-c lookups.
 
 Aliases the LLM produces for an entity are added to `entity_aliases` unconditionally (deduped via the unique index), so
 they improve stage-b matching on the next run.
@@ -94,9 +94,9 @@ background job that recomputes the embedding from the new text and persists it. 
 `reembed_job_id` so the webapp can track it through the existing jobs / toast pipeline. Empty or whitespace-only
 descriptions short-circuit (the job records `embedded=false` rather than overwriting with a meaningless vector).
 
-Renaming an entity (canonical_name change) does NOT currently enqueue a re-embed — the existing embedding text mixes
-the old name with the description, but recognition leans more heavily on description content than on name in practice,
-and rename is comparatively rare. Revisit if recognition quality drops after batch renames.
+Renaming an entity (canonical_name change) does NOT enqueue a re-embed. The stored embedding still mixes the old name
+with the description, but recognition leans more heavily on description content than on name in practice, and renames
+are rare. Revisit if recognition quality drops after batch renames.
 
 For entities that pre-date this feature (whose embeddings were computed once at creation and never refreshed), run the
 one-shot CLI:
@@ -110,7 +110,7 @@ text-embedding-3-large pricing, ~$0.0001 per entity.
 
 ## Alias CRUD
 
-Aliases are now a first-class user-managed concept, not just an LLM byproduct. Three endpoints surface this:
+Aliases are a first-class user-managed concept, not just an LLM byproduct. Three endpoints surface this:
 
 - `POST /api/entities/{id}/aliases` — adds an alias. Returns 409 with `existing_entity_id` / `existing_canonical_name`
   / `existing_entity_type` if the alias is already mapped to a different entity for this user, so the webapp can offer
@@ -194,8 +194,8 @@ or owned by another user.
 
 ### Data-model behaviour
 
-`SQLiteEntityStore.merge_entities()` (`src/journal/entitystore/store.py`, around lines 664–757) does the following for
-each absorbed entity, inside one transaction:
+`SQLiteEntityStore.merge_entities()` (`src/journal/entitystore/merge.py`) does the following for each absorbed entity,
+inside one transaction:
 
 1. **Snapshot.** Inserts a row into `entity_merge_history` capturing `survivor_id`, `absorbed_id`, and the absorbed
    entity's `canonical_name`, `entity_type`, `description`, and `aliases` (JSON list) at the moment of merge.
@@ -231,10 +231,10 @@ and word-shaped tails are rejected so relational suffixes (`"John Mathews' mothe
 and parent/child place pairs (`"Haarlem"` vs `"Haarlem Centraal"`) do not produce false positives. The helper
 `_is_likely_word_tail` centralises that judgment.
 
-Embedding similarity above `ENTITY_DEDUP_SIMILARITY_THRESHOLD` (default `0.88`) auto-merges as before — that path
-is unchanged. Embedding similarity *below* the threshold no longer creates a candidate: the previous "near-miss"
-band (`max(threshold - 0.15, 0.5)` to threshold) was removed in WU4 because in real-world data it produced zero
-useful suggestions over many false positives (semantically related but distinct entities like Hermione vs Neville).
+Embedding similarity above `ENTITY_DEDUP_SIMILARITY_THRESHOLD` (default `0.88`) auto-merges (stage c, above).
+Embedding similarity *below* the threshold does not produce a candidate. The signal is too noisy on its own —
+semantically related but distinct entities (e.g. Hermione vs Neville) routinely score in that range, so a
+near-miss band would generate far more false positives than useful suggestions.
 
 Candidates are stored per-pair in `entity_merge_candidates` (migration `0022`) — the table's `UNIQUE(entity_id_a,
 entity_id_b)` constraint means repeated extraction runs UPSERT into the same row instead of inserting a new
@@ -261,9 +261,10 @@ panel on the entity list view.
 
 ## Quarantine
 
-Quarantine is a **soft-hide** for entities that look broken but are worth keeping around. A quarantined entity row
-stays in the database — its description, aliases, and merge history are preserved — but it is excluded from the default
-entity list and from chart endpoints, so it doesn't pollute the UI while the operator decides what to do with it.
+Quarantine **soft-hides** entities that look hallucinated or malformed, while preserving their data for review or
+merging. A quarantined entity row stays in the database — its description, aliases, and merge history are preserved —
+but it is excluded from the default entity list and from chart endpoints, so it doesn't pollute the UI while the
+operator decides what to do with it.
 
 The schema columns landed in migration `0018_entity_quarantine.sql`: `is_quarantined` (0/1), `quarantine_reason`
 (free-text), and `quarantined_at` (UTC ISO-8601 string, empty when not quarantined). Migration adds a partial index
@@ -272,24 +273,25 @@ active-entity hot path.
 
 ### When entities are quarantined
 
-Two paths:
+Three paths:
 
 1. **Automatic, post-extraction sanity sweep.** After extraction completes for an entry, the service re-checks every
    entity that was touched by the run (created or matched). If the entity's `canonical_name` does not appear (case-
    insensitively, whitespace-tolerant) in any of its mention quotes, and does not appear in the `final_text` of any
    entry it is mentioned in, the entity is flagged as quarantined. This catches the LLM-hallucination failure mode
-   where a canonical name was invented out of partial context and never actually written by the author, including the
-   "zombie rebound" case where a hallucinated canonical (e.g. `"Zij Kanaal C Zuid"`) re-binds to a corrected entry
-   text via embedding similarity. The journal author entity is exempt — first-person prose ("I went...") legitimately
-   produces an author mention whose canonical (the user's display name) is never written verbatim. The implementation
-   lives in `EntityExtractionService.extract_from_entry` (the sweep) and `_canonical_name_supported` (the matcher) in
-   `src/journal/services/entity_extraction.py`.
+   where a canonical name was invented out of partial context and never actually written by the author. It also
+   catches the "zombie rebound" case where a hallucinated canonical (e.g. `"Zij Kanaal C Zuid"`) re-binds to a
+   corrected entry text via embedding similarity. The journal author entity is exempt — first-person prose ("I
+   went...") legitimately produces an author mention whose canonical (the user's display name) is never written
+   verbatim. The implementation lives in `EntityExtractionService.extract_from_entry`
+   (`src/journal/services/entity_extraction/service.py`) for the sweep, and `is_canonical_name_supported`
+   (`src/journal/services/entity_extraction/sanity.py`) for the matcher.
 2. **Automatic, hallucinated-name rejection at the LLM layer.** When the extraction provider receives an entity whose
    `canonical_name` is not a substring of its source quote, it first tries a longest-token-substring repair against the
    quote (rebinding `"Zij Kanaal C Zuid"` to `"Zij Kanaal C"` when the quote contains only the shorter form). If no
    token-aligned substring of length ≥ 3 chars matches, the entity is still surfaced (so the audit trail isn't lost)
    but is flagged with `pending_quarantine_reason`; the extraction service quarantines the new row at creation time.
-   See `_longest_canonical_substring_in_quote` and the WU4 branch in `_parse_tool_response`
+   See `_longest_canonical_substring_in_quote` and `_parse_tool_response`
    (`src/journal/providers/extraction.py`).
 3. **Manual.** An operator can quarantine an entity directly from the entity detail view — useful for deliberately
    hiding noise (a single accidental mention of a public figure, for instance) without deleting the row outright.
@@ -305,7 +307,7 @@ Two paths:
 
 The default `GET /api/entities` list and the dashboard chart endpoints (`entity-distribution`, `entity-trends`,
 `mood-entity-correlation`) exclude quarantined rows. The store-level methods accept an `include_quarantined=True`
-flag for callers (e.g. an admin "show everything" view) that need the unfiltered set.
+flag for callers — e.g. an admin "show everything" view — that need the unfiltered set.
 
 ### Operator guidance
 
@@ -336,9 +338,8 @@ For each space-separated word, in order:
    - Otherwise → title-case. Hyphen-segments are title-cased independently (`anglo-saxon →
      Anglo-Saxon`).
 
-The per-word check is what makes inputs like `iOS app → iOS App` work. An older revision
-short-circuited on a whole-string mid-word-uppercase check, which incorrectly froze the
-entire input verbatim whenever any single word had non-leading uppercase.
+The per-word check is what makes inputs like `iOS app → iOS App` work — checking each word
+independently means an intra-word uppercase only freezes that word, not the whole input.
 
 ### Exception list
 
