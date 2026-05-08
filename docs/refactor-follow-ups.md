@@ -1,10 +1,8 @@
 # Refactor follow-ups — open items after the v2 plan landed
 
-> **Round 3 supersedes this doc.** All items below are resolved /
-> accepted+documented as of 2026-05-07 (item 7 was the last to land).
-> For the current punch list see
-> [`docs/refactor-round-3.md`](refactor-round-3.md). This doc is kept
-> as a record of decisions and standing-fact verification commands.
+**Status:** closed 2026-05-07. Superseded by [`refactor-round-3.md`](./refactor-round-3.md).
+All items below are resolved or accepted+documented (item 7 was the last to land). Kept as a
+record of decisions and standing-fact verification commands.
 
 A single punch list for sessions after the original `code-quality-refactor-plan.md`
 (v2) closed out on 2026-05-07. **Load this doc first** in any new session that

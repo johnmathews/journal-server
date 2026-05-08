@@ -1,5 +1,8 @@
 # `db/repository.py` split — planning round
 
+**Status:** active. **Last updated:** 2026-05-07. **Supersedes:** none.
+Tracked under Round-3 Recommendation 3 in [`refactor-round-3.md`](./refactor-round-3.md).
+
 Round-3 Recommendation 3 from `docs/refactor-round-3.md`. Read-only
 planning output. The intent is to bring the proposed split back for
 sign-off, then carry out the extraction in a follow-up session — one

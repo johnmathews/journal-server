@@ -1,5 +1,9 @@
 # Refactor round 3 — kickoff doc for the next session
 
+**Status:** active. **Last updated:** 2026-05-07. **Supersedes:**
+[`code-quality-refactor-plan.md`](./code-quality-refactor-plan.md) and
+[`refactor-follow-ups.md`](./refactor-follow-ups.md).
+
 This document is the entry point for the next refactor session. The
 v2 plan (`docs/code-quality-refactor-plan.md`) and the round-2 living
 punch list (`docs/refactor-follow-ups.md`) are both **fully closed**;

@@ -1,5 +1,9 @@
 # Code Quality Refactor Plan (v2)
 
+**Status:** closed 2026-05-07. Superseded by [`refactor-round-3.md`](./refactor-round-3.md).
+All v2 work units (1a–7) shipped; new candidates that surfaced during execution moved into
+round 3. Kept as a record of decisions and per-unit rationale.
+
 Implementation plan for the 2026-05-07 codebase review's recommendations, revised after a
 code-grounded review of v1. v1 was written without reading the actual files; v2 incorporates
 structural realities (e.g. `api.py`'s closure-over-`services_getter` shape, additional reach-ins,

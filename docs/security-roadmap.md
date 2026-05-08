@@ -1,7 +1,7 @@
 # Security Hardening Roadmap
 
-**Created:** 2026-04-14
-**Last updated:** 2026-04-15
+**Status:** active. **Last updated:** 2026-04-15. **Supersedes:** none.
+Created 2026-04-14. Tier 1 completed 2026-04-15; later tiers remain.
 
 Prioritized security improvements for the multi-user authentication system. Items are grouped
 into tiers based on urgency. Each tier should be completed before the one below it.

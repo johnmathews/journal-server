@@ -1,11 +1,31 @@
 # Journal Tool — Consolidated Roadmap
 
-**Status:** written 2026-04-11. Supersedes `docs/phase-2-brief.md` (2026-03-23) and
-`journal-webapp/docs/future-features.md`. Pulls in all outstanding TODOs from the task list, memory files, and recent
-journal entries.
+**Status:** active. **Last updated:** 2026-05-08. **Supersedes:**
+[`phase-2-brief.md`](./phase-2-brief.md) (2026-03-23) and `journal-webapp/docs/future-features.md`.
+Pulls in all outstanding TODOs from the task list, memory files, and recent journal entries.
 
 This is the single source of truth for "what do we work on next". When you finish an item, cross it out here; when you
 defer one, move it to the "Deferred / known gaps" section with a reason.
+
+## Active planning docs
+
+Live plans linked here so they don't become shadow inventory. For each, the `Status:` header at
+the top of the linked doc tells you whether it's active, closed, or superseded.
+
+- [`tier-1-plan.md`](./tier-1-plan.md) — Tier 1 work-unit breakdown. Items 2/3a/3b/4 shipped;
+  Items 1 and 3c remain.
+- [`refactor-round-3.md`](./refactor-round-3.md) — current entry point for refactor work.
+  Supersedes [`code-quality-refactor-plan.md`](./code-quality-refactor-plan.md) (v2, closed)
+  and [`refactor-follow-ups.md`](./refactor-follow-ups.md) (closed).
+  - [`refactor-repository-plan.md`](./refactor-repository-plan.md) — child plan, Recommendation 3.
+  - [`refactor-item-6-exceptions-plan.md`](./refactor-item-6-exceptions-plan.md) — child plan, § B.
+  - [`refactor-mcp-server-plan.md`](./refactor-mcp-server-plan.md) — child plan, Recommendation 2 (closed; split landed 2026-05-07).
+- [`security-roadmap.md`](./security-roadmap.md) — multi-tier security hardening. Tier 1
+  completed; later tiers remain.
+- [`fitness-integration-plan.md`](./fitness-integration-plan.md) — fitness-tracker
+  ingestion design. Active — planning.
+- [`code-quality-principles.md`](./code-quality-principles.md) — standing rules referenced
+  by the refactor docs.
 
 Scope is cross-cutting: some items are pure backend (`journal-server`), some pure frontend (`journal-webapp`), many touch
 both. Each item is tagged with `[server]`, `[webapp]`, or `[both]`.

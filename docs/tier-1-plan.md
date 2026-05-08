@@ -1,7 +1,10 @@
 # Tier 1 Implementation Plan
 
-**Status:** written 2026-04-11. Expands the 4 Tier 1 items from `roadmap.md` into concrete work units, a recommended
-build order, and the open questions that need a decision before coding starts.
+**Status:** active. **Last updated:** 2026-04-11. **Supersedes:** none.
+Items 2, 3a, 3b, and 4 shipped 2026-04-11; Items 1 (entity-extraction first run) and 3c
+(people/topic charts) remain. Expands the 4 Tier 1 items from
+[`roadmap.md`](./roadmap.md) into concrete work units, a recommended build order, and the
+open questions that need a decision before coding starts.
 
 This doc sits between `roadmap.md` (long-lived intent) and the task list (per-session scratch). When a work unit starts,
 create a task and link back here; when it ships, cross it out in both this doc and the roadmap.

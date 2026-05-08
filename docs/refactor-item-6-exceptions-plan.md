@@ -1,5 +1,8 @@
 # Item-6 exceptions — umbrella planning round
 
+**Status:** active. **Last updated:** 2026-05-07. **Supersedes:** none.
+Tracked under Round-3 § B in [`refactor-round-3.md`](./refactor-round-3.md).
+
 The three remaining size-cap exceptions documented in
 `docs/refactor-round-3.md` § B and the round-3 standing facts table:
 
