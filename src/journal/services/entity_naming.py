@@ -1,16 +1,30 @@
 """Smart title-casing for entity canonical names.
 
-Applied at write time in EntityStore.create_entity. Reads the operator-managed exception
-list from config/entity-casing-exceptions.toml. Hot-reloadable via services.reload.
+Applied at write time in ``EntityStore.create_entity`` and
+``EntityStore.update_entity``. Reads the operator-managed exception list from
+``config/entity-casing-exceptions.toml``. Hot-reloadable via ``services.reload``.
 
 Algorithm summary:
     1. Strip + collapse whitespace.
-    2. Case-insensitive lookup in the exceptions table -> exact preserved-case value.
-    3. If the input has any uppercase character at index >= 1 (e.g. ``iOS``,
-       ``GitHub``, ``FC Barcelona``), assume deliberate casing and return verbatim.
-    4. Otherwise word-by-word title-case. Articles/prepositions and Dutch particles
-       are lowercased in non-leading positions. Hyphen-segments are individually
-       title-cased. Apostrophe-suffixes (``'s``) keep the trailing letter lower.
+    2. Case-insensitive whole-string lookup in the exceptions table — exact
+       preserved-case value wins.
+    3. Word-by-word normalisation. For each word, in order:
+       a. If the word is a fully-uppercase acronym (length > 1, e.g. ``NASA``,
+          ``FOO``) — preserve verbatim.
+       b. If the word has an *intra-word* uppercase — i.e. an uppercase letter
+          appears AFTER a lowercase letter in the same word (e.g. ``iOS``,
+          ``eBay``, ``McDonald's``, ``DeepMind``) — preserve verbatim.
+       c. If the word is an article / preposition / Dutch particle in a
+          non-leading position — lowercase.
+       d. Otherwise — title-case. Hyphen-segments are title-cased independently
+          (``anglo-saxon`` → ``Anglo-Saxon``). Apostrophe-suffixes (``'s``) keep
+          the trailing letter lower because the apostrophe is not a word
+          separator.
+
+This per-word approach is what makes inputs like ``iOS app`` normalise correctly
+to ``iOS App``. An older revision of this algorithm did a single whole-string
+mid-word-uppercase check, which incorrectly froze the entire input verbatim
+whenever any single word had non-leading uppercase.
 
 The function is idempotent: ``smart_title_case(smart_title_case(x)) == smart_title_case(x)``.
 """
@@ -41,12 +55,28 @@ _DUTCH_PARTICLES: frozenset[str] = frozenset({
 _NON_LEADING_LOWERCASE: frozenset[str] = _LOWERCASE_ARTICLES | _DUTCH_PARTICLES
 
 
-def _has_midword_uppercase(s: str) -> bool:
-    """Return True if any character at index >= 1 is uppercase.
+def _word_should_preserve_verbatim(word: str) -> bool:
+    """Return True if a word looks deliberately cased and should not be re-cased.
 
-    Used to detect deliberately-cased input like 'iOS', 'iPhone', 'FC Barcelona'.
+    Two cases qualify:
+      - Fully uppercase, length > 1 (e.g. ``NASA``, ``FOO``, ``BBQ``) — acronym.
+      - An uppercase letter appears after a lowercase letter in the same word
+        (e.g. ``iOS``, ``eBay``, ``McDonald``, ``DeepMind``).
+
+    Hyphens / apostrophes / digits do not break the scan: ``McDonald's`` and
+    ``Pull-Up`` both qualify.
     """
-    return any(c.isupper() for c in s[1:])
+    if not word:
+        return False
+    if len(word) > 1 and word.isupper():
+        return True
+    seen_lower = False
+    for c in word:
+        if c.islower():
+            seen_lower = True
+        elif c.isupper() and seen_lower:
+            return True
+    return False
 
 
 def _capitalize_word(word: str) -> str:
@@ -89,10 +119,6 @@ def smart_title_case(name: str, exceptions: dict[str, str] | None = None) -> str
     if lower_key in exceptions:
         return exceptions[lower_key]
 
-    if _has_midword_uppercase(trimmed):
-        # Deliberate mixed-case input — pass through verbatim.
-        return trimmed
-
     words = trimmed.split(" ")
     out: list[str] = []
     for idx, word in enumerate(words):
@@ -101,6 +127,8 @@ def smart_title_case(name: str, exceptions: dict[str, str] | None = None) -> str
         word_lower = word.lower()
         if idx > 0 and word_lower in _NON_LEADING_LOWERCASE:
             out.append(word_lower)
+        elif _word_should_preserve_verbatim(word):
+            out.append(word)
         else:
             out.append(_capitalize_word(word))
     return " ".join(out)

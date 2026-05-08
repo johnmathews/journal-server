@@ -63,7 +63,7 @@ def build_system_prompt(author_name: str) -> str:
         "Entity types (pick the best fit for each):\n"
         "  - person: a named individual, pet, or character\n"
         "  - place: a city, venue, building, region, or address\n"
-        "  - activity: a verb-ish noun (squash, climbing, journaling)\n"
+        "  - activity: a verb-ish noun (Squash, Climbing, Morning Pages, Frisbee, Bible Study)\n"
         "  - organization: a company, club, team, or institution\n"
         "  - topic: a subject or concept the author is thinking about\n"
         "  - other: only when none of the above fit\n\n"
@@ -95,7 +95,10 @@ def build_system_prompt(author_name: str) -> str:
         "  - If nothing is found, return empty arrays for entities and\n"
         "    relationships.\n"
         "  - Confidence is a number in [0.0, 1.0]: 1.0 = completely\n"
-        "    certain, 0.5 = plausible guess, <0.3 = probably skip.\n\n"
+        "    certain, 0.5 = plausible guess, <0.3 = probably skip.\n"
+        "  - Use Title Case for `canonical_name` (e.g. `Morning Pages`,\n"
+        "    not `morning pages`). Preserve deliberate non-standard\n"
+        "    casing for proper nouns (`iOS`, `eBay`, `McDonald's`).\n\n"
         "Call the `record_entities` tool exactly once with your findings."
     )
 

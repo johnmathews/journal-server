@@ -24,6 +24,7 @@ from journal.cli._services import build_services as _build_services
 from journal.cli.entities import (
     cmd_backfill_entity_embeddings,
     cmd_extract_entities,
+    cmd_renormalise_entity_casing,
     cmd_repair_entity_names,
 )
 from journal.cli.mood import cmd_backfill_mood
@@ -579,6 +580,21 @@ def main():
         help="Apply proposed repairs (default is dry-run)",
     )
 
+    # renormalise-entity-casing
+    p_renorm = subparsers.add_parser(
+        "renormalise-entity-casing",
+        help=(
+            "Re-apply smart_title_case + the exceptions TOML to every "
+            "existing entity's canonical_name. Dry-run by default; pass "
+            "--apply to update rows."
+        ),
+    )
+    p_renorm.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply proposed renames (default is dry-run)",
+    )
+
     args = parser.parse_args()
     setup_logging(args.log_level)
     config = load_config()
@@ -598,6 +614,7 @@ def main():
         "extract-entities": cmd_extract_entities,
         "backfill-entity-embeddings": cmd_backfill_entity_embeddings,
         "repair-entity-names": cmd_repair_entity_names,
+        "renormalise-entity-casing": cmd_renormalise_entity_casing,
         "migrate-chromadb": cmd_migrate_chromadb,
     }
     commands[args.command](args, config)

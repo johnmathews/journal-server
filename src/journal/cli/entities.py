@@ -1,11 +1,14 @@
 """Entity-management CLI commands.
 
-Three commands lifted out of ``cli/__init__.py``:
+Four commands lifted out of ``cli/__init__.py``:
 
 - ``journal extract-entities``: run the on-demand extraction batch.
 - ``journal backfill-entity-embeddings``: refresh stored embeddings.
 - ``journal repair-entity-names``: find LLM-clipped canonical names
   and optionally apply repairs.
+- ``journal renormalise-entity-casing``: re-apply ``smart_title_case`` to
+  every existing ``entities.canonical_name`` so legacy rows get the
+  current rules.
 """
 
 from __future__ import annotations
@@ -18,6 +21,10 @@ from journal.db.connection import get_connection
 from journal.db.migrations import run_migrations
 from journal.entitystore.store import SQLiteEntityStore
 from journal.providers.embeddings import OpenAIEmbeddingsProvider
+from journal.services.entity_naming import (
+    load_entity_casing_exceptions,
+    smart_title_case,
+)
 
 if TYPE_CHECKING:
     import argparse
@@ -249,3 +256,142 @@ def cmd_repair_entity_names(
                 file=sys.stderr,
             )
     print(f"Applied {applied}/{len(repairs)} repair(s).")
+
+
+def cmd_renormalise_entity_casing(
+    args: argparse.Namespace, config: Config,
+) -> None:
+    """Re-apply ``smart_title_case`` + the exceptions TOML to every
+    existing ``entities.canonical_name``.
+
+    Use after the casing-normalisation feature lands, or after any
+    extension to ``config/entity-casing-exceptions.toml``, to bring
+    legacy rows in line with the current rules.
+
+    Default is dry-run — pass ``--apply`` to actually write changes.
+    Skips proposed renames that would collide with another entity of
+    the same ``(user_id, entity_type)``: those need operator review
+    via the merge UI rather than silent absorption here.
+
+    Quarantined rows are included so the table is fully normalised;
+    the operator can adjust by hand if a quarantined row needs
+    different treatment.
+    """
+    exceptions = load_entity_casing_exceptions(
+        config.entity_casing_exceptions_path,
+    )
+
+    conn = get_connection(config.db_path)
+    run_migrations(conn)
+
+    rows = list(
+        conn.execute(
+            "SELECT id, user_id, entity_type, canonical_name FROM entities"
+            " ORDER BY id"
+        ).fetchall()
+    )
+
+    # (user_id, entity_type, canonical_name) -> id, used for collision detection.
+    # Include the current canonical_name so a row colliding with itself doesn't
+    # count as a collision.
+    by_key: dict[tuple[int, str, str], int] = {
+        (int(r["user_id"]), r["entity_type"], r["canonical_name"]): int(r["id"])
+        for r in rows
+    }
+
+    proposed_renames: list[tuple[int, int, str, str, str]] = []
+    # (id, user_id, entity_type, old_name, new_name)
+    skipped_collisions: list[tuple[int, int, str, str, str, int]] = []
+    # (id, user_id, entity_type, old_name, new_name, colliding_id)
+
+    for row in rows:
+        old_name = row["canonical_name"]
+        new_name = smart_title_case(old_name, exceptions=exceptions)
+        if new_name == old_name:
+            continue
+        key = (int(row["user_id"]), row["entity_type"], new_name)
+        existing_id = by_key.get(key)
+        if existing_id is not None and existing_id != int(row["id"]):
+            skipped_collisions.append(
+                (
+                    int(row["id"]),
+                    int(row["user_id"]),
+                    row["entity_type"],
+                    old_name,
+                    new_name,
+                    existing_id,
+                ),
+            )
+            continue
+        proposed_renames.append(
+            (
+                int(row["id"]),
+                int(row["user_id"]),
+                row["entity_type"],
+                old_name,
+                new_name,
+            ),
+        )
+
+    print(f"Scanned {len(rows)} entities.")
+    if not proposed_renames and not skipped_collisions:
+        print("Nothing to do — all canonical_name values already normalised.")
+        conn.close()
+        return
+
+    if proposed_renames:
+        print(f"Proposed renames ({len(proposed_renames)}):")
+        for entity_id, user_id, entity_type, old_name, new_name in proposed_renames:
+            print(
+                f"  [{entity_id}] {old_name!r} -> {new_name!r}"
+                f"  (type={entity_type}, user_id={user_id})"
+            )
+    if skipped_collisions:
+        print()
+        print(
+            f"Skipped due to collision with existing entity "
+            f"({len(skipped_collisions)}):"
+        )
+        for (
+            entity_id,
+            user_id,
+            entity_type,
+            old_name,
+            new_name,
+            colliding_id,
+        ) in skipped_collisions:
+            print(
+                f"  [{entity_id}] {old_name!r} -> {new_name!r}"
+                f" would collide with entity #{colliding_id}"
+                f" (type={entity_type}, user_id={user_id})"
+            )
+
+    if not args.apply:
+        print()
+        print("Dry-run only. Pass --apply to make these changes.")
+        conn.close()
+        return
+
+    print()
+    print(f"Applying {len(proposed_renames)} rename(s)...")
+    applied = 0
+    for entity_id, _user_id, _entity_type, _old_name, new_name in proposed_renames:
+        try:
+            # Direct UPDATE here rather than EntityStore.update_entity, because
+            # update_entity also runs smart_title_case (intentional) and we
+            # already have the normalised name in hand.
+            conn.execute(
+                "UPDATE entities SET canonical_name = ?,"
+                " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+                " WHERE id = ?",
+                (new_name, entity_id),
+            )
+            applied += 1
+        except Exception as exc:  # noqa: BLE001 — keep going on per-row error
+            print(
+                f"  Failed to update entity {entity_id}: {exc}",
+                file=sys.stderr,
+            )
+    conn.commit()
+    conn.close()
+    print(f"Applied {applied}/{len(proposed_renames)} rename(s).")

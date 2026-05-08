@@ -297,29 +297,57 @@ plain release leaves the bad canonical name visible to the UI again.
 
 ## Casing normalization
 
-New entity canonical names are smart-title-cased at write time, before the row is inserted in
-`SQLiteEntityStore.create_entity()`. The transformation is performed by `smart_title_case()` in
-`services/entity_naming.py`, with rules tuned for journal-style proper nouns:
+Entity canonical names are smart-title-cased at write time, both when a row is inserted in
+`SQLiteEntityStore.create_entity()` *and* when an admin edits an existing row via
+`SQLiteEntityStore.update_entity()`. The transformation is performed by `smart_title_case()` in
+`services/entity_naming.py`. **The DB is the single source of truth** — there is no client-side
+display normaliser; the webapp renders `canonical_name` verbatim everywhere it appears.
 
-- Lowercased single words become title case: `running → Running`.
-- Multi-word strings are title-cased per token: `the netherlands → The Netherlands`.
-- Mid-word uppercase characters are preserved verbatim, so the function is safe on names that already carry
-  intentional casing: `iOS`, `iPhone`, `FC Barcelona`, `O'Brien` all pass through unchanged.
+### Algorithm (per word)
+
+For each space-separated word, in order:
+
+1. Whole-string match in the exceptions table → return the table's preserved-case value.
+2. Word-by-word:
+   - If the word is a fully-uppercase acronym (length > 1, e.g. `NASA`) → preserve verbatim.
+   - If the word has an *intra-word* uppercase — uppercase letter after a lowercase letter
+     in the same word (`iOS`, `eBay`, `McDonald's`, `DeepMind`) → preserve verbatim.
+   - If the word is an article / preposition / Dutch particle in a non-leading position →
+     lowercase (`The Lord of the Rings`, `Vincent van Gogh`).
+   - Otherwise → title-case. Hyphen-segments are title-cased independently (`anglo-saxon →
+     Anglo-Saxon`).
+
+The per-word check is what makes inputs like `iOS app → iOS App` work. An older revision
+short-circuited on a whole-string mid-word-uppercase check, which incorrectly froze the
+entire input verbatim whenever any single word had non-leading uppercase.
 
 ### Exception list
 
-Names that don't fit the rules — brand names like `IKEA`, lowercase-leading product names like `iOS`, contractions like
-`O'Brien` — are listed in `config/entity-casing-exceptions.toml`. The file is operator-managed: edit it to add a new
-exception, then call `POST /api/admin/reload/entity-casing` to refresh the in-memory cache without a server restart.
-The reload route is wired through `services/reload.py` alongside the other hot-reload endpoints (mood dimensions, OCR
-context, etc.).
+Names that need explicit overrides — acronyms (`SQL`, `API`, `IKEA`), mixed-case brands
+(`iOS`, `iPhone`, `GitHub`, `PostgreSQL`), contractions (`O'Brien`, `McDonald's`) — live in
+`config/entity-casing-exceptions.toml`. Keys are lowercased; values are the preserved-case
+form. The file is operator-managed: edit it to add an entry, then call `POST
+/api/admin/reload/entity-casing` to refresh the in-memory cache without a server restart.
+The reload route is wired through `services/reload.py` alongside the other hot-reload
+endpoints.
 
-### Scope
+### Backfilling existing rows
 
-Only **new writes** are normalised. Migration `0011`'s `UNIQUE(user_id, entity_type, canonical_name)` constraint uses
-SQLite's default `BINARY` collation, so pre-existing duplicate rows that differ only in case (`running` vs `Running`)
-are not collapsed automatically. Operators can merge them manually via the merge UI; backfill is intentionally not
-performed.
+After landing the normaliser, or after extending the exceptions TOML, run:
+
+```bash
+uv run journal renormalise-entity-casing             # dry-run — prints proposed renames
+uv run journal renormalise-entity-casing --apply      # writes the changes
+```
+
+This walks every row in `entities`, applies `smart_title_case` + the loaded exceptions, and
+updates `canonical_name` for any row that would change. If a proposed rename would collide
+with an existing entity of the same `(user_id, entity_type)`, the CLI surfaces it but does
+not auto-merge — the merge UI is the right place to resolve those.
+
+`UNIQUE(user_id, entity_type, canonical_name)` (migration `0011`) uses SQLite's default
+`BINARY` collation, so the backfill cannot silently merge `running` and `Running` — it will
+flag the collision. Resolve via the merge UI, then re-run the backfill if needed.
 
 ## Post-LLM canonical_name validation
 

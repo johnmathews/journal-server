@@ -376,6 +376,163 @@ def test_cmd_repair_entity_names_skips_collision(tmp_path, capsys):
     conn.close()
 
 
+def _seed_entity_with_raw_canonical(
+    conn, entity_type: str, canonical_name: str, user_id: int = 1,
+) -> int:
+    """Insert an entity row directly via SQL, bypassing smart_title_case.
+
+    Used to simulate pre-feature data where entities were stored with the raw
+    LLM output, e.g. ``running`` lowercase, ``Easter picnic`` mixed-case.
+    """
+    cursor = conn.execute(
+        "INSERT INTO entities"
+        " (user_id, entity_type, canonical_name, description, first_seen)"
+        " VALUES (?, ?, ?, '', '2026-04-01')",
+        (user_id, entity_type, canonical_name),
+    )
+    conn.commit()
+    entity_id = cursor.lastrowid
+    assert entity_id is not None
+    return entity_id
+
+
+def test_cmd_renormalise_entity_casing_dry_run_lists_changes(tmp_path, capsys):
+    """`renormalise-entity-casing` (dry-run) shows what would change without
+    modifying the DB."""
+    from unittest.mock import MagicMock
+
+    from journal.cli import cmd_renormalise_entity_casing
+    from journal.config import Config
+    from journal.db.connection import get_connection
+    from journal.db.migrations import run_migrations
+    from journal.entitystore.store import SQLiteEntityStore
+
+    db_path = tmp_path / "renorm.db"
+    conn = get_connection(db_path)
+    run_migrations(conn)
+
+    # Pre-feature data — names that should change after renormalisation.
+    legacy_running = _seed_entity_with_raw_canonical(conn, "activity", "running")
+    legacy_pages = _seed_entity_with_raw_canonical(conn, "activity", "morning pages")
+    # Already-correct name — should NOT appear in dry-run output.
+    correct = _seed_entity_with_raw_canonical(conn, "activity", "Frisbee")
+    conn.close()
+
+    config = Config(db_path=db_path)
+    cmd_renormalise_entity_casing(MagicMock(apply=False), config)
+
+    out = capsys.readouterr().out
+    assert "'running' -> 'Running'" in out
+    assert "'morning pages' -> 'Morning Pages'" in out
+    # Already-correct rows should not be listed.
+    assert "'Frisbee'" not in out
+    assert "Dry-run only" in out
+
+    # DB state must be unchanged.
+    conn = get_connection(db_path)
+    store = SQLiteEntityStore(conn)
+    assert store.get_entity(legacy_running).canonical_name == "running"
+    assert store.get_entity(legacy_pages).canonical_name == "morning pages"
+    assert store.get_entity(correct).canonical_name == "Frisbee"
+    conn.close()
+
+
+def test_cmd_renormalise_entity_casing_apply_updates_rows(tmp_path, capsys):
+    """`renormalise-entity-casing --apply` writes the normalised values back."""
+    from unittest.mock import MagicMock
+
+    from journal.cli import cmd_renormalise_entity_casing
+    from journal.config import Config
+    from journal.db.connection import get_connection
+    from journal.db.migrations import run_migrations
+    from journal.entitystore.store import SQLiteEntityStore
+
+    db_path = tmp_path / "renorm_apply.db"
+    conn = get_connection(db_path)
+    run_migrations(conn)
+    a = _seed_entity_with_raw_canonical(conn, "activity", "running")
+    b = _seed_entity_with_raw_canonical(conn, "topic", "kubernetes")
+    c = _seed_entity_with_raw_canonical(conn, "place", "the netherlands")
+    conn.close()
+
+    config = Config(db_path=db_path)
+    cmd_renormalise_entity_casing(MagicMock(apply=True), config)
+
+    out = capsys.readouterr().out
+    assert "Applied" in out
+
+    conn = get_connection(db_path)
+    store = SQLiteEntityStore(conn)
+    assert store.get_entity(a).canonical_name == "Running"
+    assert store.get_entity(b).canonical_name == "Kubernetes"
+    # Articles lowercased in non-leading positions via the algorithm.
+    assert store.get_entity(c).canonical_name == "The Netherlands"
+    conn.close()
+
+
+def test_cmd_renormalise_entity_casing_uses_exceptions_toml(tmp_path, capsys):
+    """The CLI must load the repo-shipped exceptions TOML so iOS/GitHub-style
+    rules apply during the backfill."""
+    from unittest.mock import MagicMock
+
+    from journal.cli import cmd_renormalise_entity_casing
+    from journal.config import Config
+    from journal.db.connection import get_connection
+    from journal.db.migrations import run_migrations
+    from journal.entitystore.store import SQLiteEntityStore
+
+    db_path = tmp_path / "renorm_exc.db"
+    conn = get_connection(db_path)
+    run_migrations(conn)
+    e1 = _seed_entity_with_raw_canonical(conn, "topic", "ios")
+    e2 = _seed_entity_with_raw_canonical(conn, "topic", "github")
+    e3 = _seed_entity_with_raw_canonical(conn, "topic", "javascript")
+    conn.close()
+
+    config = Config(db_path=db_path)
+    cmd_renormalise_entity_casing(MagicMock(apply=True), config)
+
+    conn = get_connection(db_path)
+    store = SQLiteEntityStore(conn)
+    assert store.get_entity(e1).canonical_name == "iOS"
+    assert store.get_entity(e2).canonical_name == "GitHub"
+    assert store.get_entity(e3).canonical_name == "JavaScript"
+    conn.close()
+
+
+def test_cmd_renormalise_entity_casing_skips_collisions(tmp_path, capsys):
+    """When the proposed normalised name collides with an existing entity of
+    the same (user_id, entity_type), the CLI must skip rather than create a
+    duplicate or violate uniqueness — and surface the collision in output so
+    the operator can resolve it via the merge UI."""
+    from unittest.mock import MagicMock
+
+    from journal.cli import cmd_renormalise_entity_casing
+    from journal.config import Config
+    from journal.db.connection import get_connection
+    from journal.db.migrations import run_migrations
+    from journal.entitystore.store import SQLiteEntityStore
+
+    db_path = tmp_path / "renorm_coll.db"
+    conn = get_connection(db_path)
+    run_migrations(conn)
+    correct = _seed_entity_with_raw_canonical(conn, "activity", "Running")
+    legacy = _seed_entity_with_raw_canonical(conn, "activity", "running")
+    conn.close()
+
+    config = Config(db_path=db_path)
+    cmd_renormalise_entity_casing(MagicMock(apply=True), config)
+
+    out = capsys.readouterr().out
+    assert "would collide" in out
+    # Neither entity should be merged or destroyed by the backfill itself.
+    conn = get_connection(db_path)
+    store = SQLiteEntityStore(conn)
+    assert store.get_entity(correct).canonical_name == "Running"
+    assert store.get_entity(legacy).canonical_name == "running"
+    conn.close()
+
+
 def test_cmd_health_compact_mode(tmp_path, capsys):
     """`--compact` emits single-line JSON for piping."""
     from unittest.mock import MagicMock, patch

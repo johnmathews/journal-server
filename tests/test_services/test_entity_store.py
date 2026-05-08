@@ -14,6 +14,20 @@ def store(db_conn: sqlite3.Connection) -> SQLiteEntityStore:
 
 
 @pytest.fixture
+def store_with_exceptions(db_conn: sqlite3.Connection) -> SQLiteEntityStore:
+    """Store with a small casing-exceptions table loaded, for testing that
+    smart_title_case + exceptions runs on both create and update."""
+    return SQLiteEntityStore(
+        db_conn,
+        casing_exceptions={
+            "github": "GitHub",
+            "ios": "iOS",
+            "kubernetes": "Kubernetes",
+        },
+    )
+
+
+@pytest.fixture
 def repo(db_conn: sqlite3.Connection) -> SQLiteEntryRepository:
     return SQLiteEntryRepository(db_conn)
 
@@ -489,7 +503,9 @@ class TestUpdateEntity:
         updated = store.update_entity(
             entity.id, canonical_name="Gym session", entity_type="activity"
         )
-        assert updated.canonical_name == "Gym session"
+        # update_entity normalises canonical_name through smart_title_case,
+        # so 'Gym session' becomes 'Gym Session' on the way in.
+        assert updated.canonical_name == "Gym Session"
         assert updated.entity_type == "activity"
 
     def test_update_no_fields_returns_unchanged(
@@ -508,6 +524,28 @@ class TestUpdateEntity:
         original_updated_at = entity.updated_at
         updated = store.update_entity(entity.id, description="new desc")
         assert updated.updated_at >= original_updated_at
+
+    def test_update_canonical_name_runs_smart_title_case(
+        self, store: SQLiteEntityStore,
+    ) -> None:
+        """Manual edits via the admin UI must not be able to reintroduce
+        the same casing drift the backfill cleaned up. ``update_entity``
+        runs ``smart_title_case`` on the new name just like ``create_entity``."""
+        entity = store.create_entity("activity", "Running", "", "2026-01-01")
+        updated = store.update_entity(entity.id, canonical_name="running")
+        assert updated.canonical_name == "Running"
+
+    def test_update_canonical_name_respects_casing_exceptions(
+        self, store_with_exceptions: SQLiteEntityStore,
+    ) -> None:
+        """Exceptions table is consulted on update too."""
+        entity = store_with_exceptions.create_entity(
+            "topic", "Kubernetes", "", "2026-01-01",
+        )
+        updated = store_with_exceptions.update_entity(
+            entity.id, canonical_name="github",
+        )
+        assert updated.canonical_name == "GitHub"
 
 
 class TestDeleteEntity:

@@ -52,7 +52,13 @@ class TestArticlePreservation:
         assert smart_title_case(raw) == expected
 
 
-class TestMidwordUppercasePreservation:
+class TestIntraWordUppercasePreservation:
+    """Per-word preservation: a word with a deliberate intra-word uppercase
+    (uppercase after a lowercase in the same word, e.g. ``iOS``, ``DeepMind``)
+    is passed through verbatim. A word that is fully uppercase and longer
+    than one character (e.g. ``FC``, ``NASA``) is also preserved as an acronym.
+    """
+
     @pytest.mark.parametrize(
         "name",
         [
@@ -69,8 +75,29 @@ class TestMidwordUppercasePreservation:
         ],
     )
     def test_passes_through_when_already_cased(self, name: str) -> None:
-        # Any uppercase character at index >= 1 is treated as deliberate casing.
         assert smart_title_case(name) == name
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            # Mixed-case words alongside lowercase words: each handled per-word.
+            ("Easter picnic", "Easter Picnic"),
+            ("Kettlebell workouts", "Kettlebell Workouts"),
+            ("Artist dates", "Artist Dates"),
+            ("Easter sunday", "Easter Sunday"),
+            ("Pull-up bar", "Pull-Up Bar"),
+            # iOS-style word adjacent to a regular word.
+            ("iOS app", "iOS App"),
+            ("eBay listing", "eBay Listing"),
+            # Unknown acronym (not in exceptions) preserved when fully uppercase.
+            ("FOO bar", "FOO Bar"),
+            ("BBQ tongs", "BBQ Tongs"),
+        ],
+    )
+    def test_per_word_normalisation_with_mixed_casing(
+        self, raw: str, expected: str
+    ) -> None:
+        assert smart_title_case(raw) == expected
 
 
 class TestExceptionsLookup:

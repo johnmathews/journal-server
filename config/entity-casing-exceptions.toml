@@ -8,21 +8,107 @@
 # The mood-dimensions.toml admin reload tab in the webapp also surfaces a button for this.
 
 [meta]
-version = "2026-05-06"
+version = "2026-05-08"
 description = "Preserved-case overrides for smart-title-case entity normalization."
 
 [exceptions]
-# Tech / brands
+# --- Tech brands (mixed case) ---
 "ios" = "iOS"
 "iphone" = "iPhone"
 "ipad" = "iPad"
 "ipod" = "iPod"
+"imac" = "iMac"
 "macos" = "macOS"
 "github" = "GitHub"
+"gitlab" = "GitLab"
 "linkedin" = "LinkedIn"
 "ebay" = "eBay"
 "youtube" = "YouTube"
 "whatsapp" = "WhatsApp"
+"postgresql" = "PostgreSQL"
+"mysql" = "MySQL"
+"mongodb" = "MongoDB"
+"graphql" = "GraphQL"
+"devops" = "DevOps"
+"chatgpt" = "ChatGPT"
+"openai" = "OpenAI"
+"wifi" = "WiFi"
+"javascript" = "JavaScript"
+"typescript" = "TypeScript"
+"claude.code" = "Claude Code"
+"ghcr.io" = "ghcr.io"
+
+# --- Acronyms (all caps, length > 1) ---
+# These are also detected verbatim by the algorithm when the input is already
+# all-caps, but listing them ensures lowercase / mixed-case input is corrected.
+# Data & markup
+"sql" = "SQL"
+"json" = "JSON"
+"xml" = "XML"
+"csv" = "CSV"
+"pdf" = "PDF"
+"yaml" = "YAML"
+"toml" = "TOML"
+"html" = "HTML"
+"css" = "CSS"
+# Web / networking
+"http" = "HTTP"
+"https" = "HTTPS"
+"url" = "URL"
+"uri" = "URI"
+"rest" = "REST"
+"grpc" = "GRPC"
+"ssh" = "SSH"
+"ssl" = "SSL"
+"tls" = "TLS"
+"tcp" = "TCP"
+"udp" = "UDP"
+"dns" = "DNS"
+"api" = "API"
+"jwt" = "JWT"
+"oauth" = "OAUTH"
+# Languages & runtimes
+"js" = "JS"
+"ts" = "TS"
+# Hardware
+"cpu" = "CPU"
+"gpu" = "GPU"
+"ram" = "RAM"
+"ssd" = "SSD"
+"hdd" = "HDD"
+"usb" = "USB"
+"hdmi" = "HDMI"
+# AI / ML
+"ai" = "AI"
+"ml" = "ML"
+"nlp" = "NLP"
+"llm" = "LLM"
+"gpt" = "GPT"
+"ocr" = "OCR"
+# Cloud & DevOps
+"aws" = "AWS"
+"gcp" = "GCP"
+"ci" = "CI"
+"cd" = "CD"
+"ide" = "IDE"
+"cli" = "CLI"
+"gui" = "GUI"
+"sdk" = "SDK"
+"mcp" = "MCP"
+# Geography
+"uk" = "UK"
+"us" = "US"
+"usa" = "USA"
+"eu" = "EU"
+"nz" = "NZ"
+# Roles
+"it" = "IT"
+"vp" = "VP"
+"ceo" = "CEO"
+"cto" = "CTO"
+"cfo" = "CFO"
+"hr" = "HR"
+# Companies / orgs (stored as acronyms)
 "ikea" = "IKEA"
 "ibm" = "IBM"
 "hp" = "HP"
@@ -30,26 +116,25 @@ description = "Preserved-case overrides for smart-title-case entity normalizatio
 "bbc" = "BBC"
 "nasa" = "NASA"
 "fbi" = "FBI"
-"claude.code" = "Claude Code"
-"ghcr.io" = "ghcr.io"
 
-# Other
+# --- EVs / EV ---
 "EVs" = "EVs"
 "ev" = "EV"
 "evs" = "EVs"
 
-# Sports
+# --- Sports ---
 "fc barcelona" = "FC Barcelona"
 "ac milan" = "AC Milan"
 "clean and press" = "Clean and Press"
 
-# Names with apostrophes / Dutch particles that need explicit casing
+# --- Names with apostrophes / Dutch particles that need explicit casing ---
 "o'brien" = "O'Brien"
 "o'reilly" = "O'Reilly"
 "mcdonald's" = "McDonald's"
+"mcdonalds" = "McDonald's"
 "'t gooi" = "'t Gooi"
 
-# Place-name leading articles (handled by algorithm, but listed for clarity / overrides)
+# --- Place-name leading articles (handled by algorithm, but listed for clarity / overrides) ---
 "the netherlands" = "The Netherlands"
 "the hague" = "The Hague"
 "den haag" = "Den Haag"

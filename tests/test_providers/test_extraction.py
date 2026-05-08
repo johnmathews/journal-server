@@ -131,6 +131,24 @@ class TestAnthropicExtractionProvider:
         assert "match_justification" in prompt
         assert "Do not force a match" in prompt or "do not force a match" in prompt.lower()
 
+    def test_system_prompt_specifies_title_case_for_canonical_name(self) -> None:
+        """The prompt must explicitly tell the LLM to Title-Case canonical_name.
+
+        Without this, the model anchors on the lowercase examples in the
+        activity description ("squash, climbing, journaling") and produces
+        chart legends full of lowercase verbs. The server-side normaliser is a
+        safety net; nudging the prompt reduces how often it has to fire.
+        """
+        prompt = build_system_prompt("Jane")
+        assert "Title Case" in prompt or "title case" in prompt.lower()
+        # Mixed-case activity examples — at least one should be capitalised so
+        # the LLM doesn't conclude that activities are always lowercase.
+        # We accept any of these well-known capitalised activities.
+        capitalised_examples = ("Climbing", "Morning Pages", "Frisbee", "Bible Study")
+        assert any(ex in prompt for ex in capitalised_examples), (
+            "expected at least one capitalised activity example in the prompt"
+        )
+
     def test_known_entities_appear_in_user_message(self) -> None:
         provider, client = _make_provider()
         tool_block = MagicMock()

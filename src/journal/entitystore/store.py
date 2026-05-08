@@ -363,7 +363,9 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
         params: list[object] = []
         if canonical_name is not None:
             sets.append("canonical_name = ?")
-            params.append(canonical_name.strip())
+            params.append(
+                smart_title_case(canonical_name, exceptions=self._casing_exceptions)
+            )
         if entity_type is not None:
             sets.append("entity_type = ?")
             params.append(entity_type)
