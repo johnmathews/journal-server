@@ -205,13 +205,14 @@ convention and code review; consider an import-linter rule if drift becomes a pr
 All six original open questions resolved 2026-05-08. Original questions preserved below for
 context, with each resolution inline.
 
-### Q1. Strava client library — **`stravalib`** (pending reliability check).
-Use `stravalib` rather than hitting the Strava REST API directly with `httpx`. Reasoning: Strava
-API is more stable than Garmin's, the library handles OAuth refresh + pagination + typed models,
-and the dependency-staleness risk is much lower than for Garmin. Reliability research is in
-flight (mirroring the `python-garminconnect` investigation) — if results show poor maintenance or
-recent breakage, revisit and consider raw `httpx`. Findings will be appended to
-`journal/260508-fitness-integration-planning.md`.
+### Q1. Strava client library — **`stravalib`** (confirmed).
+Use `stravalib`. Reliability research (see `journal/260508-fitness-integration-planning.md`)
+confirmed it is in a different reliability class from `python-garminconnect`: ~0 major breakages
+in the last 12 months, OAuth refresh and rate limiting built-in, only additive changes to the
+underlying Strava V3 API. Default rate limits are 600 / 15 min, 30k / day — generous for our
+daily-cadence use. One non-technical note: Strava's Nov 2024 API Agreement restricts third-party
+apps to displaying a user's data back to that user only and prohibits AI/ML training on the data
+— fine for our single-user personal pipeline, worth flagging if scope ever expands.
 
 ### Q2. Token storage — **SQLite table (`fitness_auth_state`)**.
 Mirrors how session/auth tokens already live in the database. Single backup story for everything;

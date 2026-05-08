@@ -106,7 +106,7 @@ aggressively. Rate-limit logins (one per token lifetime). Pin a known-working ve
 library is usable, but absolutely not "set and forget." This is the load-bearing reliability
 fact behind decisions D2, D4, and D5 in `docs/fitness-integration-plan.md`.
 
-### Primary sources
+### Primary sources (Garmin)
 
 - [`python-garminconnect` repo](https://github.com/cyberjunky/python-garminconnect)
 - [`python-garminconnect` commits](https://github.com/cyberjunky/python-garminconnect/commits/master)
@@ -120,6 +120,88 @@ fact behind decisions D2, D4, and D5 in `docs/fitness-integration-plan.md`.
 - [`garth` repo (DEPRECATED)](https://github.com/matin/garth)
 - [`garth` deprecation discussion #222](https://github.com/matin/garth/discussions/222)
 - [Home Assistant `garmin_connect` integration](https://github.com/cyberjunky/home-assistant-garmin_connect)
+
+## `stravalib` reliability — research summary
+
+Verdict: **boringly stable**. Effectively zero unplanned breakages requiring user action over the
+last 12 months. Different reliability class from `python-garminconnect` — appropriate as the
+backbone of the pipeline.
+
+### Key findings (May 2025 – May 2026)
+
+- **No outages, no forced re-auth, no forced upgrades.** No "library is broken until fixed"
+  episodes found.
+- **One PyPI release in the window** — v2.4 on 18 Jun 2025. Prior release v2.3 in Mar 2025. Slow
+  cadence reflects API stability, not abandonment;
+  [main branch shows ~2–4 commits/month](https://github.com/stravalib/stravalib/commits/main)
+  including dependency bumps and "Strava API Change" tracking commits in Oct/Nov/Dec 2025.
+- **Strava V3 API itself shipped only three additive changes** in the window — zero breaking,
+  zero OAuth changes ([Strava V3 changelog](https://developers.strava.com/docs/changelog/)). This
+  is the dominant reason the library is stable.
+- **Issues seen are quality-of-life bugs, not outages.** Examples: `DefaultRateLimiter` parsing
+  warning ([#663](https://github.com/stravalib/stravalib/issues/663)), mypy/typing failures
+  ([#687](https://github.com/stravalib/stravalib/issues/687)), `pytz` → `zoneinfo` migration
+  ([#706](https://github.com/stravalib/stravalib/issues/706)),
+  `hide_from_home` edge case ([#716](https://github.com/stravalib/stravalib/issues/716), open).
+  Time-to-fix on substantive bugs is weeks-to-months; maintainer is responsive but not 24/7.
+
+### Built-in capabilities (relevant to our pipeline design)
+
+- **OAuth refresh is automatic** — token expiry checked on every API call,
+  `refresh_access_token` invoked when expired. We do not need to handle this manually.
+  ([Client docs](https://stravalib.readthedocs.io/en/stable/reference/api/stravalib.client.Client.html))
+- **Rate limiting is built-in** via `DefaultRateLimiter` / `SleepingRateLimitRule`. When limits
+  are hit, the library sleeps until the window resets rather than raising — no exception handling
+  needed at the caller layer.
+  ([limiter docs](https://stravalib.readthedocs.io/en/v1.5/reference/api/stravalib.util.limiter.DefaultRateLimiter.html))
+- **Current default rate limits: 600 / 15 min, 30k / day** (not the legacy 200/2000 numbers).
+- **Typed model layer** kept current via auto-generated commits tied to Strava's published
+  OpenAPI spec.
+
+### One non-technical risk (worth recording, not blocking)
+
+Strava updated its **API Agreement effective Nov 11 2024**: third-party apps may only display a
+user's data back to that user, AI/ML training on the data is prohibited, design constraints apply
+([Strava press release](https://press.strava.com/articles/updates-to-stravas-api-agreement);
+[Strava support](https://support.strava.com/hc/en-us/articles/31798729397773)). For our personal
+pipeline (single user, own data, displayed to themselves, not used for AI training) this is fine
+— but worth noting if the system's scope ever expands.
+
+### Direct comparison
+
+|  | `stravalib` | `python-garminconnect` |
+|---|---|---|
+| Major breakages in 12 mo | ~0 | ~3.5 weeks (Mar–Apr 2026 SSO + `garth` deprecation) |
+| API officially sanctioned | Yes (Strava V3) | No (reverse-engineered) |
+| OAuth refresh | Built-in, automatic | Brittle; SSO changes break it |
+| Rate limiting | Built-in sleeping limiter | DIY |
+| Release cadence | Slow because nothing breaks | Forced rapid-fix releases on each break |
+
+### Verdict for our design
+
+**Use `stravalib` without reservation.** No reason to consider raw `httpx`. The library handles
+OAuth refresh and rate limiting better than we'd build ourselves at this scale, and its stability
+profile matches what we want for the backbone of the pipeline. Q1 in the plan is fully resolved.
+
+### Things not established
+
+- No meaningful Reddit / r/Strava reports of stravalib breakage surfaced in search — absence of
+  evidence rather than evidence of absence, but no contradicting signal either.
+- Strava's community hub (communityhub.strava.com) not directly fetched; the
+  developers.strava.com changelog is the authoritative API-changes source and shows nothing of
+  concern.
+
+### Primary sources (Strava)
+
+- [`stravalib` GitHub releases](https://github.com/stravalib/stravalib/releases)
+- [`stravalib` PyPI history](https://pypi.org/project/stravalib/#history)
+- [`stravalib` issues](https://github.com/stravalib/stravalib/issues?q=is%3Aissue+sort%3Aupdated-desc)
+- [`stravalib` commits](https://github.com/stravalib/stravalib/commits/main)
+- [Strava V3 API Changelog](https://developers.strava.com/docs/changelog/)
+- [Strava API Agreement update](https://press.strava.com/articles/updates-to-stravas-api-agreement)
+- [Rate limiter docs](https://stravalib.readthedocs.io/en/v1.5/reference/api/stravalib.util.limiter.DefaultRateLimiter.html)
+- [Client / token refresh docs](https://stravalib.readthedocs.io/en/stable/reference/api/stravalib.client.Client.html)
+- [Discussion #593 — rate header warning](https://github.com/orgs/stravalib/discussions/593)
 
 ## Architecture: in-process module, not a separate service
 
