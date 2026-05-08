@@ -116,13 +116,21 @@ full set.
 If you're hitting the cap, reorder by importance — name files like `01-people.md`,
 `02-places.md` to control which entries survive the truncation.
 
-## Server restart required
+## Reloading after edits
 
-Both pipelines load context files **once at startup**. Editing a file does nothing until the
-server is restarted. This is by design — caching guarantees and deterministic behaviour are
-worth more than hot-reload convenience for a single-user tool.
+Both pipelines load context files **once at startup** and then cache them in memory. To pick up
+edits without a full container restart, hit the admin-only reload endpoints (admin user, session
+cookie or API key):
 
-Restart in the deployed setup:
+```bash
+curl -X POST -b "session_id=$ADMIN_SESSION" http://localhost:8400/api/admin/reload/ocr-context
+curl -X POST -b "session_id=$ADMIN_SESSION" http://localhost:8400/api/admin/reload/transcription-context
+```
+
+Each endpoint rebuilds the relevant provider stack against the on-disk files. The webapp's
+Admin Server tab also surfaces these as buttons (closed roadmap item 41).
+
+A full restart still works as a fallback:
 
 ```bash
 ssh media
@@ -138,8 +146,9 @@ Two independent toggles control the two pipelines:
   but no transcription priming. Affects whichever transcription provider is active.
 
 Both are also editable at runtime through the admin settings UI without a server restart for
-the **toggle** — but edits to the **files** still require a restart to be picked up by the
-already-loaded providers.
+the **toggle**. Edits to the **files themselves** are picked up by the reload endpoints
+documented above (`POST /api/admin/reload/{ocr-context,transcription-context}`); only edits
+to runtime-static config like provider model names still require a container restart.
 
 ## Hallucination warning
 

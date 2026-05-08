@@ -129,7 +129,7 @@ Photos of handwritten journal pages are sent to a vision-capable LLM which retur
 implementation supports context-priming (a glossary of proper nouns injected into the system prompt) and marks uncertain
 regions with `⟪/⟫` sentinels.
 
-**Current:** Google Gemini 3 Pro (primary), Anthropic Claude Opus 4.6 (switchable alternative).
+**Current (2026-05-09):** Google Gemini 2.5 Pro (primary, `OCR_PROVIDER=gemini` / `OCR_MODEL=gemini-2.5-pro` in prod env on `media`); Anthropic Claude Opus 4.6 runs as a second pass via `OCR_DUAL_PASS=true`. Gemini 3 / 3.1 Pro rows further down are research/forward-pricing — they are NOT what prod runs.
 
 #### Cloud API Options
 
@@ -139,8 +139,8 @@ regions with `⟪/⟫` sentinels.
 | **Anthropic** | Claude Sonnet 4.6     | $3.00        | $15.00        | 1M      | 50% off | ~91%              | Cheaper, similar quality for OCR.                    |
 | **Anthropic** | Claude Haiku 4.5      | $1.00        | $5.00         | 200K    | 50% off | —                 | Untested on cursive; worth benchmarking.             |
 | **Google**    | Gemini 3.1 Pro        | $2.00        | $12.00        | 1M      | 50% off | ~100%             | Top handwriting benchmark score.                     |
-| **Google**    | Gemini 3 Pro          | $2.00        | $12.00        | 1M      | 50% off | 100%              | Current primary. Best-in-class cursive.              |
-| **Google**    | Gemini 2.5 Pro        | $1.25        | $10.00        | 1M      | 50% off | 95%               | Strong quality, lower cost.                          |
+| **Google**    | Gemini 3 Pro          | $2.00        | $12.00        | 1M      | 50% off | 100%              | Forward-pricing row. Best-in-class cursive.          |
+| **Google**    | Gemini 2.5 Pro        | $1.25        | $10.00        | 1M      | 50% off | 95%               | **Current primary.** Strong quality, lower cost.     |
 | **Google**    | Gemini 2.5 Flash      | $0.30        | $2.50         | 1M      | 50% off | —                 | Budget option, quality TBD on cursive.               |
 | **Google**    | Gemini 2.5 Flash-Lite | $0.10        | $0.40         | 1M      | 50% off | —                 | Ultra-budget. Free tier available.                   |
 | **OpenAI**    | GPT-5.4               | $2.50        | $15.00        | 1.1M    | 50% off | ~97%              | "Original" detail mode for full-fidelity images.     |

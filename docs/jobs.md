@@ -13,7 +13,7 @@ A single `jobs` table (migration `0006_jobs.sql`) holds one row per submitted ba
 | column             | type    | notes                                                        |
 | ------------------ | ------- | ------------------------------------------------------------ |
 | `id`               | TEXT PK | UUID v4 assigned at submission time                          |
-| `type`             | TEXT    | `entity_extraction` \| `mood_backfill` \| `entity_reembed` \| ingestion / save-entry types |
+| `type`             | TEXT    | One of: `entity_extraction`, `mood_backfill`, `mood_score_entry`, `entity_reembed`, `reprocess_embeddings`, `ingest_images`, `ingest_audio`, `save_entry_pipeline` (8 types as of 2026-05-09). |
 | `status`           | TEXT    | `queued` → `running` → `succeeded` \| `failed`               |
 | `params_json`      | TEXT    | JSON-encoded submission params (e.g. `{"stale_only": true}`) |
 | `progress_current` | INTEGER | Updated after each entry finishes                            |
@@ -28,7 +28,9 @@ There are indexes on `status` and `created_at DESC` so the (small) dashboard loo
 
 ## JobRunner
 
-`src/journal/services/jobs.py::JobRunner` owns the in-process execution of jobs. Its contract:
+`src/journal/services/jobs/runner.py::JobRunner` owns the in-process execution of jobs. (The single-file
+`services/jobs.py` was split into the `services/jobs/` package on 2026-05-07: `runner.py`, `models.py`, `retry.py`,
+and a `workers/` subdirectory with one file per job type.) Its contract:
 
 1. **Single-worker `ThreadPoolExecutor`.** `max_workers=1`. Concurrent submissions queue behind the running one. This is
    deliberate and load-bearing — see [threading and SQLite](#threading-and-sqlite) below.
@@ -67,7 +69,9 @@ executor construction that flags this invariant.
 
 ## REST surface
 
-All three job endpoints are registered via `mcp.custom_route` in `src/journal/api.py` alongside the other REST routes.
+Job-related endpoints are registered via `mcp.custom_route` in `src/journal/api/jobs.py` (and a few in
+`api/ingestion.py` for the `submit_*` entry points). The single-file `api.py` was split into the `src/journal/api/`
+package on 2026-05-07.
 
 ### `POST /api/entities/extract`
 

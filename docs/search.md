@@ -138,6 +138,25 @@ hosted cross-encoder API is the obvious next adapter when latency
 becomes a concern — it's typically ~3× faster than an LLM listwise
 rerank.
 
+## Query parameters
+
+| Parameter    | Required | Default      | Description                                                                                                                                                          |
+| ------------ | -------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `q`          | yes      |              | Search query. Must be non-empty after stripping whitespace. Returns `400 missing_query` otherwise.                                                                   |
+| `start_date` | no       |              | ISO date (`YYYY-MM-DD`) lower bound (inclusive) on `entry_date`.                                                                                                     |
+| `end_date`   | no       |              | ISO date upper bound (inclusive).                                                                                                                                    |
+| `limit`      | no       | `10`         | Page size. Range `1..50`. Out-of-range returns `400 invalid_query`.                                                                                                  |
+| `offset`     | no       | `0`          | Page offset.                                                                                                                                                         |
+| `sort`       | no       | `relevance`  | One of `relevance`, `date_desc`, `date_asc`. `relevance` returns the post-rerank order; `date_*` re-orders the same candidate list by entry date. Anything else returns `400 invalid_sort`. |
+
+The `mode` parameter was retired when hybrid shipped; passing it returns `400 mode_removed`.
+
+### Result cache
+
+A small in-memory LRU cache (64 entries, 5-minute TTL) is keyed by `(query, start_date, end_date, user_id)` and stores
+the full reranked candidate list. `sort` and pagination are applied **on every call** to the cached candidates, so
+paging through results does not re-run the BM25/dense/RRF/rerank pipeline. See `services/hybrid.py:_ResultCache`.
+
 ## Response envelope
 
 ```json
@@ -145,6 +164,7 @@ rerank.
   "query": "vienna",
   "limit": 10,
   "offset": 0,
+  "sort": "relevance",
   "reranker": "AnthropicReranker",
   "items": [
     {
@@ -171,8 +191,10 @@ rerank.
   comparable across queries (the reranker doesn't promise calibrated
   scores) — only the within-result ordering is contract.
 - `snippet` is populated when BM25 contributed to the match. The
-  `` / `` markers wrap matched terms (FTS5's `snippet()`
-  output) and survive JSON serialisation.
+  `\x02` (start) / `\x03` (end) ASCII control characters wrap
+  matched terms (FTS5's `snippet()` output) and survive JSON
+  serialisation. The webapp converts them to `<mark>` tags via
+  `src/utils/searchSnippet.ts`.
 - `matching_chunks` is populated when dense retrieval contributed,
   ordered by chunk similarity descending. `char_start` and
   `char_end` are absolute offsets into `text`, present only for
@@ -188,7 +210,9 @@ rerank.
 - `400 mode_removed` — client passed `mode=`. The parameter was
   retired when hybrid shipped; drop it.
 - `400 invalid_query` — FTS5 parse error on the BM25 retriever
-  (unterminated quote, bare boolean operator, etc.). The error
-  message echoes the underlying SQLite parse error.
+  (unterminated quote, bare boolean operator, etc.) or out-of-range
+  `limit`. The error message echoes the underlying parse error.
+- `400 invalid_sort` — `sort` was something other than `relevance`,
+  `date_desc`, or `date_asc`.
 - `503 Server not initialized` — service registry is missing,
   typically during a startup race or test setup error.

@@ -2,8 +2,13 @@
 
 The OCR provider can be primed with a static set of "context files" that tell the model about known proper nouns in the
 author's life — family names, places, recurring topics — so that handwritten tokens that match those names are
-transcribed correctly. Both the Anthropic (Claude) and Gemini providers support context priming. This document explains
-the mechanism, the cost profile, the failure modes, and how to enable it.
+transcribed correctly. Both the Anthropic (Claude) and Gemini providers support context priming — Anthropic puts the
+composed text in the top-level `system` block (with `cache_control` once the system text crosses the 4,096-token
+minimum); Gemini puts the same composed text into `system_instruction` on each call. **Production runs Gemini 2.5 Pro
+as the primary OCR provider with Anthropic Opus as a second pass under `OCR_DUAL_PASS=true`** (as of 2026-05-09); the
+Anthropic-specific caching discussion below applies to the Anthropic adapter.
+
+This document explains the mechanism, the cost profile, the failure modes, and how to enable it.
 
 ## Why
 
@@ -70,7 +75,11 @@ OCR_CONTEXT_CACHE_TTL=1h  # or "5m"
 When `OCR_CONTEXT_DIR` is unset (the default), the OCR adapter behaves identically to the pre-feature version — the same
 `SYSTEM_PROMPT` is used, with no appended instructions or glossary.
 
-## The 4,096-token minimum
+## The 4,096-token minimum (Anthropic-specific)
+
+This section applies only when Anthropic is the OCR provider (either as the primary, or as the second pass under
+`OCR_DUAL_PASS=true`). Gemini's caching mechanics are governed by the Vertex AI / Gemini API context-cache feature with
+a different minimum and TTL story; the Gemini adapter does not use Anthropic's `cache_control`.
 
 Anthropic's prompt cache has a minimum block size of **4,096 tokens** on Claude Opus 4.6 (confirmed against the current
 docs on 2026-04-10). If the composed system block is smaller, `cache_control` is **silently ignored** and every request
@@ -224,7 +233,8 @@ scribble, flag the substituted word"), but that's out of scope for the initial r
 ### Files to read if you change this
 
 - `src/journal/providers/ocr.py` — `parse_uncertain_markers`, `OCRResult`, sentinel constants, `SYSTEM_PROMPT`
-- `src/journal/services/ingestion.py` — `_strip_and_shift_page_spans` and the single- and multi-page flows
+- `src/journal/services/ingestion/` — package containing the single- and multi-page flows; `_strip_and_shift_page_spans`
+  lives in the image-handling module after the 2026-05-07 split
 - `src/journal/db/migrations/0005_uncertain_spans.sql` — schema
 - `src/journal/db/repository/pages.py` — `add_uncertain_spans`, `get_uncertain_spans`
 - `tests/test_providers/test_ocr.py::TestParseUncertainMarkers` — exhaustive parser tests

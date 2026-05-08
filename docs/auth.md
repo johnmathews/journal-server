@@ -101,5 +101,8 @@ Admin users (`is_admin=true`) can:
 - View all users with stats (entry count, word count, job count)
 - Enable/disable user accounts
 - Promote/demote admin status
+- Trigger live config reloads via the four `POST /api/admin/reload/{ocr-context, transcription-context, mood-dimensions, entity-casing}` endpoints — see `configuration.md` and `context-files.md`.
+- Edit the `pricing` table and runtime feature flags (`PATCH /api/settings/pricing`, `PATCH /api/settings/runtime`).
 
-Access the admin panel via `/admin` in the web UI (link visible only to admins).
+Access the admin panel via `/admin` in the web UI (link visible only to admins). Routes are implemented in
+`src/journal/auth_api/admin.py` (after the 2026-05-08 `auth_api/` package split).

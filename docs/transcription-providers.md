@@ -259,11 +259,13 @@ docker compose logs journal-server --since 1h --no-color \
   (`_is_transient`), and the `build_transcription_provider` factory.
 - `src/journal/services/transcription_context.py` — `build_whisper_prompt` (200-token capped
   prompt for OpenAI) and `build_full_context_instruction` (full system instruction for Gemini).
-- `src/journal/config.py` — all 9 env-var fields (`transcription_provider`,
-  `transcription_fallback_enabled`, `transcription_fallback_model`, `transcription_retry_*`,
-  `transcription_shadow_*`) with `__post_init__` validation.
-- `src/journal/api.py` — the `/api/settings` block that surfaces the resolved transcription
-  config to the webapp.
+- `src/journal/config.py` — all `transcription_*` env-var fields (`transcription_provider`,
+  `transcription_model`, `transcription_fallback_enabled`, `transcription_fallback_model`,
+  `transcription_retry_max_attempts`, `transcription_retry_base_delay`, `transcription_retry_max_delay`,
+  `transcription_shadow_provider`, `transcription_shadow_model`, plus the context-priming pair
+  `transcription_context_enabled`, `transcription_confidence_threshold`) with `__post_init__` validation.
+- `src/journal/api/settings.py` — the `/api/settings` block that surfaces the resolved transcription
+  config to the webapp. (The single-file `api.py` was split into the `src/journal/api/` package on 2026-05-07.)
 - `tests/test_providers/test_transcription.py` — adapter and wrapper unit tests.
 - `tests/test_providers/test_transcription_factory.py` — end-to-end stack composition,
   retry/fallback, and shadow diffing.

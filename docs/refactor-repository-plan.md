@@ -1,7 +1,12 @@
 # `db/repository.py` split — planning round
 
-**Status:** active. **Last updated:** 2026-05-07. **Supersedes:** none.
-Tracked under Round-3 Recommendation 3 in [`refactor-round-3.md`](./refactor-round-3.md).
+**Status:** closed 2026-05-07. **Last updated:** 2026-05-09 (status flip during accuracy audit).
+**Supersedes:** none. Tracked under Round-3 Recommendation 3 in [`refactor-round-3.md`](./refactor-round-3.md).
+The proposed split landed in commits `f690336` (commit A: package skeleton, mixin extraction) and `98ee348`
+(commit B: tests + reach-in retargets); follow-ups `a9cb1ad` (legacy `add_people`/`add_places`/`add_tags`
+deletion — chose option 1 in Decision 6) and `12acee5` (transaction-pattern standardisation — Decision 8 was
+deferred at planning time, shipped after) closed out the workstream. Largest member is `stats.py` (357 lines).
+Doc kept as a record of decisions.
 
 Round-3 Recommendation 3 from `docs/refactor-round-3.md`. Read-only
 planning output. The intent is to bring the proposed split back for

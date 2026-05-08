@@ -424,18 +424,52 @@ docker exec journal-server uv run journal repair-entity-names --apply       # ac
 
 ## Storage-agnostic Protocol
 
-Everything the service touches goes through the `EntityStore` Protocol (`src/journal/entitystore/store.py`). The SQLite
+Everything the service touches goes through the `EntityStore` Protocol (`src/journal/entitystore/protocol.py`,
+re-exported from `entitystore/store.py`). The SQLite
 implementation is the source of truth for now, but a graph-DB backend (Memgraph, LadybugDB, Neo4j, ...) can be dropped in
 against the same Protocol without touching `EntityExtractionService`. The goal of Phase 2 is to experiment with a native
 graph backend once there's enough data to make the comparison meaningful.
 
-## Migration
+## Migration timeline
 
-`0004_entities.sql` adds:
+The entity-tracking schema accreted across multiple migrations. Entries below are in chronological order; production
+is at `user_version = 22` as of 2026-05-09.
 
-- `entities`, `entity_aliases`, `entity_mentions`, `entity_relationships` tables.
-- `entries.entity_extraction_stale` column (default `1` so all existing entries are flagged for first-pass extraction).
-- `entries_entity_stale_on_final_text` trigger that re-flags an entry as stale whenever its `final_text` is updated.
+- **`0004_entities.sql`** — base entity tables.
+  - `entities`, `entity_aliases`, `entity_mentions`, `entity_relationships`.
+  - `entries.entity_extraction_stale` column (default `1` so existing entries are flagged for first-pass extraction).
+  - `entries_entity_stale_on_final_text` trigger that re-flags an entry as stale whenever its `final_text` is updated.
+
+- **`0008_entity_merge_history.sql`** — merge audit + early candidate model.
+  - `entity_merge_history` (records what was absorbed into what, with timestamp and operator).
+  - First version of `entity_merge_candidates` keyed by `(entity_id_a, entity_id_b, run_id)` (multiple candidates per
+    pair — one per dedup run).
+
+- **`0011_multi_tenant.sql`** — multi-user isolation.
+  - Adds `users`, `user_sessions`, `api_keys`.
+  - Rebuilds `entities` with `user_id INTEGER NOT NULL REFERENCES users(id)` and
+    `UNIQUE(user_id, entity_type, canonical_name)`.
+  - Adds `user_id` to all entity-adjacent tables. Per-user data isolation enforced at the repository layer.
+
+- **`0018_entity_quarantine.sql`** — soft quarantine.
+  - Adds `is_quarantined` (BOOLEAN), `quarantine_reason` (TEXT), `quarantined_at` (TIMESTAMP) columns to `entities`.
+  - Partial index for fast "list quarantined entities" lookup.
+
+- **`0019_merge_history_quarantine.sql`** — quarantine fields are also captured in the merge-history snapshot so undo
+  can restore the quarantine state of an absorbed entity.
+
+- **`0020_entity_mentions_match_source.sql`** — adds `entity_mentions.match_source` so mentions know whether they were
+  produced by exact-string match, alias match, embedding-similarity match, or LLM-asserted match.
+
+- **`0021_entity_pair_decisions.sql`** — persistent dedup-rejection memory.
+  - `entity_pair_decisions(entity_id_a, entity_id_b, decision, decided_at, decided_by_user_id)` records
+    user-rejected merge candidates so the same pair is not re-surfaced on subsequent dedup runs.
+
+- **`0022_entity_merge_candidates_pair_unique.sql`** — candidates rebuild for per-pair uniqueness.
+  - Drops the old `(a, b, run)` composite key and rebuilds `entity_merge_candidates` with `UNIQUE(entity_id_a, entity_id_b)`.
+  - Idempotent on partial failure: drops the temp table at the top, so an aborted run can be re-tried cleanly. This
+    migration validates the migration-testing principles in `CLAUDE.md` — orphan-tolerant, re-runnable, prod-shaped
+    fixtures.
 
 Legacy `people` and `places` tables from migration `0001` are intentionally left untouched — they are unused in the
 current codebase but removing them would risk a schema mismatch on an existing database. The entity extraction feature

@@ -330,5 +330,7 @@ docker run -d --name chromadb -p 8401:8000 chromadb/chroma:latest
 Use the MCP inspector for interactive testing:
 
 ```bash
-uv run mcp dev src/journal/mcp_server.py
+uv run python -m journal.mcp_server
 ```
+
+(`mcp_server.py` was split into the `src/journal/mcp_server/` package on 2026-05-07; the `__main__.py` entrypoint is what `python -m` invokes.)

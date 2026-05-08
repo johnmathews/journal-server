@@ -3,9 +3,76 @@
 ## REST API Endpoints
 
 The journal server exposes REST API endpoints alongside the MCP protocol, both on the same port. These endpoints are
-registered via `mcp.custom_route()` and served by the same Starlette/ASGI application.
+registered via `mcp.custom_route()` and served by the same Starlette/ASGI application. The route handlers live under
+`src/journal/api/` (entries, ingestion, search, dashboard, jobs, entities, entity_merge, settings, users, health,
+notifications) and `src/journal/auth_api/` (core, account, profile, api_keys, admin).
 
 CORS is configurable via the `API_CORS_ORIGINS` environment variable (see [configuration.md](configuration.md)).
+
+## Authentication
+
+The server applies a single auth middleware stack (`src/journal/auth.py`) to **every** REST and MCP route. Two
+authentication schemes are accepted, checked in order:
+
+1. **Session cookie** — `session_id`, issued by `POST /api/auth/login` (or `POST /api/auth/register`). The cookie is
+   set with `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`, and a 7-day `Max-Age`. The raw token is held only in the
+   cookie; the server stores a SHA-256 hash of the session id in the `sessions` table. This is the path the webapp
+   uses.
+2. **Bearer API key** — `Authorization: Bearer <key>` header. Used by MCP clients and direct REST consumers. Keys are
+   created by `POST /api/auth/api-keys` and shown to the caller exactly once. Like session ids, only a hash of the key
+   is stored server-side.
+
+Successful auth attaches an `AuthenticatedUser` to `request.user` and exposes `user_id` to MCP tool handlers via a
+`ContextVar`. After auth, the middleware enforces:
+
+- `403 forbidden` (`"Account is disabled"`) when `is_active` is false.
+- `403 forbidden` (`"Please verify your email"`) when `email_verified` is false and the path is not in
+  `VERIFICATION_EXEMPT_PATHS` (`/api/auth/me`, `/api/auth/logout`, `/api/auth/resend-verification`).
+- `401 unauthorized` (`{"error": "unauthorized", ...}`) for everything else without valid credentials.
+
+### Public paths
+
+The following paths bypass auth entirely (`PUBLIC_PATHS` in `auth.py`):
+
+- `/health`
+- `/api/auth/login`
+- `/api/auth/register`
+- `/api/auth/config`
+- `/api/auth/forgot-password`
+- `/api/auth/verify-reset-token`
+- `/api/auth/reset-password`
+- `/api/auth/verify-email`
+
+`OPTIONS` requests always pass (CORS preflight). For the full auth model — registration toggle, password reset
+lifecycle, email verification, session/API key data shapes — see [`auth.md`](auth.md).
+
+## Conventions
+
+### Error envelopes
+
+Most modern endpoints (auth, search, dashboard, ingestion, settings, users) return JSON of the form:
+
+```json
+{ "error": "<machine_code>", "message": "<human readable text>" }
+```
+
+with HTTP status `400` (validation), `401` (auth required / invalid credentials), `403` (forbidden / verification
+required), `404` (not found), `409` (conflict — entry has active jobs, alias collides, mood reload disabled), `413`
+(payload too large), or `503` (server still booting / dependency unavailable). Older endpoints — `/api/stats`, the
+entity CRUD/aliases routes, and a handful of admin reload routes — emit a single-key `{"error": "..."}` body with no
+`message` field and no machine code; treat both shapes as possible.
+
+### Date format
+
+All `entry_date`, `start_date`, `end_date`, `from`, and `to` parameters use ISO 8601 calendar dates (`YYYY-MM-DD`).
+Timestamps in responses (e.g. `created_at`, `updated_at`, `started_at`) are ISO 8601 datetimes, usually with explicit
+UTC offset.
+
+### Pagination
+
+List endpoints accept `limit` and `offset` query parameters. Defaults vary by endpoint (typically 20 or 50, capped
+between 50 and 200) and are documented per route. Responses use a consistent
+`{"items": [...], "total": N, "limit": L, "offset": O}` envelope where applicable.
 
 ### GET /api/entries
 
@@ -327,8 +394,7 @@ If you ever front this server with a reverse proxy, exclude `/health` from the p
   "uptime_seconds": 3821.42,
   "started_at": "2026-04-11T07:30:00+00:00",
   "by_type": {
-   "semantic_search": { "count": 12, "latency": { "p50_ms": 41.2, "p95_ms": 89.7, "p99_ms": 102.3 } },
-   "keyword_search": { "count": 5, "latency": { "p50_ms": 4.1, "p95_ms": 9.8, "p99_ms": 12.1 } }
+   "hybrid_search": { "count": 17, "latency": { "p50_ms": 184.2, "p95_ms": 412.7, "p99_ms": 588.3 } }
   }
  }
 }
@@ -363,41 +429,50 @@ output suitable for piping to `jq`. The CLI exits non-zero only when the rolled-
 
 ### GET /api/search
 
-Full-text search across journal entries. Supports two modes:
+Hybrid full-text + semantic search across journal entries. There is **no** mode toggle — every request runs the full
+pipeline. The `mode` query parameter has been retired and passing it now returns `400 mode_removed`. See
+[`search.md`](search.md) for the architecture deep-dive.
 
-- **`semantic`** (default): vector similarity over persisted chunk embeddings. Results are ranked by cosine similarity
-  and each matching chunk carries its character offsets into the parent entry's `final_text` so a client can render
-  in-place highlights without a second round-trip.
-- **`keyword`**: SQLite FTS5 over `final_text`. Ranked by FTS5's `rank` score. Each hit includes a `snippet` string with
-  ASCII `\x02` (start) and `\x03` (end) control characters wrapping the matched terms — the client replaces these with
-  whatever highlight markup it wants (for example `<mark>`).
+**Pipeline:**
+
+1. **L1a — BM25 retrieval.** SQLite FTS5 (`entries_fts`) over `raw_text`, entry-level, top-N candidates.
+2. **L1b — Dense retrieval.** Query is embedded via the configured embeddings provider, ChromaDB returns the top-N
+   chunks by cosine distance, projected to entries by keeping the best-scoring chunk per entry.
+3. **Fusion.** Reciprocal Rank Fusion across the two ranked lists with `k = 60` (Cormack et al.). Truncated to the
+   top-M fused entries.
+4. **L2 — Listwise rerank.** The configured `Reranker` (default: Anthropic Claude Haiku 4.5; can be swapped to
+   `none` to skip L2) scores the fused candidates given the query and returns a final order.
+5. **Sort + slice.** Results are reordered per the `sort` parameter and paged by `offset` + `limit`. Sort + paging
+   are applied on top of a 5-minute LRU cache of the reranked candidate list — paging or changing sort does not
+   re-run the pipeline.
 
 **Query parameters:**
 
-| Parameter    | Type   | Required | Default    | Description                  |
-| ------------ | ------ | -------- | ---------- | ---------------------------- |
-| `q`          | string | yes      |            | Search query                 |
-| `mode`       | string | no       | `semantic` | `semantic` or `keyword`      |
-| `start_date` | string | no       |            | Filter from date (ISO 8601)  |
-| `end_date`   | string | no       |            | Filter until date (ISO 8601) |
-| `limit`      | int    | no       | 10         | Max entries returned (1–50)  |
-| `offset`     | int    | no       | 0          | Pagination offset            |
+| Parameter    | Type   | Required | Default     | Description                                                  |
+| ------------ | ------ | -------- | ----------- | ------------------------------------------------------------ |
+| `q`          | string | yes      |             | Search query (FTS5 syntax permitted; bare terms recommended) |
+| `start_date` | string | no       |             | Filter from date (ISO 8601)                                  |
+| `end_date`   | string | no       |             | Filter until date (ISO 8601)                                 |
+| `limit`      | int    | no       | 10          | Max entries returned (clamped to 1–50)                       |
+| `offset`     | int    | no       | 0           | Pagination offset                                            |
+| `sort`       | string | no       | `relevance` | `relevance`, `date_desc`, or `date_asc`                      |
 
 **Response (200):**
 
 ```json
 {
  "query": "vienna with atlas",
- "mode": "semantic",
  "limit": 10,
  "offset": 0,
+ "sort": "relevance",
+ "reranker": "ClaudeListwiseReranker",
  "items": [
   {
    "entry_id": 42,
    "entry_date": "2026-03-22",
    "text": "Walked through Vienna with Atlas. Later we met Robyn...",
-   "score": 0.871,
-   "snippet": null,
+   "score": 0.92,
+   "snippet": "...walked through Vienna with Atlas...",
    "matching_chunks": [
     {
      "text": "Walked through Vienna with Atlas",
@@ -412,19 +487,31 @@ Full-text search across journal entries. Supports two modes:
 }
 ```
 
-**Mode differences:**
+**Item shape:**
 
-- In `semantic` mode, `snippet` is always `null` and `matching_chunks` is populated with one entry per chunk that
-  matched, sorted by score descending. Each chunk has `char_start`/`char_end`/`chunk_index` when the entry has persisted
-  chunks in SQLite (entries ingested before chunk persistence return `null` offsets).
-- In `keyword` mode, `matching_chunks` is an empty list and `snippet` is a string like
-  `"...walked through \x02Vienna\x03 with Atlas..."`. The `score` field carries a small positive float derived from
-  FTS5's `rank` so rows sort by relevance; it is not comparable across modes.
+- `entry_id`, `entry_date`, `text` — the matched entry's id, date, and full text (`final_text` if present, else
+  `raw_text`).
+- `score` — the reranker's score for the entry (or the RRF score when the reranker is set to `none`). Comparable
+  within a single response, not across responses.
+- `snippet` — populated **only when BM25 contributed to the match**. An FTS5 excerpt with ASCII `\x02` / `\x03`
+  control characters wrapping the matched terms; the client replaces them with whatever highlight markup it wants
+  (for example `<mark>`). `null` when only dense retrieval matched.
+- `matching_chunks` — populated **only when dense retrieval contributed**. One entry per chunk that matched, sorted
+  by similarity descending. Each chunk has `text`, `score` (cosine similarity), `chunk_index`, `char_start`, and
+  `char_end`. `char_start`/`char_end` are `null` for entries ingested before chunk persistence (migration 0003).
+  Empty list when only BM25 matched.
+
+Either `snippet` or `matching_chunks` (or both) will carry data for any successful hit. The `reranker` field at the
+top level names the reranker class actually used (e.g. `ClaudeListwiseReranker`, `NoOpReranker`) so clients can
+debug or cache-bust based on the L2 stage.
 
 **Error responses:**
 
-- `400` — `q` missing or empty, or `mode` not one of `semantic` / `keyword`
-- `503` — server not initialised
+- `400 missing_query` — `q` is missing or empty.
+- `400 mode_removed` — the request included a `mode` query parameter (retired when hybrid shipped).
+- `400 invalid_sort` — `sort` is not one of `relevance`, `date_desc`, `date_asc`.
+- `400 invalid_query` — FTS5 could not parse `q` (unterminated quote, bare boolean operator, etc.).
+- `503` — `{"error": "Server not initialized"}` while the server is still booting.
 
 ---
 
@@ -458,12 +545,20 @@ their scale types, and score ranges without hardcoding anything in the frontend.
    "score_max": 1.0,
    "notes": "..."
   }
- ]
+ ],
+ "meta": {
+  "version": "2026-04-14",
+  "description": "Six bipolar facets + two unipolar drives."
+ }
 }
 ```
 
+The `meta` block carries `version` and `description` from the loaded mood-dimensions TOML; both fields are always
+present (empty strings when the file is absent or the feature is disabled).
+
 When mood scoring is disabled (`JOURNAL_ENABLE_MOOD_SCORING` unset or false) the endpoint returns 200 with an empty
-`dimensions` array. Callers should treat that as "no mood data to display" rather than an error.
+`dimensions` array (and an empty `meta` block). Callers should treat that as "no mood data to display" rather than an
+error.
 
 See `docs/mood-scoring.md` for the full rationale, facet definitions, bipolar vs unipolar semantics, and the rebuild
 procedure.
@@ -673,14 +768,23 @@ extraction runs on every new entry). Poll `GET /api/jobs/{id}` to check completi
 
 ### POST /api/entries/ingest/file
 
-Create a journal entry from an uploaded `.md` or `.txt` file. Synchronous.
+Create a journal entry from an uploaded `.md` or `.txt` file. Synchronous. The new entry is stored with
+`source_type = "imported_text_file"`.
 
 **Request body (multipart/form-data):**
 
 | Field        | Type   | Required | Default | Description                   |
 | ------------ | ------ | -------- | ------- | ----------------------------- |
 | `file`       | file   | yes      |         | A single `.md` or `.txt` file |
-| `entry_date` | string | no       | today   | ISO 8601 date                 |
+| `entry_date` | string | no       |         | ISO 8601 date (fallback only) |
+
+**Date precedence** (`api/ingestion.py:230-235`): the entry's date is chosen by walking this list and taking the first
+hit:
+
+1. A date parsed from the file **content** (e.g. a "TUES 17 FEB 2026" or "2026-02-17" header in the document).
+2. A date parsed from the **filename** (e.g. `260217-trip.md`).
+3. The `entry_date` form field, if supplied.
+4. Today's date (UTC).
 
 **Response (201):** Same shape as `POST /api/entries/ingest/text`.
 
@@ -729,7 +833,10 @@ HEIC/HEIF images (common on macOS and iOS) are automatically converted to JPEG o
 ### POST /api/entries/ingest/audio
 
 Upload one or more audio recordings for transcription. Asynchronous — returns a job ID immediately. The job transcribes
-each recording via OpenAI Whisper, concatenates the texts into a single entry, chunks, embeds, and stores.
+each recording via the configured transcription stack (default OpenAI `gpt-4o-transcribe` with a `whisper-1`
+retry/fallback; an optional Gemini provider can run as primary or shadow — see
+[`transcription-providers.md`](transcription-providers.md)), concatenates the texts into a single entry, chunks,
+embeds, and stores.
 
 Multiple recordings are joined with a single newline separator and stored as one voice entry. This supports the workflow
 of recording a journal entry in multiple segments (e.g., start, pause, continue).
@@ -1309,7 +1416,8 @@ shape.
 
 ### GET /api/jobs
 
-List jobs ordered newest first, with optional filters and pagination.
+List jobs ordered newest first, with optional filters and pagination. Non-admin users see only their own jobs; admins
+see all jobs across users (`api/jobs.py:48`).
 
 **Query parameters:**
 
@@ -1469,6 +1577,672 @@ Send a test Pushover notification using the authenticated user's saved credentia
 
 ---
 
+## Auth endpoints
+
+Session and account-lifecycle routes. See [`auth.md`](auth.md) for the data model, password rules, token lifetimes,
+and email-dispatch behaviour.
+
+### POST /api/auth/login
+
+**Public.** Authenticate with email + password. On success returns the user JSON and sets the `session_id` cookie
+(httpOnly, Secure, SameSite=Lax, 7-day max-age). The cookie is the only place the raw session token appears; the
+server stores a hashed copy.
+
+**Request body:**
+
+```json
+{ "email": "alice@example.com", "password": "..." }
+```
+
+**Response (200):**
+
+```json
+{
+ "user": {
+  "id": 1,
+  "email": "alice@example.com",
+  "display_name": "Alice",
+  "is_admin": false,
+  "is_active": true,
+  "email_verified": true,
+  "created_at": "2026-04-01T10:00:00+00:00",
+  "updated_at": "2026-04-01T10:00:00+00:00"
+ }
+}
+```
+
+**Errors:** `400 invalid_body`, `400 missing_fields`, `401 invalid_credentials`, `503 server_not_ready`.
+
+---
+
+### POST /api/auth/logout
+
+Revoke the current session and clear the `session_id` cookie. Idempotent — returning 200 with `{"ok": true}` even if
+no session was attached.
+
+**Response (200):**
+
+```json
+{ "ok": true }
+```
+
+---
+
+### GET /api/auth/me
+
+Return the currently authenticated user.
+
+**Response (200):**
+
+```json
+{ "user": { "id": 1, "email": "alice@example.com", "display_name": "Alice", "is_admin": false, "is_active": true, "email_verified": true, "created_at": "...", "updated_at": "..." } }
+```
+
+`/api/auth/me` is in `VERIFICATION_EXEMPT_PATHS`, so it is reachable while `email_verified` is still `false` (unlike
+most other authenticated routes).
+
+---
+
+### PATCH /api/auth/me
+
+Update the current user's profile. Currently the only mutable field is `display_name`.
+
+**Request body:**
+
+```json
+{ "display_name": "Alice Smith" }
+```
+
+**Response (200):** `{"user": { ... }}` with the updated record.
+
+**Errors:** `400 invalid_body`, `400 missing_fields` (empty `display_name`), `404 not_found`.
+
+---
+
+### GET /api/auth/config
+
+**Public.** Expose non-sensitive auth configuration that the webapp needs **before** the user is logged in (e.g. to
+decide whether to show the Register link).
+
+**Response (200):**
+
+```json
+{ "registration_enabled": true }
+```
+
+---
+
+### POST /api/auth/register
+
+**Public.** Create a new user, issue a session cookie, and (best-effort) send a verification email. Honours the
+runtime `registration_enabled` flag — when disabled, returns `403 registration_disabled`.
+
+**Request body:**
+
+```json
+{ "email": "alice@example.com", "password": "long-enough", "display_name": "Alice" }
+```
+
+`password` must be 8–1024 characters.
+
+**Response (201):** Same `{"user": ...}` shape as `/login`, plus a `session_id` cookie. The user starts with
+`email_verified: false`; verification email dispatch is best-effort and never fails the request.
+
+**Errors:** `400 invalid_body`, `400 missing_fields`, `400 weak_password`, `400 duplicate_email`,
+`403 registration_disabled`.
+
+---
+
+### POST /api/auth/forgot-password
+
+**Public.** Request a password-reset email. **Always returns 200** to avoid email enumeration; the actual email is
+sent only if the address matches a real user and the email service is configured.
+
+**Request body:**
+
+```json
+{ "email": "alice@example.com" }
+```
+
+**Response (200):**
+
+```json
+{ "message": "If that email exists, a reset link has been sent" }
+```
+
+---
+
+### GET /api/auth/verify-reset-token
+
+**Public.** Check whether a password-reset token is still valid. Used by the webapp to gate the password-reset form.
+
+**Query parameters:** `token` (required).
+
+**Response (200):**
+
+```json
+{ "valid": true }
+```
+
+**Errors:** `400 missing_token`, `400 invalid_token`.
+
+---
+
+### POST /api/auth/reset-password
+
+**Public.** Reset the password for the user identified by a valid reset token.
+
+**Request body:**
+
+```json
+{ "token": "...", "password": "new-password" }
+```
+
+`password` must be 8–1024 characters.
+
+**Response (200):**
+
+```json
+{ "message": "Password has been reset successfully" }
+```
+
+**Errors:** `400 invalid_body`, `400 missing_fields`, `400 weak_password`, `400 invalid_token`.
+
+---
+
+### GET /api/auth/verify-email
+
+**Public.** Confirm an email-verification token (linked from the verification email).
+
+**Query parameters:** `token` (required).
+
+**Response (200):**
+
+```json
+{ "message": "Email verified successfully" }
+```
+
+**Errors:** `400 missing_token`, `400 invalid_token`.
+
+---
+
+### POST /api/auth/resend-verification
+
+Resend the verification email for the current user. Allowed even when `email_verified` is `false` (path is in
+`VERIFICATION_EXEMPT_PATHS`).
+
+**Request body:** none.
+
+**Response (200):**
+
+```json
+{ "message": "Verification email sent" }
+```
+
+If the user is already verified, returns 200 with `{"message": "Email is already verified"}` and does not send.
+
+**Errors:** `500 email_failed` (SMTP send failed), `500 email_not_configured`.
+
+---
+
+### POST /api/auth/api-keys
+
+Create a new API key for the authenticated user. The full key value is returned **once** in the response and is
+otherwise unrecoverable — the server only stores a hash.
+
+**Request body:**
+
+```json
+{ "name": "nanoclaw bot", "expires_days": 90 }
+```
+
+`name` is required. `expires_days` is optional; when set, must be a positive integer.
+
+**Response (201):**
+
+```json
+{
+ "id": 7,
+ "user_id": 1,
+ "key_prefix": "jrnl_a1b2",
+ "name": "nanoclaw bot",
+ "created_at": "2026-04-12T10:00:00+00:00",
+ "expires_at": "2026-07-11T10:00:00+00:00",
+ "last_used_at": null,
+ "revoked_at": null,
+ "key": "jrnl_a1b2c3d4e5f6..."
+}
+```
+
+`key` is the full Bearer token; persist it client-side. Subsequent reads (GET) will not include it.
+
+**Errors:** `400 invalid_body`, `400 missing_fields`, `400 invalid_field`.
+
+---
+
+### GET /api/auth/api-keys
+
+List the authenticated user's API keys. Secret material is never returned.
+
+**Response (200):**
+
+```json
+{
+ "items": [
+  {
+   "id": 7,
+   "user_id": 1,
+   "key_prefix": "jrnl_a1b2",
+   "name": "nanoclaw bot",
+   "created_at": "...",
+   "expires_at": "...",
+   "last_used_at": "2026-04-15T08:01:11+00:00",
+   "revoked_at": null
+  }
+ ]
+}
+```
+
+---
+
+### DELETE /api/auth/api-keys/{key_id}
+
+Revoke an API key owned by the authenticated user.
+
+**Response (200):**
+
+```json
+{ "ok": true }
+```
+
+**Errors:** `404 not_found` (unknown id, not owned by the caller, or already revoked).
+
+---
+
+## Admin endpoints
+
+**Admin only.** All routes require the caller's `is_admin` flag to be set; non-admin callers receive
+`403 forbidden`.
+
+### GET /api/admin/users
+
+List all users with stats (entry counts, last activity, etc.). The exact stat fields come from
+`SQLiteUserRepository.get_user_stats`.
+
+**Response (200):**
+
+```json
+{
+ "items": [
+  {
+   "id": 1,
+   "email": "alice@example.com",
+   "display_name": "Alice",
+   "is_admin": false,
+   "is_active": true,
+   "email_verified": true,
+   "entry_count": 42,
+   "last_entry_at": "2026-04-12"
+  }
+ ]
+}
+```
+
+---
+
+### PATCH /api/admin/users/{user_id}
+
+Update a user's role or active flag. Only `is_admin` and `is_active` are accepted; both must be booleans.
+
+**Request body:**
+
+```json
+{ "is_active": false }
+```
+
+**Response (200):** `{"user": { ... }}` with the updated record.
+
+**Errors:** `400 invalid_body`, `400 invalid_field`, `400 missing_fields`, `404 not_found`.
+
+---
+
+### POST /api/admin/reload/ocr-context
+
+**Admin only.** Re-read the OCR glossary directory and rebuild the OCR provider.
+
+**Response (200):** A summary dict from the helper (paths re-read, glossary entry counts, etc.).
+
+**Errors:** `409 reload_unavailable` if the helper raises (e.g. the underlying feature is disabled or the
+configuration is invalid).
+
+---
+
+### POST /api/admin/reload/transcription-context
+
+**Admin only.** Re-read the OCR/transcription glossary directory and rebuild the transcription stack (primary,
+fallback, and shadow providers). Same response/error contract as `/reload/ocr-context`.
+
+---
+
+### POST /api/admin/reload/mood-dimensions
+
+**Admin only.** Re-read the mood-dimensions TOML and rebuild the mood-scoring service. Returns the helper summary
+(loaded version, dimension count). When mood scoring is disabled, the helper raises `RuntimeError` and the route
+returns `409 reload_unavailable`.
+
+---
+
+### POST /api/admin/reload/entity-casing
+
+**Admin only.** Re-read the entity-casing exceptions TOML and rebind it on the entity store. Same response/error
+contract as the other reload routes.
+
+---
+
+## Settings & preferences
+
+Server-wide config (`/api/settings*`) is partly read-only and partly admin-only; per-user preferences live under
+`/api/users/me/preferences`.
+
+### GET /api/settings
+
+Return a non-secret snapshot of the running server's configuration: provider/model selections (OCR, transcription,
+embeddings), chunking parameters, hybrid-search knobs, runtime feature flags, and the current pricing table. Secret
+fields (API keys, bearer tokens, Slack tokens) are not included.
+
+**Response (200):** A `{"ocr": {...}, "transcription": {...}, "transcript_formatting": {...}, "embedding": {...},
+"chunking": {...}, "entity_extraction": {...}, "search": {...}, "features": {...}, "runtime": [...], "pricing":
+[...]}` envelope. Field shapes follow the dataclasses in `journal.config.Config` and the runtime/pricing repository
+helpers.
+
+---
+
+### GET /api/settings/runtime
+
+Return all runtime-editable settings with metadata (key, current value, type, description).
+
+**Response (200):**
+
+```json
+{ "settings": [ { "key": "registration_enabled", "value": true, "type": "bool", "description": "..." } ] }
+```
+
+---
+
+### PATCH /api/settings/runtime
+
+**Admin only.** Update one or more runtime settings.
+
+**Request body:** `{"key": value, ...}` — each key must be a known runtime setting; the value is coerced to the
+declared type.
+
+**Response (200):**
+
+```json
+{ "updated": ["registration_enabled"], "settings": [ ... ], "warnings": [] }
+```
+
+If every key in the body fails validation, returns 400 with a single-key `{"error": "..."}` body. If some succeed and
+some fail, the failed keys are returned in `warnings` alongside the successful `updated` list.
+
+---
+
+### GET /api/settings/pricing
+
+Return the model-pricing table used for cost reporting (token-cost-per-million per model).
+
+**Response (200):**
+
+```json
+{ "pricing": [ { "model_name": "claude-haiku-4-5", "input_per_mtok": 1.0, "output_per_mtok": 5.0, "cached_input_per_mtok": 0.1, "updated_at": "..." } ] }
+```
+
+---
+
+### PATCH /api/settings/pricing
+
+**Admin only.** Update pricing for one or more models. The body is a `{model_name: {field: value, ...}, ...}` map.
+
+**Response codes:**
+
+- `200` — every model in the body was applied.
+- `207` — some models updated, others rejected (unknown model, no valid fields). The body's `updated` list and
+  `errors` list together describe what happened.
+- `400` — every entry in the body failed validation.
+
+**Response body:**
+
+```json
+{ "updated": ["claude-haiku-4-5"], "pricing": [ ... ], "errors": ["claude-mystery: unknown model or no valid fields"] }
+```
+
+---
+
+### GET /api/users/me/preferences
+
+Return all per-user preference key/value pairs for the authenticated user.
+
+**Response (200):**
+
+```json
+{ "preferences": { "pushover_user_key": "...", "notif_job_success_ingest_images": true } }
+```
+
+---
+
+### PATCH /api/users/me/preferences
+
+Partial update of the current user's preferences. Body is a JSON object whose keys are preference names and whose
+values are any JSON-serialisable scalars/objects.
+
+**Request body:**
+
+```json
+{ "notif_job_success_ingest_images": false }
+```
+
+**Response (200):** the full preferences map after the update (same shape as GET).
+
+**Errors:**
+
+- `400` — invalid JSON, body not an object, or a non-string key.
+- `403` — the body sets a preference key that is in the admin-only set (currently the admin-only notification
+  topics defined by `journal.services.notifications.TOPICS`).
+
+---
+
+### GET /api/health
+
+Authenticated mirror of `/health`. Identical payload — provided because the webapp's nginx only proxies `/api/*`
+through to the server, so the unauthenticated `/health` path is unreachable from the browser.
+
+---
+
+## Dashboard endpoints (additional)
+
+The dashboard cluster carries four routes beyond the ones above (`mood-dimensions`, `mood-trends`, `mood-drilldown`,
+`entity-distribution`, `writing-stats`).
+
+### GET /api/dashboard/calendar-heatmap
+
+Daily entry counts and word totals, used by the dashboard's calendar heatmap.
+
+**Query parameters:**
+
+| Parameter | Type   | Required | Description                   |
+| --------- | ------ | -------- | ----------------------------- |
+| `from`    | string | no       | Inclusive ISO-8601 start date |
+| `to`      | string | no       | Inclusive ISO-8601 end date   |
+
+**Response (200):**
+
+```json
+{
+ "from": "2026-01-01",
+ "to": "2026-04-20",
+ "days": [
+  { "date": "2026-04-12", "entry_count": 1, "total_words": 412 }
+ ]
+}
+```
+
+Days with zero entries are omitted.
+
+---
+
+### GET /api/dashboard/entity-trends
+
+Top-N entity mention counts over time, bucketed by `bin`. Used to show which topics wax and wane.
+
+**Query parameters:**
+
+| Parameter | Type   | Required | Default | Description                                                 |
+| --------- | ------ | -------- | ------- | ----------------------------------------------------------- |
+| `bin`     | string | no       | `month` | `week`, `month`, `quarter`, or `year`                       |
+| `from`    | string | no       |         | Inclusive ISO-8601 start date                               |
+| `to`      | string | no       |         | Inclusive ISO-8601 end date                                 |
+| `type`    | string | no       |         | Filter by entity_type (`person`, `place`, `topic`, ...)     |
+| `limit`   | int    | no       | 8       | Top N entities to track (capped at 50)                      |
+
+**Response (200):**
+
+```json
+{
+ "from": "2026-01-01",
+ "to": "2026-04-20",
+ "bin": "month",
+ "entity_type": "person",
+ "entities": ["Atlas", "Lizzie", "Robyn"],
+ "bins": [
+  { "period": "2026-01-01", "entity_name": "Atlas", "mention_count": 4 },
+  { "period": "2026-02-01", "entity_name": "Atlas", "mention_count": 7 }
+ ]
+}
+```
+
+The flat `entities` list at the top level names the top-N selected; `bins` carries one row per (period, entity)
+combination that had at least one mention.
+
+**Errors:** `400 invalid_bin`, `503 Server not initialized`.
+
+---
+
+### GET /api/dashboard/mood-entity-correlation
+
+Average mood score per entity, compared against the overall corpus average for the same window. Surfaces "entities
+that correlate with feeling X".
+
+**Query parameters:**
+
+| Parameter   | Type   | Required | Default | Description                                  |
+| ----------- | ------ | -------- | ------- | -------------------------------------------- |
+| `dimension` | string | yes      |         | The mood dimension name                      |
+| `from`      | string | no       |         | Inclusive ISO-8601 start date                |
+| `to`        | string | no       |         | Inclusive ISO-8601 end date                  |
+| `type`      | string | no       |         | Filter by entity_type                        |
+| `limit`     | int    | no       | 10      | Top N entities (capped at 50)                |
+
+**Response (200):**
+
+```json
+{
+ "dimension": "joy_sadness",
+ "from": "2026-01-01",
+ "to": "2026-04-20",
+ "entity_type": null,
+ "overall_avg": 0.21,
+ "items": [
+  { "canonical_name": "Atlas", "entity_type": "person", "avg_score": 0.62, "entry_count": 11 },
+  { "canonical_name": "rain", "entity_type": "topic", "avg_score": -0.34, "entry_count": 6 }
+ ]
+}
+```
+
+**Errors:** `400 missing_dimension`, `503`.
+
+---
+
+### GET /api/dashboard/word-count-distribution
+
+Histogram of entry word counts plus summary statistics. Used to characterise typical entry length.
+
+**Query parameters:**
+
+| Parameter     | Type   | Required | Default | Description                                       |
+| ------------- | ------ | -------- | ------- | ------------------------------------------------- |
+| `from`        | string | no       |         | Inclusive ISO-8601 start date                     |
+| `to`          | string | no       |         | Inclusive ISO-8601 end date                       |
+| `bucket_size` | int    | no       | 100     | Histogram bucket width in words (minimum 10)      |
+
+**Response (200):**
+
+```json
+{
+ "from": "2026-01-01",
+ "to": "2026-04-20",
+ "bucket_size": 100,
+ "buckets": [
+  { "bucket_start": 0, "bucket_end": 100, "entry_count": 4 },
+  { "bucket_start": 100, "bucket_end": 200, "entry_count": 9 }
+ ],
+ "stats": { "min": 12, "max": 1840, "mean": 412.7, "median": 380, "p90": 940, "total_entries": 42 }
+}
+```
+
+---
+
+## Entity merge — pair decisions
+
+Companion to `POST /api/entities/merge` and `/api/entities/merge-candidates`. Pair decisions are the user's persistent
+"these two entities are NOT duplicates" rejections, surfaced so they can be audited and undone.
+
+### GET /api/entities/pair-decisions
+
+List the authenticated user's stored pair-rejection decisions.
+
+**Query parameters:**
+
+| Parameter | Type | Required | Default | Description                              |
+| --------- | ---- | -------- | ------- | ---------------------------------------- |
+| `limit`   | int  | no       | 50      | Max decisions to return (capped at 200)  |
+| `offset`  | int  | no       | 0       | Pagination offset                        |
+
+**Response (200):**
+
+```json
+{
+ "items": [
+  {
+   "id": 4,
+   "entity_a": { "id": 5, "canonical_name": "Liz", "entity_type": "person", "...": "..." },
+   "entity_b": { "id": 12, "canonical_name": "Lizzie", "entity_type": "person", "...": "..." },
+   "decision": "not_duplicate",
+   "decided_at": "2026-04-12T10:30:00+00:00"
+  }
+ ],
+ "total": 1
+}
+```
+
+`total` is the unpaginated count of stored decisions for the user.
+
+---
+
+### DELETE /api/entities/pair-decisions/{decision_id}
+
+Undo a "not a duplicate" decision. Removes the rejection so the pair is once again eligible to be flagged as a merge
+candidate by future extraction runs.
+
+**Response (200):**
+
+```json
+{ "id": 4, "deleted": true }
+```
+
+**Response (404):** `{"error": "Decision not found"}` if the decision id is unknown or not owned by the caller.
+
+---
+
 # MCP Tool Reference
 
 The journal MCP server exposes its tools via streamable HTTP transport.
@@ -1477,9 +2251,10 @@ The journal MCP server exposes its tools via streamable HTTP transport.
 
 ### journal_search_entries
 
-Semantic similarity search across journal entries. The query is converted to a vector by the embedding model (not an LLM)
-and matched against stored entry vectors by cosine distance. Results are ranked by similarity score. No model reads or
-interprets the entries — you get raw text back, ranked by how close the meaning is to your query.
+Hybrid search across journal entries. Each call runs BM25 over SQLite FTS5 in parallel with dense embedding retrieval
+over ChromaDB, fuses the two ranked lists with Reciprocal Rank Fusion (`k = 60`), and reranks the fused top-M
+candidates with the configured listwise reranker (default: Claude Haiku 4.5). There is no mode toggle — every search
+combines keyword and semantic signals. See [`search.md`](search.md) for the full pipeline and configuration.
 
 | Parameter    | Type   | Required | Default | Description                  |
 | ------------ | ------ | -------- | ------- | ---------------------------- |

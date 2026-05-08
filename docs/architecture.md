@@ -37,14 +37,21 @@ difference is whether an LLM is in the loop to interpret the results.
 
 ### Interface Layer
 
-Thin adapters that expose the service layer to external consumers:
+Thin adapters that expose the service layer to external consumers. All three were converted from single files into
+packages during the 2026-05-07/08 refactor round; references below are to the package roots.
 
-- **MCP Server** (`mcp_server.py`) — 10 tools via FastMCP, streamable HTTP transport. The primary interface, designed to
-  be called by LLM-based MCP clients that interpret results for the user.
-- **REST API** (`api.py`) — 4 endpoints via `mcp.custom_route()`, same port as MCP server. Used by the journal-webapp
-  frontend.
-- **CLI** (`cli.py`) — argparse-based command-line interface. Exposes 9 commands (ingest, ingest-multi, search, list,
-  stats, backfill-chunks, rechunk, eval-chunking, seed) for direct use without an LLM client.
+- **MCP Server** (`mcp_server/`) — ~19 FastMCP tools across `tools/` (entities, ingestion, jobs, queries) on a
+  streamable HTTP transport. Bootstrap, runserver, and app-wiring live in `mcp_server/{bootstrap,runserver,app}.py`.
+  The primary interface for LLM-based MCP clients.
+- **REST API** (`api/`) — many dozens of routes registered via `mcp.custom_route()`, split across
+  `api/{entries,ingestion,settings,users,health,dashboard,search,jobs,entities,entity_merge,notifications}.py`. Same
+  port as the MCP server; used by the webapp frontend and direct API-key consumers.
+- **Auth REST surface** (`auth_api/`) — login/logout, registration, profile, API keys, admin reload endpoints.
+  Split across `auth_api/{core,account,profile,api_keys,admin,_shared}.py`. See `docs/auth.md`.
+- **CLI** (`cli/`) — argparse-based command-line interface. Each `cli/<command>.py` registers its subcommand from
+  `cli/__init__.py`. Subcommands include `ingest`, `ingest-multi`, `search`, `list`, `stats`, `health`, `seed`,
+  `rechunk`, `backfill-mood`, `eval-chunking`, `extract-entities`, `reembed-entity`, `repair-entity-names`,
+  `renorm-entity-casing` (~16 subcommands as of 2026-05-09).
 
 ### Service Layer
 
@@ -217,15 +224,35 @@ local database operations. No LLM is involved in any query path — see "How Sea
 
 ### SQLite
 
-- `entries` — Core table (user_id, date, source_type, raw_text, final_text, word_count, chunk_count)
-- `entry_pages` — Per-page OCR text for multi-page entries (entry_id, page_number, raw_text, source_file_id)
-- `entry_chunks` — Per-chunk text with character offsets into the source (entry_id, chunk_index, chunk_text, char_start,
-  char_end, token_count). Populated at ingestion time (migration 0003); used by the webapp chunk-overlay feature and by
-  any client that needs to render chunk boundaries over the original entry text without re-running the chunker
-- `mood_scores` — Multi-dimensional mood tracking per entry
-- `people`, `places`, `tags` — Entity tables with junction tables for many-to-many
+The schema has accreted across 22 migrations (`db/migrations/0001..0022`). Production runs at `user_version = 22` as
+of 2026-05-09. Tables in current use:
+
+**Core entries / pipeline**
+- `entries` — Core table (user_id, date, source_type, raw_text, final_text, word_count, chunk_count, entry_extraction_stale)
+- `entry_pages` — Per-page OCR text for multi-page entries
+- `entry_chunks` — Per-chunk text with character offsets (used by the webapp chunk-overlay)
+- `entry_uncertain_spans` — Per-entry uncertain OCR/transcription spans (yellow Review-toggle highlights)
 - `source_files` — Original file metadata with SHA-256 dedup
-- `entries_fts` — FTS5 virtual table with porter stemming (indexes final_text)
+- `entries_fts` (+ `entries_fts_*`) — FTS5 virtual table over `final_text` with porter stemming
+
+**Auth / multi-tenant** (migrations 0011, 0012)
+- `users`, `user_sessions` (session tokens stored hashed via migration 0012), `api_keys`, `user_preferences`
+
+**Entity tracking** (migrations 0004, 0008, 0011, 0018-0022)
+- `entities`, `entity_aliases`, `entity_mentions`, `entity_relationships`
+- `entity_merge_history`, `entity_merge_candidates`, `entity_pair_decisions`
+- Plus quarantine columns on `entities` (0018) and on the merge-history snapshot (0019)
+
+**Mood scoring** (initial schema + 0014)
+- `mood_scores` — sparse `(entry_id, dimension)` storage; `rationale` column added in 0014
+
+**Jobs / runtime config** (migrations 0006, 0010, 0015, 0017)
+- `jobs` — single in-process job queue (`type`, `status`, `params_json`, `progress_*`, `result_json`, `status_detail`, `user_id`)
+- `runtime_settings` — DB-backed runtime overrides (toggleable from webapp)
+- `pricing` — editable per-model cost table (12 rows in prod)
+
+**Legacy (intentionally retained but unused)**
+- `people`, `places`, `tags` — pre-entity-tracking tables from the initial schema; no current code reads or writes them.
 
 ### ChromaDB
 
@@ -245,16 +272,24 @@ reference). Initialization is idempotent — the `_init_services()` function gua
 
 ## Deployment
 
-Docker Compose stack with three services running on the media VM (deployed via Ansible):
+Docker Compose stack with three services running on the `media` VM. New images are pulled and restarted manually
+(`docker compose pull && docker compose up -d`); there is no Ansible playbook in the loop.
 
-- `journal-server` — Python app running MCP server + REST API (port 8400)
-- `journal-chromadb` — ChromaDB vector database (port 8401)
-- `journal-webapp` — Vue.js frontend served by nginx (port 8402), proxies `/api/` to journal-server
+- `journal-server` — Python app running MCP server + REST API. Host port `8400`. The repo's `compose.yml` pins this to
+  `127.0.0.1:8400` for the loopback-only stance recommended in `docs/security.md`; the production compose on `media`
+  currently exposes `0.0.0.0:8400` (LAN-reachable inside the home network — public exposure is only via the Cloudflare
+  Tunnel that fronts the webapp on `:8402`).
+- `journal-chromadb` — ChromaDB vector database (host port `8401`). Custom image (`ghcr.io/johnmathews/journal-chromadb`)
+  with `curl` baked in for a working healthcheck.
+- `journal-webapp` — Vue.js frontend served by nginx (host port `8402`), proxies `/api/*` to journal-server.
+
+**Public exposure** is via Cloudflare Tunnel — there is no reverse proxy on `media`. See
+`docs/production-deployment.md` for runbook details.
 
 **CI/CD pipeline:** On push to `main`, GitHub Actions runs tests and linting, then builds and pushes both Docker images
-to `ghcr.io/johnmathews/`. New images are manually pulled on the media VM.
+to `ghcr.io/johnmathews/journal-server` and `ghcr.io/johnmathews/journal-webapp`.
 
 **Data persistence:** SQLite and ChromaDB data are bind-mounted to `/srv/media/config/journal/` on the host.
 
-**MCP endpoint:** `http://<media-vm-ip>:8400/mcp` **REST API:** `http://<media-vm-ip>:8400/api/` **Web UI:**
-`http://<media-vm-ip>:8402/`
+**Endpoints (loopback or behind tunnel):** MCP `http://127.0.0.1:8400/mcp`, REST `http://127.0.0.1:8400/api/`,
+Web UI `http://127.0.0.1:8402/`.

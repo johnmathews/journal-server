@@ -7,7 +7,7 @@
 | **Last updated** | 2026-05-08 |
 | **Supersedes** | None |
 | **Superseded by** | None |
-| **Related docs** | `architecture.md`, `external-services.md`, `jobs.md`, `roadmap.md` |
+| **Related docs** | `architecture.md`, `external-services.md`, `jobs.md`, `mood-scoring.md`, `roadmap.md` |
 | **Code-grounded** | Yes — `src/journal/{providers,services,api,mcp_server,db}/` reviewed before writing |
 
 This document captures the architectural decisions and constraints for adding personal fitness data
@@ -170,7 +170,7 @@ concern handled in the webapp, not in storage.
 | Config | New fields in `src/journal/config.py` | Same `Config` dataclass, env-var-backed |
 
 **Boundary discipline:** nothing under `services/fitness/` imports from `services/ingestion/`,
-`services/entity_extraction/`, `services/mood_*`, or vice versa, except through the small
+`services/entity_extraction/`, or `services/mood_scoring.py` / `services/mood_dimensions.py`, or vice versa, except through the small
 explicit interfaces of `db.repository`, `services/jobs`, and `services/notifications`. Enforce by
 convention and code review; consider an import-linter rule if drift becomes a problem.
 

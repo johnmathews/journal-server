@@ -99,7 +99,8 @@ entries per month. No batching — each entry fires one LLM call at ingestion ti
 
 Skipping days or writing partial entries is fine. The `mood_scores` table is sparse by `(entry_id, dimension)`, so a
 missed day simply has no row. Adding a new facet later does not require rewriting old entries — they remain validly
-scored against the previous set and return `null` for the new facet until you run `journal backfill-mood --stale-only`.
+scored against the previous set and return `null` for the new facet until you run `journal backfill-mood`
+(stale-only is the default mode — no flag needed).
 
 ## Regeneration
 
@@ -110,9 +111,10 @@ Four common edit patterns, all cheap:
 1. Append a new `[[dimension]]` block to the TOML file.
 2. Restart the server (the dimension set is loaded once at startup).
 3. New entries are scored against the new facet automatically.
-4. Optionally run `journal backfill-mood --stale-only` to score historical entries against the new facet. `--stale-only`
-   is idempotent: it scores entries that are missing one or more currently-configured dimensions **or** whose text was
-   edited after the most recent mood score (i.e. OCR corrections trigger re-scoring automatically).
+4. Optionally run `journal backfill-mood` to score historical entries against the new facet. The default mode
+   (no `--force`) is "stale-only" and is idempotent: it scores entries that are missing one or more
+   currently-configured dimensions **or** whose text was edited after the most recent mood score (i.e. OCR corrections
+   trigger re-scoring automatically).
 
 ### Removing a facet
 
@@ -128,7 +130,7 @@ Four common edit patterns, all cheap:
 1. Edit the `notes`, `positive_pole`, or `negative_pole` field.
 2. Restart the server.
 3. Run `journal backfill-mood --force` to rescore every entry against the new interpretation. This is the only time you
-   need `--force` — for pure additions, `--stale-only` is enough.
+   need `--force` — for pure additions, the default stale-only mode is enough.
 
 ### Reordering facets
 

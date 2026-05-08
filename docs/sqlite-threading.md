@@ -38,7 +38,8 @@ This surfaced as an intermittent 500 on job submission — roughly 1 in 5 runs u
 
 ## The fix
 
-A `threading.Lock` in `SQLiteJobRepository` wraps every `execute()` + `commit()` pair:
+The originally-attempted fix (item 1.1) was a `threading.Lock` in `SQLiteJobRepository` wrapping each `execute()` +
+`commit()` pair:
 
 ```python
 class SQLiteJobRepository:
@@ -47,16 +48,29 @@ class SQLiteJobRepository:
         self._lock = threading.Lock()
 
     def create(self, job_type: str, params: dict) -> Job:
-        ...
         with self._lock:
             self._conn.execute("INSERT INTO jobs ...", (...))
             self._conn.commit()
-        ...
 ```
 
-This serializes all DB access through one lock, which is the correct approach for a single shared connection. The
-`JobRunner`'s single-worker executor already serialized *its own* writes, but `create()` runs on the caller's thread —
-outside the executor — so the executor's serialization was insufficient.
+The lock **still ships in the repo today**, but it turned out to be insufficient on its own — the multi-step
+"execute → fetchone()" or "execute → lastrowid → commit" windows are still exposed (see the WARNING block in
+`src/journal/db/connection.py`). The race that the lock failed to close was the within-call race in
+`submit_save_entry_pipeline`, where the API thread was creating job rows while the worker thread was already starting
+to read them.
+
+**The shipped fix** for that specific race (and the only race we've actually observed in production) is to **defer
+worker dispatch** until the API thread's writes complete:
+
+- `submit_save_entry_pipeline` writes the parent + child job rows synchronously on the API thread, then schedules the
+  worker to start *after* the writes are committed.
+- This avoids the cross-thread interleaving entirely for the only path that surfaced the bug.
+
+Cross-call races (two unrelated workers writing simultaneously) remain theoretical — workers spend most of their time
+in LLM calls, not SQLite, so concurrent SQLite writes are rare. The repository lock catches the simple cases; the
+deferred-dispatch fix catches the only one that actually mattered. If new `sqlite3.OperationalError: not an error`
+reports surface in prod logs, the proper structural fix is per-thread connections (option 1 in the connection.py
+docstring), which is a real architectural change.
 
 ## Rules for SQLite connections in this codebase
 
@@ -107,7 +121,13 @@ times, the fix is likely correct.
 
 ## Files involved
 
-- `src/journal/db/jobs_repository.py` — the lock lives here
-- `src/journal/db/connection.py` — creates connections with `check_same_thread=False`
-- `src/journal/services/jobs.py` — `JobRunner` calls repository methods from the executor thread
-- `src/journal/api.py` — API handlers call `submit_*()` (which calls `create()`) from the ASGI thread
+- `src/journal/db/jobs_repository.py` — the per-method `threading.Lock` lives here.
+- `src/journal/db/connection.py` — creates connections; the docstring is the authoritative explanation of why the lock
+  approach is incomplete and what the residual risks are.
+- `src/journal/services/jobs/runner.py` — `JobRunner` calls repository methods from the executor thread (formerly
+  `services/jobs.py`; split into the `services/jobs/` package on 2026-05-07).
+- `src/journal/api/ingestion.py` (and other `src/journal/api/*` route modules) — API handlers call `submit_*()` (which
+  calls `create()`) from the ASGI thread; `submit_save_entry_pipeline` defers worker dispatch.
+
+**PRAGMAs set on connection open** (`connection.py:67-71`): `journal_mode=WAL`, `synchronous=NORMAL`,
+`cache_size=-64000`, `busy_timeout=5000`, `foreign_keys=ON`.

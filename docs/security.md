@@ -63,16 +63,22 @@ Lockout is enforced at the repository layer (thread-safe).
 
 ### Loopback port binding + reverse proxy expected
 
-`docker-compose.yml` binds the host-side of the journal port to `127.0.0.1:8400`, not `0.0.0.0:8400`. This means the port
-is only reachable from the VM itself. External access must go through a reverse proxy (Caddy, Traefik, nginx) running on
-the same host that:
+The repo's `compose.yml` binds the host-side of the journal port to `127.0.0.1:8400`, not `0.0.0.0:8400`, so when run
+with the in-repo compose the port is only reachable from the VM itself. External access goes through a Cloudflare
+Tunnel that fronts the webapp on `:8402`, which proxies `/api/*` to `journal-server` over the compose-internal
+network — `journal-server`'s host port doesn't need LAN exposure for normal use.
 
-1. Terminates TLS with a real certificate.
-2. Optionally adds a second layer of auth (basic auth, mTLS, an authenticating forward proxy like Authelia).
-3. Forwards decrypted traffic to `127.0.0.1:8400` locally.
+> **Drift note (2026-05-09):** the production compose at `/srv/media/docker-compose.yml` on `media` currently exposes
+> `8400:8400` (LAN-reachable, not loopback). Public access still goes via the Cloudflare Tunnel on `:8402`, but the
+> defence-in-depth posture documented here only holds when the prod compose is brought back in line with the in-repo
+> file. Tracked as a security-roadmap follow-up.
 
-This is belt-and-braces with the bearer token: losing either (token leak OR proxy misconfiguration) still leaves the
-other as a defence.
+The expected stance for any LAN-exposed deployment: a reverse proxy (Caddy, Traefik, nginx) on the same host that
+(1) terminates TLS with a real certificate, (2) optionally adds a second layer of auth, and (3) forwards decrypted
+traffic to `127.0.0.1:8400` locally.
+
+This is belt-and-braces with the per-user API keys / sessions: losing either (key/session leak OR proxy
+misconfiguration) still leaves the other as a defence.
 
 ### ChromaDB has no external port
 
@@ -91,7 +97,8 @@ behind a reverse proxy.
 ### SSRF protection on URL ingestion
 
 `journal_ingest_media_from_url` and `journal_ingest_multi_page_from_url` accept arbitrary URLs as parameters. Before any socket
-is opened, `IngestionService._download` calls `_validate_public_url`, which:
+is opened, the URL-source helper calls `_validate_public_url` (defined in
+`src/journal/services/ingestion/url_sources.py`), which:
 
 1. Rejects any scheme that isn't `http` or `https` (blocks `file://`, `gopher://`, `ftp://`, etc.).
 2. Resolves the hostname via DNS.
@@ -106,9 +113,10 @@ for this tool. Loopback and RFC1918 are the realistic threat surface for a perso
 
 ### Secrets hygiene
 
-API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `SLACK_BOT_TOKEN`, `JOURNAL_API_TOKEN`) are loaded from environment
-variables only — never from command-line args, never from source files. `.env` is in `.gitignore`. Logging is
-intentionally free of secrets, prompts, LLM responses, and entry content — only counts and IDs are logged.
+API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `SLACK_BOT_TOKEN`) and the server signing secret
+(`JOURNAL_SECRET_KEY`) are loaded from environment variables only — never from command-line args, never from source
+files. `.env` is in `.gitignore`. Logging is intentionally free of secrets, prompts, LLM responses, and entry
+content — only counts and IDs are logged.
 
 ### Filesystem permissions (your responsibility)
 
@@ -126,15 +134,22 @@ directory is owned by the user running Docker and is not world-readable.
 
 ## Provider data retention
 
-Journal content is sent to two third-party providers:
+Journal content is sent to three third-party providers:
 
-- **Anthropic** — handwritten page images for OCR via Claude Opus 4.6.
-- **OpenAI** — voice audio for Whisper transcription, and chunk text for `text-embedding-3-large` embeddings.
+- **Anthropic** — handwritten page images for OCR via Claude Opus 4.6 (when `OCR_PROVIDER=anthropic` or as the second
+  pass under `OCR_DUAL_PASS=true`); entity extraction (Opus); mood scoring (Sonnet 4.5); search reranking (Haiku 4.5).
+- **Google (Gemini)** — handwritten page images for OCR via Gemini 2.5 Pro (when `OCR_PROVIDER=gemini`, the prod
+  default); voice audio for transcription via Gemini 2.5 Pro (when `TRANSCRIPTION_PROVIDER=gemini` or as a parallel
+  shadow via `TRANSCRIPTION_SHADOW_PROVIDER=gemini`).
+- **OpenAI** — voice audio for transcription (default `gpt-4o-transcribe`, fallback `whisper-1`), and chunk text for
+  `text-embedding-3-large` embeddings.
 
-Both providers retain API inputs and outputs for approximately 30 days by default as part of abuse monitoring, and
-neither uses API data for model training on the commercial tier (OpenAI stopped in March 2023; Anthropic's commercial API
-terms exclude training). If your threat model includes the providers themselves, apply for Zero Data Retention (ZDR) with
-both — it is available on request for eligible customers — and use the organisation-level ZDR header from then on.
+Anthropic and OpenAI retain API inputs and outputs for approximately 30 days by default as part of abuse monitoring,
+and neither uses API data for model training on the commercial tier (OpenAI stopped in March 2023; Anthropic's
+commercial API terms exclude training). Google's Gemini API retention is governed by the paid Vertex AI / Gemini API
+terms — abuse-monitoring retention applies, and customer data is not used to improve Google models on the paid tier;
+specifics are in Google's data-handling docs. If your threat model includes the providers themselves, apply for Zero
+Data Retention (ZDR) with all three (where available) and use the organisation-level ZDR header from then on.
 
 This is a policy decision, not a code change. The journal-server does not currently send any ZDR headers.
 
@@ -163,10 +178,14 @@ For the sake of informed consent:
 ## Security-relevant files
 
 - `src/journal/auth.py` — `SessionOrKeyBackend`, `RequireAuthMiddleware`, contextvar propagation for MCP tools
+- `src/journal/auth_api/` — REST surface for auth (login/logout, registration, profile, API keys, admin); split into
+  `core.py`, `account.py`, `profile.py`, `api_keys.py`, `admin.py`, `_shared.py`
 - `src/journal/services/auth.py` — `AuthService` (password hashing, session management, API keys, token signing)
 - `src/journal/db/user_repository.py` — user, session, and API key persistence
-- `src/journal/mcp_server.py` — DNS rebinding config, middleware wiring, fail-closed startup check
-- `src/journal/services/ingestion.py` — `_validate_public_url` SSRF check
-- `src/journal/config.py` — `secret_key`, `mcp_allowed_hosts`
-- `docker-compose.yml` — loopback port binding, ChromaDB isolation
+- `src/journal/mcp_server/runserver.py` — DNS rebinding config, middleware wiring, fail-closed `JOURNAL_SECRET_KEY`
+  startup check
+- `src/journal/services/ingestion/url_sources.py` — `_validate_public_url` SSRF check (called from
+  `IngestionService` before fetching any user-supplied URL)
+- `src/journal/config.py` — `secret_key`, `mcp_allowed_hosts`, registration/SMTP/session config
+- `compose.yml` / `docker-compose.yml` — loopback port binding, ChromaDB isolation
 - `docs/security-roadmap.md` — prioritised list of remaining security improvements

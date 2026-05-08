@@ -4,14 +4,32 @@ All configuration is via environment variables. No config files are needed.
 
 ## Required
 
-| Variable            | Description                                                                                                                                                                |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `JOURNAL_API_TOKEN` | Bearer token required on every REST and MCP request. The server refuses to start without it. Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. |
-| `ANTHROPIC_API_KEY` | Anthropic API key — required when `OCR_PROVIDER=anthropic` (the default). Also used for entity extraction and mood scoring.                                                |
-| `OPENAI_API_KEY`    | OpenAI API key. Used for embeddings and any OpenAI transcription adapter (primary, shadow, or `whisper-1` fallback).                                                       |
-| `GOOGLE_API_KEY`    | Google API key — required when `OCR_PROVIDER=gemini` or when Gemini is the primary/shadow transcription provider.                                                          |
+| Variable             | Description                                                                                                                                                                                                                                                |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `JOURNAL_SECRET_KEY` | Server secret used to sign session cookies and password-reset tokens. **The server refuses to start without it** (fail-closed check in `mcp_server/runserver.py`). Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`.           |
+| `ANTHROPIC_API_KEY`  | Anthropic API key — required when `OCR_PROVIDER=anthropic` or under `OCR_DUAL_PASS=true`. Also used for entity extraction (Opus), mood scoring (Sonnet 4.5), and search reranking (Haiku 4.5).                                                             |
+| `OPENAI_API_KEY`     | OpenAI API key. Used for embeddings (`text-embedding-3-large`) and any OpenAI transcription adapter (primary, shadow, or `whisper-1` fallback).                                                                                                            |
+| `GOOGLE_API_KEY`     | Google API key — required when `OCR_PROVIDER=gemini` (the prod default) or when Gemini is the primary/shadow transcription provider.                                                                                                                       |
+
+> **Migration note (2026-04-15):** the legacy `JOURNAL_API_TOKEN` single bearer-token was retired when multi-user auth
+> shipped. Auth is now session cookies (web) + per-user API keys (programmatic). The `api_bearer_token` field still
+> exists in `config.py` for back-compat but is **not read by any production code path** — setting it has no effect.
+> See [`auth.md`](auth.md) for the current model.
 
 See `docs/security.md` for the threat model and how auth fits in.
+
+## Required — auth & email (multi-user)
+
+| Variable                | Default                  | Description                                                                                                                                                                            |
+| ----------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `REGISTRATION_ENABLED`  | `false`                  | When `true`, `/api/auth/register` accepts new users. Toggleable at runtime via `runtime_settings`. Set to `true` for first-time setup, then flip back to `false`.                      |
+| `SESSION_EXPIRY_DAYS`   | `7`                      | Session cookie lifetime. Sessions are stored hashed in `user_sessions`; expired rows are pruned by the (currently un-scheduled) cleanup helper.                                        |
+| `APP_BASE_URL`          | `http://localhost:5173`  | Base URL used inside email-verification and password-reset links. Set to the public origin for prod (e.g. `https://journal.example.com`).                                              |
+| `SMTP_HOST`             | `smtp.gmail.com`         | SMTP server hostname. Email-verification and password-reset emails fail silently if `SMTP_USERNAME`/`SMTP_PASSWORD` are unset — required for the user-self-registration flow.          |
+| `SMTP_PORT`             | `465`                    | SMTP port (default is implicit-TLS / SSL).                                                                                                                                             |
+| `SMTP_USERNAME`         |                          | SMTP auth username.                                                                                                                                                                    |
+| `SMTP_PASSWORD`         |                          | SMTP auth password.                                                                                                                                                                    |
+| `SMTP_FROM_EMAIL`       |                          | `From:` header used for outgoing verification and reset emails.                                                                                                                        |
 
 ## Optional — deployment
 
@@ -58,15 +76,18 @@ See `docs/architecture.md` → "Chunking Strategies" for the algorithm and trade
 
 ## Optional — OCR provider
 
-| Variable       | Default      | Description                                                                                                   |
-| -------------- | ------------ | ------------------------------------------------------------------------------------------------------------- |
-| `OCR_PROVIDER` | `anthropic`  | Which vision API to use for handwriting OCR. `"anthropic"` (Claude) or `"gemini"` (Google Gemini).            |
-| `OCR_MODEL`    | per-provider | Model name sent to the selected provider. Defaults: `claude-opus-4-6` (anthropic), `gemini-2.5-pro` (gemini). Ignored in dual-pass mode — each provider always uses its own default. |
+| Variable           | Default      | Description                                                                                                                                                                                                                              |
+| ------------------ | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OCR_PROVIDER`     | `anthropic`  | Which vision API to use for handwriting OCR. `"anthropic"` (Claude) or `"gemini"` (Google Gemini). **Prod runs `gemini`** (set in compose env).                                                                                          |
+| `OCR_MODEL`        | per-provider | Model name sent to the selected provider. Defaults: `claude-opus-4-6` (anthropic), `gemini-2.5-pro` (gemini). Ignored in dual-pass mode — each provider always uses its own default.                                                     |
+| `OCR_DUAL_PASS`    | `false`      | When `true`, run **both** providers on every page and persist a reconciled `final_text`. **Prod runs `true`.** Doubles per-page cost. Toggleable at runtime via `runtime_settings`.                                                       |
+| `PREPROCESS_IMAGES`| `true`       | Apply Pillow-based deskew/contrast preprocessing before sending to the OCR provider. Toggleable at runtime via `runtime_settings`.                                                                                                       |
 
-When using `gemini`, the context-priming glossary (`OCR_CONTEXT_DIR`) is not applied to OCR — Gemini uses only the base
-system prompt. Voice transcription priming (`TRANSCRIPTION_CONTEXT_ENABLED`) is independent of the OCR backend; the
-glossary is wired into whichever transcription provider is active (Whisper-style `prompt` for OpenAI adapters, full
-system instruction for the Gemini adapter).
+Both providers receive the context-priming glossary (`OCR_CONTEXT_DIR`): Anthropic puts the composed system text in the
+top-level `system` block (with `cache_control` once the system text is large enough); Gemini puts the same composed
+text into `system_instruction` on each call. Voice transcription priming (`TRANSCRIPTION_CONTEXT_ENABLED`) is independent
+of the OCR backend — the glossary is wired into whichever transcription provider is active (Whisper-style `prompt` for
+OpenAI adapters, full system instruction for the Gemini adapter).
 
 ## Optional — transcription provider
 
@@ -132,6 +153,33 @@ for the full architecture and rationale.
 | `HYBRID_RERANKER`         | `anthropic`        | L2 reranker. `anthropic` runs Claude listwise; `none` skips L2 and returns RRF-only ordering.          |
 | `RERANKER_MODEL`          | `claude-haiku-4-5` | Model used by `AnthropicReranker`. Only consulted when `HYBRID_RERANKER=anthropic`.                    |
 
+## Optional — mood scoring
+
+See [`mood-scoring.md`](mood-scoring.md) for the pipeline and CLI.
+
+| Variable                       | Default                            | Description                                                                                                                                                                                          |
+| ------------------------------ | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `JOURNAL_ENABLE_MOOD_SCORING`  | `true`                             | When `true`, ingestion submits a `mood_score_entry` job per entry. Toggleable at runtime via Settings → Features (writes the `enable_mood_scoring` row in `runtime_settings` and rebuilds the service in-place; no restart needed). |
+| `MOOD_SCORER_MODEL`            | `claude-sonnet-4-5`                | Anthropic model used for tool-use mood scoring.                                                                                                                                                      |
+| `MOOD_SCORER_MAX_TOKENS`       | `1024`                             | Token budget for the mood-scoring tool-use response.                                                                                                                                                 |
+| `MOOD_DIMENSIONS_PATH`         | `config/mood-dimensions.toml`      | Path to the TOML file defining the 7 facets (joy_sadness, energy_fatigue, agency, fulfillment, connection, frustration, proactive_reactive). Reload with `POST /api/admin/reload/mood-dimensions`.   |
+
+## Optional — entity extraction
+
+See [`entity-tracking.md`](entity-tracking.md) for the pipeline.
+
+| Variable                          | Default                                  | Description                                                                                                                          |
+| --------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `ENTITY_CASING_EXCEPTIONS_PATH`   | `config/entity-casing-exceptions.toml`   | TOML file defining canonical-casing exceptions for `smart_title_case` (e.g. `iPhone`, `eBay`). Reload with `POST /api/admin/reload/entity-casing`. |
+
+## Runtime-toggleable settings
+
+The following env vars seed the initial value at startup, but are overlaid at runtime by rows in the `runtime_settings`
+table (admins toggle them from the webapp's Settings / Admin pages without a server restart): `OCR_PROVIDER`,
+`OCR_DUAL_PASS`, `PREPROCESS_IMAGES`, `JOURNAL_ENABLE_MOOD_SCORING`, `REGISTRATION_ENABLED`, `TRANSCRIPT_FORMATTING`,
+`DATE_HEADING_DETECTION`, `TRANSCRIPTION_CONTEXT_ENABLED`. The current effective value is exposed at
+`GET /api/settings/runtime` (admin) and merged into `GET /api/settings` (all users) for the relevant feature flags.
+
 ## Models (defaults, overridable via env vars or config.py)
 
 | Variable / Setting                   | Default                              | Description                                                                       |
@@ -148,11 +196,13 @@ When running via Docker Compose, set API keys in a `.env` file in the project ro
 variables:
 
 ```bash
+export JOURNAL_SECRET_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
 export ANTHROPIC_API_KEY=sk-ant-...
 export OPENAI_API_KEY=sk-...
-export SLACK_BOT_TOKEN=xoxb-...   # optional, for Slack file URL ingestion
-export OCR_PROVIDER=anthropic     # or "gemini"
-export GOOGLE_API_KEY=...         # required only when OCR_PROVIDER=gemini
+export GOOGLE_API_KEY=...           # required when OCR_PROVIDER=gemini (the prod default)
+export OCR_PROVIDER=gemini          # or "anthropic"
+export OCR_DUAL_PASS=true           # optional second-pass with the other provider
+export SLACK_BOT_TOKEN=xoxb-...     # optional, for Slack file URL ingestion
 docker compose up
 ```
 

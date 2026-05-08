@@ -1,7 +1,17 @@
 # Item-6 exceptions — umbrella planning round
 
-**Status:** active. **Last updated:** 2026-05-07. **Supersedes:** none.
-Tracked under Round-3 § B in [`refactor-round-3.md`](./refactor-round-3.md).
+**Status:** closed 2026-05-08. **Last updated:** 2026-05-09 (status flip during accuracy audit).
+**Supersedes:** none. Tracked under Round-3 § B in [`refactor-round-3.md`](./refactor-round-3.md).
+All three items dispositioned and shipped:
+
+1. `api/entities.py` split into `api/entities.py` (425 lines) + `api/entity_merge.py` (406 lines) — commit `deceb1e`.
+2. `services/entity_extraction/service.py` reclassified as acknowledged-permanent — commit `1104d74`; reflected in
+   `refactor-round-3.md` § "Acknowledged-permanent" table.
+3. `auth_api.py` split into `auth_api/` package (7 files, largest is `account.py` at 355 lines) — commits `d1992a4`
+   (commit A) and `bb00065` (commit B). Inline `from journal.api import _runtime_get` imports flagged in Decision 9
+   were hoisted to module-level on the way out.
+
+Doc kept as a record of per-item rationale.
 
 The three remaining size-cap exceptions documented in
 `docs/refactor-round-3.md` § B and the round-3 standing facts table:

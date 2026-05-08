@@ -1,8 +1,8 @@
 # Journal Tool — Consolidated Roadmap
 
-**Status:** active. **Last updated:** 2026-05-09. **Supersedes:**
-[`phase-2-brief.md`](./phase-2-brief.md) (2026-03-23) and `journal-webapp/docs/future-features.md`.
-Pulls in all outstanding TODOs from the task list, memory files, and recent journal entries.
+**Status:** active. **Last updated:** 2026-05-09 (recursive accuracy/freshness audit; production state cross-checked against prod DB and env on `media`). **Supersedes:**
+[`phase-2-brief.md`](./phase-2-brief.md) (2026-03-23) and `webapp/docs/future-features.md`.
+Pulls in all outstanding TODOs from memory files and recent journal entries.
 
 This is the single source of truth for "what do we work on next". When you finish an item, cross it out here; when you
 defer one, move it to the "Deferred / known gaps" section with a reason.
@@ -20,8 +20,8 @@ the top of the linked doc tells you whether it's active, closed, or superseded.
   and [`refactor-follow-ups.md`](./refactor-follow-ups.md) (closed). Most recent shipped
   units: api.py / repository / mcp_server / auth_api / ingestion / cli splits and
   item-6 exceptions batch 1 (all by 2026-05-08).
-  - [`refactor-repository-plan.md`](./refactor-repository-plan.md) — child plan, Recommendation 3 (active).
-  - [`refactor-item-6-exceptions-plan.md`](./refactor-item-6-exceptions-plan.md) — child plan, § B (active; batch 1 landed 2026-05-08).
+  - [`refactor-repository-plan.md`](./refactor-repository-plan.md) — child plan, Recommendation 3 (closed 2026-05-07).
+  - [`refactor-item-6-exceptions-plan.md`](./refactor-item-6-exceptions-plan.md) — child plan, § B (closed 2026-05-08; all three items dispositioned).
   - [`refactor-mcp-server-plan.md`](./refactor-mcp-server-plan.md) — child plan, Recommendation 2 (closed; split landed 2026-05-07).
 - [`security-roadmap.md`](./security-roadmap.md) — multi-tier security hardening. Tier 1
   completed 2026-04-15; later tiers remain.
@@ -205,22 +205,21 @@ an interactive force- directed layout.
 4. Filter bar: entity-type checkboxes, date-range slider, min confidence threshold
 5. Search box to focus on a specific named entity
 
-**Blocker:** Per the entity-tracking session notes, this waits until there are "at least 30–50 entities and a handful of
-relationships — anything smaller is a toy, not a useful knowledge graph." So this is blocked on Tier 1 item 1 AND on the
-user actually building up a corpus.
+**Blocker cleared 2026-05-09:** the original session notes set a "at least 30–50 entities and a handful of
+relationships" threshold; prod now has **475 entities and 895 relationships** (plus 222 aliases, 50 merge-history rows,
+34 open merge candidates). Item is unblocked — only remaining work is the webapp implementation. Consider promoting
+to Tier 1 next time you pick this up.
 
-**Tasks tracked:** this is task #8 in the task list.
-
-**Source:** `journal-webapp/journal/260411-auth-header-overlay-cache-entity-views.md` "Deferred to Phase 2";
-`journal-server/docs/entity-tracking.md`.
+**Source:** `webapp/journal/260411-auth-header-overlay-cache-entity-views.md` "Deferred to Phase 2";
+`server/docs/entity-tracking.md`.
 
 ---
 
 ### 6. LadybugDB graph-backend experiment `[server]`
 
 Swap in a second `EntityStore` implementation backed by LadybugDB (Kuzu's successor) while keeping SQLite as the
-fallback. The `EntityStore` Protocol in `src/journal/entitystore/store.py` already exists specifically to make this
-pluggable — the experiment is meant to be a zero-architectural-risk bet.
+fallback. The `EntityStore` Protocol in `src/journal/entitystore/protocol.py` (re-exported from `entitystore/store.py`)
+already exists specifically to make this pluggable — the experiment is meant to be a zero-architectural-risk bet.
 
 **Goals**
 
@@ -234,13 +233,12 @@ pluggable — the experiment is meant to be a zero-architectural-risk bet.
 **Decision point:** once the benchmark is run, either commit to graph DB as the default (feature-flagged, config-driven)
 or stay on SQLite and delete the experimental branch. Do not ship two backends as permanent production paths.
 
-**Blocker:** needs real entity data (Tier 1 item 1) to benchmark against. A toy dataset doesn't exercise graph traversal
-in any meaningful way.
-
-**Tasks tracked:** this is task #7 in the task list.
+**Blocker:** ~~needs real entity data~~ **cleared 2026-05-09** — prod has 475 entities / 895 relationships, plenty
+of graph structure to benchmark against. Real blocker now is bandwidth: this is a research bet, not a user-facing
+feature.
 
 **Source:** `docs/entity-tracking.md` "Storage-agnostic Protocol",
-`journal-server/journal/260411-security-ocr-context-entity-tracking.md` "Deferred to a future session".
+`server/journal/260411-security-ocr-context-entity-tracking.md` "Deferred to a future session".
 
 ---
 
@@ -328,17 +326,17 @@ server-side rendering. Button on `EntryListView` above the filtered list.
 ### 13. Semantic-chunker percentile tuning `[server]`
 
 `SemanticChunker` ships with `boundary_percentile=25` and `decisive_percentile=10` as defaults. These were picked by gut
-feel because the user had 2 real entries at the time — meaningless stats. Once the corpus is ~20 entries, sweep values
-with the existing `journal eval-chunking` CLI and commit the winners to `config.py`.
+feel because the user had 2 real entries at the time — meaningless stats. The 20-entry threshold the original session
+notes called for is **met three times over** (prod corpus: 69 entries / 500 chunks as of 2026-05-09); ready to run.
 
 Open questions to answer during tuning:
 
 1. Does raising boundary_percentile to 30/35 produce more coherent chunks or just fewer chunks?
 2. How do ratios compare between `fixed` (150/40) and `semantic` (25/10)? The user flipped the default to `semantic` in
-   commit `d1343ac` — verify that decision holds at ~20 entries.
-3. Consider building a golden-query retrieval set at ~20 entries.
+   commit `d1343ac` — verify that decision still holds at 69 entries.
+3. Consider building a golden-query retrieval set against the current corpus.
 
-**Source:** `journal-server/journal/260410-semantic-chunking.md` "What's deferred to the next session".
+**Source:** `server/journal/260410-semantic-chunking.md` "What's deferred to the next session".
 
 ---
 
@@ -374,10 +372,16 @@ fill in pronoun references. Expensive if done every run; cheap if done only as p
 OCR context priming shipped 2026-04-11 but was never measured against a real baseline. Run the same handwritten sample
 through the OCR provider with and without `OCR_CONTEXT_DIR` set and eyeball the proper-noun accuracy delta.
 
+**Provider note (2026-05-09):** prod now uses Gemini 2.5 Pro as the primary OCR provider (`OCR_PROVIDER=gemini`) with
+`OCR_DUAL_PASS=true` — Anthropic Claude runs in shadow as a second pass. The evaluation should cover **both** providers
+since the context block primes both. `OCR_CONTEXT_DIR` markdown also primes Whisper / Gemini transcription via
+`services/transcription_context.py` (closed item 38), so any glossary growth has a side-effect on transcription
+accuracy too.
+
 **If no delta:** decide whether to keep the feature on (cache-ttl cost is minimal once the system text is above the cache
 minimum) or rip it out.
 
-**Source:** `journal-server/journal/260411-security-ocr-context-entity-tracking.md` "Second-session checklist".
+**Source:** `server/journal/260411-security-ocr-context-entity-tracking.md` "Second-session checklist".
 
 ---
 
@@ -400,40 +404,46 @@ Candidate points: `(150,40)` baseline, `(200,40)`, `(250,30)`, `(300,25)`. Expec
 277-word entry with clean paragraph boundaries. Commit the winner to `config.py` and update the regression test
 `test_ingest_multi_page_packs_efficiently` (currently locks the old 2-chunk count at `max_tokens=150`).
 
-**Related:** #13 (semantic chunker percentile tuning). Both sweeps are worth doing in the same session once the corpus
-reaches ~20 entries so the numbers are meaningful.
+**Related:** #13 (semantic chunker percentile tuning). Both sweeps are worth doing in the same session — the corpus is
+now at 69 entries (≥ 3× the original gating threshold), so numbers are meaningful.
 
 **Source:** conversation with Claude, 2026-04-11, reviewing the chunks overlay on entry 7.
 
 ---
 
-### 18. Grow OCR glossary to unlock prompt caching `[server]`
+### 18. Grow OCR glossary `[server]`
 
-As of 2026-04-11 the deployed `OCR_CONTEXT_DIR` loads ~333 chars of glossary content. Combined with `SYSTEM_PROMPT` +
-`CONTEXT_USAGE_INSTRUCTIONS` the composed system block is ~328 tokens — well below Anthropic's 4,096-token
-`cache_control` minimum, so the system block is re-sent uncached on every OCR call. The boot-time warning fires on every
-restart:
+`OCR_CONTEXT_DIR` glossary growth is worth doing for two independent reasons: OCR accuracy on proper nouns, and (when
+running an Anthropic primary) prompt-caching economics.
+
+**Status note (2026-05-09):** prod is on Gemini (`OCR_PROVIDER=gemini`, `OCR_MODEL=gemini-2.5-pro`) with
+`OCR_DUAL_PASS=true`. Gemini has its own caching mechanics (Vertex/Gemini API context-cache vs. Anthropic's
+`cache_control`); the original 4,096-token Anthropic threshold called out in this item only applies when Anthropic is
+the primary or shadow provider. The boot-time warning quoted below still fires from the Anthropic adapter
+(`providers/ocr.py`) when it's loaded.
 
 ```
-OCR system text is 328 tokens (approx) — below the 4096-token
+OCR system text is N tokens (approx) — below the 4096-token
 cache minimum for claude-opus-4-6. cache_control will be silently
 ignored and every request will pay full input price.
 ```
 
-**Action:** grow the context directory organically until the composed system text crosses 4,096 tokens (≈ 15-20 KB of
-markdown across `people.md`, `places.md`, `topics.md`, and any other categories that make sense). Genuine content is
-preferred — both for OCR accuracy and for caching — rather than padding with filler. Once over the threshold every OCR
-call becomes ~12.5× cheaper on the system block.
+**Action:**
 
-**Cost pressure is low** — at ~1 page/day the uncached system block is cents per month, so this is a "do it when you have
-more proper nouns to add" item, not urgent. But it should be done at some point, and if you decide _not_ to, consider
-adding a `warning_suppressed` flag to silence the repeat warning so it doesn't numb you to other cache-related issues.
+1. Grow the context directory organically as you add proper nouns — drives accuracy on both providers.
+2. **If Anthropic is selected as primary** (or used heavily in dual-pass), continue past 4,096 tokens of composed system
+   text (≈ 15-20 KB of markdown) to clear the cache-minimum bar. Below that bar `cache_control` is silently ignored on
+   Anthropic and every request pays full input price.
+3. Genuine content only — both for accuracy and for caching — rather than padding with filler.
 
-**Related:** #16 (glossary accuracy evaluation). Do both in the same session — grow the glossary, measure the accuracy
-delta on a held-out sample, check the warning is gone.
+**Cost pressure is low** — at ~1 page/day the uncached system block is cents per month even on the Anthropic adapter.
+This is a "do it when you have more proper nouns to add" item, not urgent. If you decide _not_ to, consider adding a
+`warning_suppressed` flag to silence the Anthropic repeat warning so it doesn't numb you to other cache-related issues.
 
-**Source:** conversation with Claude, 2026-04-11. Server logs after the `OCR_CONTEXT_DIR` path fix at 23:46:31 show the
-glossary loading correctly but still below the cache minimum.
+**Related:** #16 (glossary accuracy evaluation across both providers). Do both in the same session.
+
+**Source:** conversation with Claude, 2026-04-11; provider-pivot notes 2026-05-01 (multi-provider transcription) and the
+audit on 2026-05-09.
 
 ---
 
@@ -448,10 +458,11 @@ Fix options:
 
 1. Opt-in script that rebuilds `final_text` for legacy multipage entries from `entry_pages.raw_text` with the new
    separator, then rechunks. Destructive to any user edits to `final_text`, so it must be opt-in.
-2. Ignore — the user's current DB has 5 small single-page entries, none affected. Re-ingest from scratch if any multipage
-   pathologies actually surface.
+2. Ignore — most legacy entries are single-page text/voice; only the early multi-page photo entries are candidates and
+   none have surfaced as problematic. Re-ingest from scratch if any multipage pathologies appear.
 
-**Status:** currently going with option 2. Promote to Tier 2 if affected entries appear.
+**Status:** still going with option 2 as of 2026-05-09 (prod has 69 entries — 29 photo, 28 text, 9 voice, 3 imported;
+no observed legacy-multipage pathologies). Promote to Tier 2 if affected entries appear.
 
 ---
 
@@ -605,8 +616,9 @@ Grouped by workstream rather than by commit; see the linked journal entries for 
 35. **Pushover notification stack (2026-04-23 → 2026-04-30)** — `PushoverNotificationService`
     with per-user creds, six notification topics, and a `health_poll.py` daemon thread
     pinging SQLite/Chroma/disk every 5 min. Webapp Pushover settings UI on Admin/Settings.
-    Series: `260423-pushover-notifications.md`, `260423-pushover-notifications-ui.md`,
-    `260430-pushover-bullet-format.md`.
+    Series: `server/journal/260423-pushover-notifications.md`,
+    `webapp/journal/260423-pushover-notifications-ui.md`,
+    `server/journal/260430-pushover-bullet-format.md`.
 36. **Compress / individual-toasts pipeline notifications (2026-04-25 → 2026-04-27)** —
     pipeline-stage toasts collapsed into one Pushover bullet message;
     individual stage toasts in the webapp.

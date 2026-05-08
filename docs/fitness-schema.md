@@ -7,7 +7,7 @@
 | **Last updated** | 2026-05-09 |
 | **Supersedes** | None |
 | **Superseded by** | None |
-| **Related docs** | `fitness-integration-plan.md` (master), `architecture.md`, `external-services.md` |
+| **Related docs** | `fitness-integration-plan.md` (master), `architecture.md`, `external-services.md`, `mood-scoring.md` |
 | **Code-grounded** | Yes — `db/migrations/0001,0006,0011,0017`, `services/notifications.py`, `services/mood_dimensions.py`, `config/mood-dimensions.toml`, and `models.py` reviewed before writing |
 
 This document specifies concrete tables, indexes, and migration sequencing for the fitness

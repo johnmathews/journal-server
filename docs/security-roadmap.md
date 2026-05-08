@@ -1,7 +1,7 @@
 # Security Hardening Roadmap
 
-**Status:** active. **Last updated:** 2026-04-15. **Supersedes:** none.
-Created 2026-04-14. Tier 1 completed 2026-04-15; later tiers remain.
+**Status:** active. **Last updated:** 2026-05-09 (audit pass; no Tier-2/3 items shipped since 2026-04-15).
+**Supersedes:** none. Created 2026-04-14. Tier 1 completed 2026-04-15; later tiers remain.
 
 Prioritized security improvements for the multi-user authentication system. Items are grouped
 into tiers based on urgency. Each tier should be completed before the one below it.
@@ -55,6 +55,14 @@ user's data.
 ---
 
 ## Tier 2 — High (do before exposing to the internet long-term)
+
+### 2b. Bring prod compose back to loopback bind for `journal-server`
+
+The repo's `compose.yml` pins `journal-server` host port to `127.0.0.1:8400`, but the prod compose on `media`
+(`/srv/media/docker-compose.yml`) currently exposes `0.0.0.0:8400` (LAN-reachable). Public access already goes through
+the Cloudflare Tunnel that fronts `:8402`, so the LAN-exposed `:8400` adds attack surface without any operational
+benefit. **Action:** edit the prod compose to `127.0.0.1:8400:8400`, `docker compose up -d`. No webapp impact (it
+proxies through the compose network, not the host port).
 
 ### 3. Add app-level rate limiting on auth endpoints
 
