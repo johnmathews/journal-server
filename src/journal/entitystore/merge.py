@@ -17,7 +17,12 @@ from typing import TYPE_CHECKING
 from journal.entitystore.protocol import _normalise
 
 if TYPE_CHECKING:
-    from journal.models import Entity, MergeCandidate, MergeResult
+    from journal.models import (
+        Entity,
+        MergeCandidate,
+        MergeResult,
+        PairDecision,
+    )
 
 log = logging.getLogger(__name__)
 
@@ -105,7 +110,18 @@ class _MergeMixin:
                     )
                     total_aliases += 1
 
-            # Delete the absorbed entity (cascades aliases)
+            # Transfer "not a duplicate" decisions from the absorbed
+            # entity onto the survivor so they survive the merge.
+            # Done before the FK CASCADE deletes the rows on entity
+            # deletion: an explicit transfer preserves the semantic
+            # ("survivor is not the same as B") whereas the CASCADE
+            # would silently lose it.
+            self._transfer_pair_rejections_for_merge(
+                absorbed_id=absorbed_id, survivor_id=survivor_id,
+            )
+
+            # Delete the absorbed entity (cascades aliases + any
+            # remaining pair-decision rows still referencing it)
             self._conn.execute(  # type: ignore[attr-defined]
                 "DELETE FROM entities WHERE id = ?", (absorbed_id,),
             )
@@ -228,12 +244,29 @@ class _MergeMixin:
         similarity: float,
         extraction_run_id: str,
     ) -> None:
-        # Normalise order so (a, b) == (b, a)
+        """UPSERT a candidate for the given pair.
+
+        The table has been per-pair unique since migration 0022. If the
+        pair already exists in ``pending``, bump similarity to the
+        higher of the two scores and refresh ``extraction_run_id`` /
+        ``updated_at``. Already-resolved rows (``accepted`` or
+        ``dismissed``) are left alone so historical decisions are not
+        silently overwritten — the rejection check in the extraction
+        service is the primary defence against re-flagging dismissed
+        pairs, this clause is belt + braces.
+        """
+        # Normalise order so (a, b) == (b, a) — matches the table's
+        # CHECK (entity_id_a < entity_id_b).
         lo, hi = sorted([entity_id_a, entity_id_b])
         self._conn.execute(  # type: ignore[attr-defined]
-            "INSERT OR IGNORE INTO entity_merge_candidates"
+            "INSERT INTO entity_merge_candidates"
             " (entity_id_a, entity_id_b, similarity, extraction_run_id)"
-            " VALUES (?, ?, ?, ?)",
+            " VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(entity_id_a, entity_id_b) DO UPDATE SET"
+            "   similarity = MAX(similarity, excluded.similarity),"
+            "   extraction_run_id = excluded.extraction_run_id,"
+            "   updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+            " WHERE entity_merge_candidates.status = 'pending'",
             (lo, hi, similarity, extraction_run_id),
         )
         self._conn.commit()  # type: ignore[attr-defined]
@@ -282,15 +315,192 @@ class _MergeMixin:
     def resolve_merge_candidate(
         self, candidate_id: int, status: str,
     ) -> None:
+        """Update a candidate's status; on dismiss, persist the rejection.
+
+        Dismissing a candidate writes a row to ``entity_pair_decisions``
+        in the same transaction. Future extractions consult that table
+        and skip re-creating the pair as a candidate, so a rejected pair
+        never resurfaces unless the user explicitly undoes the decision.
+        """
         if status not in ("accepted", "dismissed"):
             raise ValueError(f"Invalid status: {status}")
+        row = self._conn.execute(  # type: ignore[attr-defined]
+            "SELECT entity_id_a, entity_id_b FROM entity_merge_candidates"
+            " WHERE id = ?",
+            (candidate_id,),
+        ).fetchone()
         self._conn.execute(  # type: ignore[attr-defined]
             "UPDATE entity_merge_candidates SET status = ?,"
             " resolved_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
             " WHERE id = ?",
             (status, candidate_id),
         )
+        if status == "dismissed" and row is not None:
+            entity_id_a = int(row["entity_id_a"])
+            entity_id_b = int(row["entity_id_b"])
+            user_row = self._conn.execute(  # type: ignore[attr-defined]
+                "SELECT user_id FROM entities WHERE id = ?",
+                (entity_id_a,),
+            ).fetchone()
+            if user_row is not None:
+                self._record_pair_rejection_no_commit(
+                    user_id=int(user_row["user_id"]),
+                    entity_id_a=entity_id_a,
+                    entity_id_b=entity_id_b,
+                )
         self._conn.commit()  # type: ignore[attr-defined]
+
+    # ---- pair decisions (persistent "not a duplicate") ---------------
+
+    def _record_pair_rejection_no_commit(
+        self, user_id: int, entity_id_a: int, entity_id_b: int,
+    ) -> None:
+        """Insert a rejection row without committing.
+
+        Internal helper so callers that already hold a transaction
+        (``resolve_merge_candidate``, ``merge_entities``) batch the
+        rejection write into the same commit.
+        """
+        if entity_id_a == entity_id_b:
+            return
+        lo, hi = sorted([entity_id_a, entity_id_b])
+        self._conn.execute(  # type: ignore[attr-defined]
+            "INSERT OR IGNORE INTO entity_pair_decisions"
+            " (user_id, entity_id_lo, entity_id_hi, decision)"
+            " VALUES (?, ?, ?, 'rejected')",
+            (user_id, lo, hi),
+        )
+
+    def record_pair_rejection(
+        self, user_id: int, entity_id_a: int, entity_id_b: int,
+    ) -> None:
+        """Record a "not a duplicate" decision for the given pair.
+
+        Idempotent: if the pair is already rejected, this is a no-op.
+        Order of ids does not matter — they are normalised internally.
+        """
+        self._record_pair_rejection_no_commit(
+            user_id=user_id,
+            entity_id_a=entity_id_a,
+            entity_id_b=entity_id_b,
+        )
+        self._conn.commit()  # type: ignore[attr-defined]
+
+    def is_pair_rejected(
+        self, user_id: int, entity_id_a: int, entity_id_b: int,
+    ) -> bool:
+        """Return True if the user has rejected the given pair."""
+        if entity_id_a == entity_id_b:
+            return False
+        lo, hi = sorted([entity_id_a, entity_id_b])
+        row = self._conn.execute(  # type: ignore[attr-defined]
+            "SELECT 1 FROM entity_pair_decisions"
+            " WHERE user_id = ? AND entity_id_lo = ? AND entity_id_hi = ?",
+            (user_id, lo, hi),
+        ).fetchone()
+        return row is not None
+
+    def list_pair_rejections(
+        self, user_id: int, limit: int = 50, offset: int = 0,
+    ) -> list[PairDecision]:
+        """Return the user's rejected pairs, newest first."""
+        from journal.models import PairDecision
+
+        rows = self._conn.execute(  # type: ignore[attr-defined]
+            "SELECT * FROM entity_pair_decisions"
+            " WHERE user_id = ?"
+            " ORDER BY decided_at DESC, id DESC"
+            " LIMIT ? OFFSET ?",
+            (user_id, limit, offset),
+        ).fetchall()
+        decisions: list[PairDecision] = []
+        for row in rows:
+            entity_a = self.get_entity(row["entity_id_lo"])  # type: ignore[attr-defined]
+            entity_b = self.get_entity(row["entity_id_hi"])  # type: ignore[attr-defined]
+            if entity_a is None or entity_b is None:
+                # FK CASCADE should have removed these, but guard anyway.
+                continue
+            decisions.append(
+                PairDecision(
+                    id=row["id"],
+                    user_id=row["user_id"],
+                    entity_a=entity_a,
+                    entity_b=entity_b,
+                    decision=row["decision"],
+                    decided_at=row["decided_at"],
+                )
+            )
+        return decisions
+
+    def count_pair_rejections(self, user_id: int) -> int:
+        """Total rejections for the user (for paginated list metadata)."""
+        row = self._conn.execute(  # type: ignore[attr-defined]
+            "SELECT COUNT(*) AS n FROM entity_pair_decisions"
+            " WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        return int(row["n"]) if row is not None else 0
+
+    def delete_pair_rejection(
+        self, user_id: int, decision_id: int,
+    ) -> bool:
+        """Remove a rejection. Returns True if a row was deleted."""
+        cursor = self._conn.execute(  # type: ignore[attr-defined]
+            "DELETE FROM entity_pair_decisions"
+            " WHERE id = ? AND user_id = ?",
+            (decision_id, user_id),
+        )
+        self._conn.commit()  # type: ignore[attr-defined]
+        return cursor.rowcount > 0
+
+    def _transfer_pair_rejections_for_merge(
+        self, absorbed_id: int, survivor_id: int,
+    ) -> None:
+        """Re-target rejections involving the absorbed entity onto the
+        survivor.
+
+        Called inside ``merge_entities``' transaction. For each
+        rejection ``(absorbed, X)``:
+
+        - If ``X == survivor``: drop it (a self-pair can't be "not the
+          same"); will also be removed by FK CASCADE.
+        - Otherwise: insert ``(survivor, X)`` if not already present,
+          then delete the original. The survivor inherits the user's
+          decision that "this entity is not the same as X".
+
+        The FK CASCADE on the absorbed entity's deletion is a safety
+        net for any rows the loop missed (it shouldn't miss any).
+        """
+        rows = self._conn.execute(  # type: ignore[attr-defined]
+            "SELECT id, user_id, entity_id_lo, entity_id_hi"
+            " FROM entity_pair_decisions"
+            " WHERE entity_id_lo = ? OR entity_id_hi = ?",
+            (absorbed_id, absorbed_id),
+        ).fetchall()
+        for row in rows:
+            other = (
+                row["entity_id_hi"]
+                if row["entity_id_lo"] == absorbed_id
+                else row["entity_id_lo"]
+            )
+            if other == survivor_id:
+                # Self-pair after the merge — drop it.
+                self._conn.execute(  # type: ignore[attr-defined]
+                    "DELETE FROM entity_pair_decisions WHERE id = ?",
+                    (row["id"],),
+                )
+                continue
+            new_lo, new_hi = sorted([survivor_id, other])
+            self._conn.execute(  # type: ignore[attr-defined]
+                "INSERT OR IGNORE INTO entity_pair_decisions"
+                " (user_id, entity_id_lo, entity_id_hi, decision)"
+                " VALUES (?, ?, ?, 'rejected')",
+                (row["user_id"], new_lo, new_hi),
+            )
+            self._conn.execute(  # type: ignore[attr-defined]
+                "DELETE FROM entity_pair_decisions WHERE id = ?",
+                (row["id"],),
+            )
 
     # ---- merge history ------------------------------------------------
 

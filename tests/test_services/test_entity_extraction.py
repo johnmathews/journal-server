@@ -769,17 +769,28 @@ class TestNormalizedSignatureHelpers:
         assert _normalized_signature("St. Mary-le-Bow") == "stmarylebow"
         assert _normalized_signature("St Mary, le Bow") == "stmarylebow"
 
-    def test_is_short_difference_true_for_short_suffix(self) -> None:
-        # "Zij Kanaal C" is contained in "Zij Kanaal C Weg"; leftover
-        # "Weg" is a single token.
-        assert _is_short_difference("Zij Kanaal C Weg", "Zij Kanaal C")
+    def test_is_short_difference_true_for_typo_leftover(self) -> None:
+        # Single-character drift — the canonical typo case Case 2 was
+        # designed to catch.
+        assert _is_short_difference("Andrews", "Andrew")
+
+    def test_is_short_difference_false_for_word_leftover(self) -> None:
+        # WU3: a real-word leftover ("Weg") indicates a more specific
+        # entity (the canal road), not a typo of the shorter name.
+        assert not _is_short_difference("Zij Kanaal C Weg", "Zij Kanaal C")
+
+    def test_is_short_difference_false_for_possessive_leftover(self) -> None:
+        # Relational suffix — different person.
+        assert not _is_short_difference(
+            "JohnMathews'mother", "JohnMathews"
+        )
 
     def test_is_short_difference_false_when_not_substring(self) -> None:
         assert not _is_short_difference("Amsterdam", "Rotterdam")
 
     def test_is_short_difference_false_for_long_leftover(self) -> None:
         # Contains "Apple" but the leftover " has many trailing words" is
-        # both longer than 6 chars AND multi-word — should not flag.
+        # longer than 6 chars and word-shaped — should not flag.
         assert not _is_short_difference(
             "Apple has many trailing words", "Apple"
         )
@@ -808,6 +819,59 @@ class TestNormalizedSignatureHelpers:
         # Avoid false positives on degenerate inputs.
         assert not _is_signature_match("", "Anything")
         assert not _is_signature_match("a", "Apple")
+
+    # WU3 regression cases — every pair below produced a 0.95 signature
+    # match in the user's prod database that was then dismissed as
+    # "not a duplicate". Each represents a distinct false-positive
+    # pattern the heuristic used to mistake for a typo.
+
+    def test_relational_possessive_suffix_not_matched(self) -> None:
+        assert not _is_signature_match(
+            "John Mathews", "John Mathews' mother"
+        )
+        assert not _is_signature_match(
+            "John Mathews", "John Mathews’ mother"
+        )  # curly apostrophe
+
+    def test_numeric_specifier_not_matched(self) -> None:
+        assert not _is_signature_match("Psalms", "Psalms 63")
+        assert not _is_signature_match("Highway", "Highway 5")
+
+    def test_word_specifier_suffix_not_matched(self) -> None:
+        assert not _is_signature_match("Bible", "Bible study")
+        assert not _is_signature_match("Interview", "Interview practice")
+        assert not _is_signature_match("Haarlem", "Haarlem Centraal")
+        assert not _is_signature_match("Spaarne", "Spaarnebuiten")
+
+    def test_word_qualifier_prefix_not_matched(self) -> None:
+        # Prefix-side qualifier (acronym or noun) on the longer name —
+        # almost always a different concept.
+        assert not _is_signature_match("pipelines", "RAG pipelines")
+        assert not _is_signature_match(
+            "Engineering", "Chaos Engineering"
+        )
+
+    def test_common_suffix_with_wordy_prefix_tails_not_matched(self) -> None:
+        # Common suffix "engineering" but distinct front-words — the
+        # Case-3 SUFFIX branch should reject these.
+        assert not _is_signature_match(
+            "Chaos Engineering", "Data Engineering"
+        )
+
+    def test_typo_recall_preserved(self) -> None:
+        # Single-character drift at the end (OCR letter dropped/added)
+        # should still match.
+        assert _is_signature_match("Andrew", "Andrews")
+        # Empty-leftover (whitespace-only difference) still matches.
+        assert _is_signature_match("Zij Kanaal", "ZijKanaal")
+
+    def test_short_place_qualifiers_still_matched(self) -> None:
+        # Case 3 prefix branch with short place qualifiers — preserved
+        # by the more lenient ``allow_short_words`` threshold so that
+        # near-duplicate Dutch place names still get flagged.
+        assert _is_signature_match(
+            "Zij Kanaal C Weg", "Zij Kanaal C Zuid"
+        )
 
 
 class TestSignatureMergeCandidatesDuringExtraction:
@@ -923,6 +987,86 @@ class TestSignatureMergeCandidatesDuringExtraction:
         extractor = MagicMock()
         extractor.extract_entities.return_value = _raw(
             entities=[_entity("Football", "organization")],
+        )
+        embeddings = MagicMock()
+        embeddings.embed_query = MagicMock(return_value=[0.0, 1.0, 0.0])
+        service = _make_service(
+            repo, entity_store, extractor,
+            embeddings=embeddings, threshold=0.9,
+        )
+        service.extract_from_entry(e)
+
+        assert entity_store.list_merge_candidates(status="pending") == []
+
+
+class TestNoEmbeddingNearMissCandidates:
+    """WU4: the embedding "near-miss" candidate creation path was
+    removed. Below-threshold embedding similarity now produces no
+    candidate at all — only the signature heuristic creates them."""
+
+    def test_below_threshold_above_old_near_miss_creates_no_candidate(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        # Embedding similarity ~0.80: previously surfaced as a "near
+        # miss" candidate (threshold 0.9 minus 0.15 floor → 0.75). With
+        # WU4 it is silently dropped.
+        existing = entity_store.create_entity(
+            "person", "Sarah", "", "2026-03-01",
+        )
+        # Two near-parallel unit vectors give cosine ≈ 0.80.
+        entity_store.set_entity_embedding(existing.id, [1.0, 0.0, 0.0])
+
+        e = repo.create_entry("2026-03-22", "photo", "one", 1).id
+        extractor = MagicMock()
+        # Different name so signature heuristic doesn't fire.
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity("Bob", "person")],
+        )
+        embeddings = MagicMock()
+        embeddings.embed_query = MagicMock(
+            return_value=[0.8, 0.6, 0.0],  # cos = 0.8 vs [1, 0, 0]
+        )
+        service = _make_service(
+            repo, entity_store, extractor,
+            embeddings=embeddings, threshold=0.9,
+        )
+        service.extract_from_entry(e)
+
+        assert entity_store.list_merge_candidates(status="pending") == []
+
+
+class TestSignatureCandidateSkipsWhenRejected:
+    """WU1: when the user has previously dismissed a candidate, the
+    signature heuristic should not re-suggest the pair on subsequent
+    extractions."""
+
+    def test_signature_match_suppressed_for_rejected_pair(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        existing = entity_store.create_entity(
+            "place", "Zij Kanaal C Weg", "", "2026-03-01"
+        )
+        entity_store.set_entity_embedding(existing.id, [1.0, 0.0, 0.0])
+        # Stand-in for the (yet-to-exist) sibling entity. Pre-create it
+        # so we can record a rejection between the two ids before the
+        # extraction runs.
+        sibling = entity_store.create_entity(
+            "place", "Zij Kanaal C Zuid", "", "2026-03-01"
+        )
+        entity_store.set_entity_embedding(sibling.id, [0.0, 1.0, 0.0])
+        # Reject the pair as the user would have via the dismiss flow.
+        entity_store.record_pair_rejection(1, existing.id, sibling.id)
+
+        # Now run extraction that would normally trigger the signature
+        # heuristic for this pair (existing canonical re-extracted).
+        e = repo.create_entry("2026-03-22", "photo", "one", 1).id
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity("Zij Kanaal C Zuid", "place")],
         )
         embeddings = MagicMock()
         embeddings.embed_query = MagicMock(return_value=[0.0, 1.0, 0.0])

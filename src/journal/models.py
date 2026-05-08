@@ -278,6 +278,23 @@ class MergeCandidate:
 
 
 @dataclass
+class PairDecision:
+    """A persisted "not a duplicate" decision for a pair of entities.
+
+    Survives across extraction runs so the same pair is not re-suggested
+    after the user has rejected it. Stored normalised (entity_a.id <
+    entity_b.id) by the repository layer.
+    """
+
+    id: int
+    user_id: int
+    entity_a: Entity
+    entity_b: Entity
+    decision: str  # currently always 'rejected'
+    decided_at: str
+
+
+@dataclass
 class ExtractionResult:
     entry_id: int
     extraction_run_id: str

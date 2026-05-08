@@ -2192,6 +2192,59 @@ class TestMergeCandidates:
         )
         assert resp.status_code == 400
 
+    def test_dismiss_records_pair_decision(
+        self, client: TestClient, services: dict
+    ) -> None:
+        # WU1 + WU6: dismissing a candidate writes a row to
+        # entity_pair_decisions, and the pair-decisions endpoint
+        # surfaces it.
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        a = entity_store.create_entity("person", "A", "", "2026-01-01")
+        b = entity_store.create_entity("person", "B", "", "2026-01-01")
+        entity_store.create_merge_candidate(a.id, b.id, 0.82, "run-1")
+        candidates = entity_store.list_merge_candidates()
+        client.patch(
+            f"/api/entities/merge-candidates/{candidates[0].id}",
+            json={"status": "dismissed"},
+        )
+
+        resp = client.get("/api/entities/pair-decisions")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["decision"] == "rejected"
+        item = data["items"][0]
+        assert {item["entity_a"]["id"], item["entity_b"]["id"]} == {
+            a.id, b.id,
+        }
+
+    def test_undo_pair_decision(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        a = entity_store.create_entity("person", "A", "", "2026-01-01")
+        b = entity_store.create_entity("person", "B", "", "2026-01-01")
+        entity_store.record_pair_rejection(1, a.id, b.id)
+
+        listed = client.get("/api/entities/pair-decisions").json()
+        decision_id = listed["items"][0]["id"]
+
+        resp = client.delete(
+            f"/api/entities/pair-decisions/{decision_id}"
+        )
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] is True
+
+        # No rejections left.
+        resp2 = client.get("/api/entities/pair-decisions")
+        assert resp2.json()["total"] == 0
+
+    def test_undo_missing_decision_returns_404(
+        self, client: TestClient, services: dict
+    ) -> None:
+        resp = client.delete("/api/entities/pair-decisions/99999")
+        assert resp.status_code == 404
+
 
 class TestMergeHistory:
     def test_merge_history_after_merge(

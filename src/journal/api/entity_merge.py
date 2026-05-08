@@ -300,6 +300,86 @@ def register_entity_merge_routes(
         return JSONResponse({"id": candidate_id, "status": status})
 
     @mcp.custom_route(
+        "/api/entities/pair-decisions",
+        methods=["GET"],
+        name="api_list_pair_decisions",
+    )
+    async def list_pair_decisions_route(request: Request) -> JSONResponse:
+        """List the user's persistent "not a duplicate" decisions.
+
+        Backs the past-dismissals UI so the user can audit and undo
+        decisions taken in earlier sessions.
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+        entity_store: EntityStore = services["entity_store"]
+        user = get_authenticated_user(request)
+        user_id = user.user_id
+
+        try:
+            limit = min(int(request.query_params.get("limit", "50")), 200)
+        except ValueError:
+            limit = 50
+        try:
+            offset = max(int(request.query_params.get("offset", "0")), 0)
+        except ValueError:
+            offset = 0
+
+        decisions = entity_store.list_pair_rejections(
+            user_id=user_id, limit=limit, offset=offset,
+        )
+        total = entity_store.count_pair_rejections(user_id=user_id)
+        items = [
+            {
+                "id": d.id,
+                "entity_a": _entity_summary(d.entity_a),
+                "entity_b": _entity_summary(d.entity_b),
+                "decision": d.decision,
+                "decided_at": d.decided_at,
+            }
+            for d in decisions
+        ]
+        log.info(
+            "GET /api/entities/pair-decisions — %d/%d items",
+            len(items), total,
+        )
+        return JSONResponse({"items": items, "total": total})
+
+    @mcp.custom_route(
+        "/api/entities/pair-decisions/{decision_id:int}",
+        methods=["DELETE"],
+        name="api_delete_pair_decision",
+    )
+    async def delete_pair_decision_route(
+        request: Request,
+    ) -> JSONResponse:
+        """Undo a "not a duplicate" decision.
+
+        Removes the rejection record so the pair is once again
+        eligible to be flagged as a candidate by future extractions.
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+        entity_store: EntityStore = services["entity_store"]
+        user = get_authenticated_user(request)
+        user_id = user.user_id
+        decision_id = int(request.path_params["decision_id"])
+
+        deleted = entity_store.delete_pair_rejection(
+            user_id=user_id, decision_id=decision_id,
+        )
+        if not deleted:
+            return JSONResponse(
+                {"error": "Decision not found"}, status_code=404,
+            )
+        log.info(
+            "DELETE /api/entities/pair-decisions/%d", decision_id,
+        )
+        return JSONResponse({"id": decision_id, "deleted": True})
+
+    @mcp.custom_route(
         "/api/entities/{entity_id:int}/merge-history",
         methods=["GET"],
         name="api_entity_merge_history",
