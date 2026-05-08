@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      # Bundle every open security advisory into one PR. Major bumps stay
+      # in the group (CVE fixes sometimes require a major version), so
+      # this PR is what the operator merges after a quick review.
+      security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      # Batch routine minor/patch version bumps into a single PR. Major
+      # bumps still arrive as individual PRs so they can be reviewed
+      # one-by-one for breaking changes.
+      minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
