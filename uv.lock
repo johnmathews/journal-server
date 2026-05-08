@@ -657,7 +657,7 @@ requires-dist = [
     { name = "chromadb-client", specifier = ">=1.5,<2" },
     { name = "google-genai", specifier = "==1.73.0" },
     { name = "itsdangerous", specifier = ">=2.2,<3" },
-    { name = "mcp", extras = ["cli"], specifier = ">=1.26,<2" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.27.0,<2" },
     { name = "openai", specifier = ">=2.29,<3" },
     { name = "pillow", specifier = ">=12.2,<13" },
     { name = "pillow-heif", specifier = ">=0.21,<1" },
