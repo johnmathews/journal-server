@@ -347,17 +347,21 @@ class EntityExtractionService:
                 entities_matched += 1
             if warning:
                 warnings.append(warning)
-            if near_miss is not None:
-                candidate_id, score = near_miss
-                with contextlib.suppress(Exception):
-                    self._store.create_merge_candidate(
-                        entity_id_a=candidate_id,
-                        entity_id_b=entity_id,
-                        similarity=score,
-                        extraction_run_id=run_id,
-                    )
+            # Skip candidate creation for any pair the user has already
+            # rejected. A user_id of None means single-tenant / unset
+            # context; default to user 1 to match create_entity below.
+            rejection_user_id = user_id if user_id is not None else 1
+            # ``near_miss`` is always None — the embedding near-miss
+            # candidate path was removed in WU4 (it produced 0 useful
+            # suggestions vs ~21 false positives in prod). The signature
+            # heuristic is the sole remaining candidate source.
+            assert near_miss is None
             for candidate_id, score in signature_matches:
                 if candidate_id == entity_id:
+                    continue
+                if self._store.is_pair_rejected(
+                    rejection_user_id, candidate_id, entity_id,
+                ):
                     continue
                 with contextlib.suppress(Exception):
                     self._store.create_merge_candidate(
@@ -743,14 +747,11 @@ class EntityExtractionService:
         )
         self._store.set_entity_embedding(entity.id, new_embedding)
 
-        # If there was a near-miss (below threshold but close), return
-        # it so the caller can persist a merge candidate for user review.
-        near_miss_threshold = max(self._threshold - 0.15, 0.5)
-        near_miss: tuple[int, float] | None = None
-        if best_id is not None and best_score >= near_miss_threshold:
-            near_miss = (best_id, best_score)
-
-        return entity.id, True, None, near_miss, signature_matches, None
+        # WU4: the embedding "near-miss" candidate path was removed —
+        # in prod it produced 0 acceptances over ~21 false positives.
+        # Auto-merge at >= self._threshold still applies above. The
+        # signature heuristic is now the sole candidate source.
+        return entity.id, True, None, None, signature_matches, None
 
     def _resolve_for_relationship(
         self,

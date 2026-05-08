@@ -33,6 +33,41 @@ if TYPE_CHECKING:
 _SIGNATURE_EXACT_MATCH_SCORE = 1.0
 _SIGNATURE_SHORT_DIFF_SCORE = 0.95
 
+_VOWELS = frozenset("aeiou")
+
+
+def _is_likely_word_tail(
+    tail: str, *, allow_short_words: bool = False,
+) -> bool:
+    """Whether a divergent tail is more likely a real word/qualifier
+    than an OCR/typo artifact.
+
+    Tails that look like real words point at semantically distinct
+    entities ("John Mathews" vs "John Mathews' mother", "Bible" vs
+    "Bible study") rather than near-duplicates of the same entity.
+
+    Triggers:
+
+    - **Possessive markers** (``'`` / ``’``) — virtually always a
+      relational suffix (``"X's mother"``).
+    - **Purely numeric tails** — qualifying specifiers like "Psalms 63"
+      or "Highway 5".
+    - **Multi-character vowel-bearing tails** — likely real words. The
+      length threshold defaults to 3 (strict) but rises to 5 when the
+      caller passes ``allow_short_words=True``, which preserves the
+      common Dutch place-qualifier pattern ("Weg", "Zuid", "Noord")
+      that the heuristic was built to catch.
+    """
+    if not tail:
+        return False
+    t = tail.lower()
+    if t.startswith("'") or t.startswith("’"):
+        return True
+    if t.isdigit():
+        return True
+    threshold = 5 if allow_short_words else 3
+    return len(t) >= threshold and any(c in _VOWELS for c in t)
+
 
 def _normalized_signature(name: str) -> str:
     """Lowercase, strip whitespace runs, drop trivial punctuation.
@@ -51,18 +86,25 @@ def _normalized_signature(name: str) -> str:
 
 def _is_short_difference(longer: str, shorter: str) -> bool:
     """Return True when ``shorter`` is a substring of ``longer`` and the
-    leftover after removing it is small enough to suggest a near-duplicate.
+    leftover after removing it is small enough — and word-shaped enough —
+    to suggest a near-duplicate rather than a semantically related but
+    distinct entity.
 
-    We treat "small" as either ``<= 6 characters`` or a single token
-    (no whitespace). Both cases catch trailing/leading qualifiers like
-    ``" Weg"``, ``" Zuid"``, or ``"St "`` that distinguish near-duplicate
-    place names without producing false positives on long sentences that
-    happen to contain a short common substring.
+    Empty leftover is always a match (the strings differ only in
+    case/whitespace/punctuation, already collapsed before this check).
+    Wordy leftovers — possessives, numerics, real words — indicate the
+    longer name is a more specific concept ("X's mother", "Psalms 63",
+    "Bible study") and are rejected. Short non-word leftovers (``"s"``,
+    ``"St "``) are accepted to preserve OCR/typo recall.
     """
     if shorter not in longer:
         return False
     leftover = longer.replace(shorter, "", 1).strip()
-    return len(leftover) <= 6 or " " not in leftover
+    if not leftover:
+        return True
+    if _is_likely_word_tail(leftover):
+        return False
+    return len(leftover) <= 6
 
 
 def _common_prefix_len(a: str, b: str) -> int:
@@ -147,6 +189,14 @@ def _is_signature_match(name_a: str, name_b: str) -> bool:
     #   - the common region to be at least twice the max tail length
     #     (so the shared portion clearly dominates the divergence);
     #   - both divergent tails to be short (≤ 6 chars).
+    #
+    # Plus a tail-shape filter: tails that look like real words point
+    # at semantically distinct entities ("Chaos" / "Data" sharing the
+    # "Engineering" suffix) rather than near-duplicates. The PREFIX
+    # branch (divergent suffix tails) is lenient — short Dutch place
+    # qualifiers like "Weg" / "Zuid" should still match. The SUFFIX
+    # branch (divergent prefix tails) is strict — a different qualifier
+    # at the start nearly always means a different entity.
     prefix = _common_prefix_len(sig_a, sig_b)
     if prefix >= 8:
         tail_a = sig_a[prefix:]
@@ -156,6 +206,8 @@ def _is_signature_match(name_a: str, name_b: str) -> bool:
             _is_short_tail(tail_a)
             and _is_short_tail(tail_b)
             and prefix >= 2 * max_tail
+            and not _is_likely_word_tail(tail_a, allow_short_words=True)
+            and not _is_likely_word_tail(tail_b, allow_short_words=True)
         ):
             return True
 
@@ -168,6 +220,8 @@ def _is_signature_match(name_a: str, name_b: str) -> bool:
             _is_short_tail(tail_a)
             and _is_short_tail(tail_b)
             and suffix >= 2 * max_tail
+            and not _is_likely_word_tail(tail_a)
+            and not _is_likely_word_tail(tail_b)
         ):
             return True
 

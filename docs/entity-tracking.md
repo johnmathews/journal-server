@@ -223,22 +223,41 @@ absorbed entities disappear; the survivor's alias list grows by however many dis
 
 ### Merge candidates
 
-The extraction service's stage-c (embedding similarity) fallback runs against every entity of the same type. When a
-near-miss is found — similarity above `max(threshold - 0.15, 0.5)` but below `ENTITY_DEDUP_SIMILARITY_THRESHOLD` — the
-service writes a row to `entity_merge_candidates` (also defined in migration `0008`). A short-name signature heuristic
-flags additional pairs whose canonical names differ only in trailing tokens (place names like `"Zij Kanaal C Zuid"` vs
-`"Zij Kanaal C Noord"` that the embedding distance alone misses).
-<!-- pending: short-name signature heuristic lands with WU5 -->
+The string-signature heuristic in `src/journal/services/entity_extraction/signature.py` is the sole producer of merge
+candidates. It flags pairs of same-type entities whose canonical names differ only in case, whitespace, trivial
+punctuation, or short divergent tails (place names like `"Zij Kanaal C Zuid"` vs `"Zij Kanaal C Weg"` that the
+embedding distance alone misses). Tail shape is filtered: possessive markers (`'s`), purely numeric specifiers,
+and word-shaped tails are rejected so relational suffixes (`"John Mathews' mother"`), specifiers (`"Psalms 63"`),
+and parent/child place pairs (`"Haarlem"` vs `"Haarlem Centraal"`) do not produce false positives. The helper
+`_is_likely_word_tail` centralises that judgment.
+
+Embedding similarity above `ENTITY_DEDUP_SIMILARITY_THRESHOLD` (default `0.88`) auto-merges as before — that path
+is unchanged. Embedding similarity *below* the threshold no longer creates a candidate: the previous "near-miss"
+band (`max(threshold - 0.15, 0.5)` to threshold) was removed in WU4 because in real-world data it produced zero
+useful suggestions over many false positives (semantically related but distinct entities like Hermione vs Neville).
+
+Candidates are stored per-pair in `entity_merge_candidates` (migration `0022`) — the table's `UNIQUE(entity_id_a,
+entity_id_b)` constraint means repeated extraction runs UPSERT into the same row instead of inserting a new
+'pending' row each time. The UPSERT keeps the higher similarity and never resurrects an already-dismissed pair.
 
 Pending candidates surface on the entity list view as a "Possible duplicates to review" banner. Each pair can be:
 
 - **Accepted** — the webapp issues `POST /api/entities/merge` to fold the lower-mention-count entity into the
   higher-mention-count one (or vice versa, at the operator's discretion).
-- **Dismissed** — `PATCH /api/entities/merge-candidates/{id}` with `{"status": "dismissed"}`. The pair is never
-  re-flagged unless the embeddings change.
+- **Dismissed** — `PATCH /api/entities/merge-candidates/{id}` with `{"status": "dismissed"}`. The dismissal also
+  writes a row to `entity_pair_decisions` (migration `0021`), which the extraction service consults before
+  creating new candidates. So a dismissed pair never resurfaces — even after future extractions, edits, or
+  re-embedding.
+
+When two entities are merged, any rejection rows involving the absorbed entity are transferred to the survivor
+(`_transfer_pair_rejections_for_merge`), so the user's "these are not the same" decision survives a subsequent
+merge of A into a third entity.
 
 `GET /api/entities/merge-candidates?status=pending&limit=50` lists current candidates;
-`GET /api/entities/{id}/merge-history` returns the audit trail for a survivor.
+`GET /api/entities/{id}/merge-history` returns the audit trail for a survivor;
+`GET /api/entities/pair-decisions` returns the user's persisted rejections, and
+`DELETE /api/entities/pair-decisions/{id}` undoes one. The webapp surfaces the latter as a "Past dismissals"
+panel on the entity list view.
 
 ## Quarantine
 

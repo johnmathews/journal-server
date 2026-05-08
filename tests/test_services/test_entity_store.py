@@ -830,6 +830,60 @@ class TestMergeCandidates:
         assert store.list_merge_candidates(status="pending") == []
 
 
+class TestMergeCandidateUpsert:
+    """WU2: candidates table is per-pair-unique. Repeated extraction
+    runs UPSERT instead of inserting a fresh row."""
+
+    def test_repeated_create_keeps_one_row_at_max_score(
+        self, store: SQLiteEntityStore,
+    ) -> None:
+        a = store.create_entity("person", "A", "", "2026-01-01")
+        b = store.create_entity("person", "B", "", "2026-01-01")
+
+        store.create_merge_candidate(a.id, b.id, 0.80, "run-1")
+        store.create_merge_candidate(a.id, b.id, 0.95, "run-2")
+        store.create_merge_candidate(a.id, b.id, 0.85, "run-3")
+
+        candidates = store.list_merge_candidates(status="pending")
+        assert len(candidates) == 1
+        assert candidates[0].similarity == pytest.approx(0.95)
+        # Most recent run id wins for traceability.
+        assert candidates[0].extraction_run_id == "run-3"
+
+    def test_dismissed_candidate_not_resurrected(
+        self, store: SQLiteEntityStore,
+    ) -> None:
+        a = store.create_entity("person", "A", "", "2026-01-01")
+        b = store.create_entity("person", "B", "", "2026-01-01")
+        store.create_merge_candidate(a.id, b.id, 0.80, "run-1")
+        candidates = store.list_merge_candidates()
+        store.resolve_merge_candidate(candidates[0].id, "dismissed")
+
+        # Re-running extraction generates the candidate again — it must
+        # stay dismissed, not flip back to pending.
+        store.create_merge_candidate(a.id, b.id, 0.95, "run-2")
+
+        assert store.list_merge_candidates(status="pending") == []
+        dismissed = store.list_merge_candidates(status="dismissed")
+        assert len(dismissed) == 1
+
+    def test_no_duplicate_rows_per_pair(
+        self,
+        store: SQLiteEntityStore,
+        db_conn: sqlite3.Connection,
+    ) -> None:
+        a = store.create_entity("person", "A", "", "2026-01-01")
+        b = store.create_entity("person", "B", "", "2026-01-01")
+        for i in range(5):
+            store.create_merge_candidate(a.id, b.id, 0.80 + 0.01 * i, f"run-{i}")
+        row = db_conn.execute(
+            "SELECT COUNT(*) AS n FROM entity_merge_candidates"
+            " WHERE entity_id_a = ? AND entity_id_b = ?",
+            (min(a.id, b.id), max(a.id, b.id)),
+        ).fetchone()
+        assert row["n"] == 1
+
+
 class TestSmartTitleCaseAtWriteTime:
     """create_entity normalises canonical_name through smart_title_case."""
 

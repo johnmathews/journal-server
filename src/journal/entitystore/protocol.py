@@ -18,6 +18,7 @@ from journal.models import (
     EntityRelationship,
     MergeCandidate,
     MergeResult,
+    PairDecision,
 )
 
 if TYPE_CHECKING:
@@ -255,6 +256,26 @@ class EntityStore(Protocol):
     def resolve_merge_candidate(
         self, candidate_id: int, status: str
     ) -> None: ...
+
+    # ---- pair decisions ("not a duplicate") -----------------------------
+
+    def record_pair_rejection(
+        self, user_id: int, entity_id_a: int, entity_id_b: int,
+    ) -> None: ...
+
+    def is_pair_rejected(
+        self, user_id: int, entity_id_a: int, entity_id_b: int,
+    ) -> bool: ...
+
+    def list_pair_rejections(
+        self, user_id: int, limit: int = 50, offset: int = 0,
+    ) -> list[PairDecision]: ...
+
+    def count_pair_rejections(self, user_id: int) -> int: ...
+
+    def delete_pair_rejection(
+        self, user_id: int, decision_id: int,
+    ) -> bool: ...
 
     # ---- merge history ---------------------------------------------------
 

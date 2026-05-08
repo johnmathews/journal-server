@@ -203,6 +203,139 @@ class TestEntityQuarantineMigration:
         assert get_current_version(db_conn) >= 18
 
 
+class TestEntityPairDecisionsMigration:
+    """Migration 0021 adds the entity_pair_decisions table for
+    persistent "not a duplicate" memory across extraction runs."""
+
+    def test_table_exists(self, db_conn):
+        row = db_conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='entity_pair_decisions'"
+        ).fetchone()
+        assert row is not None
+
+    def test_has_expected_columns(self, db_conn):
+        columns = db_conn.execute(
+            "PRAGMA table_info(entity_pair_decisions)"
+        ).fetchall()
+        names = {col["name"] for col in columns}
+        assert {
+            "id",
+            "user_id",
+            "entity_id_lo",
+            "entity_id_hi",
+            "decision",
+            "decided_at",
+        } <= names
+
+    def test_check_lo_lt_hi(self, db_conn):
+        # Seed an entity so the FK is satisfied.
+        db_conn.execute(
+            "INSERT INTO entities (user_id, entity_type, canonical_name)"
+            " VALUES (1, 'person', 'A')"
+        )
+        eid = db_conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        db_conn.commit()
+
+        import sqlite3 as _sqlite3
+        with pytest.raises(_sqlite3.IntegrityError):
+            db_conn.execute(
+                "INSERT INTO entity_pair_decisions"
+                " (user_id, entity_id_lo, entity_id_hi, decision)"
+                " VALUES (1, ?, ?, 'rejected')",
+                (eid, eid),  # equal — violates lo < hi
+            )
+            db_conn.commit()
+        db_conn.rollback()
+
+    def test_unique_per_user_pair(self, db_conn):
+        db_conn.execute(
+            "INSERT INTO entities (user_id, entity_type, canonical_name)"
+            " VALUES (1, 'person', 'A'), (1, 'person', 'B')"
+        )
+        rows = db_conn.execute(
+            "SELECT id FROM entities ORDER BY id DESC LIMIT 2"
+        ).fetchall()
+        hi = max(r["id"] for r in rows)
+        lo = min(r["id"] for r in rows)
+        db_conn.execute(
+            "INSERT INTO entity_pair_decisions"
+            " (user_id, entity_id_lo, entity_id_hi, decision)"
+            " VALUES (1, ?, ?, 'rejected')",
+            (lo, hi),
+        )
+        db_conn.commit()
+
+        import sqlite3 as _sqlite3
+        with pytest.raises(_sqlite3.IntegrityError):
+            db_conn.execute(
+                "INSERT INTO entity_pair_decisions"
+                " (user_id, entity_id_lo, entity_id_hi, decision)"
+                " VALUES (1, ?, ?, 'rejected')",
+                (lo, hi),
+            )
+            db_conn.commit()
+        db_conn.rollback()
+
+
+class TestMergeCandidatesPairUniqueMigration:
+    """Migration 0022 rebuilds entity_merge_candidates with per-pair
+    UNIQUE and a CHECK(entity_id_a < entity_id_b)."""
+
+    def test_unique_per_pair(self, db_conn):
+        db_conn.execute(
+            "INSERT INTO entities (user_id, entity_type, canonical_name)"
+            " VALUES (1, 'person', 'A'), (1, 'person', 'B')"
+        )
+        rows = db_conn.execute(
+            "SELECT id FROM entities ORDER BY id DESC LIMIT 2"
+        ).fetchall()
+        hi = max(r["id"] for r in rows)
+        lo = min(r["id"] for r in rows)
+        db_conn.execute(
+            "INSERT INTO entity_merge_candidates"
+            " (entity_id_a, entity_id_b, similarity, extraction_run_id)"
+            " VALUES (?, ?, 0.9, 'run-1')",
+            (lo, hi),
+        )
+        db_conn.commit()
+
+        # Same pair with a different run id used to be allowed; now rejected.
+        import sqlite3 as _sqlite3
+        with pytest.raises(_sqlite3.IntegrityError):
+            db_conn.execute(
+                "INSERT INTO entity_merge_candidates"
+                " (entity_id_a, entity_id_b, similarity, extraction_run_id)"
+                " VALUES (?, ?, 0.9, 'run-2')",
+                (lo, hi),
+            )
+            db_conn.commit()
+        db_conn.rollback()
+
+    def test_check_a_lt_b(self, db_conn):
+        db_conn.execute(
+            "INSERT INTO entities (user_id, entity_type, canonical_name)"
+            " VALUES (1, 'person', 'A'), (1, 'person', 'B')"
+        )
+        rows = db_conn.execute(
+            "SELECT id FROM entities ORDER BY id DESC LIMIT 2"
+        ).fetchall()
+        hi = max(r["id"] for r in rows)
+        lo = min(r["id"] for r in rows)
+
+        # Inserting with reversed order violates CHECK(a<b)
+        import sqlite3 as _sqlite3
+        with pytest.raises(_sqlite3.IntegrityError):
+            db_conn.execute(
+                "INSERT INTO entity_merge_candidates"
+                " (entity_id_a, entity_id_b, similarity, extraction_run_id)"
+                " VALUES (?, ?, 0.9, 'run-1')",
+                (hi, lo),
+            )
+            db_conn.commit()
+        db_conn.rollback()
+
+
 def test_entry_uncertain_spans_check_constraints(db_conn):
     db_conn.execute(
         "INSERT INTO entries (user_id, entry_date, source_type, raw_text, word_count)"
