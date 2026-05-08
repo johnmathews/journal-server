@@ -1,6 +1,6 @@
 # Journal Tool — Consolidated Roadmap
 
-**Status:** active. **Last updated:** 2026-05-08. **Supersedes:**
+**Status:** active. **Last updated:** 2026-05-09. **Supersedes:**
 [`phase-2-brief.md`](./phase-2-brief.md) (2026-03-23) and `journal-webapp/docs/future-features.md`.
 Pulls in all outstanding TODOs from the task list, memory files, and recent journal entries.
 
@@ -12,20 +12,30 @@ defer one, move it to the "Deferred / known gaps" section with a reason.
 Live plans linked here so they don't become shadow inventory. For each, the `Status:` header at
 the top of the linked doc tells you whether it's active, closed, or superseded.
 
-- [`tier-1-plan.md`](./tier-1-plan.md) — Tier 1 work-unit breakdown. Items 2/3a/3b/4 shipped;
-  Items 1 and 3c remain.
+- [`tier-1-plan.md`](./tier-1-plan.md) — **closed 2026-05-09**, all four Tier 1 items done
+  (Items 2/3a/3b/4 shipped 2026-04-11; Item 3c shipped 2026-04-21 with renamed endpoints;
+  Item 1 de facto complete via the entity-quality workstream). Kept as a record of decisions.
 - [`refactor-round-3.md`](./refactor-round-3.md) — current entry point for refactor work.
   Supersedes [`code-quality-refactor-plan.md`](./code-quality-refactor-plan.md) (v2, closed)
-  and [`refactor-follow-ups.md`](./refactor-follow-ups.md) (closed).
-  - [`refactor-repository-plan.md`](./refactor-repository-plan.md) — child plan, Recommendation 3.
-  - [`refactor-item-6-exceptions-plan.md`](./refactor-item-6-exceptions-plan.md) — child plan, § B.
+  and [`refactor-follow-ups.md`](./refactor-follow-ups.md) (closed). Most recent shipped
+  units: api.py / repository / mcp_server / auth_api / ingestion / cli splits and
+  item-6 exceptions batch 1 (all by 2026-05-08).
+  - [`refactor-repository-plan.md`](./refactor-repository-plan.md) — child plan, Recommendation 3 (active).
+  - [`refactor-item-6-exceptions-plan.md`](./refactor-item-6-exceptions-plan.md) — child plan, § B (active; batch 1 landed 2026-05-08).
   - [`refactor-mcp-server-plan.md`](./refactor-mcp-server-plan.md) — child plan, Recommendation 2 (closed; split landed 2026-05-07).
 - [`security-roadmap.md`](./security-roadmap.md) — multi-tier security hardening. Tier 1
-  completed; later tiers remain.
+  completed 2026-04-15; later tiers remain.
 - [`fitness-integration-plan.md`](./fitness-integration-plan.md) — fitness-tracker
-  ingestion design. Active — planning.
+  ingestion design (open questions resolved 2026-05-08). See also
+  [`fitness-schema.md`](./fitness-schema.md). Promoted to Tier 1 below.
 - [`code-quality-principles.md`](./code-quality-principles.md) — standing rules referenced
   by the refactor docs.
+- [`mood-scoring.md`](./mood-scoring.md) — pipeline reference. Note: mood scoring is now
+  **on by default** (opt-out via `JOURNAL_ENABLE_MOOD_SCORING=false`). Toggleable at runtime
+  from the webapp's Settings page.
+- [`search.md`](./search.md), [`transcription-providers.md`](./transcription-providers.md) —
+  reference docs for the hybrid search and multi-provider transcription stacks (both shipped
+  2026-05-01).
 
 Scope is cross-cutting: some items are pure backend (`journal-server`), some pure frontend (`journal-webapp`), many touch
 both. Each item is tagged with `[server]`, `[webapp]`, or `[both]`.
@@ -49,24 +59,31 @@ with a small corpus".
 
 ## Tier 1 — Ready to start now
 
-### 1. First real entity-extraction run `[server]`
+> All four original Tier 1 items (entity-extraction first run, `/health`, dashboard, search UI)
+> are now done — see [`tier-1-plan.md`](./tier-1-plan.md) (closed) and the Closed list below.
+> The next active item that meets the Tier 1 criterion (no upstream dependency, ready to
+> start) is **fitness integration** — see the linked plan for scope.
 
-Entity extraction plumbing ships end-to-end in tests but has never been run against real entries. Before building any
-entity UI on top of it, we need to know the output quality is acceptable.
+### 1. ~~First real entity-extraction run~~ `[server]` — ✅ de facto shipped
 
-Steps:
+Entity tables are populated and actively maintained in prod. Downstream features built on
+them (auto-reextraction-on-save, entity-distribution / entity-trends charts, the entity
+casing / aliases / quarantine / merge-candidate / dedup-rejection workstream, past-dismissals
+panel) have all shipped. T1.1.b dedup-threshold tuning (`0.88`) was never executed but no
+work was blocked. See `tier-1-plan.md` closeout summary for detail.
 
-1. Pick a single known entry: `journal extract-entities --entry-id N`.
-2. Spot-check the extracted entities and relationships against what you'd expect for that entry.
-3. Tune `ENTITY_DEDUP_SIMILARITY_THRESHOLD` (default `0.88`) if stage-c merges are noisy.
-4. Once one entry looks good, do a batch run: `journal extract-entities --stale-only`.
-5. Spot-check the entity list and relationship graph via the existing REST endpoints.
+---
 
-**Why this is first:** Every downstream item in Tier 2 (entity graph view, LadybugDB experiment, dashboard
-people-mentions chart) depends on having extracted data to look at. Graph viz against an empty or 5-entity corpus is a
-toy.
+### 1b. Fitness integration `[server]` — active, planning open questions resolved 2026-05-08
 
-**Source:** `journal-server/journal/260411-security-ocr-context-entity-tracking.md` "Context for the next session".
+Ingestion pipeline for fitness-tracker data (Garmin / Apple Health). Schema and design
+decisions captured in [`fitness-integration-plan.md`](./fitness-integration-plan.md) and
+[`fitness-schema.md`](./fitness-schema.md). Sibling journal entry:
+`journal/260508-fitness-integration-planning.md`. Implementation has not yet started.
+
+**Why this is now Tier 1:** independent of the journal-text pipeline, opens a new analytical
+surface (mood vs activity correlation), and the planning doc is the most recently added
+active workstream.
 
 ---
 
@@ -105,59 +122,39 @@ contract.
 
 ---
 
-### 3. Dashboard view `[both]` — 3a + 3b shipped 2026-04-11, 3c outstanding
+### 3. ~~Dashboard view~~ `[both]` — ✅ entirely shipped (3a + 3b on 2026-04-11; 3c on 2026-04-21)
 
-Scoped webapp view at `/` (Option B — Dashboard is now the home route; entries list moved to `/entries`). Uses Chart.js 4
-(already in `journal-webapp` via `src/utils/chartjs-config.ts`) styled to match the Mosaic aesthetic.
+Unified DashboardView at `/` (entries list at `/entries`). Chart.js 4 throughout. Sub-epic 3c
+shipped under different endpoint names than originally planned and as a CSS-grid heatmap
+rather than `chartjs-chart-matrix` (open question 6 resolved against the plugin).
 
-**Charts**
+**Live charts** (all in `webapp/src/views/DashboardView.vue`):
 
-1. ✅ **Writing frequency** — entries per bin (week / month / quarter / year) over a selectable date range. Pure SQL
-   aggregation, no LLM. Shipped 2026-04-11 as sub-epic 3a.
-2. ✅ **Word count trend** — total words per bin, rendered alongside writing frequency. Same endpoint, second series.
-   Shipped 2026-04-11 as sub-epic 3a.
-3. ⏳ **People mentions over time** — stacked area / multi-line, top-N people. Depends on Tier 1 item 1 (real entity
-   extraction) before it's meaningful. **3c, not yet started.**
-4. ✅ **Mood dimensions** — per-entry scoring via Claude Sonnet 4.5 (env-overridable), opt-in via
-   `JOURNAL_ENABLE_MOOD_SCORING`. Facet set is user-editable via `config/mood-dimensions.toml` with mixed bipolar
-   (`-1..+1`) / unipolar (`0..+1`) scale types per facet. Regeneration via
-   `journal backfill-mood [--force | --stale-only] [--prune-retired] [--dry-run]`. See `docs/mood-scoring.md`.
-5. ⏳ **Topic frequency heatmap or bar chart** — most-mentioned entities of type `topic` over time. Feeds off entity
-   extraction. **3c, blocked on item 1.**
+1. ✅ Writing frequency (sub-epic 3a, 2026-04-11)
+2. ✅ Word count trend (sub-epic 3a, 2026-04-11)
+3. ✅ Mood dimensions with variance bands and grouped/ungrouped toggles
+   (sub-epic 3b, backend + frontend 2026-04-11; grouped toggles + admin Moods tab 2026-05-05)
+4. ✅ Entity-trends multi-line chart (sub-epic 3c, 2026-04-21)
+5. ✅ Entity-distribution doughnut with expand/collapse legend (3c, 2026-04-21)
+6. ✅ Calendar heatmap (CSS grid, 3c, 2026-04-21)
+7. ✅ Mood-entity correlation chart (bonus, 2026-04-21)
+8. ✅ Word-count distribution chart (bonus, 2026-04-21)
 
-**Dashboard features**
+**Live backend endpoints** in `src/journal/api/dashboard.py`:
 
-1. Date range selector (last month / 3 months / 6 months / 1 year / all)
-2. Bin width selector (day / week / month)
-3. Responsive layout
+1. ✅ `GET /api/dashboard/writing-stats` (combined entry-count + word-count)
+2. ✅ `GET /api/dashboard/mood-dimensions`, `GET /api/dashboard/mood-trends`
+3. ✅ `GET /api/dashboard/entity-distribution`, `GET /api/dashboard/entity-trends`
+4. ✅ `GET /api/dashboard/calendar-heatmap`
+5. ✅ `GET /api/dashboard/mood-entity-correlation`, `GET /api/dashboard/word-count-distribution`
 
-**Backend endpoints** needed:
+**Mood scoring decision changed:** `JOURNAL_ENABLE_MOOD_SCORING` now **defaults to `true`**
+(opt-out via `=false`). Reversal of open question 2 in the original tier-1-plan; happened
+during the deployment fix on 2026-04-13 and was made user-toggleable from the Settings page.
 
-1. `GET /api/dashboard/writing-frequency?from=...&to=...&bin=week`
-2. `GET /api/dashboard/word-count-trend?from=...&to=...&bin=week`
-3. `GET /api/dashboard/mentions?from=...&to=...&top_n=10` (wraps entity-mention aggregation)
-4. `GET /api/dashboard/mood-trends?from=...&to=...&bin=week` (wraps `QueryService.get_mood_trends()` — already exists)
-5. `GET /api/dashboard/topic-frequency?from=...&to=...` (wraps `QueryService.get_topic_frequency()` — already exists)
-
-**New dependency — ingestion-time scoring:** Charts 4 and 5 need per-entry mood/topic scores stored in SQLite so the
-dashboard can aggregate without re-running an LLM on every load. Two options:
-
-1. **At ingestion:** during `_process_text` (or immediately after), fire a single scoring LLM call per entry, store
-   results in a new `mood_scores` row (table already exists from migration 0001 but is currently unused). This is the
-   preferred path per the phase-2-brief — pay once at ingest, query cheaply forever.
-2. **On demand:** score an entry the first time the dashboard asks for it, cache the result. Lazy but adds latency spikes
-   on first dashboard load after batch ingestion.
-
-Go with option 1. Keep the scorer behind a Protocol so it's swappable. Make it opt-in via `JOURNAL_ENABLE_MOOD_SCORING`
-so it doesn't silently burn tokens on users who don't want it.
-
-**Ordering within the item:**
-
-1. Ship writing-frequency + word-count charts first (no LLM cost, immediate value).
-2. Then mood scoring + mood chart.
-3. Then people/topic charts, which depend on Tier 1 item 1 having run against real entries.
-
-**Source:** `docs/phase-2-brief.md` "Web Dashboard", `journal-webapp/docs/future-features.md` "Phase 2: Dashboards".
+**Source:** [`tier-1-plan.md`](./tier-1-plan.md) (closed),
+`webapp/journal/260421-unified-dashboard-and-new-charts.md`,
+`webapp/journal/260413-mood-scoring-deployment-fix.md`.
 
 ---
 
@@ -181,6 +178,10 @@ Dedicated webapp `/search` view.
    chars to `<mark>` tags with HTML escaping).
 4. ✅ Click-through to `EntryDetailView` with `?chunk=N` on semantic hits; `EntryDetailView` reads the param, flips the
    overlay to chunks mode, and `scrollIntoView` on the matching chunk badge.
+
+**Subsequent overhaul (2026-05-01):** the `mode=keyword|semantic` toggle was removed and the
+backend replaced with a hybrid pipeline (BM25 + dense + RRF + Haiku rerank). See
+[`search.md`](./search.md) and Closed item 42.
 
 **Source:** `journal-webapp/docs/future-features.md` "Phase 3: Search UI" (now obsolete — this roadmap entry is the
 record of what actually shipped).
@@ -243,18 +244,11 @@ in any meaningful way.
 
 ---
 
-### 7. Entity extraction trigger UI `[webapp]`
+### 7. ~~Entity extraction trigger UI~~ `[webapp]` — ✅ superseded 2026-04-13
 
-An "Extract entities" button next to Save/Delete in `EntryDetailView` that calls the existing `triggerEntityExtraction()`
-API client function.
-
-**Why deferred:** the 2026-04-11 entity session chose to keep the initial population on the CLI so the user could
-spot-check results without a button accidentally triggering extraction on every page view. Once the user has done the
-first real run (Tier 1 item 1) and is comfortable with the output, this becomes worth building.
-
-**Blocker:** Tier 1 item 1.
-
-**Source:** `journal-webapp/journal/260411-auth-header-overlay-cache-entity-views.md` "Deferred to Phase 2".
+Resolved by **auto-reextraction on save** (`server/journal/260413-auto-entity-reextraction-on-save.md`):
+extraction now runs automatically as part of the save pipeline, so a manual trigger button is
+no longer needed. Manual extraction is still available via CLI for backfills.
 
 ---
 
@@ -463,12 +457,12 @@ Fix options:
 
 ### D2. No entity chips cache invalidation on entry save `[webapp]`
 
-When the user saves an edited entry, the entity chip strip in `EntryDetailView` continues to show entities extracted from
-the _pre-edit_ text until a full page reload.
+When the user saves an edited entry, the entity chip strip in `EntryDetailView` may continue to
+show entities extracted from the _pre-edit_ text until a full page reload.
 
-Not a bug exactly: chips show historical extraction state, and the user needs to explicitly re-run extraction anyway
-before the entity graph is updated. Worth revisiting if and when Tier 2 item 7 (in-webapp extraction trigger) ships — at
-that point the workflow becomes "edit, save, re-extract from within the webapp" and the stale chips become a real UX bug.
+Now that auto-reextraction-on-save shipped (Closed item 23), the stale-chips condition is more
+likely to surface as a real UX bug rather than a benign display lag. Worth revisiting — promote
+to Tier 2 if the user observes it.
 
 **Source:** `journal-webapp/journal/260411-auth-header-overlay-cache-entity-views.md` "Risks and known gaps".
 
@@ -511,23 +505,18 @@ rest to protect against disk loss. Out of scope for the codebase.
 
 ---
 
-### D7. Webapp "Phase 2: Authentication" from `future-features.md` `[webapp]`
+### D7. ~~Webapp "Phase 2: Authentication" from `future-features.md`~~ `[webapp]` — ✅ resolved 2026-04-15
 
-The old `future-features.md` listed "Phase 2: Authentication" — login page, JWT, user table. **This is obsolete** as
-written. The backend shipped bearer-token auth in the 2026-04-11 security session; the webapp sends
-`Authorization: Bearer <token>` from `JOURNAL_API_TOKEN` in its env.
-
-What _might_ still be worth doing:
-
-1. A lightweight settings page where the user can set/change the API token without editing env files (nice to have, not
-   important on a single-user tool).
-2. If the tool ever goes multi-user, that's a full-blown rewrite of the auth model — not a "Phase 2" item, a new project.
-
-Leaving this in the deferred list only as a marker so the old doc's item doesn't get quietly forgotten.
+What was deferred here is now done. The bearer-token shim from the 2026-04-11 security session
+was followed by the **multi-user auth + tier-1 data isolation** workstream that landed
+2026-04-14 → 2026-04-15 (Closed item 25). The webapp now has registration, email-verification,
+hashed sessions, per-user data isolation, an Admin/Settings split, and an API-keys view at
+`/api-keys`. See [`security-roadmap.md`](./security-roadmap.md) (Tier 1 closed; later tiers
+remain).
 
 ---
 
-## Closed — shipped between 2026-03-22 and 2026-04-11 (recap)
+## Closed — shipped between 2026-03-22 and 2026-04-12 (recap)
 
 Included so we don't accidentally re-surface these as TODOs.
 
@@ -577,6 +566,105 @@ Included so we don't accidentally re-surface these as TODOs.
     endpoints.
 22. Mobile layout fix (2026-04-12) — corrected text panel was invisible on small screens due to absolute-positioned
     children in a flex-col layout. Both editor sections now have `min-h-[300px]` on mobile.
+
+## Closed — shipped between 2026-04-13 and 2026-05-09
+
+Grouped by workstream rather than by commit; see the linked journal entries for detail.
+
+23. **Auto-entity-reextraction on save (2026-04-13)** — entity extraction runs automatically
+    as part of the save pipeline (`server/journal/260413-auto-entity-reextraction-on-save.md`).
+    Supersedes Tier 2 item 7.
+24. **Mood-scoring deployment fix + default reversal (2026-04-13)** — frontend mood chart
+    confirmed live (was already shipped on 2026-04-11), and `JOURNAL_ENABLE_MOOD_SCORING`
+    flipped to default `true` (`config.py:263`). Now toggleable at runtime from Settings.
+25. **Multi-user auth + tier-1 data isolation (2026-04-14 → 2026-04-15)** — per-user data
+    isolation throughout the schema, hashed sessions, follow-up bugfixes for verification
+    spinner flicker and stale view-mode state. Origin doc:
+    [`security-roadmap.md`](./security-roadmap.md) (Tier 1 closed 2026-04-15). Webapp side:
+    `webapp/journal/260415-multi-tenant-bugfixes.md`.
+26. **Source-type taxonomy rename (2026-04-15)** — `webapp/journal/260415-rename-source-type-taxonomy.md`.
+27. **Search UX improvements (2026-04-15, 2026-05-01)** — quick-pick presets, chronological
+    sort, spinner-on-search, "All time" preset normalisation.
+28. **Unified Dashboard expansion (2026-04-20 → 2026-04-21)** — Insights page merged into
+    `/`. Five new charts beyond 3a/3b: entity-trends multi-line, entity-distribution
+    doughnut, calendar heatmap (CSS grid), mood-entity correlation, word-count distribution.
+    See `webapp/journal/260421-unified-dashboard-and-new-charts.md`. Sub-epic 3c of the
+    original Tier 1 dashboard item.
+29. **Bell rehydration fix + dashboard chart improvements (2026-04-21)** — webapp polish.
+30. **Sticky filters + dashboard drilldown (2026-04-21)** — webapp.
+31. **Dynamic dashboard descriptions + heatmap fill (2026-04-22)** — webapp.
+32. **Wake lock + voice confidence scoring (2026-04-22)** — `useWakeLock` composable using
+    Screen Wake Lock API for long voice recordings; transcription confidence scoring on
+    server side. `webapp/journal/260422-wake-lock-and-voice-confidence.md` and
+    `server/journal/260422-transcription-confidence-scoring.md`.
+33. **Cost estimates + editable API pricing (2026-04-23)** — editable pricing table
+    (`webapp/journal/260423-cost-estimates-and-pricing.md`); ingestion job results enriched
+    with token/cost data. Plus Dockerfile `uv run` removed from boot path.
+34. **Job History improvements (2026-04-23 → 2026-05-03)** — color-coded type badges, raw
+    params popovers, polish, tweaks at `JobHistoryView.vue`.
+35. **Pushover notification stack (2026-04-23 → 2026-04-30)** — `PushoverNotificationService`
+    with per-user creds, six notification topics, and a `health_poll.py` daemon thread
+    pinging SQLite/Chroma/disk every 5 min. Webapp Pushover settings UI on Admin/Settings.
+    Series: `260423-pushover-notifications.md`, `260423-pushover-notifications-ui.md`,
+    `260430-pushover-bullet-format.md`.
+36. **Compress / individual-toasts pipeline notifications (2026-04-25 → 2026-04-27)** —
+    pipeline-stage toasts collapsed into one Pushover bullet message;
+    individual stage toasts in the webapp.
+37. **Canonical-name validator + possessive false-positive fix (2026-04-27)** — entity
+    extraction quality work on the real corpus.
+38. **Context-driven Whisper priming + date-heading detection (2026-04-28)** —
+    `OCR_CONTEXT_DIR` markdown also drives Whisper; Haiku-based heading detector lifts
+    leading dates into `# ` markdown headings on `final_text`.
+    `server/journal/260428-context-transcription-and-date-headings.md`.
+39. **Responsive entry-footer spacing (2026-04-28)** — webapp.
+40. **OCR/voice date-extraction fixes (2026-05-04)** — preserve dictated leading dates as
+    `entry_date`. `server/journal/260504-fix-voice-date-extraction.md`.
+41. **Live reload for file-backed config (2026-05-01)** — three admin-only endpoints
+    `POST /api/admin/reload/{ocr-context,transcription-context,mood-dimensions}` to re-read
+    configs without server restart. Webapp Admin Server UI surfaces it.
+42. **Hybrid search (2026-05-01)** — replaced `mode=keyword|semantic` with a hybrid pipeline
+    (BM25 + dense in parallel, RRF k=60 fusion, Claude Haiku listwise rerank of top-30). Mode
+    toggle removed from SearchView. Reference: [`search.md`](./search.md);
+    `server/journal/260501-hybrid-search.md`.
+43. **Multi-provider transcription (2026-05-01)** — `build_transcription_provider()` factory
+    composing primary + retry/fallback + shadow wrappers. Gemini 2.5 Pro as alternative
+    primary, whisper-1 as fallback, parallel shadow adapter for offline diff evaluation.
+    Reference: [`transcription-providers.md`](./transcription-providers.md).
+44. **Save-entry Pushover toggles (2026-05-01)** — per-user notification opt-outs.
+45. **Strip leading date from body (2026-05-01)** — body cleanup after date promotion.
+46. **Settings vs Admin rationalization (2026-05-01)** — split per-user `/settings` from
+    system-wide `/admin/*` behind `requiresAdmin`.
+47. **Local dev auth runbook (2026-05-03)** — `server/journal/260503-local-dev-auth-runbook.md`.
+48. **Mood dimensions overhaul + admin Moods tab (2026-05-05)** — grouped mood toggles,
+    admin Moods tab, mood-trend tooltip group chips, `frustration` rendered as inverted
+    "calm". Series: `260505-mood-dimension-tweaks.md`, `260505-mood-dimensions-meta-block.md`,
+    `webapp/journal/260505-mood-group-tooltips-and-admin-moods-tab.md`.
+49. **Entity quality program (2026-05-06 → 2026-05-08)** — large workstream covering:
+    aliases CRUD + async re-embed-on-description-edit, casing single source of truth on the
+    server (`services/entity_naming.py:smart_title_case`, client title-caser removed),
+    soft quarantine + merge-candidate detection, persistent dedup rejection memory,
+    past-dismissals audit/undo panel. Series: `260506-entity-aliases-and-reembed-job-slice-a.md`,
+    `260506-entity-casing-quarantine-and-merge-candidates.md`,
+    `260507-known-entity-context-stage-0.md`,
+    `260508-entity-casing-single-source-of-truth.md`,
+    `260508-entity-dedup-rejection-memory.md`,
+    `webapp/journal/260507-entity-aliases-ui-and-recognition-toasts.md`,
+    `webapp/journal/260508-past-dismissals-panel.md`.
+50. **Refactor round 3 — module splits (2026-05-07 → 2026-05-08)** — `api.py` →
+    domain modules; `db/repository.py` → package; `mcp_server.py` → `mcp_server/` package
+    (closed sub-plan); `auth_api` → 6-cluster split; `services/ingestion.py` → per-media
+    package; `entitystore/store.py` → mixins + protocol; `cli.py` → command-group package.
+    Plus item-6 exceptions batch 1 and shared-connection race fix. See
+    [`refactor-round-3.md`](./refactor-round-3.md) for the live tracker.
+51. **Entity dedup persistent rejections + per-pair candidates + signature tightening (2026-05-08)** —
+    `2a5990c` "Entity dedup: persistent rejections, per-pair candidates, signature tightening (#12)".
+52. **Migration 0022 idempotency fix (2026-05-08)** — orphan-tolerant + idempotent on
+    partial-failure retry. Validates the migration-testing principle now captured in memory.
+53. **Dependabot config (2026-05-08)** — grouped security + minor/patch PR config.
+54. **Entry-edit panel swap (2026-05-08)** — Corrected Text on the left in `EntryDetailView`.
+55. **Slice C follow-ups (recent webapp)** — docs, Docker healthcheck fix, prettier sweep.
+56. **Doc cleanup + plan-hygiene conventions applied retroactively (2026-05-08)** —
+    `server/journal/260508-doc-cleanup-and-plan-hygiene.md`.
 
 ---
 

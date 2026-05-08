@@ -1,13 +1,41 @@
 # Tier 1 Implementation Plan
 
-**Status:** active. **Last updated:** 2026-04-11. **Supersedes:** none.
-Items 2, 3a, 3b, and 4 shipped 2026-04-11; Items 1 (entity-extraction first run) and 3c
-(people/topic charts) remain. Expands the 4 Tier 1 items from
-[`roadmap.md`](./roadmap.md) into concrete work units, a recommended build order, and the
-open questions that need a decision before coding starts.
+**Status:** closed 2026-05-09. All four Tier 1 items are now done. Kept as a record of the
+planning round and the open-question decisions. New work moves directly through
+[`roadmap.md`](./roadmap.md); promote Tier 2 items into a successor `tier-2-plan.md` when one
+is needed.
 
-This doc sits between `roadmap.md` (long-lived intent) and the task list (per-session scratch). When a work unit starts,
-create a task and link back here; when it ships, cross it out in both this doc and the roadmap.
+**Closeout summary (2026-05-09 audit):**
+
+1. **Item 1 (entity-extraction first run)** — de facto complete. The entity tables have been
+   populated and actively maintained in prod since mid-April; downstream features built on
+   them include auto-reextraction-on-save (2026-04-13), `/api/dashboard/entity-distribution`
+   + `/entity-trends` (2026-04-21), the entity casing / aliases / quarantine / merge-candidate
+   / dedup-rejection workstream (2026-05-06 → 2026-05-08), and the past-dismissals audit panel
+   (2026-05-08). T1.1.b (dedup-threshold tuning) was never executed — `0.88` remains the
+   default in `config.py:363` — but no entry suggests this blocked anyone, so the implicit
+   decision is "default holds."
+2. **Item 2 (`/health` endpoint)** — shipped 2026-04-11 (unchanged from the original entry).
+3. **Item 3a (basic dashboard)** — shipped 2026-04-11.
+4. **Item 3b (mood scoring)** — backend shipped 2026-04-11. T1.3b.vii (frontend mood chart)
+   was also shipped 2026-04-11; the original plan entry was stale on the day it was written
+   and was corrected on 2026-04-13 (`journal/260413-mood-scoring-deployment-fix.md`). Open
+   question 2 was later reversed: `JOURNAL_ENABLE_MOOD_SCORING` now **defaults to True**
+   (`src/journal/config.py:263`), opt-out instead of opt-in. See `docs/mood-scoring.md`.
+5. **Item 3c (people + topic charts)** — shipped 2026-04-21 with different endpoint names and
+   chart shapes than this plan specified:
+   - Endpoints: `/api/dashboard/entity-distribution`, `/api/dashboard/entity-trends`,
+     `/api/dashboard/calendar-heatmap`, plus `/mood-entity-correlation` and
+     `/word-count-distribution` as bonus charts.
+   - Open question 6 (heatmap library) decided in favour of CSS grid + multi-line, not
+     `chartjs-chart-matrix` — no new npm dep.
+   - All shipped as part of the unified DashboardView, not as a separate Insights view.
+6. **Item 4 (Search UI)** — shipped 2026-04-11. Subsequently overhauled 2026-05-01 to a
+   hybrid (BM25 + dense + RRF + Haiku rerank) pipeline that drops the `mode=` toggle entirely;
+   see `docs/search.md` and `journal/260501-hybrid-search.md`.
+
+The original plan body, work-unit breakdown, build order, and open-question rationale are
+preserved below as reference.
 
 ---
 
@@ -109,9 +137,12 @@ Sizes use **S / M / L**:
 - **M** — half a day to a day of focused work; multi-file change, moderate tests.
 - **L** — more than a day; new subsystem, migration, or cross-repo coordination.
 
-### Item 1 — First real entity-extraction run `[server, ops]`
+### Item 1 — First real entity-extraction run `[server, ops]` — ✅ de facto shipped
 
-No code. All work units are operational.
+See closeout summary above. The work units below were never ticked off as a discrete checklist
+session, but the entity tables have been populated and worked against in prod since mid-April.
+T1.1.b (dedup tuning) was not executed; `ENTITY_DEDUP_SIMILARITY_THRESHOLD` remains at the
+default `0.88`. Treat the rest as historical.
 
 - **T1.1.a** `[S]` — Pick one entry you know well. Run `journal extract-entities --entry-id N`. Eyeball the output:
   canonical names, relationships, predicates, confidence scores. Deliverable: gut-check result ("looks right" / "list of
@@ -236,8 +267,12 @@ Backend in `journal-server@HEAD`. Webapp mood chart is the last remaining piece 
 - **T1.3b.vi** `[S]` ✅ **Dashboard endpoints.** Two new routes in `api.py`: `GET /api/dashboard/mood-dimensions`
   surfaces the live facet set for the frontend; `GET /api/dashboard/mood-trends` wraps `QueryService.get_mood_trends`
   with a `dimension` filter. Both bearer-authenticated. 7 integration tests.
-- **T1.3b.vii** `[M]` ⏳ **Frontend mood chart.** Pending in the webapp sibling commit — multi-line Chart.js chart with
-  dimension toggles, sharing the existing date range + bin picker.
+- **T1.3b.vii** `[M]` ✅ **Frontend mood chart.** Was actually shipped in the webapp on
+  2026-04-11 alongside the backend; the original entry here was stale on the day it was
+  written. Corrected 2026-04-13 in `journal/260413-mood-scoring-deployment-fix.md`. Now
+  rendered as a multi-line Chart.js chart with variance bands, grouped/ungrouped dimension
+  toggles, and a sibling mood-correlation chart (added 2026-04-21). See
+  `webapp/src/views/DashboardView.vue:381` (`renderMoodChart`).
 - **T1.3b.viii** `[M]` ✅ **Backend tests.** 80 new tests across the six backend files (repository CRUD, trends canonical
   dates, scoring service, backfill service, mood scorer adapter, dimensions loader, API endpoints, CLI). Frontend tests
   ship with the webapp commit.
@@ -247,23 +282,34 @@ canonical ISO dates instead of `%Y-W%W`-style format strings. The LLM-facing `jo
 accepts `day / week / month / quarter / year` for backward compatibility — only the supported-granularity set expanded;
 nothing was removed.
 
-#### Item 3c — People + topic charts
+#### Item 3c — People + topic charts — ✅ shipped 2026-04-21 (different shape)
 
-- **T1.3c.i** `[S]` — **Backend: mentions aggregation.** New repository method
-  `get_top_mentions(entity_type, start, end, bin, top_n)` that returns per-bin counts for the top-N entities of a given
-  type. Pure SQL over `entity_mentions` JOIN `entries`.
-- **T1.3c.ii** `[S]` — **Backend: entity-type frequency.** New method for the topic heatmap — counts of
-  `entity_type='topic'` mentions binned the same way.
-- **T1.3c.iii** `[S]` — **Endpoints.**
-  1. `GET /api/dashboard/mentions?entity_type=person&top_n=10&from=&to=&bin=week`
-  2. `GET /api/dashboard/topic-frequency?from=&to=&bin=week`
-- **T1.3c.iv** `[S]` — **Chart: people mentions.** Stacked area or multi-line.
-- **T1.3c.v** `[M]` — **Chart: topic heatmap.** Chart.js doesn't natively do heatmaps well — options are the matrix
-  plugin (`chartjs-chart-matrix`) or falling back to a grouped bar chart. **Open question** (see bottom).
-- **T1.3c.vi** `[M]` — **Tests.**
+What actually shipped (see `webapp/journal/260421-unified-dashboard-and-new-charts.md`):
 
-**Blocker:** all of 3c depends on Item 1 having populated the entity tables with real data. Don't start coding 3c until
-T1.1.c is complete.
+- **Backend** — `src/journal/api/dashboard.py`:
+  - `GET /api/dashboard/entity-distribution` (line 310) — entity mention counts grouped by
+    name, filtered by type and date. Covers T1.3c.i + T1.3c.ii intent.
+  - `GET /api/dashboard/entity-trends` (line 418) — top-N entities binned over time. Covers
+    T1.3c.iv intent.
+  - `GET /api/dashboard/calendar-heatmap` (line 373) — calendar heatmap, rendered as a CSS
+    grid in the frontend (no `chartjs-chart-matrix` dep). Open question 6 resolved in favour
+    of CSS grid + multi-line.
+  - Bonus: `GET /api/dashboard/mood-entity-correlation` (line 494),
+    `GET /api/dashboard/word-count-distribution` (line 560).
+- **Frontend** — `webapp/src/views/DashboardView.vue`: entity-trends multi-line chart, entity
+  distribution doughnut with expand/collapse legend, calendar heatmap CSS grid. All on the
+  unified `/` dashboard, not a separate Insights view.
+
+The original work-unit table is preserved below as a historical reference.
+
+- **T1.3c.i** `[S]` — Backend: mentions aggregation. *(replaced by `entity-distribution` +
+  `entity-trends`.)*
+- **T1.3c.ii** `[S]` — Backend: entity-type frequency. *(folded into the above.)*
+- **T1.3c.iii** `[S]` — Endpoints. *(shipped under different names — see above.)*
+- **T1.3c.iv** `[S]` — Chart: people mentions. *(shipped as `renderEntityTrendsChart`.)*
+- **T1.3c.v** `[M]` — Chart: topic heatmap. *(shipped as a CSS-grid calendar heatmap; matrix
+  plugin not adopted.)*
+- **T1.3c.vi** `[M]` — Tests. *(shipped alongside.)*
 
 ---
 
@@ -369,6 +415,11 @@ data. Even if item 1 is kicked off in parallel, the batch run takes time. Work o
 ---
 
 ## Open questions (need decisions before coding)
+
+> **Historical note (2026-05-09):** these were the planning-time questions and recommendations.
+> Outcomes recorded in the work-unit sections above and the closeout summary at the top of
+> this doc. Notably, Q2 was reversed — `JOURNAL_ENABLE_MOOD_SCORING` defaults to **True**, not
+> False; Q6 was decided in favour of CSS-grid heatmap rather than `chartjs-chart-matrix`.
 
 Numbered so you can answer by number.
 
