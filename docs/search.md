@@ -107,8 +107,9 @@ class Reranker(Protocol):
 - **`AnthropicReranker`** (default). Sends a single listwise prompt
   to a Claude model — by default `claude-haiku-4-5`. The model
   ranks the candidates and returns scored indices with one-line
-  reasons. Latency: 200–500 ms typical. Cost: roughly $0.001 per
-  search at 30 candidates × ~500 tokens each. The system prompt is
+  reasons. Latency: 200–500 ms typical. Cost: roughly $0.015 per
+  search at 30 candidates × ~500 tokens each (~15K input tokens at
+  Haiku 4.5's $1/MTok input rate, plus a small output term). The system prompt is
   marked `cache_control` for forward compatibility (current Haiku
   cache minimum is above the prompt size, so caching is currently
   a no-op).
