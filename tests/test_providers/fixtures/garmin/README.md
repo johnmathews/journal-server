@@ -32,3 +32,12 @@ so adding more extracted fields later doesn't require fixture changes.
 | `get_training_status` | `training_load_chronic` | `mostRecentTrainingLoadBalance.metricsTrainingLoadChronic` |
 | `get_training_readiness` | `training_readiness` | `[0].score` |
 | `get_activities_by_date` | each list element → `GarminActivitySummary` | see `list_activities_response.json` |
+
+## `raw_payloads_per_endpoint` keys
+
+The `GarminDailyMetrics.raw_payloads_per_endpoint` dict keys also appear as the
+`endpoint` column value in `fitness_raw_garmin`, so they must match the schema's
+CHECK constraint (`sleep, hrv, body_battery, training_load, training_readiness,
+stress, activities, activity_detail`). Notably the dict key for the
+`get_training_status` payload is `training_load` (not `training_status`) — the
+schema's terminology takes precedence because it's load-bearing for inserts.

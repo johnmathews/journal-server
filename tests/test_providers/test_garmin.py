@@ -179,7 +179,7 @@ def test_get_daily_aggregates_all_fields_from_fixtures() -> None:
     # All seven endpoint payloads are preserved verbatim for the raw archive.
     assert set(metrics.raw_payloads_per_endpoint.keys()) == {
         "sleep", "hrv", "body_battery", "stress",
-        "training_status", "training_readiness",
+        "training_load", "training_readiness",
     }
     for payload in metrics.raw_payloads_per_endpoint.values():
         # Every payload round-trips through json.dumps — what gets archived.

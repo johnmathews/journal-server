@@ -639,6 +639,59 @@ class PushoverNotificationService:
 
     # ── Health alerts ────────────────────────────────────────────────
 
+    def notify_fitness_auth_broken(self, user_id: int, source: str) -> None:
+        """Notify a user that fitness auth needs re-authentication (fire-once).
+
+        Caller (the W6 fetch service) only invokes this on the
+        transition into ``broken`` — re-broken syncs do not re-fire.
+        """
+        try:
+            if not self._is_topic_enabled(user_id, "notif_fitness_auth_broken"):
+                return
+            user_key, app_token = self._resolve_credentials(user_id)
+            if not user_key or not app_token:
+                return
+            label = source.capitalize()
+            title = f"{label} re-auth needed"
+            message = f"{label} fitness sync is paused. Re-authenticate in the app."
+            self._post_to_pushover(
+                user_key, app_token, title, message, PRIORITY_HIGH,
+            )
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "Failed to send fitness-auth-broken notification for user %s/%s",
+                user_id, source, exc_info=True,
+            )
+
+    def notify_fitness_sync_failure(
+        self, user_id: int, source: str, attempts: int,
+    ) -> None:
+        """Notify a user that fitness sync has failed N consecutive times.
+
+        Caller (the W6 fetch service) only invokes this on the Nth
+        consecutive transient failure (N = configured threshold).
+        """
+        try:
+            if not self._is_topic_enabled(user_id, "notif_fitness_sync_failure"):
+                return
+            user_key, app_token = self._resolve_credentials(user_id)
+            if not user_key or not app_token:
+                return
+            label = source.capitalize()
+            title = f"{label} sync failing"
+            message = (
+                f"{label} fitness sync has failed {attempts} times in a row. "
+                "Check service status."
+            )
+            self._post_to_pushover(
+                user_key, app_token, title, message, PRIORITY_NORMAL,
+            )
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "Failed to send fitness-sync-failure notification for user %s/%s",
+                user_id, source, exc_info=True,
+            )
+
     def notify_health_alert(
         self,
         component: str,

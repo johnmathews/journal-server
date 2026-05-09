@@ -780,3 +780,70 @@ class TestFitnessNotificationTopics:
         from journal.services.notifications import _JOB_TYPE_LABELS
         assert "fitness_sync_strava" in _JOB_TYPE_LABELS
         assert "fitness_sync_garmin" in _JOB_TYPE_LABELS
+
+
+class TestNotifyFitnessAuthBroken:
+    """notify_fitness_auth_broken is a fire-once topic — caller is
+    responsible for invoking only on transition. The notification
+    service just gates on the topic toggle."""
+
+    def test_posts_high_priority_with_source_label(
+        self,
+        svc: PushoverNotificationService,
+        mock_user_repo: MagicMock,
+    ) -> None:
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = _make_urlopen_response({"status": 1})
+            svc.notify_fitness_auth_broken(user_id=1, source="strava")
+
+            assert mock_urlopen.called
+            req = mock_urlopen.call_args[0][0]
+            posted_data = req.data.decode()
+            assert "Strava+re-auth+needed" in posted_data
+            assert "priority=1" in posted_data  # PRIORITY_HIGH
+
+    def test_skips_when_topic_disabled(
+        self,
+        svc: PushoverNotificationService,
+        mock_user_repo: MagicMock,
+    ) -> None:
+        def pref_side_effect(user_id: int, key: str):
+            return False if key == "notif_fitness_auth_broken" else None
+
+        mock_user_repo.get_preference.side_effect = pref_side_effect
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            svc.notify_fitness_auth_broken(1, "strava")
+            mock_urlopen.assert_not_called()
+
+
+class TestNotifyFitnessSyncFailure:
+    """notify_fitness_sync_failure fires after N consecutive failures."""
+
+    def test_posts_normal_priority_with_attempts_count(
+        self,
+        svc: PushoverNotificationService,
+        mock_user_repo: MagicMock,
+    ) -> None:
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = _make_urlopen_response({"status": 1})
+            svc.notify_fitness_sync_failure(user_id=1, source="garmin", attempts=3)
+
+            assert mock_urlopen.called
+            req = mock_urlopen.call_args[0][0]
+            posted_data = req.data.decode()
+            assert "Garmin+sync+failing" in posted_data
+            assert "failed+3+times" in posted_data
+            assert f"priority={PRIORITY_NORMAL}" in posted_data
+
+    def test_skips_when_topic_disabled(
+        self,
+        svc: PushoverNotificationService,
+        mock_user_repo: MagicMock,
+    ) -> None:
+        def pref_side_effect(user_id: int, key: str):
+            return False if key == "notif_fitness_sync_failure" else None
+
+        mock_user_repo.get_preference.side_effect = pref_side_effect
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            svc.notify_fitness_sync_failure(1, "garmin", 3)
+            mock_urlopen.assert_not_called()

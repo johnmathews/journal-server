@@ -243,7 +243,7 @@ class GarminConnectGarminProvider:
                 "hrv": hrv,
                 "body_battery": body_battery,
                 "stress": stress,
-                "training_status": training_status,
+                "training_load": training_status,
                 "training_readiness": training_readiness,
             },
         )
