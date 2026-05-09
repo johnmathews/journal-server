@@ -28,12 +28,23 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict, runtime_checkable
 
 from stravalib import Client
+from stravalib.exc import AccessUnauthorized, AuthError
 
 if TYPE_CHECKING:
     from stravalib.model import DetailedActivity, SummaryActivity
 
 
 logger = logging.getLogger(__name__)
+
+
+class StravaAuthError(Exception):
+    """Raised when Strava returns 401/403 — the fetch service classifies as ``auth_broken``.
+
+    Translates ``stravalib.exc.AccessUnauthorized`` (HTTP 401/403 on data calls)
+    and ``stravalib.exc.AuthError`` (refresh-grant rejected) into a single typed
+    contract so ``services/fitness/`` depends only on the provider module, not on
+    ``stravalib``. Mirrors :class:`journal.providers.garmin.GarminAuthError`.
+    """
 
 
 @dataclass(frozen=True)
@@ -126,11 +137,18 @@ class StravalibStravaProvider:
     def list_activities(
         self, *, after: datetime, before: datetime,
     ) -> Iterator[StravaActivitySummary]:
-        for activity in self._client.get_activities(after=after, before=before):
-            yield _summary_from_stravalib(activity)
+        try:
+            activities = self._client.get_activities(after=after, before=before)
+            for activity in activities:
+                yield _summary_from_stravalib(activity)
+        except (AccessUnauthorized, AuthError) as exc:
+            raise StravaAuthError(str(exc)) from exc
 
     def get_activity_detail(self, source_id: str) -> StravaActivitySummary:
-        activity = self._client.get_activity(int(source_id))
+        try:
+            activity = self._client.get_activity(int(source_id))
+        except (AccessUnauthorized, AuthError) as exc:
+            raise StravaAuthError(str(exc)) from exc
         return _summary_from_stravalib(activity)
 
     def refresh_token_if_needed(self) -> None:
@@ -140,14 +158,21 @@ class StravalibStravaProvider:
         all three token fields are populated; we still call this
         explicitly at fetch-service boundaries so the persisted ISO
         timestamp matches what the in-memory client believes.
+
+        Raises :class:`StravaAuthError` if the refresh grant is rejected
+        (revoked refresh token, deauthorised app) — the fetch service
+        treats this as ``auth_broken``.
         """
         if not _expired(self._token_expires_at):
             return
-        token = self._client.refresh_access_token(
-            client_id=self._client_id,
-            client_secret=self._client_secret,
-            refresh_token=self._refresh_token,
-        )
+        try:
+            token = self._client.refresh_access_token(
+                client_id=self._client_id,
+                client_secret=self._client_secret,
+                refresh_token=self._refresh_token,
+            )
+        except (AccessUnauthorized, AuthError) as exc:
+            raise StravaAuthError(str(exc)) from exc
         new_expires_iso = _epoch_to_iso(int(token["expires_at"]))
         self._access_token = token["access_token"]
         self._refresh_token = token["refresh_token"]

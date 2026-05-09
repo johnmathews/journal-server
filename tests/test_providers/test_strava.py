@@ -8,10 +8,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from stravalib.exc import AccessUnauthorized, AuthError
 from stravalib.model import DetailedActivity, SummaryActivity
 
 from journal.providers.strava import (
     StravaActivitySummary,
+    StravaAuthError,
     StravalibStravaProvider,
     StravaProvider,
     Tokens,
@@ -334,3 +336,47 @@ def test_get_activity_detail_returns_summary_shape() -> None:
     summary = provider.get_activity_detail("42")
     assert summary.source_id == "42"
     assert summary.calories_kcal == 412
+
+
+# 6. 401/403 → typed StravaAuthError ----------------------------------
+
+
+def _raiser(exc: BaseException) -> Any:
+    def _f(*args: Any, **kwargs: Any) -> Any:
+        raise exc
+    return _f
+
+
+def test_list_activities_translates_access_unauthorized_to_typed_error() -> None:
+    """A 401 from stravalib propagates as StravaAuthError, not the SDK type."""
+    provider, fake, _ = _make_provider()
+    fake.get_activities = _raiser(  # type: ignore[method-assign]
+        AccessUnauthorized("Authorization Error: ..."),
+    )
+
+    with pytest.raises(StravaAuthError):
+        list(provider.list_activities(
+            after=datetime(2026, 4, 1, tzinfo=UTC),
+            before=datetime(2026, 5, 1, tzinfo=UTC),
+        ))
+
+
+def test_get_activity_detail_translates_access_unauthorized_to_typed_error() -> None:
+    provider, fake, _ = _make_provider()
+    fake.get_activity = _raiser(AccessUnauthorized("401"))  # type: ignore[method-assign]
+
+    with pytest.raises(StravaAuthError):
+        provider.get_activity_detail("42")
+
+
+def test_refresh_translates_auth_error_to_typed_error() -> None:
+    """A revoked refresh token surfaces as AuthError; adapter wraps it for W6."""
+    provider, fake, _ = _make_provider(
+        token_expires_at="2020-01-01T00:00:00Z",  # forces refresh
+    )
+    fake.refresh_access_token = _raiser(  # type: ignore[method-assign]
+        AuthError("refresh grant rejected"),
+    )
+
+    with pytest.raises(StravaAuthError):
+        provider.refresh_token_if_needed()
