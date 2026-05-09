@@ -119,7 +119,7 @@ class Reranker(Protocol):
   rerank order.
 
 Both adapters fall back transparently when something goes wrong:
-a network/API error, malformed model output, or unparseable JSON
+a network/API error, malformed model output, or unparsable JSON
 all degrade to RRF-only ordering rather than 500-ing the request.
 The fallback is logged at WARN level so operators can see when it
 happens.

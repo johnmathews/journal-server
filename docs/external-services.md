@@ -73,8 +73,8 @@ If `OCR_DUAL_PASS=false`, the secondary OCR row drops out and you get 8 + 5 = 13
 ### Cost estimate: 3-page, 500-word entry (upload + review)
 
 Assumes ~170 words per page, ~25 sentences total, ~4 chunks, ~8 entities with relationships. Costs below are for the
-single-pass case; with `OCR_DUAL_PASS=true` the OCR row is the sum of both providers (≈ $0.093 Opus + $0.032 Gemini ≈
-$0.125 per 3-page entry).
+single-pass case; with `OCR_DUAL_PASS=true` (the prod default) the OCR row is the sum of both providers (≈ $0.093 Opus
++ $0.032 Gemini ≈ $0.125 per 3-page entry), so the full per-entry total is ≈ $0.18 instead of ~$0.09.
 
 | Step                                   | Input tokens | Output tokens | Model                      |       Cost |
 | -------------------------------------- | -----------: | ------------: | -------------------------- | ---------: |
@@ -153,12 +153,12 @@ primary is uncertain and the secondary is confident. Gemini 3 / 3.1 Pro rows fur
 
 | Provider      | Model                 | Input $/MTok | Output $/MTok | Context | Batch   | Handwriting Score | Notes                                                |
 | ------------- | --------------------- | ------------ | ------------- | ------- | ------- | ----------------- | ---------------------------------------------------- |
-| **Anthropic** | Claude Opus 4.6       | $5.00        | $25.00        | 1M      | 50% off | ~91%+             | Prompt caching for glossary. Switchable alternative. |
+| **Anthropic** | Claude Opus 4.6       | $5.00        | $25.00        | 1M      | 50% off | ~91%+             | **Current dual-pass primary.** Prompt caching for glossary. |
 | **Anthropic** | Claude Sonnet 4.6     | $3.00        | $15.00        | 1M      | 50% off | ~91%              | Cheaper, similar quality for OCR.                    |
 | **Anthropic** | Claude Haiku 4.5      | $1.00        | $5.00         | 200K    | 50% off | —                 | Untested on cursive; worth benchmarking.             |
 | **Google**    | Gemini 3.1 Pro        | $2.00        | $12.00        | 1M      | 50% off | ~100%             | Top handwriting benchmark score.                     |
 | **Google**    | Gemini 3 Pro          | $2.00        | $12.00        | 1M      | 50% off | 100%              | Forward-pricing row. Best-in-class cursive.          |
-| **Google**    | Gemini 2.5 Pro        | $1.25        | $10.00        | 1M      | 50% off | 95%               | **Current primary.** Strong quality, lower cost.     |
+| **Google**    | Gemini 2.5 Pro        | $1.25        | $10.00        | 1M      | 50% off | 95%               | **Current dual-pass secondary.** Strong quality, lower cost. |
 | **Google**    | Gemini 2.5 Flash      | $0.30        | $2.50         | 1M      | 50% off | —                 | Budget option, quality TBD on cursive.               |
 | **Google**    | Gemini 2.5 Flash-Lite | $0.10        | $0.40         | 1M      | 50% off | —                 | Ultra-budget. Free tier available.                   |
 | **OpenAI**    | GPT-5.4               | $2.50        | $15.00        | 1.1M    | 50% off | ~97%              | "Original" detail mode for full-fidelity images.     |
@@ -595,8 +595,8 @@ Not every task needs a frontier model:
 Current dependencies from `pyproject.toml`:
 
 ```
-anthropic>=0.87,<1          # Entity extraction, mood scoring
-google-genai>=1,<2          # OCR (primary provider)
+anthropic>=0.87,<1          # OCR (dual-pass primary), entity extraction, mood scoring
+google-genai>=1,<2          # OCR (dual-pass secondary), alt transcription
 openai>=2.29,<3             # Transcription, embeddings
 chromadb-client>=1.5,<2     # Vector store
 mcp[cli]>=1.26,<2           # MCP server framework

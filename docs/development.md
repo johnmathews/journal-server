@@ -179,7 +179,7 @@ sqlite3 journal.db "UPDATE users SET email_verified = 1 WHERE email = 'dev@local
 ```
 
 Then sign in at http://localhost:5173/login. The same flow is documented in detail in
-[`journal-webapp/docs/development.md`](../../journal-webapp/docs/development.md#local-full-stack-quickstart),
+[`webapp/docs/development.md`](../../webapp/docs/development.md#local-full-stack-quickstart),
 including a SQL snippet for seeding fake job rows when you need to verify UI work on the Job History page.
 
 ### Seed data
