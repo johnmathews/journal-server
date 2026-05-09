@@ -1,0 +1,17 @@
+{
+  "userId": 12345,
+  "mostRecentVO2Max": {
+    "generic": {
+      "vo2MaxValue": 51.0
+    }
+  },
+  "mostRecentTrainingLoadBalance": {
+    "calendarDate": "2026-04-15",
+    "metricsTrainingLoadAcute": 412.5,
+    "metricsTrainingLoadChronic": 380.0,
+    "trainingBalanceFeedbackPhrase": "OPTIMAL"
+  },
+  "mostRecentTrainingStatus": {
+    "trainingStatus": "PRODUCTIVE"
+  }
+}

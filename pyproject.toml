@@ -17,6 +17,7 @@ dependencies = [
     "Pillow>=12.2,<13",
     "pillow-heif>=0.21,<1",
     "stravalib~=2.2",
+    "garminconnect==0.3.3",
 ]
 
 [project.scripts]

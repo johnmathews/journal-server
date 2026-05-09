@@ -1,0 +1,146 @@
+[
+  {
+    "activityId": 22000000001,
+    "activityName": "Morning run",
+    "activityType": {
+      "typeId": 1,
+      "typeKey": "running",
+      "parentTypeId": 17
+    },
+    "startTimeGMT": "2026-04-21 07:15:00",
+    "startTimeLocal": "2026-04-21 09:15:00",
+    "duration": 1830.0,
+    "movingDuration": 1790.0,
+    "distance": 5612.4,
+    "elevationGain": 42.1,
+    "averageHR": 148.6,
+    "maxHR": 169.0,
+    "calories": 412.0
+  },
+  {
+    "activityId": 22000000002,
+    "activityName": "Treadmill warmup",
+    "activityType": {
+      "typeId": 9,
+      "typeKey": "treadmill_running",
+      "parentTypeId": 1
+    },
+    "startTimeGMT": "2026-04-22 06:00:00",
+    "startTimeLocal": "2026-04-22 08:00:00",
+    "duration": 1200.0,
+    "movingDuration": 1200.0,
+    "distance": 2500.0,
+    "elevationGain": 0.0,
+    "averageHR": 138.0,
+    "maxHR": 152.0,
+    "calories": 175.0
+  },
+  {
+    "activityId": 22000000003,
+    "activityName": "Sunday gravel ride",
+    "activityType": {
+      "typeId": 2,
+      "typeKey": "cycling",
+      "parentTypeId": 17
+    },
+    "startTimeGMT": "2026-04-23 08:30:00",
+    "startTimeLocal": "2026-04-23 10:30:00",
+    "duration": 7200.0,
+    "movingDuration": 6900.0,
+    "distance": 45200.7,
+    "elevationGain": 410.0,
+    "averageHR": 132.8,
+    "maxHR": 158.0,
+    "calories": 1240.0
+  },
+  {
+    "activityId": 22000000004,
+    "activityName": "Mountain bike loop",
+    "activityType": {
+      "typeId": 6,
+      "typeKey": "mountain_biking",
+      "parentTypeId": 2
+    },
+    "startTimeGMT": "2026-04-24 14:00:00",
+    "startTimeLocal": "2026-04-24 16:00:00",
+    "duration": 5400.0,
+    "movingDuration": 5100.0,
+    "distance": 22300.0,
+    "elevationGain": 680.0,
+    "averageHR": 145.0,
+    "maxHR": 178.0,
+    "calories": 980.0
+  },
+  {
+    "activityId": 22000000005,
+    "activityName": "Strength session",
+    "activityType": {
+      "typeId": 13,
+      "typeKey": "strength_training",
+      "parentTypeId": 9
+    },
+    "startTimeGMT": "2026-04-25 17:30:00",
+    "startTimeLocal": "2026-04-25 19:30:00",
+    "duration": 2700.0,
+    "movingDuration": null,
+    "distance": null,
+    "elevationGain": null,
+    "averageHR": 118.0,
+    "maxHR": 152.0,
+    "calories": 245.0
+  },
+  {
+    "activityId": 22000000006,
+    "activityName": "Pool laps",
+    "activityType": {
+      "typeId": 26,
+      "typeKey": "lap_swimming",
+      "parentTypeId": 5
+    },
+    "startTimeGMT": "2026-04-26 07:30:00",
+    "startTimeLocal": "2026-04-26 09:30:00",
+    "duration": 2400.0,
+    "movingDuration": 2280.0,
+    "distance": 1500.0,
+    "elevationGain": 0.0,
+    "averageHR": 122.0,
+    "maxHR": 148.0,
+    "calories": 320.0
+  },
+  {
+    "activityId": 22000000007,
+    "activityName": "Coastal walk",
+    "activityType": {
+      "typeId": 9,
+      "typeKey": "walking",
+      "parentTypeId": 17
+    },
+    "startTimeGMT": "2026-04-27 10:00:00",
+    "startTimeLocal": "2026-04-27 12:00:00",
+    "duration": 3600.0,
+    "movingDuration": 3500.0,
+    "distance": 4200.0,
+    "elevationGain": 25.0,
+    "averageHR": 92.0,
+    "maxHR": 108.0,
+    "calories": 180.0
+  },
+  {
+    "activityId": 22000000008,
+    "activityName": "Yoga",
+    "activityType": {
+      "typeId": 23,
+      "typeKey": "yoga",
+      "parentTypeId": 17
+    },
+    "startTimeGMT": "2026-04-28 18:00:00",
+    "startTimeLocal": "2026-04-28 20:00:00",
+    "duration": 3000.0,
+    "movingDuration": null,
+    "distance": null,
+    "elevationGain": null,
+    "averageHR": null,
+    "maxHR": null,
+    "calories": 110.0
+  }
+]

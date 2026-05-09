@@ -1,0 +1,21 @@
+[
+  {
+    "userProfilePK": 12345,
+    "calendarDate": "2026-04-15",
+    "timestamp": "2026-04-15T07:30:00.0",
+    "timestampLocal": "2026-04-15T09:30:00.0",
+    "deviceId": 999000111,
+    "level": "HIGH",
+    "feedbackLong": "READY_TO_TRAIN",
+    "feedbackShort": "READY",
+    "score": 78,
+    "sleepScore": 84,
+    "sleepScoreFactorPercent": 90,
+    "recoveryTime": 18,
+    "recoveryTimeFactorPercent": 80,
+    "acwrFactorPercent": 70,
+    "hrvFactorPercent": 95,
+    "stressHistoryFactorPercent": 85,
+    "inputContext": "AFTER_WAKEUP_RESET"
+  }
+]
