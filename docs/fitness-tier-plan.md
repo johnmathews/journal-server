@@ -711,74 +711,92 @@ batch continues for everything that *can* be normalized. Drift is a code bug to 
 - `src/journal/services/jobs/validation.py` *(modify — add
   `FITNESS_SYNC_KEYS: dict[str, type] = {"user_id": int}`. The `source` is encoded in the job type
   name, not in params, matching how `mood_score_entry` doesn't carry a `dimension` param.)*
-- `src/journal/services/jobs/errors.py` *(modify — extend `is_transient` and `friendly_error` with
-  patterns for Strava 429/5xx (`stravalib.exc.RateLimitExceeded`, `stravalib.exc.Fault`) and Garmin
-  transient HTTP errors. Without this extension, `is_transient(e)` always returns False for fitness
-  errors and the retry path in the worker is unreachable — the existing function only matches
-  Gemini/Anthropic/OpenAI error strings.)*
-- `src/journal/models.py` *(modify — extend the `JobType` `Literal` (currently at line 315) with
-  `"fitness_sync_strava"` and `"fitness_sync_garmin"`)*
-- `src/journal/services/notifications.py` *(modify — also update `_SUCCESS_TOPIC_MAP` (line 117) to
-  map `"fitness_sync_strava"` and `"fitness_sync_garmin"` both to `"notif_fitness_sync_success"`,
-  AND `_JOB_TYPE_LABELS` (line 133) with human-readable labels for both. Without these map updates,
-  `notify_job_success` falls through to "always notify" and ignores the user's opt-in preference for
-  `notif_fitness_sync_success`.)*
-- `tests/test_services/test_jobs/test_workers/test_fitness_sync.py` *(new)*
+- `src/journal/models.py` *(modify — extend the `JobType` `Literal` with `"fitness_sync_strava"` and
+  `"fitness_sync_garmin"`)*
+- `tests/test_services/test_jobs/test_worker_fitness_sync.py` *(new — test files for workers live
+  flat in `tests/test_services/test_jobs/test_worker_<name>.py` per the W6/W7 convention)*
 
-**Worker body (sketch — same shape as `run_entity_reembed`):**
+**Plan correction (2026-05-09, W8 implementation).** Two earlier sketch assumptions did not survive
+contact with the W6/W7 code:
+
+1. The plan body sketch caught `FitnessAuthError` and a generic `Exception` (with `is_transient(e)`
+   re-raise). But W6 decision #4 swallows every non-auth exception inside `_FetchServiceBase.run_sync`
+   and returns `FitnessSyncResult(status="transient_failure")`; auth failures are also caught and
+   converted to `status="auth_broken"` (with the auth transition + Pushover handled inside the fetch
+   service). So the worker never sees `FitnessAuthError` from `run_sync` — it must branch on
+   `fetch_result.status`. This also means the planned `is_transient` / `friendly_error` extension for
+   stravalib / garminconnect errors is unnecessary at the worker layer — that classification already
+   happens inside the fetch service. (The errors-module file edit is dropped from W8.)
+2. W7 decision #2 keeps `_Drift` as an internal sentinel — `normalize_*` never raises
+   `FitnessNormalizeDrift` out. Drift is reported via `NormalizeResult.drift_count` and an admin-only
+   Pushover fire-once inside normalize itself. So the worker has no `FitnessNormalizeDrift` catch; it
+   simply records `drift_count` in the job's result JSON.
+3. W3 already populated `_SUCCESS_TOPIC_MAP["fitness_sync_strava" / "fitness_sync_garmin"]` and the
+   matching `_JOB_TYPE_LABELS` entries (verified at `notifications.py:150`+`172`). Notifications-file
+   edits are dropped from W8.
+
+The corrected worker body:
 
 ```python
-def run_fitness_sync_strava(ctx: WorkerContext, job_id: str, params: dict[str, Any]) -> None:
+def run_fitness_sync_strava(ctx, job_id, params):
     user_id = int(params["user_id"])
     try:
         ctx.jobs.mark_running(job_id)
         fetch_result = ctx.fetch_strava(user_id=user_id)
+        if fetch_result.status == "auth_broken":
+            ctx.jobs.mark_failed(
+                job_id,
+                "Strava authorization is broken — please re-authorize",
+            )
+            return  # fetch already fired notif_fitness_auth_broken
+        if fetch_result.status == "transient_failure":
+            ctx.jobs.mark_failed(
+                job_id,
+                "Strava sync failed transiently — will retry on next run",
+            )
+            return  # fetch already advanced threshold counter
+        if fetch_result.status == "running":
+            ctx.jobs.mark_succeeded(
+                job_id,
+                {"skipped": True, "reason": "already_running",
+                 "fetch": asdict(fetch_result)},
+            )
+            return
+        # status == "success"
         normalize_result = ctx.normalize_strava(user_id=user_id)
-        result_json = json.dumps({
+        result = {
             "fetch": asdict(fetch_result),
             "normalize": asdict(normalize_result),
-        })
-        ctx.jobs.mark_succeeded(job_id, result_json=result_json)
-    except FitnessNormalizeDrift as e:
-        # Drift is a code bug to fix, not a transient failure. Mark the job
-        # succeeded with a drift annotation — the alert routing happens
-        # inside the normalize service via notif_fitness_normalize_drift.
-        ctx.jobs.mark_succeeded(job_id, result_json=json.dumps({"drift": str(e)}))
-    except FitnessAuthError as e:
-        # Auth-broken propagated from W6. Worker marks failed; the auth-state
-        # transition + Pushover already happened inside the fetch service.
-        ctx.jobs.mark_failed(job_id, friendly_error(e))
-    except Exception as e:
-        ctx.jobs.mark_failed(job_id, friendly_error(e))
-        if not is_transient(e):
-            raise
+        }
+        ctx.jobs.mark_succeeded(job_id, result)
+        ctx.notifier.notify_success(user_id, "fitness_sync_strava", result)
+    except Exception as exc:  # terminal-state guard
+        # ... mark_failed + notify_failed, exactly like run_entity_reembed
 ```
 
 Fetch and normalize run in the same job so the operator sees one unified "fitness sync" lifecycle in
 the jobs UI. **This is committed, not optional** — the earlier draft hedged on splitting; we're not
 going to split unless normalize becomes a measurable bottleneck.
 
-**Drift handling rationale.** D5 specifies normalize-drift goes to admin-only Pushover (not user
-Pushover) and does not pollute the transient-failure threshold. Catching `FitnessNormalizeDrift`
-explicitly (before the generic `Exception` handler) is what keeps it out of the
-`is_transient`/transient-counter path. Without this catch, drift would be classified as transient and
-contribute to the consecutive-failure counter, contradicting D5.
-
 **Tests** (unit-test the worker function directly with a minimal `WorkerContext` built from fakes,
-same pattern as `tests/test_services/test_jobs/test_workers/test_*.py`):
+same pattern as `tests/test_services/test_jobs/test_worker_entity_reembed.py`):
 
-1. **Happy path success.** Fake fetch returns 3 raw rows, fake normalize writes 3 normalized rows.
-   Worker calls `ctx.jobs.mark_succeeded` once with both results in `result_json`.
-2. **Auth-broken propagation.** Fake fetch raises `FitnessAuthError`. Worker calls
-   `ctx.jobs.mark_failed`. `is_transient(e)` returns False so no retry queued.
-3. **Transient error retry.** Fake fetch raises `stravalib.exc.RateLimitExceeded`. After the
-   `is_transient` extension above, this returns True and the existing retry decorator path
-   re-submits. Test asserts the retry was scheduled.
-4. **Normalize drift.** Fake normalize raises `FitnessNormalizeDrift`. Worker marks the job
-   *succeeded* with a drift annotation. No retry, no transient counter increment.
-5. **Notification routing.** With `_SUCCESS_TOPIC_MAP` updated, an opt-out preference for
-   `notif_fitness_sync_success` results in no Pushover firing on a successful job. (Verifies the
-   plumbing — the actual map lookup is `notify_job_success`'s job, not the worker's.)
+1. **Happy path success.** Fake fetch returns `FitnessSyncResult(status="success", ...)`, fake
+   normalize returns `NormalizeResult(rows_normalized=3, drift_count=0)`. Worker calls
+   `ctx.jobs.mark_succeeded` once with both results in `result`.
+2. **Auth-broken short-circuit.** Fake fetch returns `status="auth_broken"`. Worker marks failed,
+   normalize is **not** called.
+3. **Transient-failure short-circuit.** Fake fetch returns `status="transient_failure"`. Worker marks
+   failed, normalize is **not** called.
+4. **Already-running short-circuit.** Fake fetch returns `status="running"`. Worker marks succeeded
+   with a `skipped` flag, normalize is not called.
+5. **Drift recorded in result JSON.** Fake normalize returns `drift_count=2`. Worker still marks
+   succeeded; `result["normalize"]["drift_count"] == 2`.
+6. **Terminal-state guard.** Fake fetch raises a bare `RuntimeError`. Worker calls `mark_failed`
+   without re-raising (matches `run_entity_reembed`'s guard).
+7. **Notification on success.** Fake fetch + normalize both succeed; `notifier.notify_success` is
+   called with `"fitness_sync_strava"` so the `_SUCCESS_TOPIC_MAP` lookup gates the Pushover.
+8. Same coverage for the Garmin worker (parametrized or symmetric).
 
 **Acceptance criteria:**
 

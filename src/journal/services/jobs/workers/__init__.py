@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from journal.db.repository import EntryRepository
     from journal.services.backfill import MoodBackfillResult
     from journal.services.entity_extraction import EntityExtractionService
+    from journal.services.fitness.fetch import FitnessSyncResult
+    from journal.services.fitness.normalize import NormalizeResult
     from journal.services.ingestion import IngestionService
     from journal.services.jobs.notifier import JobNotifier
     from journal.services.jobs.runner import EntityReembedder
@@ -58,3 +60,12 @@ class WorkerContext:
     queue_post_ingestion_jobs: Callable[
         [str, str, int, int | None], dict[str, str]
     ]
+    # Fitness sync seams (W8). All four are optional because
+    # fitness sync is opt-in at server boot — when the providers
+    # aren't wired the workers raise; the JobRunner gates submission
+    # on these being set so an unconfigured server never queues a
+    # fitness job in the first place.
+    fetch_strava: Callable[..., FitnessSyncResult] | None = None
+    fetch_garmin: Callable[..., FitnessSyncResult] | None = None
+    normalize_strava: Callable[..., NormalizeResult] | None = None
+    normalize_garmin: Callable[..., NormalizeResult] | None = None

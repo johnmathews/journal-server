@@ -319,6 +319,8 @@ JobType = Literal[
     "ingest_audio",
     "mood_score_entry",
     "reprocess_embeddings",
+    "fitness_sync_strava",
+    "fitness_sync_garmin",
 ]
 
 
