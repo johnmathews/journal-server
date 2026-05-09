@@ -1,12 +1,13 @@
 """End-to-end ChromaVectorStore tests against a real ChromaDB.
 
-Skipped by default. Opt in with::
+Auto-skipped when Chroma is unreachable (see
+``tests/integration/conftest.py`` for the TCP probe). To run locally::
 
-    pytest -m integration
+    docker compose -f docker-compose.dev.yml up -d   # Chroma on :8401
+    uv run pytest tests/integration
 
-Connects to ``CHROMA_HOST:CHROMA_PORT`` (defaults: ``localhost:8000``).
-CI runs ChromaDB as a service container with a healthcheck and starts
-this suite only after the service is healthy.
+CI sets ``CHROMA_PORT=8000`` explicitly to hit its service container.
+Local default is 8401 (the dev compose port).
 
 The fixtures use a unique collection name per test so concurrent runs
 don't collide and a failed test can't poison sibling collections.
@@ -20,13 +21,13 @@ This suite covers all five public methods of ``ChromaVectorStore``:
 from __future__ import annotations
 
 import contextlib
-import os
 import uuid
 from typing import TYPE_CHECKING
 
 import pytest
 
 from journal.vectorstore.store import ChromaVectorStore
+from tests.integration.conftest import chroma_endpoint
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -34,15 +35,9 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.integration
 
 
-def _connection_settings() -> tuple[str, int]:
-    host = os.getenv("CHROMA_HOST", "localhost")
-    port = int(os.getenv("CHROMA_PORT", "8000"))
-    return host, port
-
-
 @pytest.fixture
 def chroma_store() -> Iterator[ChromaVectorStore]:
-    host, port = _connection_settings()
+    host, port = chroma_endpoint()
     collection = f"itest-{uuid.uuid4().hex[:12]}"
     store = ChromaVectorStore(host=host, port=port, collection_name=collection)
     yield store
