@@ -1,0 +1,398 @@
+"""Tests for FitnessRepository.
+
+Covers the public surface defined in W2 of docs/fitness-tier-plan.md:
+auth state round-trip, transition_auth fire-once semantics + auth_broken_since,
+sync run lifecycle, last_successful_sync_at, raw insert/sha-deduplication +
+append-only-on-change, normalized upsert idempotence, list_activities
+boundary semantics (inclusive both sides), and the max_normalized_fetched_at
+watermark used by W7.
+"""
+
+import json
+import sqlite3
+
+import pytest
+
+from journal.db.fitness_repository import FitnessRepository
+from journal.models import (
+    FitnessActivity,
+    FitnessAuthState,
+    FitnessDaily,
+)
+
+
+def _seed_user(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO users (id, email, password_hash, display_name,
+                                     email_verified, is_admin)
+        VALUES (1, 'test@example.com', 'x', 'test', 1, 1)
+        """,
+    )
+
+
+@pytest.fixture
+def repo(db_conn: sqlite3.Connection) -> FitnessRepository:
+    _seed_user(db_conn)
+    return FitnessRepository(db_conn)
+
+
+# ── Auth state ──────────────────────────────────────────────────────
+
+
+def test_auth_state_roundtrip_preserves_extra_state(
+    repo: FitnessRepository,
+) -> None:
+    state = FitnessAuthState(
+        user_id=1,
+        source="garmin",
+        access_token="atk",
+        refresh_token=None,
+        token_expires_at="2027-05-09T10:00:00Z",
+        extra_state={"oauth1_secret": "shh", "garth_version": "0.4.5"},
+        last_successful_login_at="2026-05-09T04:00:00Z",
+        auth_status="ok",
+    )
+    repo.upsert_auth_state(state)
+    fetched = repo.get_auth_state(user_id=1, source="garmin")
+    assert fetched is not None
+    assert fetched.access_token == "atk"
+    assert fetched.extra_state == {"oauth1_secret": "shh", "garth_version": "0.4.5"}
+    assert fetched.auth_status == "ok"
+    # updated_at is non-empty (set to now on insert)
+    assert fetched.updated_at != ""
+
+
+def test_auth_state_upsert_overwrites(repo: FitnessRepository) -> None:
+    repo.upsert_auth_state(
+        FitnessAuthState(user_id=1, source="strava", access_token="old"),
+    )
+    repo.upsert_auth_state(
+        FitnessAuthState(user_id=1, source="strava", access_token="new"),
+    )
+    fetched = repo.get_auth_state(user_id=1, source="strava")
+    assert fetched is not None
+    assert fetched.access_token == "new"
+
+
+def test_get_auth_state_returns_none_when_absent(
+    repo: FitnessRepository,
+) -> None:
+    assert repo.get_auth_state(user_id=1, source="strava") is None
+
+
+def test_transition_auth_fires_once_then_silently_repeats(
+    repo: FitnessRepository, db_conn: sqlite3.Connection,
+) -> None:
+    """First broken call → True (transition); second broken call → False
+    (already broken). Then ok → True; ok again → False. auth_broken_since
+    is set on transition to broken and cleared on transition to ok."""
+    at_t0 = "2026-05-09T04:00:00Z"
+    assert repo.transition_auth(
+        user_id=1, source="strava", status="broken", at=at_t0,
+    ) is True
+    row = db_conn.execute(
+        "SELECT auth_status, auth_broken_since FROM fitness_auth_state "
+        "WHERE user_id=1 AND source='strava'",
+    ).fetchone()
+    assert row["auth_status"] == "broken"
+    assert row["auth_broken_since"] == at_t0
+
+    # Second consecutive 'broken' is a no-op.
+    assert repo.transition_auth(
+        user_id=1, source="strava", status="broken", at="2026-05-09T05:00:00Z",
+    ) is False
+
+    # Recover.
+    assert repo.transition_auth(
+        user_id=1, source="strava", status="ok", at="2026-05-09T06:00:00Z",
+    ) is True
+    row = db_conn.execute(
+        "SELECT auth_status, auth_broken_since FROM fitness_auth_state "
+        "WHERE user_id=1 AND source='strava'",
+    ).fetchone()
+    assert row["auth_status"] == "ok"
+    assert row["auth_broken_since"] is None  # cleared on recovery
+
+    # ok again → no-op.
+    assert repo.transition_auth(
+        user_id=1, source="strava", status="ok", at="2026-05-09T07:00:00Z",
+    ) is False
+
+
+# ── Sync runs ───────────────────────────────────────────────────────
+
+
+def test_sync_run_lifecycle_success(repo: FitnessRepository) -> None:
+    run_id = repo.start_sync_run(user_id=1, source="strava")
+    assert run_id > 0
+    repo.finish_sync_run(
+        run_id, status="success", rows_fetched=3, rows_normalized=3,
+    )
+    runs = repo.list_recent_sync_runs(user_id=1, source="strava")
+    assert len(runs) == 1
+    assert runs[0].status == "success"
+    assert runs[0].rows_fetched == 3
+    assert runs[0].finished_at is not None
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["auth_broken", "transient_failure", "normalize_drift"],
+)
+def test_finish_sync_run_accepts_terminal_statuses(
+    repo: FitnessRepository, status: str,
+) -> None:
+    run_id = repo.start_sync_run(user_id=1, source="garmin")
+    repo.finish_sync_run(
+        run_id, status=status, error_class="X", error_message="oops",
+    )
+    runs = repo.list_recent_sync_runs(user_id=1, source="garmin")
+    assert runs[0].status == status
+    assert runs[0].error_class == "X"
+
+
+def test_last_successful_sync_only_counts_success(
+    repo: FitnessRepository,
+) -> None:
+    success_run = repo.start_sync_run(user_id=1, source="strava")
+    repo.finish_sync_run(success_run, status="success")
+    fail_run = repo.start_sync_run(user_id=1, source="strava")
+    repo.finish_sync_run(fail_run, status="transient_failure")
+
+    last = repo.last_successful_sync_at(user_id=1, source="strava")
+    # Should match the successful run's started_at, not the failed one.
+    success_runs = [
+        r for r in repo.list_recent_sync_runs(user_id=1, source="strava")
+        if r.status == "success"
+    ]
+    assert last == success_runs[0].started_at
+
+
+def test_find_running_sync_run_returns_in_flight(
+    repo: FitnessRepository,
+) -> None:
+    run_id = repo.start_sync_run(user_id=1, source="strava")
+    assert repo.find_running_sync_run(user_id=1, source="strava") == run_id
+    repo.finish_sync_run(run_id, status="success")
+    assert repo.find_running_sync_run(user_id=1, source="strava") is None
+
+
+# ── Raw archive ─────────────────────────────────────────────────────
+
+
+def test_insert_raw_returns_id_and_dedupes_on_sha(
+    repo: FitnessRepository, db_conn: sqlite3.Connection,
+) -> None:
+    run_id = repo.start_sync_run(user_id=1, source="strava")
+    payload = json.dumps({"id": 42, "name": "Morning Run"})
+    new_id_1 = repo.insert_raw(
+        source="strava", user_id=1, endpoint="activities",
+        source_id="42", payload_json=payload, sync_run_id=run_id,
+    )
+    assert new_id_1 is not None
+
+    # Same payload: no-op, returns None.
+    new_id_2 = repo.insert_raw(
+        source="strava", user_id=1, endpoint="activities",
+        source_id="42", payload_json=payload, sync_run_id=run_id,
+    )
+    assert new_id_2 is None
+
+    # Changed payload (different sha): NEW row inserted, old row preserved
+    # — append-only per D3.
+    new_payload = json.dumps({"id": 42, "name": "Morning Run (edited)"})
+    new_id_3 = repo.insert_raw(
+        source="strava", user_id=1, endpoint="activities",
+        source_id="42", payload_json=new_payload, sync_run_id=run_id,
+    )
+    assert new_id_3 is not None
+    assert new_id_3 != new_id_1
+
+    # Both rows still exist.
+    count = db_conn.execute(
+        "SELECT COUNT(*) FROM fitness_raw_strava WHERE source_id='42'",
+    ).fetchone()[0]
+    assert count == 2
+
+
+def test_insert_raw_garmin_routes_to_garmin_table(
+    repo: FitnessRepository, db_conn: sqlite3.Connection,
+) -> None:
+    run_id = repo.start_sync_run(user_id=1, source="garmin")
+    repo.insert_raw(
+        source="garmin", user_id=1, endpoint="sleep",
+        source_id="2026-05-09", payload_json='{"x":1}',
+        sync_run_id=run_id,
+    )
+    strava_count = db_conn.execute(
+        "SELECT COUNT(*) FROM fitness_raw_strava",
+    ).fetchone()[0]
+    garmin_count = db_conn.execute(
+        "SELECT COUNT(*) FROM fitness_raw_garmin",
+    ).fetchone()[0]
+    assert strava_count == 0
+    assert garmin_count == 1
+
+
+def test_list_raw_since_filters_by_fetched_at(
+    repo: FitnessRepository, db_conn: sqlite3.Connection,
+) -> None:
+    run_id = repo.start_sync_run(user_id=1, source="strava")
+    # Insert one with a manual older fetched_at.
+    db_conn.execute(
+        """
+        INSERT INTO fitness_raw_strava (
+            user_id, source_id, endpoint, fetched_at, payload_json, payload_sha256, sync_run_id
+        ) VALUES (1, '100', 'activities', '2026-01-01T00:00:00Z', '{}', 'sha-old', ?)
+        """,
+        (run_id,),
+    )
+    # And a fresh one via the repo.
+    repo.insert_raw(
+        source="strava", user_id=1, endpoint="activities",
+        source_id="200", payload_json='{"x":1}', sync_run_id=run_id,
+    )
+
+    all_rows = list(repo.list_raw_since(source="strava", user_id=1))
+    assert len(all_rows) == 2
+
+    fresh = list(repo.list_raw_since(
+        source="strava", user_id=1, since="2026-04-01T00:00:00Z",
+    ))
+    assert len(fresh) == 1
+    assert fresh[0].source_id == "200"
+
+
+# ── Normalized layer ────────────────────────────────────────────────
+
+
+def _make_activity(source_id: str, local_date: str = "2026-05-09") -> FitnessActivity:
+    return FitnessActivity(
+        user_id=1, source="strava", source_id=source_id,
+        activity_type="run", source_subtype="Run",
+        start_time=f"{local_date}T10:00:00Z",
+        local_date=local_date, duration_s=600, raw_ref_id=1,
+    )
+
+
+def test_upsert_activity_is_idempotent(
+    repo: FitnessRepository, db_conn: sqlite3.Connection,
+) -> None:
+    a = _make_activity("42")
+    repo.upsert_activity(a)
+    a.duration_s = 700  # mutated; upsert should overwrite
+    repo.upsert_activity(a)
+
+    count = db_conn.execute(
+        "SELECT COUNT(*) FROM fitness_activities",
+    ).fetchone()[0]
+    assert count == 1
+    fetched = repo.list_activities(
+        user_id=1, start="2026-05-09", end="2026-05-09",
+    )[0]
+    assert fetched.duration_s == 700
+
+
+def test_upsert_daily_is_idempotent(
+    repo: FitnessRepository, db_conn: sqlite3.Connection,
+) -> None:
+    daily = FitnessDaily(
+        user_id=1, source="garmin", local_date="2026-05-09",
+        sleep_score=80, raw_ref_ids=[1, 2, 3],
+    )
+    repo.upsert_daily(daily)
+    daily.sleep_score = 85
+    daily.raw_ref_ids = [4, 5, 6]
+    repo.upsert_daily(daily)
+
+    count = db_conn.execute(
+        "SELECT COUNT(*) FROM fitness_daily",
+    ).fetchone()[0]
+    assert count == 1
+    fetched = repo.list_daily(
+        user_id=1, start="2026-05-09", end="2026-05-09",
+    )[0]
+    assert fetched.sleep_score == 85
+    assert fetched.raw_ref_ids == [4, 5, 6]
+
+
+def test_list_activities_boundary_inclusive_both_sides(
+    repo: FitnessRepository,
+) -> None:
+    """Insert four activities at [start-1, start, end, end+1]; the
+    list query with start='2026-05-09', end='2026-05-11' returns
+    exactly the two on the boundary days."""
+    repo.upsert_activity(_make_activity("1", local_date="2026-05-08"))
+    repo.upsert_activity(_make_activity("2", local_date="2026-05-09"))
+    repo.upsert_activity(_make_activity("3", local_date="2026-05-11"))
+    repo.upsert_activity(_make_activity("4", local_date="2026-05-12"))
+
+    in_range = repo.list_activities(
+        user_id=1, start="2026-05-09", end="2026-05-11",
+    )
+    source_ids = {a.source_id for a in in_range}
+    assert source_ids == {"2", "3"}
+
+
+def test_list_activities_filters_by_type(repo: FitnessRepository) -> None:
+    a = _make_activity("1")
+    a.activity_type = "run"
+    repo.upsert_activity(a)
+    b = _make_activity("2")
+    b.activity_type = "ride"
+    repo.upsert_activity(b)
+
+    runs = repo.list_activities(
+        user_id=1, start="2026-05-09", end="2026-05-09", activity_type="run",
+    )
+    assert {x.source_id for x in runs} == {"1"}
+
+
+# ── Normalize watermark ─────────────────────────────────────────────
+
+
+def test_max_normalized_fetched_at_returns_none_initially(
+    repo: FitnessRepository,
+) -> None:
+    assert repo.max_normalized_fetched_at(
+        source="strava", user_id=1, kind="activities",
+    ) is None
+    assert repo.max_normalized_fetched_at(
+        source="garmin", user_id=1, kind="daily",
+    ) is None
+
+
+def test_max_normalized_fetched_at_tracks_latest_raw(
+    repo: FitnessRepository, db_conn: sqlite3.Connection,
+) -> None:
+    run_id = repo.start_sync_run(user_id=1, source="strava")
+    # Two raw rows with different fetched_at; latest one is the watermark.
+    older_raw = db_conn.execute(
+        """
+        INSERT INTO fitness_raw_strava (
+            user_id, source_id, endpoint, fetched_at, payload_json, payload_sha256, sync_run_id
+        ) VALUES (1, '1', 'activities', '2026-05-01T00:00:00Z', '{}', 'sha-1', ?)
+        """,
+        (run_id,),
+    ).lastrowid
+    newer_raw = db_conn.execute(
+        """
+        INSERT INTO fitness_raw_strava (
+            user_id, source_id, endpoint, fetched_at, payload_json, payload_sha256, sync_run_id
+        ) VALUES (1, '2', 'activities', '2026-05-09T00:00:00Z', '{}', 'sha-2', ?)
+        """,
+        (run_id,),
+    ).lastrowid
+
+    a1 = _make_activity("1", local_date="2026-05-01")
+    a1.raw_ref_id = older_raw
+    a2 = _make_activity("2", local_date="2026-05-09")
+    a2.raw_ref_id = newer_raw
+    repo.upsert_activity(a1)
+    repo.upsert_activity(a2)
+
+    watermark = repo.max_normalized_fetched_at(
+        source="strava", user_id=1, kind="activities",
+    )
+    assert watermark == "2026-05-09T00:00:00Z"

@@ -421,3 +421,126 @@ class ApiKeyInfo:
     expires_at: str | None = None
     last_used_at: str | None = None
     revoked_at: str | None = None
+
+
+# ── Fitness pipeline ────────────────────────────────────────────────
+#
+# Persistence dataclasses for the fitness integration. Schema lives in
+# migrations 0023/0024/0025; design rationale in
+# docs/fitness-integration-plan.md and docs/fitness-schema.md.
+
+FitnessSource = Literal["strava", "garmin"]
+FitnessAuthStatus = Literal["unknown", "ok", "broken"]
+FitnessSyncStatus = Literal[
+    "running", "success", "auth_broken", "transient_failure", "normalize_drift",
+]
+FitnessActivityType = Literal[
+    "run", "ride", "swim", "walk", "hike", "strength", "other",
+]
+
+
+@dataclass
+class FitnessAuthState:
+    """Per-user, per-source auth tokens + status for the fitness pipeline.
+
+    `extra_state_json` is the catch-all for source-specific token blobs
+    (garth's OAuth1 + OAuth2 pair, Strava's redirect-state nonce, etc.)
+    that don't fit the explicit columns.
+    """
+
+    user_id: int
+    source: str
+    access_token: str | None = None
+    refresh_token: str | None = None
+    token_expires_at: str | None = None
+    extra_state: dict[str, Any] = field(default_factory=dict)
+    last_successful_login_at: str | None = None
+    last_refresh_at: str | None = None
+    auth_status: str = "unknown"
+    auth_broken_since: str | None = None
+    id: int | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass
+class FitnessSyncRun:
+    """One scheduled fetch invocation for one source."""
+
+    user_id: int
+    source: str
+    status: str
+    id: int | None = None
+    started_at: str = ""
+    finished_at: str | None = None
+    error_class: str | None = None
+    error_message: str | None = None
+    rows_fetched: int = 0
+    rows_normalized: int = 0
+    notes: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class FitnessRawRow:
+    """One raw payload row (Strava or Garmin)."""
+
+    user_id: int
+    source: str
+    source_id: str
+    endpoint: str
+    payload_json: str
+    payload_sha256: str
+    sync_run_id: int | None = None
+    id: int | None = None
+    fetched_at: str = ""
+
+
+@dataclass
+class FitnessActivity:
+    """One discrete activity (run, ride, swim, …). Per
+    fitness-schema.md S1, both Strava and Garmin live in this table."""
+
+    user_id: int
+    source: str
+    source_id: str
+    activity_type: str
+    source_subtype: str
+    start_time: str
+    local_date: str
+    duration_s: int
+    raw_ref_id: int
+    moving_time_s: int | None = None
+    distance_m: float | None = None
+    elevation_gain_m: float | None = None
+    avg_hr_bpm: int | None = None
+    max_hr_bpm: int | None = None
+    avg_pace_s_per_km: float | None = None
+    calories_kcal: int | None = None
+    perceived_exertion: int | None = None
+    extras: dict[str, Any] = field(default_factory=dict)
+    id: int | None = None
+    normalized_at: str = ""
+
+
+@dataclass
+class FitnessDaily:
+    """One daily rollup row (recovery + training-state metrics)."""
+
+    user_id: int
+    source: str
+    local_date: str
+    sleep_score: int | None = None
+    sleep_duration_s: int | None = None
+    sleep_efficiency_pct: float | None = None
+    hrv_overnight_ms: float | None = None
+    resting_hr_bpm: int | None = None
+    body_battery_high: int | None = None
+    body_battery_low: int | None = None
+    stress_avg: int | None = None
+    training_load_acute: float | None = None
+    training_load_chronic: float | None = None
+    training_readiness: int | None = None
+    extras: dict[str, Any] = field(default_factory=dict)
+    raw_ref_ids: list[int] = field(default_factory=list)
+    id: int | None = None
+    normalized_at: str = ""
