@@ -1,5 +1,11 @@
-"""Fitness pipeline services — fetch (W6), normalize (W7), workers (W8)."""
+"""Fitness pipeline services — fetch (W6), normalize (W7), workers (W8), backfill (W13)."""
 
+from journal.services.fitness.backfill import (
+    BackfillBlocked,
+    BackfillResult,
+    backfill_garmin,
+    backfill_strava,
+)
 from journal.services.fitness.errors import (
     FitnessAuthError,
     FitnessError,
@@ -20,6 +26,8 @@ from journal.services.fitness.normalize import (
 )
 
 __all__ = [
+    "BackfillBlocked",
+    "BackfillResult",
     "FitnessAuthError",
     "FitnessError",
     "FitnessNormalizeDrift",
@@ -30,6 +38,8 @@ __all__ = [
     "NormalizeDriftNotifier",
     "NormalizeResult",
     "StravaFetchService",
+    "backfill_garmin",
+    "backfill_strava",
     "normalize_garmin",
     "normalize_strava",
 ]

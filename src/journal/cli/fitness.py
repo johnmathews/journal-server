@@ -42,6 +42,12 @@ from journal.providers.strava import (
     Tokens,
     exchange_code,
 )
+from journal.services.fitness.backfill import (
+    BackfillBlocked,
+    BackfillResult,
+    backfill_garmin,
+    backfill_strava,
+)
 from journal.services.fitness.fetch import (
     GarminFetchService,
     StravaFetchService,
@@ -513,6 +519,108 @@ def cmd_fitness_sync(args: argparse.Namespace, config: Config) -> None:
             f"normalized={result['rows_normalized']}",
         )
         if status not in ("success", "running"):
+            any_failed = True
+
+    if any_failed:
+        sys.exit(1)
+
+
+# ── fitness-backfill ─────────────────────────────────────────────────
+
+
+def _run_one_source_backfill(
+    *,
+    source: str,
+    fitness_repo: FitnessRepository,
+    config: Config,
+    user_id: int,
+    start: str,
+    end: str,
+) -> BackfillResult:
+    """Construct the right fetch service and drive its backfill.
+
+    Decoupled from :func:`cmd_fitness_backfill` so the dispatcher logic
+    stays patch-friendly: tests can substitute this single seam without
+    standing up real fetch services. Mirrors the
+    :func:`_run_one_source_sync` helper for ``fitness-sync``.
+    """
+    notifier = _NoopFitnessNotifier()
+    if source == "strava":
+        fetch_service = StravaFetchService(
+            repo=fitness_repo, notifier=notifier, config=config,
+            provider_factory=_strava_provider_factory(config, fitness_repo),
+        )
+        return backfill_strava(
+            user_id=user_id,
+            repo=fitness_repo,
+            fetch_service=fetch_service,
+            start=start,
+            end=end,
+        )
+    if source == "garmin":
+        fetch_service = GarminFetchService(
+            repo=fitness_repo, notifier=notifier, config=config,
+            provider_factory=_garmin_provider_factory(config, fitness_repo),
+        )
+        return backfill_garmin(
+            user_id=user_id,
+            repo=fitness_repo,
+            fetch_service=fetch_service,
+            start=start,
+            end=end,
+        )
+    raise ValueError(f"Unknown source: {source}")
+
+
+def cmd_fitness_backfill(args: argparse.Namespace, config: Config) -> None:
+    """Run a historical backfill (W13) for the requested source(s).
+
+    Like ``fitness-sync``, runs synchronously inline — no JobRunner is
+    constructed. Each 30-day window opens a ``fitness_sync_runs`` row
+    via the W6 fetch service so ``journal fitness-status`` (and the
+    ``/api/health`` block) reflect progress in real time.
+
+    Exits non-zero if any source backfill is aborted (transient streak
+    cliff, auth_broken) or blocked (a routine sync was already in
+    flight). The operator's recovery path is encoded in the printed
+    ``aborted_reason`` string.
+    """
+    sources: list[str] = (
+        ["strava", "garmin"] if args.source == "both" else [args.source]
+    )
+
+    today_iso = datetime.now(UTC).date().isoformat()
+    end = args.end or today_iso
+
+    user_id = args.user_id
+
+    conn = get_connection(config.db_path)
+    run_migrations(conn)
+    fitness_repo = FitnessRepository(conn)
+
+    any_failed = False
+    for source in sources:
+        print(f"\nBackfilling {source} from {args.start} to {end}...")
+        try:
+            result = _run_one_source_backfill(
+                source=source, fitness_repo=fitness_repo, config=config,
+                user_id=user_id, start=args.start, end=end,
+            )
+        except BackfillBlocked as exc:
+            print(f"  [blocked] {source}: {exc}", file=sys.stderr)
+            any_failed = True
+            continue
+
+        marker = "ok" if result.final_status == "complete" else "fail"
+        print(
+            f"  [{marker}] {source}: status={result.final_status} "
+            f"windows={result.windows_succeeded}/{result.windows_attempted} "
+            f"fetched={result.rows_fetched} "
+            f"normalized={result.rows_normalized}",
+        )
+        if result.aborted_reason:
+            print(f"    reason: {result.aborted_reason}")
+        if result.final_status not in ("complete", "no_windows"):
             any_failed = True
 
     if any_failed:
