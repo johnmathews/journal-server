@@ -4,32 +4,59 @@ Personal journal insight engine that ingests handwritten pages (OCR) and voice n
 
 ## Project Structure
 
+Most originally-single-file modules (`api.py`, `cli.py`, `mcp_server.py`,
+`db/repository.py`, `services/ingestion.py`, `services/jobs/runner.py`, plus the
+`auth_api`, `entitystore`, and `entity_extraction` services) have been carved into
+packages during the round-1 → round-3 refactors. See `docs/refactor-round-3.md` for
+the canonical state and the per-split journal entries under
+`journal/260507-*.md` and `journal/260508-*.md`.
+
 ```
 src/journal/
-  config.py          — Configuration from environment variables
-  logging.py         — Structured logging setup
-  models.py          — Shared data models (dataclasses)
-  db/                — SQLite database layer
-    connection.py    — Connection factory with PRAGMAs
-    migrations.py    — Migration runner (PRAGMA user_version)
-    migrations/*.sql — SQL migration files
-    repository.py    — Repository Protocol + SQLite implementation
-  providers/         — External API adapters behind Protocol interfaces
-    ocr.py           — OCR Protocol + Anthropic adapter
-    transcription.py — Transcription Protocol + OpenAI Whisper adapter
-    embeddings.py    — Embeddings Protocol + OpenAI adapter
-  vectorstore/       — Vector database layer
-    store.py         — VectorStore Protocol + ChromaDB implementation
-  services/          — Business logic
-    ingestion.py     — Ingest images/audio -> text -> chunks -> embeddings -> store
-    query.py         — Query routing (semantic + FTS5 + stats)
-    chunking.py      — Text chunking with tiktoken
-  mcp_server.py      — FastMCP server (streamable HTTP)
-  api.py             — REST API endpoints via mcp.custom_route()
-  cli.py             — CLI interface
-tests/               — pytest tests mirroring src structure
-docs/                — Project documentation
-journal/             — Development journal entries (YYMMDD-name.md)
+  config.py             — Configuration from environment variables
+  logging.py            — Structured logging setup
+  models.py             — Shared data models (dataclasses)
+  db/
+    connection.py       — Connection factory with PRAGMAs
+    migrations.py       — Migration runner (PRAGMA user_version)
+    migrations/*.sql    — SQL migration files (currently 0001 → 0022)
+    repository/         — SQLiteEntryRepository carved into protocol/store/core/
+                          pages/chunks/search/mood/stats/analytics
+  providers/            — External-API adapters behind Protocol interfaces
+    ocr.py              — OCR Protocol + Anthropic and Gemini adapters (prod = Gemini)
+    transcription.py    — Transcription Protocol + OpenAI (gpt-4o-transcribe / whisper-1)
+                          and Gemini adapters
+    embeddings.py       — Embeddings Protocol + OpenAI text-embedding-3-large adapter
+    extraction.py       — Entity extraction provider
+    mood_scorer.py      — Mood scoring (Anthropic tool-use)
+    formatter.py        — Transcript paragraph-break formatter (Anthropic Haiku)
+    reranker.py         — Listwise reranker (Anthropic Haiku) for hybrid search
+  vectorstore/
+    store.py            — VectorStore Protocol + ChromaDB implementation
+  entitystore/          — Entity persistence carved into store/mentions/relationships/aliases
+  services/
+    ingestion/          — image/voice/text/url ingestion orchestrators
+    query.py            — Query routing (semantic + FTS5 + stats)
+    chunking.py         — Text chunking with tiktoken
+    hybrid.py           — Hybrid BM25 + dense + RRF + listwise rerank pipeline
+    entity_extraction/  — Entity extraction service (orchestrator + helpers)
+    jobs/               — Background job runner: workers/, runner, save_pipeline,
+                          notifier, retry
+    auth.py / email.py  — Multi-user auth (sessions, API keys, password reset)
+    notifications.py    — Toast + Pushover notification dispatch
+    reload.py           — Live-reload hooks for context files / mood dimensions /
+                          entity casing
+  mcp_server/           — FastMCP server: bootstrap, app, runserver, tools/*
+  api/                  — REST routes (auth, dashboard, entries, entities,
+                          entity_merge, ingestion, jobs, notifications, search,
+                          settings, users, health)
+  auth_api/             — Auth REST endpoints carved into core/account/profile/
+                          api_keys/admin
+  cli/                  — Typer CLI: __init__ (entry), entities, mood, _services,
+                          _seed_samples
+tests/                  — pytest tests mirroring src structure
+docs/                   — Project documentation
+journal/                — Development journal entries (YYMMDD-name.md)
 ```
 
 ## Commands
@@ -43,17 +70,23 @@ journal/             — Development journal entries (YYMMDD-name.md)
 
 ## Architecture Principles
 
-- All external APIs (Anthropic, OpenAI, ChromaDB) are behind Protocol interfaces
+- All external APIs (Anthropic, OpenAI, Google Gemini, ChromaDB) are behind Protocol interfaces
 - Concrete adapters can be swapped without touching core logic
 - SQLite for structured/quantitative queries, ChromaDB for semantic search
-- FTS5 for exact keyword frequency queries
+- FTS5 + dense retrieval + RRF fusion + listwise rerank for hybrid search
 - MCP server is a thin interface layer — business logic lives in services/
+- API routing follows URL-resource layout by default; write/job-creation routes are
+  bundled in `api/ingestion.py`. See `docs/code-quality-principles.md`.
 
 ## Tech Stack
 
 - Python 3.13, uv, pytest, ruff
-- Anthropic SDK (OCR via Claude Opus 4.6)
-- OpenAI SDK (Whisper transcription, text-embedding-3-large)
+- Google Gemini API (OCR primary in prod via `gemini-2.5-pro`, plus a Gemini
+  transcription adapter and shadow-mode support)
+- Anthropic SDK (Claude Opus 4.6 OCR adapter; Haiku 4.5 for mood scoring,
+  transcript formatting, date-heading detection, and the listwise reranker)
+- OpenAI SDK (`gpt-4o-transcribe` primary transcription with `whisper-1`
+  fallback; `text-embedding-3-large` embeddings)
 - ChromaDB (vector storage, cosine distance)
 - SQLite (structured storage, FTS5)
 - MCP SDK with FastMCP (streamable HTTP transport)

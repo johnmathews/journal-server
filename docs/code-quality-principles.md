@@ -1,5 +1,9 @@
 # Code Quality Principles — For Humans and Agents
 
+**Status:** standing rules. **Last updated:** 2026-05-09. **Supersedes:** none.
+This is a reference doc, not a plan — no kill criteria, no work units. Edit
+when a new convention is adopted or an old one is retired.
+
 A standing reference for what "good code" means in this project. Captured 2026-05-07 alongside a concrete codebase review (kept in Claude auto-memory under `review_codebase_2026-05-07`).
 
 The headline idea: **most of what makes code good for an agent also makes it good for a human, but more sharply.** Agents are an unusually strict reader — they have no memory across sessions, no tribal knowledge, and a hard context-window budget. Optimising for agent-comprehensibility is a forcing function for the kind of clarity that humans enjoy too.
@@ -75,7 +79,8 @@ The HTTP layer follows two rules in this order:
 
 The override is the first explicit deviation from URL-prefix purity in this codebase. It must
 stay narrow: "write/job creation" is the only currently-recognised category. New deviation
-categories require updating both this section and `code-quality-refactor-plan.md` Unit 1a.
+categories require updating this section (the v2 refactor plan that originally captured the
+rule, `code-quality-refactor-plan.md`, is closed and only kept as a historical record).
 
 ---
 
