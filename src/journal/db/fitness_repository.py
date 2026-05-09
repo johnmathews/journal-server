@@ -599,6 +599,36 @@ class FitnessRepository:
             ).fetchall()
         return [_row_to_daily(r) for r in rows]
 
+    def max_normalized_local_date(
+        self,
+        *,
+        source: Literal["strava", "garmin"],
+        user_id: int,
+        kind: Literal["activities", "daily"],
+    ) -> str | None:
+        """Resume watermark for backfill (W13).
+
+        Returns the largest ``local_date`` over ``fitness_activities``
+        (kind=``activities``) or ``fitness_daily`` (kind=``daily``) for
+        the given user and source. Drives the per-source resume
+        predicate so a backfill picks up where the previous run left
+        off — *independently per source*: a Strava-only watermark
+        would silently skip Garmin days if Strava had progressed
+        further (and vice versa). NULL on first run (empty normalized
+        table for this user/source/kind).
+        """
+        # Closed allowlist — table is never callee-supplied.
+        table = "fitness_activities" if kind == "activities" else "fitness_daily"
+        with self._lock:
+            row = self._conn.execute(
+                f"""
+                SELECT MAX(local_date) AS d FROM {table}
+                WHERE user_id = ? AND source = ?
+                """,  # noqa: S608 — table from closed allowlist above
+                (user_id, source),
+            ).fetchone()
+        return row["d"] if row and row["d"] else None
+
     def max_normalized_fetched_at(
         self,
         *,

@@ -28,6 +28,7 @@ from journal.cli.entities import (
     cmd_repair_entity_names,
 )
 from journal.cli.fitness import (
+    cmd_fitness_backfill,
     cmd_fitness_reauth_garmin,
     cmd_fitness_reauth_strava,
     cmd_fitness_status,
@@ -663,6 +664,38 @@ def main():
         help="Owner of the sync (default: 1 = admin)",
     )
 
+    # fitness-backfill
+    p_fit_backfill = subparsers.add_parser(
+        "fitness-backfill",
+        help=(
+            "Walk historical Strava/Garmin data in 30-day windows from "
+            "--start (default 2026-01-01) to --end (default today). "
+            "Resume predicate is per-source MAX(local_date) so re-running "
+            "after a crash picks up where it left off."
+        ),
+    )
+    p_fit_backfill.add_argument(
+        "--source",
+        choices=("strava", "garmin", "both"),
+        default="both",
+        help="Which source to backfill (default: both)",
+    )
+    p_fit_backfill.add_argument(
+        "--start",
+        default="2026-01-01",
+        help="Earliest local_date to fetch (ISO 8601, default: 2026-01-01)",
+    )
+    p_fit_backfill.add_argument(
+        "--end",
+        help="Latest local_date to fetch (ISO 8601, default: today UTC)",
+    )
+    p_fit_backfill.add_argument(
+        "--user-id",
+        type=int,
+        default=1,
+        help="Owner of the backfill (default: 1 = admin)",
+    )
+
     # fitness-status
     p_fit_status = subparsers.add_parser(
         "fitness-status",
@@ -702,6 +735,7 @@ def main():
         "fitness-reauth-strava": cmd_fitness_reauth_strava,
         "fitness-reauth-garmin": cmd_fitness_reauth_garmin,
         "fitness-sync": cmd_fitness_sync,
+        "fitness-backfill": cmd_fitness_backfill,
         "fitness-status": cmd_fitness_status,
     }
     commands[args.command](args, config)
