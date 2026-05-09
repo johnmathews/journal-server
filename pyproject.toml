@@ -8,7 +8,7 @@ dependencies = [
     "google-genai==1.73.0",
     "openai>=2.29,<3",
     "chromadb-client>=1.5,<2",
-    "mcp[cli]>=1.26,<2",
+    "mcp[cli]>=1.27.0,<2",
     "tiktoken>=0.9,<1",
     "pysbd>=0.3,<1",
     "python-multipart>=0.0.26",
