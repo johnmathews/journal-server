@@ -120,6 +120,119 @@ def test_transition_auth_fires_once_then_silently_repeats(
     ) is False
 
 
+# ── Health summary ──────────────────────────────────────────────────
+
+
+def test_get_health_summary_empty_db_returns_empty_list(
+    repo: FitnessRepository,
+) -> None:
+    """No auth_state and no sync_runs → empty list (not a dict of nulls)."""
+    assert repo.get_health_summary(user_id=1) == []
+
+
+def test_get_health_summary_includes_only_configured_sources(
+    repo: FitnessRepository,
+) -> None:
+    """Source surfaces if there is an auth_state row OR sync_runs history,
+    but not when both are absent. Strava configured + Garmin absent →
+    one entry for strava only."""
+    repo.upsert_auth_state(
+        FitnessAuthState(user_id=1, source="strava", auth_status="ok"),
+    )
+    summary = repo.get_health_summary(user_id=1)
+    assert [row["source"] for row in summary] == ["strava"]
+    assert summary[0]["auth_status"] == "ok"
+    assert summary[0]["auth_broken_since"] is None
+    assert summary[0]["last_success_at"] is None  # no sync runs yet
+
+
+def test_get_health_summary_reports_last_success_per_source(
+    repo: FitnessRepository,
+) -> None:
+    """`last_success_at` is the started_at of the most recent successful
+    run for that source. Failed runs are ignored."""
+    repo.upsert_auth_state(
+        FitnessAuthState(user_id=1, source="strava", auth_status="ok"),
+    )
+    success_run = repo.start_sync_run(user_id=1, source="strava")
+    repo.finish_sync_run(success_run, status="success")
+    fail_run = repo.start_sync_run(user_id=1, source="strava")
+    repo.finish_sync_run(fail_run, status="transient_failure")
+
+    summary = repo.get_health_summary(user_id=1)
+    assert len(summary) == 1
+    success_rows = [
+        r for r in repo.list_recent_sync_runs(user_id=1, source="strava")
+        if r.status == "success"
+    ]
+    assert summary[0]["last_success_at"] == success_rows[0].started_at
+
+
+def test_get_health_summary_includes_broken_auth_with_since(
+    repo: FitnessRepository,
+) -> None:
+    """`auth_broken_since` is surfaced verbatim from the auth_state row."""
+    at = "2026-05-07T04:00:00Z"
+    repo.transition_auth(user_id=1, source="garmin", status="broken", at=at)
+    summary = repo.get_health_summary(user_id=1)
+    assert len(summary) == 1
+    assert summary[0]["source"] == "garmin"
+    assert summary[0]["auth_status"] == "broken"
+    assert summary[0]["auth_broken_since"] == at
+
+
+def test_get_health_summary_surfaces_orphan_sync_runs(
+    repo: FitnessRepository,
+) -> None:
+    """A source with sync_runs but no auth_state row (legacy / orphan
+    history) still surfaces, with `auth_status` and `auth_broken_since`
+    null. Used to be how the W6 fetch service recorded
+    `MissingAuthState` runs before W11 made re-auth interactive."""
+    run_id = repo.start_sync_run(user_id=1, source="strava")
+    repo.finish_sync_run(run_id, status="success")
+    summary = repo.get_health_summary(user_id=1)
+    assert len(summary) == 1
+    assert summary[0]["source"] == "strava"
+    assert summary[0]["auth_status"] is None
+    assert summary[0]["auth_broken_since"] is None
+    assert summary[0]["last_success_at"] is not None
+
+
+def test_get_health_summary_isolates_users(repo: FitnessRepository) -> None:
+    """user_id=1 must not see user_id=2's auth state. Adds another user
+    to the seeded DB and asserts cross-user leakage is impossible."""
+    repo.connection.execute(
+        """
+        INSERT OR IGNORE INTO users (id, email, password_hash, display_name,
+                                     email_verified, is_admin)
+        VALUES (2, 'other@example.com', 'x', 'other', 1, 0)
+        """,
+    )
+    repo.upsert_auth_state(
+        FitnessAuthState(user_id=1, source="strava", auth_status="ok"),
+    )
+    repo.upsert_auth_state(
+        FitnessAuthState(user_id=2, source="garmin", auth_status="broken"),
+    )
+    assert [r["source"] for r in repo.get_health_summary(user_id=1)] == ["strava"]
+    assert [r["source"] for r in repo.get_health_summary(user_id=2)] == ["garmin"]
+
+
+def test_get_health_summary_orders_sources_alphabetically(
+    repo: FitnessRepository,
+) -> None:
+    """Stable ordering simplifies test assertions and webapp UI: garmin
+    before strava regardless of insert order."""
+    repo.upsert_auth_state(
+        FitnessAuthState(user_id=1, source="strava", auth_status="ok"),
+    )
+    repo.upsert_auth_state(
+        FitnessAuthState(user_id=1, source="garmin", auth_status="ok"),
+    )
+    summary = repo.get_health_summary(user_id=1)
+    assert [r["source"] for r in summary] == ["garmin", "strava"]
+
+
 # ── Sync runs ───────────────────────────────────────────────────────
 
 

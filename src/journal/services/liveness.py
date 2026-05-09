@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -122,6 +123,72 @@ def check_api_key(
         name=name,
         status="ok",
         detail=f"{name} API key is configured ({len(api_key)} chars)",
+    )
+
+
+def check_fitness_freshness(
+    *,
+    summary: list[dict[str, Any]],
+    threshold_hours: int,
+    now: datetime | None = None,
+) -> ComponentCheck:
+    """Roll up a per-source fitness health summary into one check.
+
+    `summary` is the list returned by
+    `FitnessRepository.get_health_summary(user_id=...)`: one dict per
+    configured source with `auth_status`, `auth_broken_since`,
+    `last_success_at`. The check returns `degraded` if any source has
+    `auth_status='broken'` with an `auth_broken_since` more than
+    `threshold_hours` ago. A recently-broken source (under threshold)
+    stays `ok` so the rollup doesn't flap on every transient token
+    refresh.
+
+    Status is never `error` — a broken integration is operator
+    information, not a server outage. The unauthenticated `/health`
+    endpoint does not call this; only the authenticated `/api/health`
+    does, with the user's own fitness state.
+    """
+    if not summary:
+        return ComponentCheck(
+            name="fitness",
+            status="ok",
+            detail="no fitness sources configured",
+        )
+
+    current = now if now is not None else datetime.now(UTC)
+    threshold = timedelta(hours=threshold_hours)
+    broken_over_threshold: list[str] = []
+
+    for row in summary:
+        if row.get("auth_status") != "broken":
+            continue
+        broken_since_iso = row.get("auth_broken_since")
+        if not broken_since_iso:
+            continue
+        try:
+            broken_since = datetime.fromisoformat(
+                broken_since_iso.replace("Z", "+00:00"),
+            )
+        except (TypeError, ValueError):
+            continue
+        if broken_since.tzinfo is None:
+            broken_since = broken_since.replace(tzinfo=UTC)
+        if current - broken_since > threshold:
+            broken_over_threshold.append(row["source"])
+
+    if broken_over_threshold:
+        names = ", ".join(sorted(broken_over_threshold))
+        return ComponentCheck(
+            name="fitness",
+            status="degraded",
+            detail=(
+                f"auth broken for >{threshold_hours}h: {names}"
+            ),
+        )
+    return ComponentCheck(
+        name="fitness",
+        status="ok",
+        detail=f"{len(summary)} source(s), none broken over threshold",
     )
 
 

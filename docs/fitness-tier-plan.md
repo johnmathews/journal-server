@@ -1008,16 +1008,19 @@ first.** Listed under W6 already; restated here for the operator.
 
 **Priority:** Medium. **Files:**
 
-- `src/journal/api/health.py` *(modify — extend the existing payload)*
-- `src/journal/services/liveness.py` *(modify — add `check_fitness_freshness` if it fits the
-  existing pattern; otherwise inline)*
-- `tests/test_api/test_health.py` *(modify)*
+- `src/journal/api/health.py` *(modify — extend the authenticated payload only; see decision #1)*
+- `src/journal/services/liveness.py` *(modify — add `check_fitness_freshness` helper)*
+- `src/journal/db/fitness_repository.py` *(modify — add `get_health_summary` single-query helper)*
+- `src/journal/config.py` *(modify — add `FITNESS_HEALTH_BROKEN_DEGRADED_HOURS`, default 48)*
+- `tests/test_api.py` *(modify — extend `TestHealth`; flat file, no `tests/test_api/` dir)*
+- `tests/test_db/test_fitness_repository.py` *(modify — cover `get_health_summary`)*
+- `tests/test_services/test_liveness.py` *(modify — cover `check_fitness_freshness`)*
 
-**Wiring note.** `FitnessRepository` reaches the health handler via the existing services-getter
-pattern: register it in `mcp_server/bootstrap.py`'s `_init_services` (alongside `entry_repo`, etc.),
-expose via `services.get("fitness_repo")` from inside `health.py`. No new threading required.
+**Wiring note.** `FitnessRepository` already reaches the health handler via `services["fitness_repo"]`
+(registered in `mcp_server/bootstrap.py::_init_services` since W6/W9). The W12 handler reads it via
+`services.get("fitness_repo")`.
 
-**Add to `/health` and `/api/health`:**
+**Add to `/api/health` only** (authenticated):
 
 ```json
 {
@@ -1033,21 +1036,51 @@ expose via `services.get("fitness_repo")` from inside `health.py`. No new thread
 }
 ```
 
-Health *status* (`overall_status`) downgrades to `degraded` if any source has been broken for
->48h. Tunable via config; default 48h (long enough for Garmin's typical SSO-incident weekend break,
-short enough to surface a real outage).
+The `fitness` block is **omitted entirely** when the user has no `fitness_auth_state` row and no
+`fitness_sync_runs` history (do not emit a block of nulls).
+
+Health *status* (`overall_status`) downgrades to `degraded` on `/api/health` if any source has been
+broken for more than `FITNESS_HEALTH_BROKEN_DEGRADED_HOURS` (default 48h, tunable via env). Long
+enough for Garmin's typical SSO-incident weekend break, short enough to surface a real outage.
+
+**Decisions worth recording (for the journal):**
+
+1. **`/health` (unauth) keeps its existing payload.** Original plan said both endpoints surface the
+   block. Deviation: `auth_broken_since` is per-user; surfacing it on the unauth probe lets any
+   anonymous caller enumerate which users have configured Strava/Garmin and when it broke. Multi-user
+   server, so this matters. The Docker healthcheck and external uptime probes only need
+   "is the server up?" — they don't need fitness state. Trade-off: the 48h-broken downgrade does
+   not propagate to the public probe; the operator's webapp `/api/health` view does, and that's
+   where the operator looks anyway.
+2. **`degraded`, not a new `warning` tier.** Existing `liveness.py` literal is
+   `ok | degraded | error`. The plan already said `degraded`; confirmed against the existing taxonomy.
+3. **Single-query summary in the repo.** `get_health_summary(user_id)` does one UNION subquery to
+   find configured sources (auth_state ∪ sync_runs), LEFT JOINs auth_state, correlated subquery for
+   `last_success_at`. Sub-millisecond. The naive 2-source × 2-table loop would be fine
+   performance-wise (`/api/health` is low traffic), but the SQL keeps the omit-if-not-configured
+   logic in one place.
+4. **Clock = `datetime.now(UTC)`.** Matches `_now_iso` in `fitness_repository.py` and the W6 fetch
+   service's clock. No shim — direct comparison of `datetime.fromisoformat(auth_broken_since)`
+   against `datetime.now(UTC)`.
 
 **Tests:**
 
-1. Empty DB (no `fitness_auth_state`) → fitness section omitted, overall status unchanged.
-2. One source `ok`, one source `broken` recently → fitness present, overall status not yet
-   `degraded`.
-3. One source broken for >48h → overall status drops to `degraded`.
+1. Empty DB (no `fitness_auth_state` and no `fitness_sync_runs`) → `fitness` key absent from
+   `/api/health`, overall status unchanged.
+2. One source `ok`, one source `broken` recently (e.g., 1h ago) → `fitness` present with both
+   sources, overall status still `ok` (recent breakage not over threshold yet).
+3. One source broken for >48h → overall status drops to `degraded`. Liveness checks list includes a
+   `fitness` entry showing `degraded` with detail naming the source.
+4. Source has sync_runs but no auth_state row (edge case: legacy/orphan history) → source surfaces
+   with `auth_status: null`, `auth_broken_since: null`, `last_success_at` populated.
+5. Custom `FITNESS_HEALTH_BROKEN_DEGRADED_HOURS=1` makes a 2h-old breakage trip `degraded`.
+6. Unauth `/health` never includes the `fitness` block, regardless of DB state.
 
 **Acceptance criteria:**
 
-- `uv run pytest tests/test_api/test_health.py` green.
-- `/health` (unauthenticated) and `/api/health` (authenticated) both surface the new payload.
+- `uv run pytest tests/test_api.py::TestHealth tests/test_db/test_fitness_repository.py
+  tests/test_services/test_liveness.py` green.
+- `/api/health` surfaces the new payload; `/health` is unchanged.
 
 ---
 

@@ -263,6 +263,59 @@ class FitnessRepository:
             self._conn.commit()
             return True
 
+    def get_health_summary(self, *, user_id: int) -> list[dict[str, Any]]:
+        """Per-source snapshot for the `/api/health` fitness block.
+
+        Returns one dict per source the user has interacted with — i.e.
+        the union of sources with a `fitness_auth_state` row and sources
+        with any `fitness_sync_runs` row. Sources with neither are
+        omitted entirely (the W12 plan: do not show null sources).
+
+        Each dict carries the three fields the health endpoint surfaces:
+        `source`, `auth_status`, `auth_broken_since`, `last_success_at`.
+        Orphan sources (sync_runs but no auth_state) yield `auth_status`
+        and `auth_broken_since` as `None`.
+
+        Single query: a UNION subquery enumerates the user's sources,
+        LEFT JOIN pulls auth_state, correlated subquery pulls the latest
+        successful run. Sub-millisecond against a personal-scale DB; the
+        endpoint is low-traffic so we don't cache.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT
+                    src.source AS source,
+                    a.auth_status AS auth_status,
+                    a.auth_broken_since AS auth_broken_since,
+                    (
+                        SELECT MAX(started_at)
+                        FROM fitness_sync_runs r
+                        WHERE r.user_id = ?
+                          AND r.source = src.source
+                          AND r.status = 'success'
+                    ) AS last_success_at
+                FROM (
+                    SELECT source FROM fitness_auth_state WHERE user_id = ?
+                    UNION
+                    SELECT DISTINCT source FROM fitness_sync_runs WHERE user_id = ?
+                ) src
+                LEFT JOIN fitness_auth_state a
+                    ON a.user_id = ? AND a.source = src.source
+                ORDER BY src.source
+                """,
+                (user_id, user_id, user_id, user_id),
+            ).fetchall()
+        return [
+            {
+                "source": row["source"],
+                "auth_status": row["auth_status"],
+                "auth_broken_since": row["auth_broken_since"],
+                "last_success_at": row["last_success_at"],
+            }
+            for row in rows
+        ]
+
     # ── Sync runs ─────────────────────────────────────────────────
 
     def start_sync_run(self, *, user_id: int, source: str) -> int:
