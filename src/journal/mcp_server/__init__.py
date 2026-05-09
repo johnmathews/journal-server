@@ -24,8 +24,10 @@ from journal.mcp_server.app import mcp
 from journal.mcp_server.bootstrap import _init_services, _services, lifespan
 from journal.mcp_server.runserver import main
 from journal.mcp_server.tools._ctx import (
+    _get_db_conn,
     _get_entity_extraction,
     _get_entity_store,
+    _get_fitness_repo,
     _get_ingestion,
     _get_job_repository,
     _get_job_runner,
@@ -37,6 +39,16 @@ from journal.mcp_server.tools.entities import (
     journal_get_entity_mentions,
     journal_get_entity_relationships,
     journal_list_entities,
+)
+from journal.mcp_server.tools.fitness import (
+    fitness_correlate_hrv_mood,
+    fitness_correlate_sleep_mood,
+    fitness_correlate_weekly_runs_stress,
+    fitness_integrity_check,
+    fitness_list_activities,
+    fitness_list_daily,
+    fitness_sync_status,
+    fitness_trigger_sync,
 )
 from journal.mcp_server.tools.ingestion import (
     journal_ingest_media,
@@ -63,8 +75,10 @@ from journal.mcp_server.tools.queries import (
 )
 
 __all__ = [
+    "_get_db_conn",
     "_get_entity_extraction",
     "_get_entity_store",
+    "_get_fitness_repo",
     "_get_ingestion",
     "_get_job_repository",
     "_get_job_runner",
@@ -74,6 +88,14 @@ __all__ = [
     "_poll_job_until_terminal",
     "_services",
     "_user_id",
+    "fitness_correlate_hrv_mood",
+    "fitness_correlate_sleep_mood",
+    "fitness_correlate_weekly_runs_stress",
+    "fitness_integrity_check",
+    "fitness_list_activities",
+    "fitness_list_daily",
+    "fitness_sync_status",
+    "fitness_trigger_sync",
     "journal_backfill_mood_scores_batch",
     "journal_extract_entities",
     "journal_extract_entities_batch",
