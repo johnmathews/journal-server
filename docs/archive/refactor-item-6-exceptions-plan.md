@@ -1,7 +1,7 @@
 # Item-6 exceptions — umbrella planning round
 
 **Status:** closed 2026-05-08. **Last updated:** 2026-05-09 (status flip during accuracy audit).
-**Supersedes:** none. Tracked under Round-3 § B in [`refactor-round-3.md`](./refactor-round-3.md).
+**Supersedes:** none. Tracked under Round-3 § B in [`refactor-round-3.md`](../refactor-round-3.md).
 All three items dispositioned and shipped:
 
 1. `api/entities.py` split into `api/entities.py` (425 lines) + `api/entity_merge.py` (406 lines) — commit `deceb1e`.

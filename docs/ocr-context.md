@@ -4,9 +4,12 @@ The OCR provider can be primed with a static set of "context files" that tell th
 author's life — family names, places, recurring topics — so that handwritten tokens that match those names are
 transcribed correctly. Both the Anthropic (Claude) and Gemini providers support context priming — Anthropic puts the
 composed text in the top-level `system` block (with `cache_control` once the system text crosses the 4,096-token
-minimum); Gemini puts the same composed text into `system_instruction` on each call. **Production runs Gemini 2.5 Pro
-as the primary OCR provider with Anthropic Opus as a second pass under `OCR_DUAL_PASS=true`** (as of 2026-05-09); the
-Anthropic-specific caching discussion below applies to the Anthropic adapter.
+minimum); Gemini puts the same composed text into `system_instruction` on each call. **Production runs with
+`OCR_DUAL_PASS=true` (as of 2026-05-09): the dual-pass factory always wires Anthropic Claude Opus 4.6 as the primary
+and Google Gemini 2.5 Pro as the secondary, regardless of the `ocr_provider` runtime setting** — see
+`_build_dual_pass_provider` in `src/journal/providers/ocr.py`. The single-provider `ocr_provider=gemini` setting only
+takes effect when `ocr_dual_pass=false`. The Anthropic-specific caching discussion below applies to the Anthropic
+adapter (i.e. always relevant in dual-pass mode).
 
 This document explains the mechanism, the cost profile, the failure modes, and how to enable it.
 

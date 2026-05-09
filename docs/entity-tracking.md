@@ -1,5 +1,26 @@
 # Entity Tracking
 
+**Status:** active. **Last updated:** 2026-05-09. Schema version 22 in production
+(`0022_entity_merge_candidates_pair_unique.sql`).
+
+## Contents
+
+- [What gets extracted](#what-gets-extracted)
+- [How extraction runs](#how-extraction-runs)
+- [Dedup strategy](#dedup-strategy)
+- [Description edits and recognition](#description-edits-and-recognition)
+- [Alias CRUD](#alias-crud)
+- [Author handling](#author-handling)
+- [Query surface](#query-surface)
+- [Entity lifecycle and orphan cleanup](#entity-lifecycle-and-orphan-cleanup)
+- [Merging entities](#merging-entities)
+- [Quarantine](#quarantine)
+- [Casing normalization](#casing-normalization)
+- [Post-LLM canonical_name validation](#post-llm-canonical_name-validation)
+- [Known risks](#known-risks)
+- [Storage-agnostic Protocol](#storage-agnostic-protocol)
+- [Migration timeline](#migration-timeline)
+
 Journal entries are freeform text. Entity tracking adds a structured layer on top: after an entry is ingested and
 (optionally) corrected, an on-demand batch job sends each entry's `final_text` to Claude, asks for named entities and the
 relationships between them, and persists the results to SQLite.
@@ -150,7 +171,7 @@ operations can orphan an entity (leave it with zero mentions):
   up any that lost all mentions.
 - **Re-extraction after edit** — `PATCH /api/entries/{id}` with `final_text` queues an async entity extraction job. The
   extraction service deletes all existing mentions for the entry, re-extracts, and then prunes entities that lost all
-  mentions as a result (`extract_from_entry()` in `entity_extraction.py`).
+  mentions as a result (`extract_from_entry()` in `src/journal/services/entity_extraction/service.py`).
 
 Both paths use the same `EntityStore.delete_orphaned_entities()` method, which only deletes entities from the candidate
 set that have zero remaining mentions across all entries — so an entity mentioned in other entries is never pruned.

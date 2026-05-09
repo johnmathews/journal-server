@@ -129,7 +129,12 @@ docker compose -f docker-compose.dev.yml up -d
 
 # 2. Configure environment
 cp .env.example .env
-# Edit .env — API keys only needed for ingestion, not for browsing/editing
+# Edit .env — at minimum set JOURNAL_SECRET_KEY (the server refuses to start
+# without it). Generate one with:
+#   python -c "import secrets; print(secrets.token_urlsafe(32))"
+# API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY) are only
+# needed for ingestion / semantic search — listing, editing, and seed work
+# without them. Set REGISTRATION_ENABLED=true so you can register a user.
 
 # 3. Seed sample data (no API keys needed)
 uv run journal seed
@@ -160,7 +165,8 @@ npm run dev
 
 The webapp gates every protected route on `email_verified=true`, so a freshly registered user can't browse the app
 until the email-verification bit is flipped — and SMTP isn't wired up locally. Register normally and then update the
-flag in SQLite. (`REGISTRATION_ENABLED` must be `true` in `.env`; `.env.example` ships it on by default.)
+flag in SQLite. (`REGISTRATION_ENABLED` must be `true` in `.env`; the env var is commented out of `.env.example`,
+so add it explicitly the first time you set up.)
 
 ```bash
 # Register via curl (or via the /register page in the webapp)

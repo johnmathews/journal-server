@@ -1,6 +1,6 @@
 # Phase 2: Health Endpoint & Web Dashboard
 
-**Status:** superseded by [`roadmap.md`](./roadmap.md) on 2026-04-11. The `/health` endpoint
+**Status:** superseded by [`roadmap.md`](../roadmap.md) on 2026-04-11. The `/health` endpoint
 and dashboard plans described below are now Tier 1 items 2 and 3 in the consolidated roadmap.
 Kept for history; do not add new work here.
 

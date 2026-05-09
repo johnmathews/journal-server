@@ -4,9 +4,11 @@ This document catalogues every external service and AI/LLM integration used (or 
 is organised by **processing stage** so you can see at a glance which models power which step of the pipeline and what
 alternatives exist.
 
-> **Last updated:** 2026-04-23
+> **Last updated:** 2026-05-09
 >
 > Pricing is stored in the `pricing` database table (migration 0017) and served via `GET /api/settings/pricing`.
+> The prod table currently has 12 rows (all `last_verified=2026-04-23`) including a `gpt-5.4` entry that may be a
+> placeholder/stub — verify before relying on it.
 > Admins can update rates in the webapp at Settings > API Pricing. The webapp uses these stored values to compute
 > per-1k-words cost estimates that react to changes in OCR provider, dual-pass mode, and other settings.
 
@@ -18,13 +20,15 @@ This shows every external API call for the current production configuration.
 
 ### Upload a 3-page handwritten journal entry
 
-Each page is OCR'd individually, then the combined text flows through chunking, embedding, and enrichment.
+Each page is OCR'd individually, then the combined text flows through chunking, embedding, and enrichment. Production
+runs `OCR_DUAL_PASS=true`, so each page is OCR'd by both Anthropic (primary) and Google (secondary) concurrently, and
+the results are reconciled via sentinel-based confidence (see `docs/ocr-context.md`).
 
 | Step | What happens                                                                          | API call         | Provider  | Model                    |
 | ---: | ------------------------------------------------------------------------------------- | ---------------- | --------- | ------------------------ |
-|    1 | **OCR page 1** — image → text                                                         | 1 LLM call       | Google    | `gemini-2.5-pro`         |
-|    2 | **OCR page 2**                                                                        | 1 LLM call       | Google    | `gemini-2.5-pro`         |
-|    3 | **OCR page 3**                                                                        | 1 LLM call       | Google    | `gemini-2.5-pro`         |
+|    1 | **OCR page 1** — image → text (dual-pass: primary + secondary)                        | 2 LLM calls      | Anthropic + Google | `claude-opus-4-6` + `gemini-2.5-pro` |
+|    2 | **OCR page 2** (dual-pass)                                                            | 2 LLM calls      | Anthropic + Google | `claude-opus-4-6` + `gemini-2.5-pro` |
+|    3 | **OCR page 3** (dual-pass)                                                            | 2 LLM calls      | Anthropic + Google | `claude-opus-4-6` + `gemini-2.5-pro` |
 |    4 | Date extraction from OCR text                                                         | — local          | —         | —                        |
 |    5 | Entry + page records saved to SQLite                                                  | — local          | —         | —                        |
 |    6 | **Semantic chunking** — embed all sentences, cosine similarity finds topic boundaries | 1 embedding call | OpenAI    | `text-embedding-3-large` |
@@ -34,7 +38,7 @@ Each page is OCR'd individually, then the combined text flows through chunking, 
 |   10 | **Entity extraction** — people, places, activities, relationships                     | 1 LLM call       | Anthropic | `claude-opus-4-6`        |
 |   11 | **Entity dedup** — compare new entities to existing by embedding similarity           | 1 embedding call | OpenAI    | `text-embedding-3-large` |
 
-**Total: 8 API calls** — 3 OCR + 2 LLM enrichment + 3 embedding.
+**Total: 11 API calls** — 6 OCR (3 pages × 2 providers under dual-pass) + 2 LLM enrichment + 3 embedding.
 
 ### Review and correct OCR text (save after editing)
 
@@ -51,21 +55,26 @@ When you edit the entry text and save, re-processing runs as background jobs:
 
 **Total: 5 API calls** — 2 LLM + 3 embedding.
 
-### Full lifecycle: upload + review = 13 API calls
+### Full lifecycle: upload + review = 16 API calls (with dual-pass OCR)
 
-| Type                      | Upload |  Save |  Total | Provider  |
-| ------------------------- | -----: | ----: | -----: | --------- |
-| Vision LLM (OCR)          |      3 |     0 |  **3** | Google    |
-| LLM (entity extraction)   |      1 |     1 |  **2** | Anthropic |
-| LLM (mood scoring)        |      1 |     1 |  **2** | Anthropic |
-| Embedding (chunking)      |      1 |     1 |  **2** | OpenAI    |
-| Embedding (chunk storage) |      1 |     1 |  **2** | OpenAI    |
-| Embedding (entity dedup)  |      1 |     1 |  **2** | OpenAI    |
-| **Total**                 |  **8** | **5** | **13** |           |
+| Type                      | Upload |  Save |  Total | Provider             |
+| ------------------------- | -----: | ----: | -----: | -------------------- |
+| Vision LLM (OCR primary)  |      3 |     0 |  **3** | Anthropic (Opus 4.6) |
+| Vision LLM (OCR secondary)|      3 |     0 |  **3** | Google (Gemini 2.5 Pro) |
+| LLM (entity extraction)   |      1 |     1 |  **2** | Anthropic            |
+| LLM (mood scoring)        |      1 |     1 |  **2** | Anthropic            |
+| Embedding (chunking)      |      1 |     1 |  **2** | OpenAI               |
+| Embedding (chunk storage) |      1 |     1 |  **2** | OpenAI               |
+| Embedding (entity dedup)  |      1 |     1 |  **2** | OpenAI               |
+| **Total**                 | **11** | **5** | **16** |                      |
+
+If `OCR_DUAL_PASS=false`, the secondary OCR row drops out and you get 8 + 5 = 13 calls.
 
 ### Cost estimate: 3-page, 500-word entry (upload + review)
 
-Assumes ~170 words per page, ~25 sentences total, ~4 chunks, ~8 entities with relationships.
+Assumes ~170 words per page, ~25 sentences total, ~4 chunks, ~8 entities with relationships. Costs below are for the
+single-pass case; with `OCR_DUAL_PASS=true` the OCR row is the sum of both providers (≈ $0.093 Opus + $0.032 Gemini ≈
+$0.125 per 3-page entry).
 
 | Step                                   | Input tokens | Output tokens | Model                      |       Cost |
 | -------------------------------------- | -----------: | ------------: | -------------------------- | ---------: |
@@ -105,10 +114,13 @@ Entity extraction and OCR dominate cost at roughly equal shares. Embeddings are 
 
 ## Current Production Stack
 
+`OCR_DUAL_PASS=true` is set on `media`, so OCR uses both providers below; everything else is single-provider.
+
 | Provider      | Model                    | Used for                                   | Price                   |
 | ------------- | ------------------------ | ------------------------------------------ | ----------------------- |
-| **Google**    | `gemini-2.5-pro`         | OCR (handwriting)                          | $1.25 / $10.00 per MTok |
-| **Anthropic** | `claude-opus-4-6`        | Entity extraction                          | $5.00 / $25.00 per MTok |
+| **Anthropic** | `claude-opus-4-6`        | OCR primary (dual-pass), entity extraction | $5.00 / $25.00 per MTok |
+| **Google**    | `gemini-2.5-pro`         | OCR secondary (dual-pass)                  | $1.25 / $10.00 per MTok |
+| **Anthropic** | `claude-haiku-4-5`       | Reranker (search L2), transcript formatter, date heading detector | $1.00 / $5.00 per MTok |
 | **Anthropic** | `claude-sonnet-4-5`      | Mood scoring                               | $3.00 / $15.00 per MTok |
 | **OpenAI**    | `text-embedding-3-large` | Chunking, search, entity dedup (1024 dims) | $0.13 per MTok          |
 | **OpenAI**    | `gpt-4o-transcribe`      | Voice transcription (default primary)      | $0.006 / min            |
@@ -129,7 +141,13 @@ Photos of handwritten journal pages are sent to a vision-capable LLM which retur
 implementation supports context-priming (a glossary of proper nouns injected into the system prompt) and marks uncertain
 regions with `⟪/⟫` sentinels.
 
-**Current (2026-05-09):** Google Gemini 2.5 Pro (primary, `OCR_PROVIDER=gemini` / `OCR_MODEL=gemini-2.5-pro` in prod env on `media`); Anthropic Claude Opus 4.6 runs as a second pass via `OCR_DUAL_PASS=true`. Gemini 3 / 3.1 Pro rows further down are research/forward-pricing — they are NOT what prod runs.
+**Current (2026-05-09):** `OCR_DUAL_PASS=true` is set in runtime_settings on `media`. The dual-pass factory
+(`_build_dual_pass_provider` in `src/journal/providers/ocr.py`) hard-wires Anthropic Claude Opus 4.6 as the primary
+and Google Gemini 2.5 Pro as the secondary, and the `ocr_provider` runtime setting is ignored while dual-pass is on.
+Each page produces two OCR calls (one per provider) and the results are reconciled via sentinel-based confidence:
+the primary's text is preferred when both agree or both flag uncertainty; the secondary is substituted only where the
+primary is uncertain and the secondary is confident. Gemini 3 / 3.1 Pro rows further down are research/forward-pricing
+— they are NOT what prod runs.
 
 #### Cloud API Options
 
@@ -594,13 +612,16 @@ tiktoken>=0.9,<1            # Token counting (cl100k_base)
      │
      ▼
   ┌──────────────────────────────────────────────────────────┐
-  │  1. OCR                               (request thread)   │
+  │  1. OCR  (dual-pass, request thread)                     │
   │                                                          │
-  │  Page 1 ──► Gemini 3 Pro ──► text ─┐                    │
-  │  Page 2 ──► Gemini 3 Pro ──► text ──┼──► combined text   │
-  │  Page 3 ──► Gemini 3 Pro ──► text ─┘     (~500 words)   │
+  │  Page 1 ──► Opus 4.6 ──┐                                 │
+  │           └► Gemini 2.5 Pro ─► reconcile ─► text 1 ─┐    │
+  │  Page 2 ──► Opus 4.6 ──┐                            │    │
+  │           └► Gemini 2.5 Pro ─► reconcile ─► text 2 ─┼─►  │
+  │  Page 3 ──► Opus 4.6 ──┐                            │    │
+  │           └► Gemini 2.5 Pro ─► reconcile ─► text 3 ─┘    │
   │                                                          │
-  │  3 LLM calls (Google)                        cost: $0.04 │
+  │  6 LLM calls (Anthropic + Google)            cost: ~$0.13│
   └────────────────────────┬─────────────────────────────────┘
                            │
                            ▼
@@ -629,7 +650,7 @@ tiktoken>=0.9,<1            # Token counting (cl100k_base)
   │  Predicate normalisation                     (planned)   │
   └──────────────────────────────────────────────────────────┘
 
-  TOTAL UPLOAD: 8 API calls, ~$0.07
+  TOTAL UPLOAD: 11 API calls, ~$0.16  (with dual-pass; 8 calls / ~$0.07 single-pass Gemini)
 
   ═══════════ AFTER OCR REVIEW + SAVE ═══════════
 
@@ -647,5 +668,5 @@ tiktoken>=0.9,<1            # Token counting (cl100k_base)
   └──────────────────────────────────────────────────────────┘
 
   TOTAL SAVE: 5 API calls, ~$0.03
-  TOTAL LIFECYCLE: 13 API calls, ~$0.10
+  TOTAL LIFECYCLE: 16 API calls, ~$0.19  (with dual-pass; 13 / ~$0.10 single-pass Gemini)
 ```

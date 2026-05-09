@@ -2,7 +2,7 @@
 
 **Status:** closed 2026-05-07. The proposed split landed — `mcp_server.py` is now the
 `mcp_server/` package, with `bootstrap.py` (475 lines) as the largest member. Tracked under
-Round-3 Recommendation 2 in [`refactor-round-3.md`](./refactor-round-3.md). Kept as a record
+Round-3 Recommendation 2 in [`refactor-round-3.md`](../refactor-round-3.md). Kept as a record
 of the design decisions behind the split.
 
 Round-3 Recommendation 2 from `docs/refactor-round-3.md`. Read-only

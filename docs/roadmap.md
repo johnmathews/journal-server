@@ -1,7 +1,10 @@
 # Journal Tool — Consolidated Roadmap
 
-**Status:** active. **Last updated:** 2026-05-09 (recursive accuracy/freshness audit; production state cross-checked against prod DB and env on `media`). **Supersedes:**
-[`phase-2-brief.md`](./phase-2-brief.md) (2026-03-23) and `webapp/docs/future-features.md`.
+**Status:** active. **Last updated:** 2026-05-09 (recursive accuracy/freshness audit; production
+state cross-checked against prod DB and env on `media`; Tier 1 collapsed after closeout — see
+Closed items 13–15 for the shipped detail). **Supersedes:**
+[`archive/phase-2-brief.md`](./archive/phase-2-brief.md) (2026-03-23) and
+`webapp/docs/archive/future-features.md`.
 Pulls in all outstanding TODOs from memory files and recent journal entries.
 
 This is the single source of truth for "what do we work on next". When you finish an item, cross it out here; when you
@@ -12,17 +15,17 @@ defer one, move it to the "Deferred / known gaps" section with a reason.
 Live plans linked here so they don't become shadow inventory. For each, the `Status:` header at
 the top of the linked doc tells you whether it's active, closed, or superseded.
 
-- [`tier-1-plan.md`](./tier-1-plan.md) — **closed 2026-05-09**, all four Tier 1 items done
+- [`archive/tier-1-plan.md`](./archive/tier-1-plan.md) — **closed 2026-05-09**, all four Tier 1 items done
   (Items 2/3a/3b/4 shipped 2026-04-11; Item 3c shipped 2026-04-21 with renamed endpoints;
   Item 1 de facto complete via the entity-quality workstream). Kept as a record of decisions.
 - [`refactor-round-3.md`](./refactor-round-3.md) — current entry point for refactor work.
-  Supersedes [`code-quality-refactor-plan.md`](./code-quality-refactor-plan.md) (v2, closed)
-  and [`refactor-follow-ups.md`](./refactor-follow-ups.md) (closed). Most recent shipped
+  Supersedes [`archive/code-quality-refactor-plan.md`](./archive/code-quality-refactor-plan.md) (v2, closed)
+  and [`archive/refactor-follow-ups.md`](./archive/refactor-follow-ups.md) (closed). Most recent shipped
   units: api.py / repository / mcp_server / auth_api / ingestion / cli splits and
   item-6 exceptions batch 1 (all by 2026-05-08).
-  - [`refactor-repository-plan.md`](./refactor-repository-plan.md) — child plan, Recommendation 3 (closed 2026-05-07).
-  - [`refactor-item-6-exceptions-plan.md`](./refactor-item-6-exceptions-plan.md) — child plan, § B (closed 2026-05-08; all three items dispositioned).
-  - [`refactor-mcp-server-plan.md`](./refactor-mcp-server-plan.md) — child plan, Recommendation 2 (closed; split landed 2026-05-07).
+  - [`archive/refactor-repository-plan.md`](./archive/refactor-repository-plan.md) — child plan, Recommendation 3 (closed 2026-05-07).
+  - [`archive/refactor-item-6-exceptions-plan.md`](./archive/refactor-item-6-exceptions-plan.md) — child plan, § B (closed 2026-05-08; all three items dispositioned).
+  - [`archive/refactor-mcp-server-plan.md`](./archive/refactor-mcp-server-plan.md) — child plan, Recommendation 2 (closed; split landed 2026-05-07).
 - [`security-roadmap.md`](./security-roadmap.md) — multi-tier security hardening. Tier 1
   completed 2026-04-15; later tiers remain.
 - [`fitness-integration-plan.md`](./fitness-integration-plan.md) — fitness-tracker
@@ -59,138 +62,28 @@ with a small corpus".
 
 ## Tier 1 — Ready to start now
 
-> All four original Tier 1 items (entity-extraction first run, `/health`, dashboard, search UI)
-> are now done — see [`tier-1-plan.md`](./tier-1-plan.md) (closed) and the Closed list below.
-> The next active item that meets the Tier 1 criterion (no upstream dependency, ready to
-> start) is **fitness integration** — see the linked plan for scope.
+> The four original Tier 1 items (entity-extraction first run, `/health`, dashboard, search
+> UI) all closed by 2026-04-21 — see [`archive/tier-1-plan.md`](./archive/tier-1-plan.md) and
+> Closed items 13–15, 28 below for the shipped detail. T1.1.b dedup-threshold tuning (`0.88`)
+> was never executed but no work was blocked. The next item meeting the Tier 1 criterion
+> (no upstream dependency, ready to start) is **fitness integration**.
 
-### 1. ~~First real entity-extraction run~~ `[server]` — ✅ de facto shipped
-
-Entity tables are populated and actively maintained in prod. Downstream features built on
-them (auto-reextraction-on-save, entity-distribution / entity-trends charts, the entity
-casing / aliases / quarantine / merge-candidate / dedup-rejection workstream, past-dismissals
-panel) have all shipped. T1.1.b dedup-threshold tuning (`0.88`) was never executed but no
-work was blocked. See `tier-1-plan.md` closeout summary for detail.
-
----
-
-### 1b. Fitness integration `[server]` — active, planning open questions resolved 2026-05-08
+### 1. Fitness integration `[server]` — active, planning open questions resolved 2026-05-08
 
 Ingestion pipeline for fitness-tracker data (Garmin / Apple Health). Schema and design
 decisions captured in [`fitness-integration-plan.md`](./fitness-integration-plan.md) and
 [`fitness-schema.md`](./fitness-schema.md). Sibling journal entry:
 `journal/260508-fitness-integration-planning.md`. Implementation has not yet started.
 
-**Why this is now Tier 1:** independent of the journal-text pipeline, opens a new analytical
-surface (mood vs activity correlation), and the planning doc is the most recently added
-active workstream.
-
----
-
-### 2. `/health` endpoint `[server]` — ✅ shipped 2026-04-11
-
-A single `GET /health` endpoint on the MCP server exposing operational stats. **Unauthenticated** (decided against bearer
-auth — loopback bind means anyone who can reach it already has a shell on the box, and we scrub any field that would leak
-query content). See `journal/260411-health-endpoint.md` for the full session notes and `docs/api.md` for the endpoint
-contract.
-
-**Shipped:**
-
-1. ✅ `InMemoryStatsCollector` — `src/journal/services/stats.py`, bounded per-type histogram with `record_query` +
-   `snapshot`, wired into `QueryService` behind an optional dependency.
-2. ✅ `get_ingestion_stats(now)` — repository method aggregating total/last-7d/last-30d counts, by-source-type, avg
-   words/chunks, last-ingestion timestamp, per-table row counts.
-3. ✅ Provider liveness — `src/journal/services/liveness.py` pings SQLite and ChromaDB and sanity-checks Anthropic/OpenAI
-   API keys without burning tokens.
-4. ✅ `GET /health` route in `api.py`, exempt from the bearer middleware via a new `exempt_paths` kwarg on
-   `BearerTokenMiddleware`.
-5. ✅ `journal health [--compact]` CLI subcommand emitting the same payload as JSON for scripted use.
-
-**Deliberately NOT shipped** (plan items that were cut on review):
-
-1. **Most frequent search terms.** The plan listed this as an optional "Query & usage stat". It would leak what the user
-   was searching for from an unauthenticated endpoint, and adding it would push us toward tracking raw query strings in
-   memory. Omitted — the query stats block carries counts-by-type only.
-2. **ChromaDB last-update timestamp** and **SQLite database size (bytes)**. Both are operationally interesting but Chroma
-   does not expose a cheap "last write" timestamp and DB bytes requires a separate stat() call. The `row_counts` block is
-   the closest proxy and good enough.
-3. **Dashboard consumer.** The plan noted that the dashboard (Tier 1 item 3) could reuse the health payload as a data
-   source. Not pursued yet — when 3a lands it will add its own dashboard-specific endpoint, and the shared-source idea
-   can be revisited if it turns out to duplicate work.
-
-**Source:** `docs/phase-2-brief.md` "Health & Stats Endpoint".
-
----
-
-### 3. ~~Dashboard view~~ `[both]` — ✅ entirely shipped (3a + 3b on 2026-04-11; 3c on 2026-04-21)
-
-Unified DashboardView at `/` (entries list at `/entries`). Chart.js 4 throughout. Sub-epic 3c
-shipped under different endpoint names than originally planned and as a CSS-grid heatmap
-rather than `chartjs-chart-matrix` (open question 6 resolved against the plugin).
-
-**Live charts** (all in `webapp/src/views/DashboardView.vue`):
-
-1. ✅ Writing frequency (sub-epic 3a, 2026-04-11)
-2. ✅ Word count trend (sub-epic 3a, 2026-04-11)
-3. ✅ Mood dimensions with variance bands and grouped/ungrouped toggles
-   (sub-epic 3b, backend + frontend 2026-04-11; grouped toggles + admin Moods tab 2026-05-05)
-4. ✅ Entity-trends multi-line chart (sub-epic 3c, 2026-04-21)
-5. ✅ Entity-distribution doughnut with expand/collapse legend (3c, 2026-04-21)
-6. ✅ Calendar heatmap (CSS grid, 3c, 2026-04-21)
-7. ✅ Mood-entity correlation chart (bonus, 2026-04-21)
-8. ✅ Word-count distribution chart (bonus, 2026-04-21)
-
-**Live backend endpoints** in `src/journal/api/dashboard.py`:
-
-1. ✅ `GET /api/dashboard/writing-stats` (combined entry-count + word-count)
-2. ✅ `GET /api/dashboard/mood-dimensions`, `GET /api/dashboard/mood-trends`
-3. ✅ `GET /api/dashboard/entity-distribution`, `GET /api/dashboard/entity-trends`
-4. ✅ `GET /api/dashboard/calendar-heatmap`
-5. ✅ `GET /api/dashboard/mood-entity-correlation`, `GET /api/dashboard/word-count-distribution`
-
-**Mood scoring decision changed:** `JOURNAL_ENABLE_MOOD_SCORING` now **defaults to `true`**
-(opt-out via `=false`). Reversal of open question 2 in the original tier-1-plan; happened
-during the deployment fix on 2026-04-13 and was made user-toggleable from the Settings page.
-
-**Source:** [`tier-1-plan.md`](./tier-1-plan.md) (closed),
-`webapp/journal/260421-unified-dashboard-and-new-charts.md`,
-`webapp/journal/260413-mood-scoring-deployment-fix.md`.
-
----
-
-### 4. Search UI `[both]` — ✅ shipped 2026-04-11
-
-Dedicated webapp `/search` view.
-
-**Backend — shipped 2026-04-11** (see `journal/260411-search-backend.md`):
-
-1. ✅ `GET /api/search?q=...&mode=semantic|keyword&start_date=...&end_date=...&limit=...&offset=...`
-2. ✅ `ChunkMatch` now carries `chunk_index`, `char_start`, `char_end` for semantic hits so the frontend can render chunk
-   highlights without a second round-trip.
-3. ✅ Keyword mode returns FTS5 `snippet()` output with `\x02`/`\x03` marker chars wrapping matched terms.
-
-**Frontend — shipped 2026-04-11** (see `journal-webapp/journal/260411-search-ui.md`):
-
-1. ✅ `/search` route and `SearchView.vue` with query input, mode toggle (semantic default), and date range filter.
-2. ✅ Pinia `useSearchStore` preserves query/mode/dates across navigation and surfaces `ApiRequestError` messages
-   verbatim.
-3. ✅ Results list with FTS5 snippet highlights rendered via `src/utils/searchSnippet.ts` (converts `\x02`/`\x03` marker
-   chars to `<mark>` tags with HTML escaping).
-4. ✅ Click-through to `EntryDetailView` with `?chunk=N` on semantic hits; `EntryDetailView` reads the param, flips the
-   overlay to chunks mode, and `scrollIntoView` on the matching chunk badge.
-
-**Subsequent overhaul (2026-05-01):** the `mode=keyword|semantic` toggle was removed and the
-backend replaced with a hybrid pipeline (BM25 + dense + RRF + Haiku rerank). See
-[`search.md`](./search.md) and Closed item 42.
-
-**Source:** `journal-webapp/docs/future-features.md` "Phase 3: Search UI" (now obsolete — this roadmap entry is the
-record of what actually shipped).
+**Why Tier 1:** independent of the journal-text pipeline, opens a new analytical surface
+(mood vs activity correlation), and the planning doc is the most recently added active
+workstream.
 
 ---
 
 ## Tier 2 — Blocked on data, Tier 1, or both
 
-### 5. Entity graph visualization view `[webapp]`
+### 2. Entity graph visualization view `[webapp]`
 
 New `/graph` route using **Cytoscape.js** (library bake-off already happened — see
 `journal-webapp/journal/260411-auth-header-overlay-cache-entity-views.md`). Renders the entity-and-relationship graph as
@@ -215,7 +108,7 @@ to Tier 1 next time you pick this up.
 
 ---
 
-### 6. LadybugDB graph-backend experiment `[server]`
+### 3. LadybugDB graph-backend experiment `[server]`
 
 Swap in a second `EntityStore` implementation backed by LadybugDB (Kuzu's successor) while keeping SQLite as the
 fallback. The `EntityStore` Protocol in `src/journal/entitystore/protocol.py` (re-exported from `entitystore/store.py`)
@@ -242,53 +135,19 @@ feature.
 
 ---
 
-### 7. ~~Entity extraction trigger UI~~ `[webapp]` — ✅ superseded 2026-04-13
-
-Resolved by **auto-reextraction on save** (`server/journal/260413-auto-entity-reextraction-on-save.md`):
-extraction now runs automatically as part of the save pipeline, so a manual trigger button is
-no longer needed. Manual extraction is still available via CLI for backfills.
-
----
-
-### 8. Entity management: combine, rename, delete `[both]` — ✅ shipped 2026-04-12
-
-All four entity management features shipped:
-
-1. ✅ **Combine / merge** — select 2+ entities in the list view via checkboxes, click "Merge selected", pick the survivor
-   in a modal. All mentions, relationships, and aliases from absorbed entities are reassigned to the survivor. Merge
-   history is recorded in `entity_merge_history` for audit/undo.
-2. ✅ **Rename / edit** — edit button on entity detail view opens an inline form for canonical name, entity type, and
-   description. `PATCH /api/entities/{id}`.
-3. ✅ **Delete** — delete button on entity detail view with `window.confirm()` dialog. `DELETE /api/entities/{id}`
-   cascades to mentions, relationships, and aliases.
-4. ✅ **Merge review** — extraction service now persists near-miss similarity matches to `entity_merge_candidates` table.
-   The entity list view shows a "Possible duplicates to review" banner with accept/dismiss actions per candidate.
-
-**Backend:** Migration 0008 (`entity_merge_history` + `entity_merge_candidates` tables). `EntityStore` Protocol extended
-with `update_entity`, `delete_entity`, `merge_entities`, `create_merge_candidate`, `list_merge_candidates`,
-`resolve_merge_candidate`, `get_merge_history`. Six new REST endpoints. Extraction service updated to persist near-miss
-candidates.
-
-**Frontend:** New types, API functions, and store actions. `EntityDetailView` has edit form + delete button.
-`EntityListView` has row checkboxes, merge modal, and merge review section.
-
-**Also fixed:** Two tuple-unpack bugs in `GET /api/entities?search=` and MCP `journal_list_entities` that crashed on
-non-empty results.
-
-**Source:** user feedback 2026-04-12.
+> **Tier 2 closed items removed 2026-05-09:** the previously-listed manual "entity extraction
+> trigger UI" (superseded by auto-reextraction on save — Closed item 23) and "entity
+> management combine/rename/delete" (shipped 2026-04-12 — Closed item 21) had full duplicated
+> detail blocks here; deleted to avoid drift.
 
 ---
 
 ## Tier 3 — Polish and research
 
-### 9. ~~Multi-page ingestion UI `[webapp]`~~ — ✅ shipped 2026-04-12
+> Multi-page ingestion UI (previously listed here) is shipped as part of `/entries/new` —
+> see Closed item 17.
 
-**Superseded** by the entry creation feature (Closed item 17). The webapp now has a full `/entries/new` view with
-drag-drop multi-image upload, reorder, thumbnails, async OCR job with progress bar, plus text entry and file import tabs.
-
----
-
-### 10. Voice note playback `[both]`
+### 4. Voice note playback `[both]`
 
 Audio player alongside transcript in `EntryDetailView` for voice entries. Needs:
 
@@ -296,34 +155,20 @@ Audio player alongside transcript in `EntryDetailView` for voice entries. Needs:
 2. Frontend `<audio>` element with transcript scrubbing (timestamp markers if Whisper gave us word-level timestamps,
    otherwise simple playback).
 
-**Source:** `journal-webapp/docs/future-features.md` "Phase 4".
+**Source:** `journal-webapp/docs/archive/future-features.md` "Phase 4".
 
 ---
 
-### 11. ~~Low-confidence OCR highlighting `[both]`~~ — ✅ shipped 2026-04-11
-
-Shipped as the "Review" toggle in `EntryDetailView`. The OCR provider wraps uncertain words/phrases in `⟪/⟫` sentinels,
-the parser extracts them as `uncertain_spans` (stored in DB via migration 0005), and the Review toggle renders them with
-yellow highlights in the Original OCR panel. Spans are anchored to `raw_text` and immune to `final_text` edits. UX
-improved 2026-04-12: toggle is always clickable, shows info banner when no uncertain spans exist.
-
-**Original question answered:** Anthropic's vision API does not return per-region confidence natively, but prompting the
-model to wrap uncertain spans in sentinels achieves the same result.
-
-**Source:** `journal-webapp/journal/260411-review-toggle.md`.
-
----
-
-### 12. Export `[both]`
+### 5. Export `[both]`
 
 Export entries (or a filtered subset) to Markdown, PDF, or JSON. `GET /api/export?format=markdown&from=...&to=...` with
 server-side rendering. Button on `EntryListView` above the filtered list.
 
-**Source:** `journal-webapp/docs/future-features.md` "Phase 5".
+**Source:** `journal-webapp/docs/archive/future-features.md` "Phase 5".
 
 ---
 
-### 13. Semantic-chunker percentile tuning `[server]`
+### 6. Semantic-chunker percentile tuning `[server]`
 
 `SemanticChunker` ships with `boundary_percentile=25` and `decisive_percentile=10` as defaults. These were picked by gut
 feel because the user had 2 real entries at the time — meaningless stats. The 20-entry threshold the original session
@@ -340,7 +185,7 @@ Open questions to answer during tuning:
 
 ---
 
-### 14. Predicate normalisation for the entity graph `[server]`
+### 7. Predicate normalisation for the entity graph `[server]`
 
 Relationship predicates (`met`, `saw`, `caught up with`, `had lunch with`) are free-text. Over time they drift and a
 single underlying relationship gets expressed as N different predicates. A normalisation pass — small clustering LLM call
@@ -354,7 +199,7 @@ then cluster.
 
 ---
 
-### 15. Coreference resolution `[server]`
+### 8. Coreference resolution `[server]`
 
 Currently only first-person (`I`, `me`, `my`) is resolved, via the `JOURNAL_AUTHOR_NAME` config. Pronouns like `we`,
 `she`, `him`, `they` are not resolved — the extractor sees them as strings with no entity link, so "she told me..."
@@ -367,7 +212,7 @@ fill in pronoun references. Expensive if done every run; cheap if done only as p
 
 ---
 
-### 16. OCR context priming empirical evaluation `[server]`
+### 9. OCR context priming empirical evaluation `[server]`
 
 OCR context priming shipped 2026-04-11 but was never measured against a real baseline. Run the same handwritten sample
 through the OCR provider with and without `OCR_CONTEXT_DIR` set and eyeball the proper-noun accuracy delta.
@@ -385,7 +230,7 @@ minimum) or rip it out.
 
 ---
 
-### 17. `FixedTokenChunker` sizing review `[server]`
+### 10. `FixedTokenChunker` sizing review `[server]`
 
 Observed on 2026-04-11 via the webapp chunks overlay on entry 7 (277 words, 2 pages, date 2026-02-15): the current
 `FixedTokenChunker(max_tokens=150, overlap_tokens=40)` produces **5 chunks** for that entry, which is over-fragmented.
@@ -404,14 +249,14 @@ Candidate points: `(150,40)` baseline, `(200,40)`, `(250,30)`, `(300,25)`. Expec
 277-word entry with clean paragraph boundaries. Commit the winner to `config.py` and update the regression test
 `test_ingest_multi_page_packs_efficiently` (currently locks the old 2-chunk count at `max_tokens=150`).
 
-**Related:** #13 (semantic chunker percentile tuning). Both sweeps are worth doing in the same session — the corpus is
+**Related:** #6 (semantic chunker percentile tuning). Both sweeps are worth doing in the same session — the corpus is
 now at 69 entries (≥ 3× the original gating threshold), so numbers are meaningful.
 
 **Source:** conversation with Claude, 2026-04-11, reviewing the chunks overlay on entry 7.
 
 ---
 
-### 18. Grow OCR glossary `[server]`
+### 11. Grow OCR glossary `[server]`
 
 `OCR_CONTEXT_DIR` glossary growth is worth doing for two independent reasons: OCR accuracy on proper nouns, and (when
 running an Anthropic primary) prompt-caching economics.
@@ -440,7 +285,7 @@ ignored and every request will pay full input price.
 This is a "do it when you have more proper nouns to add" item, not urgent. If you decide _not_ to, consider adding a
 `warning_suppressed` flag to silence the Anthropic repeat warning so it doesn't numb you to other cache-related issues.
 
-**Related:** #16 (glossary accuracy evaluation across both providers). Do both in the same session.
+**Related:** #9 (glossary accuracy evaluation across both providers). Do both in the same session.
 
 **Source:** conversation with Claude, 2026-04-11; provider-pivot notes 2026-05-01 (multi-provider transcription) and the
 audit on 2026-05-09.
@@ -561,17 +406,17 @@ Included so we don't accidentally re-surface these as TODOs.
     `POST /api/entries/ingest/file` (sync multipart .md/.txt), `POST /api/entries/ingest/images` (async multipart,
     job-based OCR). `IngestionService.ingest_text()` for text/file entries. `JobRunner` extended with `ingest_images` and
     `mood_score_entry` job types. Migration 0007 relaxes `source_type` CHECK. Webapp: `/entries/new` with Write Entry,
-    Import File, Upload Images tabs. Supersedes Tier 3 item 9 (multi-page ingestion UI).
+    Import File, Upload Images tabs. Supersedes the previously-planned multi-page ingestion UI.
 18. Image upload bug fixes (2026-04-12) — nginx `client_max_body_size 20m` for the `/api/` proxy, `apiFetch` Content-Type
     fix for `FormData` uploads, error message extraction (`body.error` fallback), duplicate error display removed,
     dismiss button + clear-on-tab-switch for error banner.
 19. OCR date extraction + date editing (2026-04-12) — new `date_extraction` module parses dates from OCR text (named
     months, ISO, DD/MM/YYYY). `PATCH /api/entries/{id}` extended to accept `entry_date` alongside `final_text`. Webapp:
     clickable date heading in EntryDetailView with inline date picker.
-20. OCR uncertainty highlighting (Tier 3 item 11, 2026-04-11) — Review toggle in EntryDetailView with `⟪/⟫` sentinel
-    parsing, `uncertain_spans` DB storage, yellow highlights on Original OCR panel. UX improved 2026-04-12: always
-    clickable, info banner when no spans exist.
-21. Entity management (Tier 2 item 8, 2026-04-12) — merge, rename, delete, and merge review for entities. Migration 0008
+20. OCR uncertainty highlighting (2026-04-11) — Review toggle in EntryDetailView with `⟪/⟫` sentinel
+    parsing, `uncertain_spans` DB storage (migration 0005), yellow highlights on Original OCR panel.
+    UX improved 2026-04-12: always clickable, info banner when no spans exist.
+21. Entity management combine/rename/delete + merge review (2026-04-12) — merge, rename, delete, and merge review for entities. Migration 0008
     adds `entity_merge_history` and `entity_merge_candidates` tables. Six new REST endpoints. Webapp entity detail view
     has edit/delete, list view has multi-select merge + merge review section. Fixed two tuple-unpack bugs in entity list
     endpoints.
@@ -584,7 +429,7 @@ Grouped by workstream rather than by commit; see the linked journal entries for 
 
 23. **Auto-entity-reextraction on save (2026-04-13)** — entity extraction runs automatically
     as part of the save pipeline (`server/journal/260413-auto-entity-reextraction-on-save.md`).
-    Supersedes Tier 2 item 7.
+    Supersedes the originally-planned manual "extraction trigger UI" (no longer needed).
 24. **Mood-scoring deployment fix + default reversal (2026-04-13)** — frontend mood chart
     confirmed live (was already shipped on 2026-04-11), and `JOURNAL_ENABLE_MOOD_SCORING`
     flipped to default `true` (`config.py:263`). Now toggleable at runtime from Settings.

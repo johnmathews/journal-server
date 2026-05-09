@@ -1,5 +1,7 @@
 # Architecture
 
+**Status:** active. **Last updated:** 2026-05-09. **Supersedes:** none.
+
 ## Overview
 
 The Journal Analysis Tool follows a layered architecture with strict separation of concerns. External services are
@@ -48,10 +50,12 @@ packages during the 2026-05-07/08 refactor round; references below are to the pa
   port as the MCP server; used by the webapp frontend and direct API-key consumers.
 - **Auth REST surface** (`auth_api/`) — login/logout, registration, profile, API keys, admin reload endpoints.
   Split across `auth_api/{core,account,profile,api_keys,admin,_shared}.py`. See `docs/auth.md`.
-- **CLI** (`cli/`) — argparse-based command-line interface. Each `cli/<command>.py` registers its subcommand from
-  `cli/__init__.py`. Subcommands include `ingest`, `ingest-multi`, `search`, `list`, `stats`, `health`, `seed`,
-  `rechunk`, `backfill-mood`, `eval-chunking`, `extract-entities`, `reembed-entity`, `repair-entity-names`,
-  `renorm-entity-casing` (~16 subcommands as of 2026-05-09).
+- **CLI** (`cli/`) — argparse-based command-line interface. All argparse setup and `cmd_*` handlers for the simple
+  subcommands live in `cli/__init__.py`; per-resource handler modules `cli/entities.py` and `cli/mood.py` hold the
+  larger entity- and mood-related commands, with shared service wiring in `cli/_services.py` and seed data in
+  `cli/_seed_samples.py`. Subcommands as of 2026-05-09 (16 total): `ingest`, `ingest-multi`, `search`, `list`,
+  `stats`, `health`, `backfill-chunks`, `rechunk`, `backfill-mood`, `eval-chunking`, `seed`, `migrate-chromadb`,
+  `extract-entities`, `backfill-entity-embeddings`, `repair-entity-names`, `renormalise-entity-casing`.
 
 ### Service Layer
 
@@ -228,7 +232,7 @@ The schema has accreted across 22 migrations (`db/migrations/0001..0022`). Produ
 of 2026-05-09. Tables in current use:
 
 **Core entries / pipeline**
-- `entries` — Core table (user_id, date, source_type, raw_text, final_text, word_count, chunk_count, entry_extraction_stale)
+- `entries` — Core table (user_id, date, source_type, raw_text, final_text, word_count, chunk_count, entity_extraction_stale)
 - `entry_pages` — Per-page OCR text for multi-page entries
 - `entry_chunks` — Per-chunk text with character offsets (used by the webapp chunk-overlay)
 - `entry_uncertain_spans` — Per-entry uncertain OCR/transcription spans (yellow Review-toggle highlights)

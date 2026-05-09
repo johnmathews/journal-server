@@ -1,6 +1,6 @@
 # Code Quality Refactor Plan (v2)
 
-**Status:** closed 2026-05-07. Superseded by [`refactor-round-3.md`](./refactor-round-3.md).
+**Status:** closed 2026-05-07. Superseded by [`refactor-round-3.md`](../refactor-round-3.md).
 All v2 work units (1a–7) shipped; new candidates that surfaced during execution moved into
 round 3. Kept as a record of decisions and per-unit rationale.
 
@@ -9,7 +9,7 @@ code-grounded review of v1. v1 was written without reading the actual files; v2 
 structural realities (e.g. `api.py`'s closure-over-`services_getter` shape, additional reach-ins,
 `entity_extraction.py`'s actual line count and dependency graph).
 
-See [`code-quality-principles.md`](code-quality-principles.md) for the standards each unit is
+See [`code-quality-principles.md`](../code-quality-principles.md) for the standards each unit is
 moving the codebase toward.
 
 ## Sequencing overview

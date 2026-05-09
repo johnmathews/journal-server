@@ -16,7 +16,7 @@ authentication schemes are accepted, checked in order:
 
 1. **Session cookie** — `session_id`, issued by `POST /api/auth/login` (or `POST /api/auth/register`). The cookie is
    set with `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`, and a 7-day `Max-Age`. The raw token is held only in the
-   cookie; the server stores a SHA-256 hash of the session id in the `sessions` table. This is the path the webapp
+   cookie; the server stores a SHA-256 hash of the session id in the `user_sessions` table. This is the path the webapp
    uses.
 2. **Bearer API key** — `Authorization: Bearer <key>` header. Used by MCP clients and direct REST consumers. Keys are
    created by `POST /api/auth/api-keys` and shown to the caller exactly once. Like session ids, only a hash of the key
@@ -730,8 +730,6 @@ via the app-wide middleware.
 
 ---
 
----
-
 ## Entry creation endpoints
 
 Three endpoints for creating journal entries from the webapp. Text and file ingestion are synchronous; image ingestion is
@@ -866,12 +864,10 @@ Poll `GET /api/jobs/{job_id}` for progress. On success, `result.entry_id` contai
 
 ---
 
----
-
 ## Entity endpoints
 
 Endpoints that expose the extracted-entity graph built by the entity extraction pipeline. See
-[entity-extraction.md](entity-extraction.md) for how entities, mentions, and relationships are produced, and
+[entity-tracking.md](entity-tracking.md) for how entities, mentions, and relationships are produced, and
 [jobs.md](jobs.md) for how the extraction runs are scheduled.
 
 ### GET /api/entities
@@ -1500,13 +1496,14 @@ Journal statistics with optional date filtering.
  "date_range_start": "2025-01-15",
  "date_range_end": "2026-04-09",
  "total_words": 18500,
- "avg_words_per_entry": 440,
- "entries_per_month": {
-  "2026-03": 8,
-  "2026-04": 3
- }
+ "avg_words_per_entry": 440.5,
+ "entries_per_month": 3.2
 }
 ```
+
+`entries_per_month` is a single float — the average entries-per-month rate over the date range
+(`total_entries / months_in_range`). For per-bucket counts, use `/api/dashboard/writing-stats` with
+`bin=month` instead.
 
 ---
 
@@ -2060,8 +2057,8 @@ through to the server, so the unauthenticated `/health` path is unreachable from
 
 ## Dashboard endpoints (additional)
 
-The dashboard cluster carries four routes beyond the ones above (`mood-dimensions`, `mood-trends`, `mood-drilldown`,
-`entity-distribution`, `writing-stats`).
+The dashboard cluster carries four more routes beyond the five above (`mood-dimensions`,
+`mood-trends`, `mood-drilldown`, `entity-distribution`, `writing-stats`).
 
 ### GET /api/dashboard/calendar-heatmap
 

@@ -1,6 +1,6 @@
 # Refactor follow-ups — open items after the v2 plan landed
 
-**Status:** closed 2026-05-07. Superseded by [`refactor-round-3.md`](./refactor-round-3.md).
+**Status:** closed 2026-05-07. Superseded by [`refactor-round-3.md`](../refactor-round-3.md).
 All items below are resolved or accepted+documented (item 7 was the last to land). Kept as a
 record of decisions and standing-fact verification commands.
 

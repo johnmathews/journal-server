@@ -2,7 +2,7 @@
 
 **Status:** closed 2026-05-09. All four Tier 1 items are now done. Kept as a record of the
 planning round and the open-question decisions. New work moves directly through
-[`roadmap.md`](./roadmap.md); promote Tier 2 items into a successor `tier-2-plan.md` when one
+[`roadmap.md`](../roadmap.md); promote Tier 2 items into a successor `tier-2-plan.md` when one
 is needed.
 
 **Closeout summary (2026-05-09 audit):**

@@ -1,9 +1,13 @@
 # Authentication & Multi-User Architecture
 
+**Status:** active reference doc. **Last reviewed:** 2026-05-09 against `src/journal/services/auth.py`,
+`src/journal/auth.py`, and `src/journal/auth_api/`. See [`security.md`](security.md) for the
+broader security posture and [`security-roadmap.md`](security-roadmap.md) for outstanding work.
+
 The journal server supports multiple users with per-user data isolation. Two authentication
 mechanisms are supported:
 
-1. **Cookie sessions** — used by the web frontend (httpOnly, Secure, SameSite=Lax)
+1. **Cookie sessions** — used by the web frontend (httpOnly, Secure, SameSite=Lax, 7-day max-age)
 2. **API keys (bearer tokens)** — used by MCP clients and external API consumers
 
 ## User Model
@@ -25,8 +29,13 @@ Each user has:
 4. User clicks link → `GET /api/auth/verify-email?token=...`
 5. Server sets `email_verified=true`, user can now access the app
 
-Registration is controlled by the `REGISTRATION_ENABLED` environment variable (default: `false`).
-The frontend checks `GET /api/auth/config` to show/hide the registration link.
+Registration is controlled by the `registration_enabled` runtime setting, which is persisted in
+the `runtime_settings` table and editable via `PATCH /api/settings/runtime` (admin only). The
+initial seed value is taken from the `REGISTRATION_ENABLED` environment variable (default:
+`false`); after the first start, the runtime-settings row wins. The frontend checks
+`GET /api/auth/config` to show/hide the registration link, and the `POST /api/auth/register`
+handler reads the runtime value on every request (`auth_api/account.py`). In prod (2026-05-09)
+this is set to `true`.
 
 ## Login Flow (Web)
 
@@ -59,14 +68,26 @@ The frontend checks `GET /api/auth/config` to show/hide the registration link.
 ## Account Lockout
 
 After 5 consecutive failed login attempts, the account is locked for 15 minutes. The counter
-resets on successful login.
+resets on successful login. Constants live in `src/journal/services/auth.py`
+(`_MAX_FAILED_ATTEMPTS`, `_LOCKOUT_MINUTES`).
+
+There is no app-level rate limit on `/api/auth/login` itself — see
+[`security-roadmap.md`](security-roadmap.md) Tier 2 item 3.
 
 ## Password Reset
 
-1. User submits email to `POST /api/auth/forgot-password` (always returns 200)
-2. If email exists, server sends a reset email with a signed token (30 min expiry)
-3. User clicks link → `/reset-password?token=...`
+1. User submits email to `POST /api/auth/forgot-password` (always returns 200, regardless of
+   whether the email exists — prevents enumeration)
+2. If the email exists, server sends a reset email with a signed `itsdangerous` token
+   (30 min expiry, salt `password-reset`)
+3. User clicks link → `/reset-password?token=...` (frontend can pre-validate via
+   `GET /api/auth/verify-reset-token?token=...`)
 4. User submits new password to `POST /api/auth/reset-password`
+5. On success, all of the user's existing sessions are deleted (`AuthService.reset_password`
+   calls `delete_user_sessions`) and the lockout counter is cleared.
+
+Note: reset tokens are stateless and currently reusable within the 30-minute window. Tracked
+as [`security-roadmap.md`](security-roadmap.md) Tier 2 item 5.
 
 ## Data Isolation
 
@@ -84,8 +105,8 @@ A user can never see another user's data through any API endpoint or MCP tool.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `JOURNAL_SECRET_KEY` | (required) | Secret for signing session tokens and reset URLs |
-| `REGISTRATION_ENABLED` | `false` | Allow self-service registration |
+| `JOURNAL_SECRET_KEY` | (required) | Secret for signing reset / verification tokens (`itsdangerous`). Server fails closed at startup if unset. |
+| `REGISTRATION_ENABLED` | `false` | Initial seed for the `registration_enabled` runtime setting. After first start, the runtime-settings row is authoritative. |
 | `SESSION_EXPIRY_DAYS` | `7` | Session lifetime in days |
 | `SMTP_HOST` | `smtp.gmail.com` | SMTP server for sending emails |
 | `SMTP_PORT` | `465` | SMTP port (SSL) |

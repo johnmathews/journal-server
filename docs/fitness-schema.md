@@ -1,19 +1,29 @@
 # Fitness Schema Design
 
-| Field | Value |
-|---|---|
-| **Status** | Active — schema design |
-| **Created** | 2026-05-09 |
-| **Last updated** | 2026-05-09 |
-| **Supersedes** | None |
-| **Superseded by** | None |
-| **Related docs** | `fitness-integration-plan.md` (master), `architecture.md`, `external-services.md`, `mood-scoring.md` |
-| **Code-grounded** | Yes — `db/migrations/0001,0006,0011,0017`, `services/notifications.py`, `services/mood_dimensions.py`, `config/mood-dimensions.toml`, and `models.py` reviewed before writing |
+**Status:** active — schema design. **Last updated:** 2026-05-09. **Created:** 2026-05-09.
+**Supersedes:** none.
+**Related docs:** [`fitness-integration-plan.md`](./fitness-integration-plan.md) (master),
+[`architecture.md`](./architecture.md), [`external-services.md`](./external-services.md),
+[`mood-scoring.md`](./mood-scoring.md).
+**Code-grounded:** yes — `db/migrations/0001,0006,0011,0017`, `services/notifications.py`,
+`services/mood_dimensions.py`, `config/mood-dimensions.toml`, and `models.py` reviewed before writing.
 
 This document specifies concrete tables, indexes, and migration sequencing for the fitness
 integration. **It does not relitigate decisions.** The four-layer pipeline, sacred raw archive,
 unit policy, `fitness_*` prefix, `user_id` requirement, daily cadence, library choices, and
 backfill window are all decided in `fitness-integration-plan.md`. Read that first.
+
+## Contents
+
+1. [Schema-level decisions](#1-schema-level-decisions-with-alternatives)
+2. [Raw layer](#2-raw-layer)
+3. [Normalized layer](#3-normalized-layer)
+4. [Auth & operational state](#4-auth--operational-state)
+5. [Notification topic keys](#5-notification-topic-keys)
+6. [Foreign keys & cascade posture](#6-foreign-keys--cascade-posture)
+7. [Migration sequencing](#7-migration-sequencing)
+8. [Correlation queries](#8-correlation-queries-proves-schema-supports-them)
+9. [Out of scope](#9-out-of-scope-explicit)
 
 ---
 
