@@ -62,12 +62,33 @@ def repo(db_conn: sqlite3.Connection) -> FitnessRepository:
 
 
 def _seed_auth(repo: FitnessRepository, source: str) -> None:
+    """Mirrors what W11's re-auth CLI persists for each source.
+
+    Strava: OAuth triple. Garmin: ``tokens_blob`` in ``extra_state``,
+    OAuth columns left ``None``. The fetch service's per-source
+    ``_has_credentials`` hook checks the right field for the source.
+    """
+    if source == "strava":
+        repo.upsert_auth_state(
+            FitnessAuthState(
+                user_id=1, source="strava",
+                access_token="atok", refresh_token="rtok",
+                token_expires_at="2030-01-01T00:00:00Z",
+                extra_state={},
+                last_successful_login_at=None,
+                last_refresh_at=None,
+                auth_status="ok",
+                auth_broken_since=None,
+            ),
+        )
+        return
     repo.upsert_auth_state(
         FitnessAuthState(
-            user_id=1, source=source,
-            access_token="atok", refresh_token="rtok",
-            token_expires_at="2030-01-01T00:00:00Z",
-            extra_state={},
+            user_id=1, source="garmin",
+            access_token=None,
+            refresh_token=None,
+            token_expires_at=None,
+            extra_state={"tokens_blob": "blob-from-W11-reauth"},
             last_successful_login_at=None,
             last_refresh_at=None,
             auth_status="ok",

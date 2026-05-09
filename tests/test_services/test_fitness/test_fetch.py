@@ -54,13 +54,35 @@ def repo(db_conn: sqlite3.Connection) -> FitnessRepository:
 
 
 def _seed_auth(repo: FitnessRepository, source: str) -> None:
-    """Insert an OK auth-state row so the fetch service has a token to use."""
+    """Insert an OK auth-state row so the fetch service has a credential to use.
+
+    The shape mirrors what each source's W11 re-auth flow actually
+    persists: Strava gets the OAuth triple; Garmin gets the token blob
+    in ``extra_state`` and leaves the OAuth columns ``None`` (matching
+    ``cmd_fitness_reauth_garmin``). Tests that want to exercise the
+    "no credentials" path should NOT call this helper.
+    """
+    if source == "strava":
+        repo.upsert_auth_state(
+            FitnessAuthState(
+                user_id=1, source="strava",
+                access_token="atok", refresh_token="rtok",
+                token_expires_at="2030-01-01T00:00:00Z",
+                extra_state={},
+                last_successful_login_at=None,
+                last_refresh_at=None,
+                auth_status="ok",
+                auth_broken_since=None,
+            ),
+        )
+        return
     repo.upsert_auth_state(
         FitnessAuthState(
-            user_id=1, source=source,
-            access_token="atok", refresh_token="rtok",
-            token_expires_at="2030-01-01T00:00:00Z",
-            extra_state={},
+            user_id=1, source="garmin",
+            access_token=None,
+            refresh_token=None,
+            token_expires_at=None,
+            extra_state={"tokens_blob": "blob-from-W11-reauth"},
             last_successful_login_at=None,
             last_refresh_at=None,
             auth_status="ok",
@@ -524,6 +546,90 @@ def test_garmin_auth_error_transitions_state_and_fires_once(
     assert auth is not None
     assert auth.auth_status == "broken"
     assert notifier.auth_broken_calls == [(1, "garmin")]
+
+
+# 10b. Garmin blob-only auth row reaches the provider -----------------
+#
+# Regression for the bug surfaced by the W13 live smoke: W11's Garmin
+# re-auth persists the credential as ``extra_state["tokens_blob"]`` and
+# leaves ``access_token`` as None, but the W6 missing-credentials check
+# only looked at ``access_token``. Result: every Garmin sync hit
+# ``MissingAuthState`` regardless of whether the blob was populated.
+# The fix decouples the credential check via ``_has_credentials``,
+# overridden per-source so Garmin checks the blob and Strava continues
+# to check the OAuth access token.
+
+
+def test_garmin_run_sync_proceeds_when_only_tokens_blob_is_set(
+    repo: FitnessRepository, config: Any,
+) -> None:
+    """W11 Garmin auth lives in extra_state.tokens_blob, not access_token.
+
+    The fetch service must not short-circuit to MissingAuthState in that
+    case. We seed an auth row in the W11 shape (no access_token, blob
+    present) and assert run_sync goes through the provider path.
+    """
+    repo.upsert_auth_state(
+        FitnessAuthState(
+            user_id=1, source="garmin",
+            access_token=None,
+            refresh_token=None,
+            token_expires_at=None,
+            extra_state={"tokens_blob": "blob-from-W11-reauth"},
+            last_successful_login_at=None,
+            last_refresh_at=None,
+            auth_status="ok",
+            auth_broken_since=None,
+        ),
+    )
+    fake = _FakeGarminProvider()
+    notifier = _FakeNotifier()
+    svc = _make_garmin(repo=repo, config=config, fake=fake, notifier=notifier)
+
+    result = svc.run_sync(
+        user_id=1,
+        since=datetime(2026, 4, 15, tzinfo=UTC),
+        until=datetime(2026, 4, 15, 23, 59, tzinfo=UTC),
+    )
+
+    assert result.status != "auth_broken", (
+        "blob-only auth must not trigger MissingAuthState; got "
+        f"{result.status} (likely the W6 access_token check still bites)"
+    )
+    assert fake.login_called, "provider.login must run when blob is present"
+
+
+def test_strava_run_sync_still_requires_access_token(
+    repo: FitnessRepository, config: Any,
+) -> None:
+    """Strava's OAuth pattern is unchanged — access_token is the credential.
+
+    A row with no access_token (whatever extra_state contains) must
+    still short-circuit MissingAuthState for Strava. Pinning this
+    behaviour prevents the fix from over-rotating the check.
+    """
+    repo.upsert_auth_state(
+        FitnessAuthState(
+            user_id=1, source="strava",
+            access_token=None,
+            refresh_token=None,
+            token_expires_at=None,
+            extra_state={"tokens_blob": "ignored-for-strava"},
+            last_successful_login_at=None,
+            last_refresh_at=None,
+            auth_status="ok",
+            auth_broken_since=None,
+        ),
+    )
+    fake = _FakeStravaProvider()
+    notifier = _FakeNotifier()
+    svc = _make_strava(repo=repo, config=config, fake=fake, notifier=notifier)
+
+    result = svc.run_sync(user_id=1)
+
+    assert result.status == "auth_broken"
+    runs = repo.list_recent_sync_runs(user_id=1, source="strava", limit=1)
+    assert runs[0].error_class == "MissingAuthState"
 
 
 # 11. FitnessSyncResult shape pinned ---------------------------------
