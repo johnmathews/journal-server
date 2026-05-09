@@ -433,7 +433,7 @@ Grouped by workstream rather than by commit; see the linked journal entries for 
     Supersedes the originally-planned manual "extraction trigger UI" (no longer needed).
 24. **Mood-scoring deployment fix + default reversal (2026-04-13)** — frontend mood chart
     confirmed live (was already shipped on 2026-04-11), and `JOURNAL_ENABLE_MOOD_SCORING`
-    flipped to default `true` (`config.py:263`). Now toggleable at runtime from Settings.
+    flipped to default `true` (`config.py:262`). Now toggleable at runtime from Settings.
 25. **Multi-user auth + tier-1 data isolation (2026-04-14 → 2026-04-15)** — per-user data
     isolation throughout the schema, hashed sessions, follow-up bugfixes for verification
     spinner flicker and stale view-mode state. Origin doc:
