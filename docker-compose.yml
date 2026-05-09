@@ -37,6 +37,16 @@ services:
       # Bearer token required on every /api/* and /mcp request. The
       # server refuses to start if this is unset.
       - JOURNAL_API_TOKEN=${JOURNAL_API_TOKEN}
+      # Fitness pipeline (see docs/fitness-tier-plan.md). Strava client
+      # credentials and the Garmin Connect login are required at W11+
+      # for live token refresh; W4–W10 use fixtures and don't need them.
+      - STRAVA_CLIENT_ID=${STRAVA_CLIENT_ID:-}
+      - STRAVA_CLIENT_SECRET=${STRAVA_CLIENT_SECRET:-}
+      - STRAVA_REDIRECT_URI=${STRAVA_REDIRECT_URI:-http://localhost:8400/strava/callback}
+      - GARMIN_USERNAME=${GARMIN_USERNAME:-}
+      - GARMIN_PASSWORD=${GARMIN_PASSWORD:-}
+      - FITNESS_BACKFILL_START=${FITNESS_BACKFILL_START:-2026-01-01}
+      - FITNESS_TRANSIENT_FAILURE_THRESHOLD=${FITNESS_TRANSIENT_FAILURE_THRESHOLD:-3}
     volumes:
       - /srv/media/config/journal/data:/data
     ports:
