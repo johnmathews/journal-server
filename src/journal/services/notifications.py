@@ -108,6 +108,39 @@ TOPICS: list[dict[str, Any]] = [
         "admin_only": True,
         "default": True,
     },
+    # ── Fitness pipeline (W3 of fitness-tier-plan.md) ──────────────
+    # Routing per master plan D5: auth-broken fires once on transition,
+    # transient is fire-after-N (threshold from Config), normalize-drift
+    # is admin-only (it's a code bug to fix, not a page), success defaults
+    # off so it's opt-in (mirrors notif_job_success_entity_reembed).
+    {
+        "key": "notif_fitness_auth_broken",
+        "label": "Fitness auth broken (re-auth needed)",
+        "group": "failure",
+        "admin_only": False,
+        "default": True,
+    },
+    {
+        "key": "notif_fitness_sync_failure",
+        "label": "Fitness sync failing repeatedly",
+        "group": "failure",
+        "admin_only": False,
+        "default": True,
+    },
+    {
+        "key": "notif_fitness_normalize_drift",
+        "label": "Fitness payload could not be normalized",
+        "group": "admin",
+        "admin_only": True,
+        "default": True,
+    },
+    {
+        "key": "notif_fitness_sync_success",
+        "label": "Fitness sync succeeded",
+        "group": "success",
+        "admin_only": False,
+        "default": False,
+    },
 ]
 
 # Map job_type -> topic key for success notifications.
@@ -119,6 +152,12 @@ _SUCCESS_TOPIC_MAP: dict[str, str] = {
     "ingest_audio": "notif_job_success_ingest_audio",
     "save_entry_pipeline": "notif_job_success_save_entry",
     "entity_reembed": "notif_job_success_entity_reembed",
+    # Fitness sync — both sources route to the same opt-in success topic.
+    # Without these entries, notify_job_success would fall through to
+    # "always notify" and ignore the user's preference (the topic
+    # defaults to off — opt-in, mirroring entity_reembed).
+    "fitness_sync_strava": "notif_fitness_sync_success",
+    "fitness_sync_garmin": "notif_fitness_sync_success",
 }
 
 # Map parent_job_type -> topic key for pipeline-failure notifications.
@@ -139,6 +178,8 @@ _JOB_TYPE_LABELS: dict[str, str] = {
     "reprocess_embeddings": "Embedding reprocessing",
     "save_entry_pipeline": "Entry update",
     "entity_reembed": "Entity recognition refresh",
+    "fitness_sync_strava": "Strava fitness sync",
+    "fitness_sync_garmin": "Garmin fitness sync",
 }
 
 

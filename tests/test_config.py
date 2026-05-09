@@ -288,3 +288,55 @@ class TestTranscriptionProviderConfig:
         monkeypatch.setenv("TRANSCRIPTION_RETRY_MAX_DELAY", "-5")
         with pytest.raises(ValueError, match="TRANSCRIPTION_RETRY_MAX_DELAY"):
             Config()
+
+
+class TestFitnessConfig:
+    """Defaults + env-var overrides for the fitness pipeline fields
+    added in W3 of docs/fitness-tier-plan.md."""
+
+    def _clean(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for key in (
+            "STRAVA_CLIENT_ID", "STRAVA_CLIENT_SECRET", "STRAVA_REDIRECT_URI",
+            "GARMIN_USERNAME", "GARMIN_PASSWORD",
+            "FITNESS_TRANSIENT_FAILURE_THRESHOLD", "FITNESS_BACKFILL_START",
+        ):
+            monkeypatch.delenv(key, raising=False)
+
+    def test_defaults_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Empty creds are tolerated at construct-time — code that needs
+        them errors at use-site, matching how anthropic_api_key works."""
+        self._clean(monkeypatch)
+        config = Config()
+        assert config.strava_client_id == ""
+        assert config.strava_client_secret == ""
+        assert config.strava_redirect_uri == "http://localhost:8400/strava/callback"
+        assert config.garmin_username == ""
+        assert config.garmin_password == ""
+        assert config.fitness_transient_failure_threshold == 3
+        assert config.fitness_backfill_start == "2026-01-01"
+
+    def test_env_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clean(monkeypatch)
+        monkeypatch.setenv("STRAVA_CLIENT_ID", "12345")
+        monkeypatch.setenv("STRAVA_CLIENT_SECRET", "shh")
+        monkeypatch.setenv("STRAVA_REDIRECT_URI", "http://localhost:9000/cb")
+        monkeypatch.setenv("GARMIN_USERNAME", "u@example.com")
+        monkeypatch.setenv("GARMIN_PASSWORD", "pw")
+        monkeypatch.setenv("FITNESS_TRANSIENT_FAILURE_THRESHOLD", "5")
+        monkeypatch.setenv("FITNESS_BACKFILL_START", "2024-06-01")
+        config = Config()
+        assert config.strava_client_id == "12345"
+        assert config.strava_client_secret == "shh"
+        assert config.strava_redirect_uri == "http://localhost:9000/cb"
+        assert config.garmin_username == "u@example.com"
+        assert config.garmin_password == "pw"
+        assert config.fitness_transient_failure_threshold == 5
+        assert config.fitness_backfill_start == "2024-06-01"
+
+    def test_zero_threshold_rejected(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._clean(monkeypatch)
+        monkeypatch.setenv("FITNESS_TRANSIENT_FAILURE_THRESHOLD", "0")
+        with pytest.raises(ValueError, match="FITNESS_TRANSIENT_FAILURE_THRESHOLD"):
+            Config()

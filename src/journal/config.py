@@ -406,6 +406,45 @@ class Config:
         )
     )
 
+    # ── Fitness pipeline (W3 of fitness-tier-plan.md) ──────────────
+    # Strava OAuth — register an app at https://www.strava.com/settings/api
+    # then drop the values here. See docs/fitness-tier-plan.md §1 P0.1.
+    strava_client_id: str = field(
+        default_factory=lambda: os.environ.get("STRAVA_CLIENT_ID", ""),
+    )
+    strava_client_secret: str = field(
+        default_factory=lambda: os.environ.get("STRAVA_CLIENT_SECRET", ""),
+    )
+    strava_redirect_uri: str = field(
+        default_factory=lambda: os.environ.get(
+            "STRAVA_REDIRECT_URI", "http://localhost:8400/strava/callback",
+        ),
+    )
+    # Garmin Connect login — same credentials as the Garmin Connect web UI.
+    # No app registration. MFA prompted via CLI on first login. See P0.2.
+    garmin_username: str = field(
+        default_factory=lambda: os.environ.get("GARMIN_USERNAME", ""),
+    )
+    garmin_password: str = field(
+        default_factory=lambda: os.environ.get("GARMIN_PASSWORD", ""),
+    )
+    # How many consecutive transient failures before Pushover fires
+    # (per D5 in fitness-integration-plan.md). 3 is a reasonable default
+    # for a daily-cadence pipeline — one bad day is noise; three in a row
+    # is a real outage worth paging for.
+    fitness_transient_failure_threshold: int = field(
+        default_factory=lambda: int(
+            os.environ.get("FITNESS_TRANSIENT_FAILURE_THRESHOLD", "3"),
+        ),
+    )
+    # Backfill cutoff. ISO date. Defaults to 2026-01-01 — the start of
+    # journal data, the only window where correlation is meaningful.
+    fitness_backfill_start: str = field(
+        default_factory=lambda: os.environ.get(
+            "FITNESS_BACKFILL_START", "2026-01-01",
+        ),
+    )
+
     def __post_init__(self) -> None:
         valid_providers = {"openai", "gemini"}
         if self.transcription_provider not in valid_providers:
@@ -430,6 +469,10 @@ class Config:
         if self.transcription_retry_max_delay < 0:
             raise ValueError(
                 "TRANSCRIPTION_RETRY_MAX_DELAY must be >= 0"
+            )
+        if self.fitness_transient_failure_threshold < 1:
+            raise ValueError(
+                "FITNESS_TRANSIENT_FAILURE_THRESHOLD must be >= 1"
             )
 
 

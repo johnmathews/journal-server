@@ -428,10 +428,11 @@ class TestGetTopicsForUser:
     ) -> None:
         topics = svc.get_topics_for_user(1, is_admin=False)
         assert all(not t["admin_only"] for t in topics)
-        # 4 success (ingest_images, ingest_audio, save_entry,
-        #            entity_reembed)
-        # 3 failure (job_retrying, job_failed, job_failed_save_entry)
-        assert len(topics) == 7
+        # 5 success (ingest_images, ingest_audio, save_entry,
+        #            entity_reembed, fitness_sync_success)
+        # 5 failure (job_retrying, job_failed, job_failed_save_entry,
+        #            fitness_auth_broken, fitness_sync_failure)
+        assert len(topics) == 10
 
     def test_admin_sees_all_topics(
         self, svc: PushoverNotificationService,
@@ -740,3 +741,42 @@ class TestNotifyPipelineFailed:
         with patch("urllib.request.urlopen") as mock_urlopen:
             svc.notify_pipeline_failed(1, "save_entry_pipeline", "body")
             mock_urlopen.assert_not_called()
+
+
+class TestFitnessNotificationTopics:
+    """Verifies the four fitness topics added in W3 are wired into the
+    TOPICS list and into the success-routing map (per W8 — without the
+    map update, notify_job_success would always-notify and ignore the
+    user's opt-in default for `notif_fitness_sync_success`)."""
+
+    def test_fitness_topics_present(self) -> None:
+        keys = {t["key"] for t in TOPICS}
+        assert "notif_fitness_auth_broken" in keys
+        assert "notif_fitness_sync_failure" in keys
+        assert "notif_fitness_normalize_drift" in keys
+        assert "notif_fitness_sync_success" in keys
+
+    def test_auth_broken_user_visible_default_on(self) -> None:
+        topic = next(t for t in TOPICS if t["key"] == "notif_fitness_auth_broken")
+        assert topic["default"] is True
+        assert topic["admin_only"] is False
+        assert topic["group"] == "failure"
+
+    def test_normalize_drift_admin_only(self) -> None:
+        topic = next(t for t in TOPICS if t["key"] == "notif_fitness_normalize_drift")
+        assert topic["admin_only"] is True
+        assert topic["group"] == "admin"
+
+    def test_sync_success_defaults_off_opt_in(self) -> None:
+        topic = next(t for t in TOPICS if t["key"] == "notif_fitness_sync_success")
+        assert topic["default"] is False
+
+    def test_success_topic_map_routes_both_sources(self) -> None:
+        from journal.services.notifications import _SUCCESS_TOPIC_MAP
+        assert _SUCCESS_TOPIC_MAP["fitness_sync_strava"] == "notif_fitness_sync_success"
+        assert _SUCCESS_TOPIC_MAP["fitness_sync_garmin"] == "notif_fitness_sync_success"
+
+    def test_job_type_labels_present(self) -> None:
+        from journal.services.notifications import _JOB_TYPE_LABELS
+        assert "fitness_sync_strava" in _JOB_TYPE_LABELS
+        assert "fitness_sync_garmin" in _JOB_TYPE_LABELS
