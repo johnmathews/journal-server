@@ -13,8 +13,15 @@ services:
       - "8401:8000"
     volumes:
       - chromadb-dev-data:/chroma/chroma
+    # The base chromadb/chroma image has no curl, wget, python, or nc —
+    # only bash + standard utils. Use bash's built-in /dev/tcp virtual
+    # file to probe the port directly. The prod image
+    # (ghcr.io/johnmathews/journal-chromadb, built from
+    # Dockerfile.chromadb) installs curl on top of the base, which is
+    # why docker-compose.yml's healthcheck can use curl and this one
+    # cannot.
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8000"]
       interval: 30s
       timeout: 10s
       retries: 3

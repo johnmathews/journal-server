@@ -30,7 +30,9 @@ the top of the linked doc tells you whether it's active, closed, or superseded.
   completed 2026-04-15; later tiers remain.
 - [`fitness-integration-plan.md`](./fitness-integration-plan.md) — fitness-tracker
   ingestion design (open questions resolved 2026-05-08). See also
-  [`fitness-schema.md`](./fitness-schema.md). Promoted to Tier 1 below.
+  [`fitness-schema.md`](./fitness-schema.md) (concrete schema) and
+  [`fitness-tier-plan.md`](./fitness-tier-plan.md) (execution sequencing — 15 work
+  units across 5 phases; foundation phase shipped 2026-05-09). Promoted to Tier 1 below.
 - [`code-quality-principles.md`](./code-quality-principles.md) — standing rules referenced
   by the refactor docs.
 - [`mood-scoring.md`](./mood-scoring.md) — pipeline reference. Note: mood scoring is now
@@ -68,12 +70,19 @@ with a small corpus".
 > was never executed but no work was blocked. The next item meeting the Tier 1 criterion
 > (no upstream dependency, ready to start) is **fitness integration**.
 
-### 1. Fitness integration `[server]` — active, planning open questions resolved 2026-05-08
+### 1. Fitness integration `[server]` — active, foundation phase shipped 2026-05-09
 
-Ingestion pipeline for fitness-tracker data (Garmin / Apple Health). Schema and design
-decisions captured in [`fitness-integration-plan.md`](./fitness-integration-plan.md) and
-[`fitness-schema.md`](./fitness-schema.md). Sibling journal entry:
-`journal/260508-fitness-integration-planning.md`. Implementation has not yet started.
+Ingestion pipeline for fitness-tracker data (Strava + Garmin Connect). Decisions in
+[`fitness-integration-plan.md`](./fitness-integration-plan.md), schema in
+[`fitness-schema.md`](./fitness-schema.md), execution sequencing in
+[`fitness-tier-plan.md`](./fitness-tier-plan.md). Sibling journal entries:
+`journal/260508-fitness-integration-planning.md`,
+`journal/260509-fitness-foundation.md`.
+
+**Status:** foundation phase (W1–W3 of 15 work units) shipped 2026-05-09 — schema
+migrations 0023/0024/0025, `FitnessRepository`, dataclasses, config + notification
+topics, integrity-check helper. **Blocked on:** Strava + Garmin credentials before
+W4–W13 can land with real fixtures (per the tier plan's P0.1/P0.2 prerequisites).
 
 **Why Tier 1:** independent of the journal-text pipeline, opens a new analytical surface
 (mood vs activity correlation), and the planning doc is the most recently added active

@@ -1,6 +1,7 @@
 # Fitness Integration Plan
 
-**Status:** active — planning (open questions resolved 2026-05-08). **Last updated:** 2026-05-08.
+**Status:** active — foundation phase shipped 2026-05-09 (see [`fitness-tier-plan.md`](./fitness-tier-plan.md)).
+**Last updated:** 2026-05-09 (Strava rate-limit figures corrected against current docs).
 **Created:** 2026-05-08. **Supersedes:** none.
 **Related docs:** [`architecture.md`](./architecture.md), [`external-services.md`](./external-services.md),
 [`jobs.md`](./jobs.md), [`mood-scoring.md`](./mood-scoring.md), [`roadmap.md`](./roadmap.md),
