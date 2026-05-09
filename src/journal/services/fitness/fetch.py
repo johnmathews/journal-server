@@ -137,11 +137,11 @@ class _FetchServiceBase:
         auth = self._repo.get_auth_state(user_id=user_id, source=self.SOURCE)
         run_id = self._repo.start_sync_run(user_id=user_id, source=self.SOURCE)
 
-        if auth is None or not auth.access_token:
+        if auth is None or not self._has_credentials(auth):
             self._repo.finish_sync_run(
                 run_id, status="auth_broken",
                 error_class="MissingAuthState",
-                error_message="No fitness_auth_state row or access token for user",
+                error_message="No fitness_auth_state row or credentials for user",
             )
             return FitnessSyncResult(
                 status="auth_broken", run_id=run_id,
@@ -205,6 +205,22 @@ class _FetchServiceBase:
         )
 
     # ── Subclass hooks ──────────────────────────────────────────────
+
+    def _has_credentials(self, auth: FitnessAuthState) -> bool:
+        """Whether ``auth`` carries the credential this source needs.
+
+        Default: ``access_token`` is set (the OAuth pattern Strava
+        uses). Garmin overrides this — its W11 re-auth persists the
+        live credential as ``extra_state["tokens_blob"]`` and leaves
+        ``access_token`` as ``None``, so the default check would
+        spuriously short-circuit to ``MissingAuthState``.
+
+        Decoupling the credential check from a fixed column lets us
+        add per-source auth shapes without reaching back into
+        :meth:`run_sync`. Each subclass owns the answer to "do I have
+        what I need to call the provider?".
+        """
+        return bool(auth.access_token)
 
     def _build_provider(self, auth: FitnessAuthState) -> Any:
         raise NotImplementedError
@@ -309,6 +325,15 @@ class GarminFetchService(_FetchServiceBase):
     ) -> None:
         super().__init__(repo=repo, notifier=notifier, config=config, clock=clock)
         self._provider_factory = provider_factory
+
+    def _has_credentials(self, auth: FitnessAuthState) -> bool:
+        """Garmin's live credential is the ``tokens_blob`` from W11 re-auth.
+
+        ``access_token`` stays ``None`` for Garmin rows (the OAuth-style
+        triple isn't applicable to ``garminconnect``'s session model);
+        the real credential is the persisted blob in ``extra_state``.
+        """
+        return bool(auth.extra_state and auth.extra_state.get("tokens_blob"))
 
     def _build_provider(self, auth: FitnessAuthState) -> GarminProvider:
         return self._provider_factory(auth)
