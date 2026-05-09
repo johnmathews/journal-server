@@ -52,7 +52,7 @@ _services: dict | None = None
 
 def _build_fitness_callables(
     *,
-    conn: Any,
+    fitness_repo: Any,
     config: Any,
     notification_service: Any,
 ) -> dict[str, Any]:
@@ -66,8 +66,11 @@ def _build_fitness_callables(
     ``GARMIN_USERNAME`` + ``GARMIN_PASSWORD``. Callers pass the dict
     via ``**`` so a partially-configured server still wires up the
     half that's set.
+
+    The repository is constructed in :func:`_init_services` and threaded
+    through here so the API layer (W9) can read from the same instance
+    without re-wrapping the connection.
     """
-    from journal.db.fitness_repository import FitnessRepository
     from journal.models import FitnessAuthState
     from journal.providers.garmin import GarminConnectGarminProvider
     from journal.providers.strava import StravalibStravaProvider, Tokens
@@ -79,8 +82,6 @@ def _build_fitness_callables(
         normalize_garmin,
         normalize_strava,
     )
-
-    fitness_repo = FitnessRepository(conn)
     out: dict[str, Any] = {
         "fetch_strava_callable": None,
         "fetch_garmin_callable": None,
@@ -516,8 +517,13 @@ def _init_services() -> dict:
         "  Jobs: reconciled %d stuck job(s) from previous process",
         reconciled,
     )
+    from journal.db.fitness_repository import FitnessRepository
+
+    fitness_repo = FitnessRepository(conn)
     fitness_callables = _build_fitness_callables(
-        conn=conn, config=config, notification_service=notification_service,
+        fitness_repo=fitness_repo,
+        config=config,
+        notification_service=notification_service,
     )
     job_runner = JobRunner(
         job_repository=job_repository,
@@ -624,6 +630,8 @@ def _init_services() -> dict:
         "user_repo": user_repo,
         # Notifications
         "notification_service": notification_service,
+        # Fitness — repo for read APIs (W9) and the integrity check.
+        "fitness_repo": fitness_repo,
         # Raw DB connection — used by lightweight config readers (e.g. pricing).
         "db_conn": conn,
     }

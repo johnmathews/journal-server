@@ -20,6 +20,7 @@ from journal.api.dashboard import register_dashboard_routes
 from journal.api.entities import register_entities_routes
 from journal.api.entity_merge import register_entity_merge_routes
 from journal.api.entries import register_entries_routes
+from journal.api.fitness import register_fitness_routes
 from journal.api.health import register_health_routes
 from journal.api.ingestion import register_ingestion_routes
 from journal.api.jobs import register_jobs_routes
@@ -56,6 +57,7 @@ def register_api_routes(
     register_jobs_routes(mcp, services_getter)
     register_entities_routes(mcp, services_getter)
     register_entity_merge_routes(mcp, services_getter)
+    register_fitness_routes(mcp, services_getter)
 
 
 __all__ = [
