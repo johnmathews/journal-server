@@ -10,6 +10,7 @@ from starlette.testclient import TestClient
 
 from journal.auth import AuthenticatedUser, _current_user_id
 from journal.db.connection import get_connection
+from journal.db.fitness_repository import FitnessRepository
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
@@ -1527,6 +1528,264 @@ class TestHealth:
         # Assert the search term does not appear anywhere in the
         # serialized envelope — query stats are counts-only.
         assert "sensitive" not in dumped
+
+
+class TestApiHealthFitness:
+    """W12 — `/api/health` (authenticated) surfaces a per-source
+    fitness block; the unauthenticated `/health` does not.
+
+    The fitness data is per-user, so exposing it on the unauth probe
+    would leak which users have configured Strava/Garmin to anyone who
+    can hit the public healthcheck path. This class pins the boundary.
+    """
+
+    @pytest.fixture
+    def fitness_health_client(
+        self,
+        api_db_conn: sqlite3.Connection,
+        repo: SQLiteEntryRepository,
+        mock_embeddings: MagicMock,
+    ) -> Generator[tuple[TestClient, dict, FitnessRepository]]:
+        from mcp.server.fastmcp import FastMCP
+
+        from journal.api import register_api_routes
+        from journal.config import Config
+        from journal.db.fitness_repository import FitnessRepository
+        from journal.services.chunking import FixedTokenChunker
+        from journal.services.stats import InMemoryStatsCollector
+        from journal.vectorstore.store import InMemoryVectorStore
+
+        # Seed the test user so fitness FK references are valid.
+        api_db_conn.execute(
+            "INSERT OR IGNORE INTO users (id, email, password_hash, "
+            "display_name, email_verified, is_admin) VALUES "
+            "(1, 'test@example.com', 'x', 'test', 1, 1)",
+        )
+        api_db_conn.commit()
+
+        vs = InMemoryVectorStore()
+        stats = InMemoryStatsCollector()
+        ingestion = IngestionService(
+            repository=repo, vector_store=vs,
+            ocr_provider=MagicMock(), transcription_provider=MagicMock(),
+            embeddings_provider=mock_embeddings,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+            preprocess_images=False,
+        )
+        query = QueryService(
+            repository=repo, vector_store=vs,
+            embeddings_provider=mock_embeddings, stats=stats,
+        )
+        config = Config(anthropic_api_key="a" * 40, openai_api_key="o" * 40)
+        fitness_repo = FitnessRepository(api_db_conn)
+        services = {
+            "ingestion": ingestion,
+            "query": query,
+            "config": config,
+            "stats": stats,
+            "fitness_repo": fitness_repo,
+        }
+        test_mcp = FastMCP("test-journal")
+        register_api_routes(test_mcp, lambda: services)
+        app = _FakeAuthMiddleware(test_mcp.streamable_http_app())
+        with TestClient(app, raise_server_exceptions=False) as tc:
+            yield tc, services, fitness_repo
+
+    def test_unauth_health_omits_fitness_block_even_when_configured(
+        self,
+        fitness_health_client: tuple[
+            TestClient, dict, FitnessRepository,
+        ],
+    ) -> None:
+        """The unauthenticated `/health` never carries `fitness`, even
+        when the user has rows. Privacy boundary: anonymous probes
+        cannot enumerate per-user integration state."""
+        from journal.models import FitnessAuthState
+
+        client, _, fitness_repo = fitness_health_client
+        fitness_repo.upsert_auth_state(
+            FitnessAuthState(
+                user_id=1, source="strava",
+                auth_status="broken",
+                auth_broken_since="2026-05-07T04:00:00Z",
+            ),
+        )
+        data = client.get("/health").json()
+        assert "fitness" not in data
+
+    def test_api_health_omits_fitness_block_when_no_sources(
+        self,
+        fitness_health_client: tuple[
+            TestClient, dict, FitnessRepository,
+        ],
+    ) -> None:
+        """No `fitness_auth_state` and no `fitness_sync_runs` for the
+        user → the `fitness` key is absent. Do not return a stub of
+        nulls."""
+        client, _, _ = fitness_health_client
+        data = client.get("/api/health").json()
+        assert "fitness" not in data
+        # And the overall rollup is unaffected.
+        assert data["status"] == "ok"
+
+    def test_api_health_includes_per_source_block_when_configured(
+        self,
+        fitness_health_client: tuple[
+            TestClient, dict, FitnessRepository,
+        ],
+    ) -> None:
+        """Both sources configured → `fitness` carries a per-source
+        dict with `auth_status`, `last_success_at`, `auth_broken_since`."""
+        from journal.models import FitnessAuthState
+
+        client, _, fitness_repo = fitness_health_client
+        fitness_repo.upsert_auth_state(
+            FitnessAuthState(user_id=1, source="strava", auth_status="ok"),
+        )
+        run_id = fitness_repo.start_sync_run(user_id=1, source="strava")
+        fitness_repo.finish_sync_run(run_id, status="success")
+
+        data = client.get("/api/health").json()
+        assert "fitness" in data
+        assert "strava" in data["fitness"]
+        strava = data["fitness"]["strava"]
+        assert set(strava) == {
+            "auth_status", "last_success_at", "auth_broken_since",
+        }
+        assert strava["auth_status"] == "ok"
+        assert strava["auth_broken_since"] is None
+        assert strava["last_success_at"] is not None
+
+    def test_api_health_recently_broken_does_not_degrade(
+        self,
+        fitness_health_client: tuple[
+            TestClient, dict, FitnessRepository,
+        ],
+    ) -> None:
+        """`auth_status='broken'` with a recent `auth_broken_since`
+        (under the 48h default) reports `broken` in the per-source
+        block but does not flip the overall rollup. Operator
+        information, not a degradation — token refresh races shouldn't
+        flap the overall status."""
+        from datetime import UTC, datetime, timedelta
+
+        from journal.models import FitnessAuthState
+
+        client, _, fitness_repo = fitness_health_client
+        recent = (datetime.now(UTC) - timedelta(hours=2)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+        )
+        fitness_repo.upsert_auth_state(
+            FitnessAuthState(
+                user_id=1, source="garmin",
+                auth_status="broken",
+                auth_broken_since=recent,
+            ),
+        )
+        data = client.get("/api/health").json()
+        assert data["fitness"]["garmin"]["auth_status"] == "broken"
+        assert data["fitness"]["garmin"]["auth_broken_since"] == recent
+        assert data["status"] == "ok"
+
+    def test_api_health_long_broken_drops_to_degraded(
+        self,
+        fitness_health_client: tuple[
+            TestClient, dict, FitnessRepository,
+        ],
+    ) -> None:
+        """Broken for >48h (default) → overall status `degraded` and a
+        new `fitness` entry appears in `checks` naming the source."""
+        from datetime import UTC, datetime, timedelta
+
+        from journal.models import FitnessAuthState
+
+        client, _, fitness_repo = fitness_health_client
+        long_ago = (datetime.now(UTC) - timedelta(hours=72)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+        )
+        fitness_repo.upsert_auth_state(
+            FitnessAuthState(
+                user_id=1, source="garmin",
+                auth_status="broken",
+                auth_broken_since=long_ago,
+            ),
+        )
+        data = client.get("/api/health").json()
+        assert data["status"] == "degraded"
+        by_name = {c["name"]: c for c in data["checks"]}
+        assert "fitness" in by_name
+        assert by_name["fitness"]["status"] == "degraded"
+        assert "garmin" in by_name["fitness"]["detail"]
+
+    def test_api_health_custom_threshold_via_config(
+        self,
+        api_db_conn: sqlite3.Connection,
+        repo: SQLiteEntryRepository,
+        mock_embeddings: MagicMock,
+    ) -> None:
+        """`FITNESS_HEALTH_BROKEN_DEGRADED_HOURS` is honoured. Set it
+        to 1h and a 2h-old breakage trips `degraded`. Same code path,
+        different config."""
+        from datetime import UTC, datetime, timedelta
+
+        from mcp.server.fastmcp import FastMCP
+
+        from journal.api import register_api_routes
+        from journal.config import Config
+        from journal.db.fitness_repository import FitnessRepository
+        from journal.models import FitnessAuthState
+        from journal.services.chunking import FixedTokenChunker
+        from journal.services.stats import InMemoryStatsCollector
+        from journal.vectorstore.store import InMemoryVectorStore
+
+        api_db_conn.execute(
+            "INSERT OR IGNORE INTO users (id, email, password_hash, "
+            "display_name, email_verified, is_admin) VALUES "
+            "(1, 'test@example.com', 'x', 'test', 1, 1)",
+        )
+        api_db_conn.commit()
+
+        vs = InMemoryVectorStore()
+        stats = InMemoryStatsCollector()
+        ingestion = IngestionService(
+            repository=repo, vector_store=vs,
+            ocr_provider=MagicMock(), transcription_provider=MagicMock(),
+            embeddings_provider=mock_embeddings,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+            preprocess_images=False,
+        )
+        query = QueryService(
+            repository=repo, vector_store=vs,
+            embeddings_provider=mock_embeddings, stats=stats,
+        )
+        config = Config(
+            anthropic_api_key="a" * 40, openai_api_key="o" * 40,
+            fitness_health_broken_degraded_hours=1,
+        )
+        fitness_repo = FitnessRepository(api_db_conn)
+        recent = (datetime.now(UTC) - timedelta(hours=2)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+        )
+        fitness_repo.upsert_auth_state(
+            FitnessAuthState(
+                user_id=1, source="strava",
+                auth_status="broken", auth_broken_since=recent,
+            ),
+        )
+
+        services = {
+            "ingestion": ingestion,
+            "query": query,
+            "config": config,
+            "stats": stats,
+            "fitness_repo": fitness_repo,
+        }
+        test_mcp = FastMCP("test-journal")
+        register_api_routes(test_mcp, lambda: services)
+        app = _FakeAuthMiddleware(test_mcp.streamable_http_app())
+        with TestClient(app, raise_server_exceptions=False) as tc:
+            data = tc.get("/api/health").json()
+        assert data["status"] == "degraded"
 
 
 class TestSettings:

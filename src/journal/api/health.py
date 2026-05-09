@@ -20,6 +20,7 @@ from journal.auth import get_authenticated_user
 from journal.services.liveness import (
     check_api_key,
     check_chromadb,
+    check_fitness_freshness,
     check_sqlite,
     overall_status,
 )
@@ -41,40 +42,23 @@ def register_health_routes(
 ) -> None:
     """Register /health, /api/health, and /api/stats routes."""
 
-    @mcp.custom_route("/health", methods=["GET"], name="api_health")
-    async def get_health(request: Request) -> JSONResponse:
-        """Operational health endpoint. Bypasses bearer auth.
+    def _build_health_payload(
+        services: dict, *, fitness_user_id: int | None,
+    ) -> dict[str, Any]:
+        """Shared payload builder for `/health` and `/api/health`.
 
-        Returns three blocks:
-
-        - `ingestion`: corpus stats (total/last-7d/last-30d counts,
-          by source type, avg words/chunks, last ingestion timestamp,
-          per-table row counts).
-        - `queries`: per-query-type counts and p50/p95/p99 latency,
-          plus server uptime and start timestamp.
-        - `status`: per-component check list (sqlite, chromadb,
-          anthropic, openai) plus the worst-of rollup.
-
-        Most-frequent search terms are deliberately NOT exposed —
-        they'd leak what the user was curious about and `/health`
-        is unauthenticated on loopback-only deployments. The query
-        stats block carries counts-by-type only.
+        `fitness_user_id` is non-None only on the authenticated route
+        (`/api/health`). When set, the per-user fitness block is added
+        and `check_fitness_freshness` participates in the overall rollup.
+        The unauthenticated `/health` deliberately does not include
+        either — `auth_broken_since` is per-user state and an anonymous
+        probe would be able to enumerate which users have configured
+        Strava/Garmin and when their auth broke (W12).
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse(
-                {
-                    "status": "error",
-                    "message": "Server not initialized",
-                },
-                status_code=503,
-            )
-
         query_svc: QueryService = services["query"]
         config = services.get("config")
         stats_collector = services.get("stats")
 
-        # Ingestion stats block — pure SQL aggregation.
         try:
             ingestion = query_svc.get_ingestion_stats(now=datetime.now(UTC))
             ingestion_dict: dict[str, Any] = asdict(ingestion)
@@ -82,7 +66,6 @@ def register_health_routes(
             log.warning("GET /health — ingestion stats failed: %s", e)
             ingestion_dict = {"error": str(e)}
 
-        # Query stats block — from the in-memory collector.
         if stats_collector is not None:
             snap = stats_collector.snapshot()
             queries_dict: dict[str, Any] = {
@@ -105,8 +88,6 @@ def register_health_routes(
                 "by_type": {},
             }
 
-        # Liveness checks. Each is independent and returns a
-        # ComponentCheck so the overall rollup can be computed at the end.
         checks = [
             check_sqlite(query_svc.connection),
             check_chromadb(query_svc.vector_store),
@@ -115,31 +96,117 @@ def register_health_routes(
             checks.append(check_api_key("anthropic", config.anthropic_api_key))
             checks.append(check_api_key("openai", config.openai_api_key))
 
-        status = overall_status(checks)
+        payload: dict[str, Any] = {
+            "ingestion": ingestion_dict,
+            "queries": queries_dict,
+        }
+
+        # Fitness block only on the authenticated path. Omitted entirely
+        # when the user has no auth_state and no sync_runs — do not
+        # emit a stub of nulls.
+        if fitness_user_id is not None:
+            fitness_repo = services.get("fitness_repo")
+            if fitness_repo is not None:
+                summary = fitness_repo.get_health_summary(
+                    user_id=fitness_user_id,
+                )
+                if summary:
+                    payload["fitness"] = {
+                        row["source"]: {
+                            "auth_status": row["auth_status"],
+                            "last_success_at": row["last_success_at"],
+                            "auth_broken_since": row["auth_broken_since"],
+                        }
+                        for row in summary
+                    }
+                    threshold = (
+                        config.fitness_health_broken_degraded_hours
+                        if config is not None
+                        else 48
+                    )
+                    checks.append(
+                        check_fitness_freshness(
+                            summary=summary,
+                            threshold_hours=threshold,
+                        ),
+                    )
+
+        payload["status"] = overall_status(checks)
+        payload["checks"] = [asdict(c) for c in checks]
+        return payload
+
+    @mcp.custom_route("/health", methods=["GET"], name="api_health")
+    async def get_health(request: Request) -> JSONResponse:
+        """Operational health endpoint. Bypasses bearer auth.
+
+        Returns three blocks:
+
+        - `ingestion`: corpus stats (total/last-7d/last-30d counts,
+          by source type, avg words/chunks, last ingestion timestamp,
+          per-table row counts).
+        - `queries`: per-query-type counts and p50/p95/p99 latency,
+          plus server uptime and start timestamp.
+        - `status`: per-component check list (sqlite, chromadb,
+          anthropic, openai) plus the worst-of rollup.
+
+        Most-frequent search terms are deliberately NOT exposed —
+        they'd leak what the user was curious about and `/health`
+        is unauthenticated on loopback-only deployments. The query
+        stats block carries counts-by-type only. Per-user fitness
+        state is similarly omitted; see `/api/health` for that.
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "message": "Server not initialized",
+                },
+                status_code=503,
+            )
+
+        payload = _build_health_payload(services, fitness_user_id=None)
         log.info(
             "GET /health — status=%s total_queries=%d total_entries=%s",
-            status,
-            queries_dict.get("total_queries", 0),
-            ingestion_dict.get("total_entries", "n/a"),
+            payload["status"],
+            payload["queries"].get("total_queries", 0),
+            payload["ingestion"].get("total_entries", "n/a"),
         )
-        return JSONResponse(
-            {
-                "status": status,
-                "checks": [asdict(c) for c in checks],
-                "ingestion": ingestion_dict,
-                "queries": queries_dict,
-            }
-        )
+        return JSONResponse(payload)
 
     @mcp.custom_route("/api/health", methods=["GET"], name="api_health_authed")
     async def get_health_authed(request: Request) -> JSONResponse:
-        """Authenticated mirror of /health for the webapp.
+        """Authenticated mirror of `/health` for the webapp.
 
-        The webapp's nginx only proxies /api/* to the server, so the
-        unauthenticated /health path is unreachable from the browser.
-        This route serves the same payload under /api/ (with auth).
+        Same payload as `/health` plus the per-user `fitness` block:
+        one entry per source the user has configured (auth_state row)
+        or interacted with (sync_runs), carrying `auth_status`,
+        `last_success_at`, `auth_broken_since`. The overall status
+        downgrades to `degraded` if any source has been broken for
+        longer than `FITNESS_HEALTH_BROKEN_DEGRADED_HOURS` (default
+        48h).
         """
-        return await get_health(request)
+        services = services_getter()
+        if services is None:
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "message": "Server not initialized",
+                },
+                status_code=503,
+            )
+
+        user = get_authenticated_user(request)
+        payload = _build_health_payload(
+            services, fitness_user_id=user.user_id,
+        )
+        log.info(
+            "GET /api/health — status=%s user_id=%d fitness_sources=%d",
+            payload["status"],
+            user.user_id,
+            len(payload.get("fitness", {})),
+        )
+        return JSONResponse(payload)
 
     @mcp.custom_route("/api/stats", methods=["GET"], name="api_stats")
     async def get_stats(request: Request) -> JSONResponse:

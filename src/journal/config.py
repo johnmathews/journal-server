@@ -444,6 +444,15 @@ class Config:
             "FITNESS_BACKFILL_START", "2026-01-01",
         ),
     )
+    # How long an `auth_status='broken'` row must persist before
+    # `/api/health` rolls up to `degraded`. 48h is long enough to ride
+    # out Garmin's typical SSO-incident weekend break, short enough to
+    # surface a real outage.
+    fitness_health_broken_degraded_hours: int = field(
+        default_factory=lambda: int(
+            os.environ.get("FITNESS_HEALTH_BROKEN_DEGRADED_HOURS", "48"),
+        ),
+    )
 
     def __post_init__(self) -> None:
         valid_providers = {"openai", "gemini"}
@@ -473,6 +482,10 @@ class Config:
         if self.fitness_transient_failure_threshold < 1:
             raise ValueError(
                 "FITNESS_TRANSIENT_FAILURE_THRESHOLD must be >= 1"
+            )
+        if self.fitness_health_broken_degraded_hours < 1:
+            raise ValueError(
+                "FITNESS_HEALTH_BROKEN_DEGRADED_HOURS must be >= 1"
             )
 
 
