@@ -27,6 +27,12 @@ from journal.cli.entities import (
     cmd_renormalise_entity_casing,
     cmd_repair_entity_names,
 )
+from journal.cli.fitness import (
+    cmd_fitness_reauth_garmin,
+    cmd_fitness_reauth_strava,
+    cmd_fitness_status,
+    cmd_fitness_sync,
+)
 from journal.cli.mood import cmd_backfill_mood
 from journal.config import load_config
 from journal.db.connection import get_connection
@@ -595,6 +601,83 @@ def main():
         help="Apply proposed renames (default is dry-run)",
     )
 
+    # fitness-reauth-strava
+    p_fit_strava = subparsers.add_parser(
+        "fitness-reauth-strava",
+        help=(
+            "Run the Strava OAuth flow and persist tokens. Prints the "
+            "authorize URL, blocks on a one-shot HTTP listener, exchanges "
+            "the received code, upserts fitness_auth_state with "
+            "auth_status='ok'."
+        ),
+    )
+    p_fit_strava.add_argument(
+        "--user-id",
+        type=int,
+        default=1,
+        help="Owner of the auth row (default: 1 = admin)",
+    )
+
+    # fitness-reauth-garmin
+    p_fit_garmin = subparsers.add_parser(
+        "fitness-reauth-garmin",
+        help=(
+            "Log into Garmin Connect (with optional MFA) and persist the "
+            "token blob. Reads GARMIN_USERNAME/GARMIN_PASSWORD from env, "
+            "or prompts."
+        ),
+    )
+    p_fit_garmin.add_argument(
+        "--user-id",
+        type=int,
+        default=1,
+        help="Owner of the auth row (default: 1 = admin)",
+    )
+
+    # fitness-sync
+    p_fit_sync = subparsers.add_parser(
+        "fitness-sync",
+        help=(
+            "Run a fitness sync inline (fetch + normalize) for the "
+            "requested source(s). Mirrors the long-running server's "
+            "scheduled sync but synchronous from the CLI."
+        ),
+    )
+    p_fit_sync.add_argument(
+        "--source",
+        choices=("strava", "garmin", "both"),
+        default="both",
+        help="Which source to sync (default: both)",
+    )
+    p_fit_sync.add_argument(
+        "--since",
+        help=(
+            "Earliest local_date to fetch (ISO 8601). Defaults to the "
+            "fetch service's window logic."
+        ),
+    )
+    p_fit_sync.add_argument(
+        "--user-id",
+        type=int,
+        default=1,
+        help="Owner of the sync (default: 1 = admin)",
+    )
+
+    # fitness-status
+    p_fit_status = subparsers.add_parser(
+        "fitness-status",
+        help=(
+            "Print per-source auth + last-runs snapshot. Same shape as "
+            "GET /api/fitness/sync/status."
+        ),
+    )
+    p_fit_status.add_argument(
+        "--user-id",
+        type=int,
+        default=1,
+        help="User to query (default: 1 = admin)",
+    )
+
     args = parser.parse_args()
     setup_logging(args.log_level)
     config = load_config()
@@ -616,5 +699,9 @@ def main():
         "repair-entity-names": cmd_repair_entity_names,
         "renormalise-entity-casing": cmd_renormalise_entity_casing,
         "migrate-chromadb": cmd_migrate_chromadb,
+        "fitness-reauth-strava": cmd_fitness_reauth_strava,
+        "fitness-reauth-garmin": cmd_fitness_reauth_garmin,
+        "fitness-sync": cmd_fitness_sync,
+        "fitness-status": cmd_fitness_status,
     }
     commands[args.command](args, config)

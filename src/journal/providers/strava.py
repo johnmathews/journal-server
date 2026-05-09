@@ -191,6 +191,41 @@ class StravalibStravaProvider:
         )
 
 
+def exchange_code(
+    *,
+    client_id: str,
+    client_secret: str,
+    code: str,
+    client_factory: Callable[..., Client] = Client,
+) -> Tokens:
+    """Exchange a Strava OAuth authorization ``code`` for an access/refresh
+    triple. Used once, the first time the user authorises the app — after
+    that the adapter's :meth:`StravalibStravaProvider.refresh_token_if_needed`
+    handles renewals.
+
+    Wraps :meth:`stravalib.Client.exchange_code_for_token` so the CLI
+    re-auth command (W11) does not import ``stravalib`` directly. Returns
+    the same :class:`Tokens` shape the persist callback consumes, so the
+    caller can hand the result straight to ``upsert_auth_state``.
+
+    ``client_id`` is accepted as a string for parity with config — stravalib
+    requires an int, so we coerce here. Raises ``stravalib.exc.AuthError`` /
+    ``AccessUnauthorized`` if Strava rejects the exchange (revoked code,
+    wrong client secret); the CLI surfaces those to the operator.
+    """
+    client = client_factory()
+    info = client.exchange_code_for_token(
+        client_id=int(client_id),
+        client_secret=client_secret,
+        code=code,
+    )
+    return Tokens(
+        access_token=str(info["access_token"]),
+        refresh_token=str(info["refresh_token"]),
+        token_expires_at=_epoch_to_iso(int(info["expires_at"])),
+    )
+
+
 def _summary_from_stravalib(
     activity: SummaryActivity | DetailedActivity,
 ) -> StravaActivitySummary:
