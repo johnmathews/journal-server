@@ -931,14 +931,21 @@ Use the existing tool-test pattern from `tests/test_mcp_server/`.
 
 ### W11 — CLI re-auth + first-run flow
 
-**Priority:** High. **Needs creds.** **Files:**
+**Status:** shipped 2026-05-09. See `journal/260509-fitness-w11-cli-reauth.md` for the
+detailed decision log and plan corrections.
+
+**Priority:** High. **Needs creds.** **Files (as shipped):**
 
 - `src/journal/cli/fitness.py` *(new — `cmd_*` functions in the same shape as `cli/entities.py` and
   `cli/mood.py`)*
-- `src/journal/cli/__init__.py` *(modify — register flat argparse subcommands; the existing CLI uses
+- `src/journal/cli/__init__.py` *(modify — flat argparse subcommands; the existing CLI uses
   argparse, **not Typer**, with flat subcommands like `journal extract-entities`)*
-- `tests/test_cli/test_fitness.py` *(new — invoke `cli.main()` with constructed `argv` lists, the
-  same shape `tests/test_cli/test_*.py` use today)*
+- `src/journal/providers/strava.py` *(modify — added free function `exchange_code(*, client_id,
+  client_secret, code) -> Tokens` because the W4 provider exposes only refresh, not initial
+  code-exchange. Plan correction.)*
+- `tests/test_cli_fitness.py` *(new — flat-file convention, mirrors `tests/test_api_fitness.py`.
+  Plan said `tests/test_cli/test_fitness.py` but no `tests/test_cli/` directory exists; CLI
+  tests live in flat `tests/test_cli*.py`.)*
 
 **Subcommands (flat, argparse):**
 
@@ -952,10 +959,14 @@ Use the existing tool-test pattern from `tests/test_mcp_server/`.
   prompts via `getpass`), calls `GarminProvider.login(mfa_callback=_stdin_mfa_prompt)`, persists the
   resulting token blob into `fitness_auth_state.extra_state_json`. The `_stdin_mfa_prompt` reads a
   6-digit code from stdin via `input()` so a normal terminal can drive it.
-- `uv run journal fitness-sync [--source strava|garmin|both] [--since YYYY-MM-DD]` — submits a
-  `fitness_sync_*` job through the existing `JobRunner` (consistency with every other CLI
-  command — `extract-entities`, `backfill-mood` all submit via `JobRunner`). Synchronous "wait for
-  the job to finish" flag (`--wait`) is optional polish.
+- `uv run journal fitness-sync [--source strava|garmin|both] [--since YYYY-MM-DD]` — runs fetch
+  + normalize **inline** for the requested source(s). **Plan correction:** the plan claimed
+  "consistency with every other CLI command — `extract-entities`, `backfill-mood` all submit via
+  `JobRunner`." Both of those actually call services synchronously with no JobRunner
+  construction; `fitness-sync` mirrors that shape. The long-running server still routes its
+  scheduled / on-demand syncs through JobRunner via REST (W9) and MCP (W10). The
+  `fitness_sync_runs` row is recorded by the fetch service either way. `--wait` is not
+  meaningful (every CLI invocation already waits) and was not added.
 - `uv run journal fitness-status` — prints the per-source status table the webapp will render
   (last_success_at, auth_status, last 10 sync runs in a tabulated form).
 
