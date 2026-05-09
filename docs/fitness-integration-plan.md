@@ -217,8 +217,12 @@ context, with each resolution inline.
 Use `stravalib`. Reliability research (see `journal/260508-fitness-integration-planning.md`)
 confirmed it is in a different reliability class from `python-garminconnect`: ~0 major breakages
 in the last 12 months, OAuth refresh and rate limiting built-in, only additive changes to the
-underlying Strava V3 API. Default rate limits are 600 / 15 min, 30k / day — generous for our
-daily-cadence use. One non-technical note: Strava's Nov 2024 API Agreement restricts third-party
+underlying Strava V3 API. Default rate limits (verified 2026-05-09 against
+<https://developers.strava.com/docs/rate-limits/>) are **200 / 15 min, 2000 / day** overall and
+**100 / 15 min, 1000 / day** for the non-upload budget that covers most read endpoints — still
+generous for our daily-cadence single-user use. (Earlier draft of this section quoted 600 / 30k
+figures; that was incorrect and has been corrected against the live docs.) One non-technical note:
+Strava's Nov 2024 API Agreement restricts third-party
 apps to displaying a user's data back to that user only and prohibits AI/ML training on the data
 — fine for our single-user personal pipeline, worth flagging if scope ever expands.
 
