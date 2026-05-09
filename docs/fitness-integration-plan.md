@@ -1,25 +1,33 @@
 # Fitness Integration Plan
 
-| Field | Value |
-|---|---|
-| **Status** | Active — planning (open questions resolved 2026-05-08) |
-| **Created** | 2026-05-08 |
-| **Last updated** | 2026-05-08 |
-| **Supersedes** | None |
-| **Superseded by** | None |
-| **Related docs** | `architecture.md`, `external-services.md`, `jobs.md`, `mood-scoring.md`, `roadmap.md` |
-| **Code-grounded** | Yes — `src/journal/{providers,services,api,mcp_server,db}/` reviewed before writing |
+**Status:** active — planning (open questions resolved 2026-05-08). **Last updated:** 2026-05-08.
+**Created:** 2026-05-08. **Supersedes:** none.
+**Related docs:** [`architecture.md`](./architecture.md), [`external-services.md`](./external-services.md),
+[`jobs.md`](./jobs.md), [`mood-scoring.md`](./mood-scoring.md), [`roadmap.md`](./roadmap.md),
+[`fitness-schema.md`](./fitness-schema.md).
+**Code-grounded:** yes — `src/journal/{providers,services,api,mcp_server,db}/` reviewed before writing.
 
 This document captures the architectural decisions and constraints for adding personal fitness data
 (activities, sleep, recovery metrics) as a complementary data source alongside journal entries. It
-is the single source of truth for **what we're building and why**. Concrete schema and execution
-sequencing live in separate follow-up docs (`fitness-schema.md`, `fitness-tier-plan.md`) and are
-deferred until this doc's decisions are settled.
+is the single source of truth for **what we're building and why**. Concrete schema lives in
+[`fitness-schema.md`](./fitness-schema.md); execution sequencing will be drafted once schema is
+settled (planned `fitness-tier-plan.md`, not yet written).
 
 > **Discipline note.** This plan is intentionally a decisions-and-rationale doc, not an
-> execution plan. Length cap: ~12k characters. If it grows past that, split — don't add. Update
-> the *Last updated* field on every change. Mark superseded sections in place rather than deleting,
-> so future agents can see what changed.
+> execution plan. Prefer keeping it short, but length is not capped — if scope or detail genuinely warrants more, add
+> it; if a section is restating background, cut it. Update the *Last updated* field on every change. Mark superseded
+> sections in place rather than deleting, so future agents can see what changed.
+
+## Contents
+
+1. [Goal](#1-goal)
+2. [Scope](#2-scope)
+3. [Decisions (with alternatives considered)](#3-decisions-with-alternatives-considered)
+4. [Code surface](#4-code-surface-grounded-in-existing-conventions)
+5. [Operational discipline](#5-operational-discipline-locked-in-posture)
+6. [Resolved questions](#6-resolved-questions)
+7. [Kill criteria](#7-kill-criteria)
+8. [References](#8-references)
 
 ---
 

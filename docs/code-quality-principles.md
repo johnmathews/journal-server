@@ -80,7 +80,7 @@ The HTTP layer follows two rules in this order:
 The override is the first explicit deviation from URL-prefix purity in this codebase. It must
 stay narrow: "write/job creation" is the only currently-recognised category. New deviation
 categories require updating this section (the v2 refactor plan that originally captured the
-rule, `code-quality-refactor-plan.md`, is closed and only kept as a historical record).
+rule, `archive/code-quality-refactor-plan.md`, is closed and only kept as a historical record).
 
 ---
 

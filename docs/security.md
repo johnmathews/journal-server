@@ -1,7 +1,13 @@
 # Security
 
+**Status:** active reference doc. **Last reviewed:** 2026-05-09 against
+`src/journal/services/auth.py`, `src/journal/auth.py`, `src/journal/auth_api/`, and prod ground
+truth on `media`. Pair with [`security-roadmap.md`](security-roadmap.md) for outstanding work
+and [`auth.md`](auth.md) for the auth flow walkthrough.
+
 This document describes the security posture of journal-server: what it protects, what it does not, and how to deploy it
-safely. The server supports multiple users with per-user data isolation.
+safely. The server supports multiple users with per-user data isolation. The intended deployment is a single VM
+on a home LAN, fronted by a Cloudflare Tunnel — not an internet-exposed multi-tenant service.
 
 ## Threat model
 
@@ -71,7 +77,9 @@ network — `journal-server`'s host port doesn't need LAN exposure for normal us
 > **Drift note (2026-05-09):** the production compose at `/srv/media/docker-compose.yml` on `media` currently exposes
 > `8400:8400` (LAN-reachable, not loopback). Public access still goes via the Cloudflare Tunnel on `:8402`, but the
 > defence-in-depth posture documented here only holds when the prod compose is brought back in line with the in-repo
-> file. Tracked as a security-roadmap follow-up.
+> file. Corroborated by `MCP_ALLOWED_HOSTS=192.168.2.105:*,localhost:*` in prod env (the LAN host would not need to
+> be in the allowlist if the bind were loopback-only). Tracked as
+> [`security-roadmap.md`](security-roadmap.md) Tier 2 item 2b.
 
 The expected stance for any LAN-exposed deployment: a reverse proxy (Caddy, Traefik, nginx) on the same host that
 (1) terminates TLS with a real certificate, (2) optionally adds a second layer of auth, and (3) forwards decrypted
@@ -160,6 +168,10 @@ gone. Recommended: add an external host-level backup of that directory, encrypte
 cron that runs `sqlite3 journal.db ".backup '/backup/journal-$(date +%F).db'"` and pipes the result through `age` or
 `gpg` before writing it to the backup volume.
 
+Note: ChromaDB does not need separate backup. Vectors are recomputed on re-ingest from the source files in the bind
+mount, so the SQLite database plus the bind-mount media files are the full restore set. Backup integrity verification
+and a documented restore drill are tracked in [`security-roadmap.md`](security-roadmap.md) Tier 3 item 15.
+
 ## What is NOT protected
 
 For the sake of informed consent:
@@ -177,9 +189,10 @@ For the sake of informed consent:
 
 ## Security-relevant files
 
-- `src/journal/auth.py` — `SessionOrKeyBackend`, `RequireAuthMiddleware`, contextvar propagation for MCP tools
+- `src/journal/auth.py` — `SessionOrKeyBackend`, `RequireAuthMiddleware`, contextvar propagation for MCP tools,
+  `set_session_cookie` / `clear_session_cookie` (httpOnly, Secure, SameSite=Lax, 7-day max-age)
 - `src/journal/auth_api/` — REST surface for auth (login/logout, registration, profile, API keys, admin); split into
-  `core.py`, `account.py`, `profile.py`, `api_keys.py`, `admin.py`, `_shared.py`
+  `core.py`, `account.py`, `profile.py`, `api_keys.py`, `admin.py`, `_shared.py` (2026-05-08)
 - `src/journal/services/auth.py` — `AuthService` (password hashing, session management, API keys, token signing)
 - `src/journal/db/user_repository.py` — user, session, and API key persistence
 - `src/journal/mcp_server/runserver.py` — DNS rebinding config, middleware wiring, fail-closed `JOURNAL_SECRET_KEY`

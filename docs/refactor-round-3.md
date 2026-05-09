@@ -1,14 +1,14 @@
 # Refactor round 3 — kickoff doc for the next session
 
 **Status:** active. **Last updated:** 2026-05-09. **Supersedes:**
-[`code-quality-refactor-plan.md`](./code-quality-refactor-plan.md) and
-[`refactor-follow-ups.md`](./refactor-follow-ups.md).
-Both child plans ([`refactor-repository-plan.md`](./refactor-repository-plan.md) and
-[`refactor-item-6-exceptions-plan.md`](./refactor-item-6-exceptions-plan.md)) are now closed.
+[`archive/code-quality-refactor-plan.md`](./archive/code-quality-refactor-plan.md) and
+[`archive/refactor-follow-ups.md`](./archive/refactor-follow-ups.md).
+Both child plans ([`archive/refactor-repository-plan.md`](./archive/refactor-repository-plan.md) and
+[`archive/refactor-item-6-exceptions-plan.md`](./archive/refactor-item-6-exceptions-plan.md)) are now closed.
 
 This document is the entry point for the next refactor session. The
-v2 plan (`docs/code-quality-refactor-plan.md`) and the round-2 living
-punch list (`docs/refactor-follow-ups.md`) are both **fully closed**;
+v2 plan (`docs/archive/code-quality-refactor-plan.md`) and the round-2 living
+punch list (`docs/archive/refactor-follow-ups.md`) are both **fully closed**;
 this doc captures the current state, the new candidates that surfaced
 along the way, and a recommendation for what to pick up next.
 
@@ -26,10 +26,10 @@ Three companion documents make up the canonical reference:
    URL resource; override = `ingestion.py` for write/job-creation
    routes). Read on every session that touches the api/ layer or
    designs a new split.
-2. **`docs/code-quality-refactor-plan.md`** — historical sequence (v2).
+2. **`docs/archive/code-quality-refactor-plan.md`** — historical sequence (v2).
    Units 1a → 7. Useful for understanding *why* an early split is
    shaped the way it is. Don't re-execute units from this doc.
-3. **`docs/refactor-follow-ups.md`** — open items from round 2. Items
+3. **`docs/archive/refactor-follow-ups.md`** — open items from round 2. Items
    1–7 are now all marked RESOLVED, ACCEPTED+DOCUMENTED, or LARGELY
    RESOLVED. The doc still has value as a record of decisions and
    standing-fact verification commands.
@@ -58,20 +58,20 @@ For any new session continuing the refactor, start with:
 
 ## What round 2 closed
 
-Every item from `docs/refactor-follow-ups.md` is closed as of
+Every item from `docs/archive/refactor-follow-ups.md` is closed as of
 2026-05-07. Brief summaries — full detail lives in the journal
 entries listed.
 
 | Item | Result | Journal |
 |---|---|---|
 | 1 — Flake `test_patch_text_queues_mood_scoring` | RESOLVED. Within-call shared-connection race in `submit_save_entry_pipeline` — each child's `executor.submit` happened before the API thread finished its writes. Fix: stage every child row up front, `mark_succeeded` the parent, then dispatch all children. 1000/1000 green post-fix. | `260507-item-1-save-pipeline-race-fix.md` |
-| 1.1 — Cross-call connection-sharing race | ACCEPTED + DOCUMENTED. Tried `LockedConnection` wrapper + `with self._conn:` blocks; ran into `cursor.lastrowid` / `cursor.fetchone()` reads happening outside per-method locks. Closing every gap requires per-thread connections (architectural rewrite) or connection-wide locks held across full multi-step transactions. Decision: accept the residual risk, rewrite docstrings honestly, document reopen criteria. | (Inline in `docs/refactor-follow-ups.md` § 1.1) |
-| 2 — Worker-class extraction from `runner.py` | RESOLVED. `runner.py` 1214 → 423 lines. Each `_run_*` is a free function under `services/jobs/workers/<name>.py` taking a `WorkerContext`. New `JobNotifier` (208), `save_pipeline.py` (186), `retry.py` (96). 4 new direct unit tests for `run_entity_reembed`. | `260507-item-2-worker-extraction.md` |
+| 1.1 — Cross-call connection-sharing race | ACCEPTED + DOCUMENTED. Tried `LockedConnection` wrapper + `with self._conn:` blocks; ran into `cursor.lastrowid` / `cursor.fetchone()` reads happening outside per-method locks. Closing every gap requires per-thread connections (architectural rewrite) or connection-wide locks held across full multi-step transactions. Decision: accept the residual risk, rewrite docstrings honestly, document reopen criteria. | (Inline in `docs/archive/refactor-follow-ups.md` § 1.1) |
+| 2 — Worker-class extraction from `runner.py` | RESOLVED. `runner.py` 1214 → 423 at landing (471 as of 2026-05-09 after follow-on edits). Each `_run_*` is a free function under `services/jobs/workers/<name>.py` taking a `WorkerContext`. New `JobNotifier` (208), `save_pipeline.py` (186), `retry.py` (96). 4 new direct unit tests for `run_entity_reembed`. | `260507-item-2-worker-extraction.md` |
 | 3 — Test private-state cleanup, round 2 | LARGELY RESOLVED + further reduced by item 7. Test reach-in count **254 → 37**. Final residual is in 4 justified buckets — see "Standing facts" below for the breakdown. | `260507-item-3-test-private-state-cleanup.md` |
 | 4 — Parked oversized files | RESOLVED. Three packages: `services/ingestion/` (5 files, max 375), `entitystore/` (4 files, max 408), `cli/` (5 files, max 603). Mixin classes for the first two; per-command modules for cli. Cmd_seed's literal sample data extracted to `cli/_seed_samples.py` (679 lines, data only). | `260507-item-4-parked-files-split.md` |
 | 5 — Unit 1b carryover | RESOLVED. `update_entry_date` and `verify_doubts` moved from `QueryService` to `IngestionService` to align with the read/write split. | `260507-item-5-write-method-ownership.md` |
 | 6 — Acknowledged size-cap exceptions | Status quo, "no action unless forced". Three remaining files (table below). | n/a |
-| 7 — Production reach-in pattern in `services/reload.py` | RESOLVED. New named methods on `IngestionService` (`replace_ocr`, `replace_transcription`, `replace_mood_scoring`, `replace_formatter`, `replace_heading_detector`, `set_preprocess_images` plus `repository` and `mood_scoring` accessors) and `JobRunner` (`mood_scoring` property + `replace_mood_scoring`). Also fixed a latent bug from item 2 — `services["job_runner"]._mood_scoring = new` had silently become a phantom-attribute write after the WorkerContext refactor. | (Inline in `docs/refactor-follow-ups.md` § 7) |
+| 7 — Production reach-in pattern in `services/reload.py` | RESOLVED. New named methods on `IngestionService` (`replace_ocr`, `replace_transcription`, `replace_mood_scoring`, `replace_formatter`, `replace_heading_detector`, `set_preprocess_images` plus `repository` and `mood_scoring` accessors) and `JobRunner` (`mood_scoring` property + `replace_mood_scoring`). Also fixed a latent bug from item 2 — `services["job_runner"]._mood_scoring = new` had silently become a phantom-attribute write after the WorkerContext refactor. | (Inline in `docs/archive/refactor-follow-ups.md` § 7) |
 
 **Test count:** 1800 unit + 8 integration = 1808 (was 1794 + 8 at the
 start of round 2).
@@ -79,21 +79,21 @@ start of round 2).
 **Test reach-in count:** 254 → 37 (-217 sites). All 37 remaining are
 in 4 documented buckets — verify before acting.
 
-**`runner.py` line count:** 1214 → 423.
+**`runner.py` line count:** 1214 → 423 at landing (471 as of 2026-05-09).
 
 **Acknowledged item-6 exceptions still in place:**
 
 | File | Lines | Reason |
 |---|---:|---|
-| ~~`api/entities.py`~~ | ~~717~~ → split | RESOLVED on 2026-05-08. Split into `api/entities.py` (425, CRUD + read sub-resources) and `api/entity_merge.py` (326, merge/candidates/quarantine/merge-history). See `docs/refactor-item-6-exceptions-plan.md` § Item 1. |
-| ~~`auth_api.py`~~ | ~~840~~ → split | RESOLVED on 2026-05-08. Carved into `auth_api/{__init__,_shared,core,account,profile,api_keys,admin}.py`. Largest resulting file is `account.py` at 355 lines (under the 400-line target). Two inline `from journal.api import _runtime_get` imports in `auth_register` and `auth_config` were hoisted to module-level on the way out (no circular-import risk). See `docs/refactor-item-6-exceptions-plan.md` § Item 3. |
+| ~~`api/entities.py`~~ | ~~717~~ → split | RESOLVED on 2026-05-08. Split into `api/entities.py` (425, CRUD + read sub-resources) and `api/entity_merge.py` (406, merge/candidates/quarantine/merge-history). See `docs/archive/refactor-item-6-exceptions-plan.md` § Item 1. |
+| ~~`auth_api.py`~~ | ~~840~~ → split | RESOLVED on 2026-05-08. Carved into `auth_api/{__init__,_shared,core,account,profile,api_keys,admin}.py`. Largest resulting file is `account.py` at 355 lines (under the 400-line target). Two inline `from journal.api import _runtime_get` imports in `auth_register` and `auth_config` were hoisted to module-level on the way out (no circular-import risk). See `docs/archive/refactor-item-6-exceptions-plan.md` § Item 3. |
 | `api/dashboard.py` | 609 | Marginally over-cap; leave as one module unless it grows further. |
 
 **Acknowledged-permanent (no further split planned):**
 
 | File | Lines | Reason |
 |---|---:|---|
-| `services/entity_extraction/service.py` | 808 | The orchestrator IS the design — already the result of a 1187 → 808 split (round 2 unit 2). `extract_from_entry` is ~300 lines of inherent integration glue; `_resolve_entity` is a 132-line decision tree where extraction would need a 14-arg free function or an `ExtractionContext` dataclass that "moves lines, not eliminates them". Independent re-analysis confirmed this in `docs/refactor-item-6-exceptions-plan.md` § Item 2. **Trigger to revisit:** if the file ever crosses ~1000 lines, redesign the `_resolve_entity` decision tree as a state machine — do not propose another mechanical split. |
+| `services/entity_extraction/service.py` | 808 | The orchestrator IS the design — already the result of a 1187 → 808 split (round 2 unit 2). `extract_from_entry` is ~300 lines of inherent integration glue; `_resolve_entity` is a 132-line decision tree where extraction would need a 14-arg free function or an `ExtractionContext` dataclass that "moves lines, not eliminates them". Independent re-analysis confirmed this in `docs/archive/refactor-item-6-exceptions-plan.md` § Item 2. **Trigger to revisit:** if the file ever crosses ~1000 lines, redesign the `_resolve_entity` decision tree as a state machine — do not propose another mechanical split. |
 
 ---
 
@@ -107,13 +107,13 @@ outliers. Both were resolved on 2026-05-07: `mcp_server.py`
 
 | File | Lines | Status |
 |---|---:|---|
-| ~~`db/repository.py`~~ | ~~1603~~ → split | RESOLVED on 2026-05-07. Carved into `db/repository/{__init__,protocol,store,core,pages,chunks,search,mood,stats,analytics}.py`. Largest resulting file is `stats.py` at 357 lines. See `docs/refactor-repository-plan.md` and Recommendation 3 below. |
-| ~~`mcp_server.py`~~ | ~~1513~~ → split | RESOLVED on 2026-05-07. Carved into `mcp_server/{bootstrap,app,runserver,__init__,__main__}.py` + `mcp_server/tools/{_ctx,queries,ingestion,entities,jobs}.py`. Largest resulting file is `bootstrap.py` at 475 lines. See `docs/refactor-mcp-server-plan.md` and Recommendation 2 below. |
+| ~~`db/repository.py`~~ | ~~1603~~ → split | RESOLVED on 2026-05-07. Carved into `db/repository/{__init__,protocol,store,core,pages,chunks,search,mood,stats,analytics}.py`. Largest resulting file is `stats.py` at 357 lines. See `docs/archive/refactor-repository-plan.md` and Recommendation 3 below. |
+| ~~`mcp_server.py`~~ | ~~1513~~ → split | RESOLVED on 2026-05-07. Carved into `mcp_server/{bootstrap,app,runserver,__init__,__main__}.py` + `mcp_server/tools/{_ctx,queries,ingestion,entities,jobs}.py`. Largest resulting file is `bootstrap.py` at 475 lines. See `docs/archive/refactor-mcp-server-plan.md` and Recommendation 2 below. |
 
 ### B. Item 3 residual
 
 37 test reach-ins remain. All four buckets are documented in
-`docs/refactor-follow-ups.md` § 3 and the journal entry. Verify the
+`docs/archive/refactor-follow-ups.md` § 3 and the journal entry. Verify the
 breakdown is unchanged with the grep gate (see Standing facts).
 Worth working only if a specific cluster turns out to bite during
 unrelated work — not category-sized investment material.
@@ -122,7 +122,7 @@ unrelated work — not category-sized investment material.
 
 The cross-call shared-connection race is still theoretically present.
 Reopen criteria are documented in
-`docs/refactor-follow-ups.md` § 1.1: production
+`docs/archive/refactor-follow-ups.md` § 1.1: production
 `sqlite3.OperationalError: not an error` reports, OR a future change
 that materially increases worker-thread SQLite write rate. Do not
 revisit speculatively.
@@ -135,7 +135,7 @@ In rough order of value vs. effort:
 
 ### 1. Tidy round 2 docs (15 min, recommended regardless) — RESOLVED
 
-Landed 2026-05-07. `docs/refactor-follow-ups.md` now carries a
+Landed 2026-05-07. `docs/archive/refactor-follow-ups.md` now carries a
 top-of-doc pointer to this round-3 doc and the residual count is
 corrected from "~66" to 37 in both the item-3 section and the
 standing-facts table.
@@ -144,7 +144,7 @@ standing-facts table.
 
 Landed 2026-05-07 in three commits (planning + commit A + commit B):
 
-- Plan: `docs/refactor-mcp-server-plan.md` — proposed package shape
+- Plan: `docs/archive/refactor-mcp-server-plan.md` — proposed package shape
   and surfaced six decisions (mcp instance location, test-patch
   retargets, `__init__.py` re-export surface, on-change callback
   staying inline, `__main__.py`, three-commit shape).
@@ -164,7 +164,7 @@ the 500-line target). 1799 unit tests pass; reach-in gates unchanged.
 
 Landed 2026-05-07 in three commits (planning + commit A + commit B):
 
-- Plan: `docs/refactor-repository-plan.md` — proposed package shape
+- Plan: `docs/archive/refactor-repository-plan.md` — proposed package shape
   (8 cluster files instead of the round-3 doc's 6 — `stats` split
   on the natural seam between corpus stats and cross-axis
   analytics) and surfaced 10 decisions including mixin-vs-free-
@@ -236,8 +236,9 @@ meantime.
 
 ## Standing facts (verify before acting)
 
-These snapshots are accurate as of 2026-05-07. Each has a
-re-verification command. Trust the command output, not the snapshot.
+These snapshots are accurate as of 2026-05-09 (file sizes and reach-in
+counts re-verified). Each has a re-verification command. Trust the
+command output, not the snapshot.
 
 ### Reach-in count from `api/` to private service state
 
@@ -275,19 +276,20 @@ Residual breakdown (what makes up the 37):
 find src/journal -name '*.py' -exec wc -l {} + | sort -rn | head -10
 ```
 
-Top-10 sizes after the auth_api split (2026-05-08):
+Top-10 sizes (re-measured 2026-05-09):
 
 | File | Lines | Status |
 |---|---:|---|
-| `services/entity_extraction/service.py` | 808 | Acknowledged-permanent (see table above). |
+| `services/entity_extraction/service.py` | 809 | Acknowledged-permanent (see table above). |
 | `providers/transcription.py` | 778 | Within range. |
 | `providers/ocr.py` | 753 | Within range. |
 | `services/notifications.py` | 744 | Grown by item 3 part E (module helpers). |
 | `cli/_seed_samples.py` | 679 | Pure data — no edits expected. |
+| `cli/__init__.py` | 620 | Within range. |
 | `api/dashboard.py` | 609 | Marginally over-cap; item 6 exception. |
-| `cli/__init__.py` | 603 | Within range. |
 | `api/ingestion.py` | 591 | Within range. |
-| `providers/extraction.py` | 560 | Within range. |
+| `providers/extraction.py` | 563 | Within range. |
+| `services/chunking.py` | 538 | Within range. |
 
 Largest `auth_api/` file is `account.py` at 355 lines (does not
 make the top-10).

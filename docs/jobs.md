@@ -29,8 +29,9 @@ There are indexes on `status` and `created_at DESC` so the (small) dashboard loo
 ## JobRunner
 
 `src/journal/services/jobs/runner.py::JobRunner` owns the in-process execution of jobs. (The single-file
-`services/jobs.py` was split into the `services/jobs/` package on 2026-05-07: `runner.py`, `models.py`, `retry.py`,
-and a `workers/` subdirectory with one file per job type.) Its contract:
+`services/jobs.py` was split into the `services/jobs/` package on 2026-05-07. The package now contains
+`runner.py`, `validation.py`, `notifier.py`, `save_pipeline.py`, `retry.py`, `errors.py`, and a `workers/`
+subdirectory with one file per job type.) Its contract:
 
 1. **Single-worker `ThreadPoolExecutor`.** `max_workers=1`. Concurrent submissions queue behind the running one. This is
    deliberate and load-bearing — see [threading and SQLite](#threading-and-sqlite) below.
@@ -44,13 +45,13 @@ and a `workers/` subdirectory with one file per job type.) Its contract:
    `jobs.progress_current / progress_total`. Callback exceptions in the service layer are swallowed and logged — a broken
    sink must never abort the batch.
 5. **Shutdown.** `JobRunner.shutdown(wait=False)` cancels pending futures and stops accepting new submissions. Registered
-   with `atexit` in `mcp_server.py`. Any job still running when the process dies will be left with `status=running` — see
+   with `atexit` in `mcp_server/bootstrap.py`. Any job still running when the process dies will be left with `status=running` — see
    [restart recovery](#restart-recovery).
 
 ## Restart recovery
 
 Because jobs run in-process, an unclean server restart can leave rows stuck in `running` or (less likely) `queued`. On
-startup, `mcp_server.py` calls `SQLiteJobRepository.reconcile_stuck_jobs()`, which rewrites any such row to `failed` with
+startup, `mcp_server/bootstrap.py` calls `SQLiteJobRepository.reconcile_stuck_jobs()`, which rewrites any such row to `failed` with
 `error_message = "server restarted before job completed"` and sets `finished_at` to now. The reconciled count is logged
 at INFO.
 
@@ -394,5 +395,11 @@ The pipeline orchestration must handle two race windows:
   cancellation is not worth the complexity of interrupting the worker mid-entry.
 - **Job history UI.** The webapp has a dedicated Job History page (`/jobs`) backed by `GET /api/jobs` that lists all
   historical jobs with filters and pagination. Old rows accumulate in the database; no pruning runs automatically.
-- **Retry.** A failed job is not automatically retried. The user can submit a new job with the same parameters.
+- **Retry.** A failed _terminal_ job is not automatically retried. The user can submit a new job with the same
+  parameters. Note: image and audio ingestion workers DO retry transparently within a single job execution on
+  transient upstream errors (Anthropic 529 / overloaded, Google 503 UNAVAILABLE / 429 RESOURCE_EXHAUSTED, OpenAI
+  rate limit) using exponential backoff at 3 / 6 / 12 / 24 / 48 minutes — see
+  `services/jobs/retry.py::run_with_retry` and `services/jobs/errors.py::is_transient`. The first retry sends a
+  `notify_retrying` Pushover; subsequent retries are silent. After all retries are exhausted (or on a non-transient
+  error) the job moves to `failed` and behaves as documented in this bullet.
 - **Multi-worker parallelism.** Would require rethinking the SQLite threading model and per-LLM rate limits.

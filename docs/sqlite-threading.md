@@ -1,7 +1,12 @@
 # SQLite Threading and Connection Safety
 
+**Status:** active. **Last updated:** 2026-05-09. **Supersedes:** none.
+
 This document records a production-grade threading bug found in the job repository, how it was diagnosed, and the
 patterns that prevent it. It applies to any code that shares a `sqlite3.Connection` across threads.
+
+The connection.py docstring referenced below also points at `docs/refactor-follow-ups.md` (now archived to
+`docs/archive/refactor-follow-ups.md`) for the item 1.1 reopen criteria.
 
 ## The bug
 
