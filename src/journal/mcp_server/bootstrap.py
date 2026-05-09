@@ -50,6 +50,159 @@ log = logging.getLogger(__name__)
 _services: dict | None = None
 
 
+def _build_fitness_callables(
+    *,
+    conn: Any,
+    config: Any,
+    notification_service: Any,
+) -> dict[str, Any]:
+    """Wire Strava + Garmin fetch + normalize for the JobRunner.
+
+    Returns the four callables the JobRunner constructor expects
+    (``fetch_strava_callable``, ``fetch_garmin_callable``,
+    ``normalize_strava_callable``, ``normalize_garmin_callable``).
+    Each is ``None`` when its source is unconfigured — Strava needs
+    ``STRAVA_CLIENT_ID`` + ``STRAVA_CLIENT_SECRET``; Garmin needs
+    ``GARMIN_USERNAME`` + ``GARMIN_PASSWORD``. Callers pass the dict
+    via ``**`` so a partially-configured server still wires up the
+    half that's set.
+    """
+    from journal.db.fitness_repository import FitnessRepository
+    from journal.models import FitnessAuthState
+    from journal.providers.garmin import GarminConnectGarminProvider
+    from journal.providers.strava import StravalibStravaProvider, Tokens
+    from journal.services.fitness.fetch import (
+        GarminFetchService,
+        StravaFetchService,
+    )
+    from journal.services.fitness.normalize import (
+        normalize_garmin,
+        normalize_strava,
+    )
+
+    fitness_repo = FitnessRepository(conn)
+    out: dict[str, Any] = {
+        "fetch_strava_callable": None,
+        "fetch_garmin_callable": None,
+        "normalize_strava_callable": None,
+        "normalize_garmin_callable": None,
+    }
+
+    strava_configured = bool(
+        config.strava_client_id and config.strava_client_secret,
+    )
+    if strava_configured:
+        def _strava_provider_factory(
+            auth: FitnessAuthState,
+        ) -> StravalibStravaProvider:
+            user_id = auth.user_id
+
+            def _persist(tokens: Tokens) -> None:
+                # Merge into the existing row so we don't reset
+                # auth_status / auth_broken_since / last_*_at columns
+                # the fetch service maintains separately.
+                existing = fitness_repo.get_auth_state(
+                    user_id=user_id, source="strava",
+                )
+                fitness_repo.upsert_auth_state(
+                    FitnessAuthState(
+                        user_id=user_id,
+                        source="strava",
+                        access_token=tokens["access_token"],
+                        refresh_token=tokens["refresh_token"],
+                        token_expires_at=tokens["token_expires_at"],
+                        extra_state=dict(existing.extra_state) if existing else {},
+                        last_successful_login_at=(
+                            existing.last_successful_login_at if existing else None
+                        ),
+                        last_refresh_at=existing.last_refresh_at if existing else None,
+                        auth_status=existing.auth_status if existing else "unknown",
+                        auth_broken_since=(
+                            existing.auth_broken_since if existing else None
+                        ),
+                        created_at=existing.created_at if existing else "",
+                    ),
+                )
+
+            return StravalibStravaProvider(
+                client_id=config.strava_client_id,
+                client_secret=config.strava_client_secret,
+                access_token=auth.access_token or "",
+                refresh_token=auth.refresh_token or "",
+                token_expires_at=auth.token_expires_at or "1970-01-01T00:00:00Z",
+                persist_tokens=_persist,
+            )
+
+        strava_fetch = StravaFetchService(
+            repo=fitness_repo,
+            notifier=notification_service,
+            config=config,
+            provider_factory=_strava_provider_factory,
+        )
+        out["fetch_strava_callable"] = strava_fetch.run_sync
+        out["normalize_strava_callable"] = (
+            lambda *, user_id, **kw: normalize_strava(
+                fitness_repo, user_id=user_id, notifier=notification_service,
+                **kw,
+            )
+        )
+
+    garmin_configured = bool(
+        config.garmin_username and config.garmin_password,
+    )
+    if garmin_configured:
+        def _garmin_provider_factory(
+            auth: FitnessAuthState,
+        ) -> GarminConnectGarminProvider:
+            user_id = auth.user_id
+            tokens_blob = auth.extra_state.get("tokens_blob") if auth.extra_state else None
+
+            def _persist(tokens_blob: str) -> None:
+                # garminconnect emits a JSON blob covering both OAuth1
+                # and OAuth2 tokens; we stash it on extra_state so the
+                # next sync boots from the DB, not a filesystem cache.
+                existing = fitness_repo.get_auth_state(
+                    user_id=user_id, source="garmin",
+                )
+                extra = dict(existing.extra_state) if existing else {}
+                extra["tokens_blob"] = tokens_blob
+                fitness_repo.upsert_auth_state(
+                    FitnessAuthState(
+                        user_id=user_id,
+                        source="garmin",
+                        access_token=existing.access_token if existing else None,
+                        refresh_token=existing.refresh_token if existing else None,
+                        token_expires_at=(
+                            existing.token_expires_at if existing else None
+                        ),
+                        extra_state=extra,
+                    ),
+                )
+
+            return GarminConnectGarminProvider(
+                username=config.garmin_username,
+                password=config.garmin_password,
+                tokens_blob=tokens_blob,
+                persist_tokens=_persist,
+            )
+
+        garmin_fetch = GarminFetchService(
+            repo=fitness_repo,
+            notifier=notification_service,
+            config=config,
+            provider_factory=_garmin_provider_factory,
+        )
+        out["fetch_garmin_callable"] = garmin_fetch.run_sync
+        out["normalize_garmin_callable"] = (
+            lambda *, user_id, **kw: normalize_garmin(
+                fitness_repo, user_id=user_id, notifier=notification_service,
+                **kw,
+            )
+        )
+
+    return out
+
+
 def _init_services() -> dict:
     """Initialize shared services (DB, vector store, providers). Idempotent."""
     global _services
@@ -363,6 +516,9 @@ def _init_services() -> dict:
         "  Jobs: reconciled %d stuck job(s) from previous process",
         reconciled,
     )
+    fitness_callables = _build_fitness_callables(
+        conn=conn, config=config, notification_service=notification_service,
+    )
     job_runner = JobRunner(
         job_repository=job_repository,
         entity_extraction_service=entity_extraction_service,
@@ -371,7 +527,15 @@ def _init_services() -> dict:
         entry_repository=repo,
         ingestion_service=ingestion_service,
         notification_service=notification_service,
+        **fitness_callables,
     )
+    if any(v is not None for v in fitness_callables.values()):
+        log.info("  Fitness sync wired (Strava + Garmin providers)")
+    else:
+        log.info(
+            "  Fitness sync not wired (no STRAVA_CLIENT_ID and no "
+            "GARMIN_USERNAME — submit_fitness_sync_* will refuse)",
+        )
     log.info("  Jobs: JobRunner started (single-worker executor)")
 
     # Health poller — daemon thread that monitors internal components

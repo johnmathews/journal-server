@@ -62,6 +62,13 @@ ENTITY_REEMBED_KEYS: dict[str, type | tuple[type, ...]] = {
     "user_id": int,
 }
 
+# Fitness sync jobs carry the source in the job_type name (mirroring
+# how mood_score_entry doesn't carry a `dimension` param), so the
+# only legal param is the user_id of the row owner.
+FITNESS_SYNC_KEYS: dict[str, type | tuple[type, ...]] = {
+    "user_id": int,
+}
+
 
 def validate_params(
     params: dict[str, Any],

@@ -55,6 +55,8 @@ if TYPE_CHECKING:
     from journal.models import Job
     from journal.services.backfill import MoodBackfillResult
     from journal.services.entity_extraction import EntityExtractionService
+    from journal.services.fitness.fetch import FitnessSyncResult
+    from journal.services.fitness.normalize import NormalizeResult
     from journal.services.ingestion import IngestionService
     from journal.services.mood_scoring import MoodScoringService
     from journal.services.notifications import PushoverNotificationService
@@ -64,6 +66,7 @@ from journal.services.jobs.save_pipeline import submit_save_entry_pipeline
 from journal.services.jobs.validation import (
     ENTITY_EXTRACTION_KEYS,
     ENTITY_REEMBED_KEYS,
+    FITNESS_SYNC_KEYS,
     INGEST_AUDIO_KEYS,
     INGEST_IMAGES_KEYS,
     MOOD_BACKFILL_KEYS,
@@ -76,6 +79,12 @@ from journal.services.jobs.workers import WorkerContext
 from journal.services.jobs.workers.audio_ingestion import run_audio_ingestion
 from journal.services.jobs.workers.entity_extraction import run_entity_extraction
 from journal.services.jobs.workers.entity_reembed import run_entity_reembed
+from journal.services.jobs.workers.fitness_sync_garmin import (
+    run_fitness_sync_garmin,
+)
+from journal.services.jobs.workers.fitness_sync_strava import (
+    run_fitness_sync_strava,
+)
 from journal.services.jobs.workers.image_ingestion import run_image_ingestion
 from journal.services.jobs.workers.mood_backfill import run_mood_backfill
 from journal.services.jobs.workers.mood_score_entry import run_mood_score_entry
@@ -138,6 +147,10 @@ class JobRunner:
         entry_repository: EntryRepository,
         ingestion_service: IngestionService | None = None,
         notification_service: PushoverNotificationService | None = None,
+        fetch_strava_callable: Callable[..., FitnessSyncResult] | None = None,
+        fetch_garmin_callable: Callable[..., FitnessSyncResult] | None = None,
+        normalize_strava_callable: Callable[..., NormalizeResult] | None = None,
+        normalize_garmin_callable: Callable[..., NormalizeResult] | None = None,
     ) -> None:
         self._jobs = job_repository
         # Default the reembedder to the extraction service: it implements
@@ -177,6 +190,10 @@ class JobRunner:
             pop_pending_images=lambda jid: self._pending_images.pop(jid, []),
             pop_pending_audio=lambda jid: self._pending_audio.pop(jid, []),
             queue_post_ingestion_jobs=self._queue_post_ingestion_jobs,
+            fetch_strava=fetch_strava_callable,
+            fetch_garmin=fetch_garmin_callable,
+            normalize_strava=normalize_strava_callable,
+            normalize_garmin=normalize_garmin_callable,
         )
 
     # ------------------------------------------------------------------
@@ -375,6 +392,43 @@ class JobRunner:
         )
         self._pending_audio[job.id] = recordings
         self._executor.submit(run_audio_ingestion, self._ctx, job.id, params)
+        return job
+
+    def submit_fitness_sync_strava(self, *, user_id: int) -> Job:
+        """Queue a Strava fitness sync (fetch + normalize end-to-end).
+
+        Raises ``RuntimeError`` if the runner was constructed without a
+        Strava fetch + normalize pair — the worker has nothing to call
+        in that case, so we fail at submit time rather than queueing a
+        row that's guaranteed to fail.
+        """
+        if self._ctx.fetch_strava is None or self._ctx.normalize_strava is None:
+            raise RuntimeError(
+                "Strava fitness sync is not configured on this server "
+                "(no fetch_strava_callable / normalize_strava_callable "
+                "passed to JobRunner)",
+            )
+        params: dict[str, Any] = {"user_id": user_id}
+        validate_params(params, FITNESS_SYNC_KEYS, job_type="fitness_sync_strava")
+        job = self._jobs.create("fitness_sync_strava", params, user_id=user_id)
+        self._executor.submit(run_fitness_sync_strava, self._ctx, job.id, params)
+        return job
+
+    def submit_fitness_sync_garmin(self, *, user_id: int) -> Job:
+        """Queue a Garmin fitness sync (fetch + normalize end-to-end).
+
+        Same configuration gate as ``submit_fitness_sync_strava``.
+        """
+        if self._ctx.fetch_garmin is None or self._ctx.normalize_garmin is None:
+            raise RuntimeError(
+                "Garmin fitness sync is not configured on this server "
+                "(no fetch_garmin_callable / normalize_garmin_callable "
+                "passed to JobRunner)",
+            )
+        params: dict[str, Any] = {"user_id": user_id}
+        validate_params(params, FITNESS_SYNC_KEYS, job_type="fitness_sync_garmin")
+        job = self._jobs.create("fitness_sync_garmin", params, user_id=user_id)
+        self._executor.submit(run_fitness_sync_garmin, self._ctx, job.id, params)
         return job
 
     def shutdown(self, wait: bool = False) -> None:

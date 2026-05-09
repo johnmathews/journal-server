@@ -254,6 +254,10 @@ def runner_factory(jobs_repo, threadsafe_conn):
         mood_backfill: FakeMoodBackfill | None = None,
         entity_reembedder: Any = None,
         ingestion: Any = None,
+        fetch_strava_callable: Any = None,
+        fetch_garmin_callable: Any = None,
+        normalize_strava_callable: Any = None,
+        normalize_garmin_callable: Any = None,
     ) -> JobRunner:
         runner = JobRunner(
             job_repository=jobs_repo,
@@ -265,6 +269,10 @@ def runner_factory(jobs_repo, threadsafe_conn):
             mood_scoring_service=object(),  # type: ignore[arg-type]
             entry_repository=object(),  # type: ignore[arg-type]
             ingestion_service=ingestion,
+            fetch_strava_callable=fetch_strava_callable,
+            fetch_garmin_callable=fetch_garmin_callable,
+            normalize_strava_callable=normalize_strava_callable,
+            normalize_garmin_callable=normalize_garmin_callable,
         )
         created.append(runner)
         return runner
@@ -1645,3 +1653,107 @@ class TestEntityReembed:
         # reembed path was *not* touched.
         assert reembedder.calls == [{"entity_id": 11, "user_id": 1}]
         assert extraction.reembed_calls == []
+
+
+class TestFitnessSync:
+    """W8 — ``submit_fitness_sync_strava`` / ``submit_fitness_sync_garmin``
+    queue jobs that run fetch + normalize end-to-end.
+    """
+
+    def test_submit_strava_creates_queued_job(
+        self, runner_factory, jobs_repo,
+    ) -> None:
+        from journal.services.fitness.fetch import FitnessSyncResult
+        from journal.services.fitness.normalize import NormalizeResult
+
+        fetch_calls: list[dict[str, Any]] = []
+        norm_calls: list[dict[str, Any]] = []
+
+        def fake_fetch(**kwargs: Any) -> FitnessSyncResult:
+            fetch_calls.append(kwargs)
+            return FitnessSyncResult(
+                status="success", run_id=1, rows_fetched=1, rows_normalized=0,
+            )
+
+        def fake_norm(**kwargs: Any) -> NormalizeResult:
+            norm_calls.append(kwargs)
+            return NormalizeResult(
+                source="strava", rows_normalized=1, drift_count=0,
+            )
+
+        runner = runner_factory(
+            fetch_strava_callable=fake_fetch,
+            normalize_strava_callable=fake_norm,
+        )
+        job = runner.submit_fitness_sync_strava(user_id=1)
+        assert job.type == "fitness_sync_strava"
+        assert job.params == {"user_id": 1}
+        _wait_terminal(jobs_repo, job.id)
+        runner.shutdown(wait=True)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "succeeded"
+        assert final.result["fetch"]["status"] == "success"
+        assert final.result["normalize"]["source"] == "strava"
+        assert fetch_calls == [{"user_id": 1}]
+        assert norm_calls == [{"user_id": 1}]
+
+    def test_submit_garmin_creates_queued_job(
+        self, runner_factory, jobs_repo,
+    ) -> None:
+        from journal.services.fitness.fetch import FitnessSyncResult
+        from journal.services.fitness.normalize import NormalizeResult
+
+        def fake_fetch(**_kw: Any) -> FitnessSyncResult:
+            return FitnessSyncResult(
+                status="success", run_id=2, rows_fetched=6, rows_normalized=0,
+            )
+
+        def fake_norm(**_kw: Any) -> NormalizeResult:
+            return NormalizeResult(
+                source="garmin", rows_normalized=4, drift_count=0,
+            )
+
+        runner = runner_factory(
+            fetch_garmin_callable=fake_fetch,
+            normalize_garmin_callable=fake_norm,
+        )
+        job = runner.submit_fitness_sync_garmin(user_id=1)
+        assert job.type == "fitness_sync_garmin"
+        _wait_terminal(jobs_repo, job.id)
+        runner.shutdown(wait=True)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "succeeded"
+        assert final.result["normalize"]["rows_normalized"] == 4
+
+    def test_submit_strava_raises_when_not_configured(
+        self, runner_factory,
+    ) -> None:
+        runner = runner_factory()  # no fitness callables
+        with pytest.raises(RuntimeError, match="not configured"):
+            runner.submit_fitness_sync_strava(user_id=1)
+
+    def test_submit_garmin_raises_when_not_configured(
+        self, runner_factory,
+    ) -> None:
+        runner = runner_factory()
+        with pytest.raises(RuntimeError, match="not configured"):
+            runner.submit_fitness_sync_garmin(user_id=1)
+
+    def test_submit_validates_user_id_type(self, runner_factory) -> None:
+        from journal.services.fitness.fetch import FitnessSyncResult
+        from journal.services.fitness.normalize import NormalizeResult
+
+        runner = runner_factory(
+            fetch_strava_callable=lambda **_kw: FitnessSyncResult(
+                "success", 1, 0, 0,
+            ),
+            normalize_strava_callable=lambda **_kw: NormalizeResult(
+                "strava", 0, 0,
+            ),
+        )
+        with pytest.raises(ValueError, match="user_id"):
+            runner.submit_fitness_sync_strava(user_id="42")  # type: ignore[arg-type]
