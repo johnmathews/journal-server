@@ -116,3 +116,62 @@ that caught real bugs in the docs (OCR primary/secondary inversion in two places
 drift in `api.md`, Tier 1 content duplicated across roadmap and tier-1-plan, `LOG_LEVEL`
 documented but not read by code, `runner.py` line counts stale by 50). These would have rotted
 into reader confusion without the second pass.
+
+## Verification rounds 3 and 4 (same day)
+
+After the initial commit landed, the user pushed for higher confidence. Three more
+verification passes were run:
+
+### Round 3 — link checker, typo checker, re-read of substantive rewrites
+
+- **lychee** (offline link checker) on `docs/`: caught one stale cross-repo link in
+  `development.md` that referenced the GitHub repo name `journal-webapp` instead of the
+  local sibling-dir name `webapp`. Fixed.
+- **codespell**: one typo fix (`unparseable` → `unparsable` in `search.md`). Other matches
+  were either project terminology ("master plan") or false positives (`collections.deque`).
+- **Re-read of three substantive rewrites** (`security-roadmap.md`, the `external-services.md`
+  OCR walkthrough, the `roadmap.md` Tier 1 collapse) caught the dual-pass-OCR primary/
+  secondary inversion bug repeated in **two more places** the original audit missed:
+  - `external-services.md` "Vision LLM available providers" table had Gemini 2.5 Pro
+    labelled "Current primary" and Anthropic Opus 4.6 labelled "Switchable alternative".
+    Inverted: Anthropic is now "Current dual-pass primary", Gemini is "Current dual-pass
+    secondary". The pyproject.toml dependency comment was also wrong.
+  - `roadmap.md` Tier 3 #9 (OCR context priming evaluation) and #11 (grow glossary) both
+    described prod as "Gemini primary, Anthropic shadow". Rewrote with the actual dual-pass
+    posture.
+  - `security-roadmap.md` item 7 (ZDR) had wildcard paths (`services/transcription_*`) that
+    don't match the real module layout — replaced with `providers/transcription.py`,
+    `providers/extraction.py`, `providers/ocr.py`.
+  - `security-roadmap.md` item 16 (TOTP) overstated "Cloudflare Tunnel + Cloudflare Access
+    posture" — only Tunnel is visible in the repo. Softened to "any Cloudflare Access
+    policy that may be configured — verify before relying on it".
+
+### Round 4 — cost-figure verification + line-citation sweep
+
+- **Cost figures** cross-checked against the live prod `pricing` table (12 model rows
+  on `media`, `last_verified=2026-04-23`). All per-token / per-minute rates verified.
+  Per-call estimates and walkthrough math (per-page OCR, per-entry walkthrough, mood-
+  scoring monthly, dual-pass $0.18/entry, ocr-context cache table, lifecycle ASCII)
+  recomputed and confirmed. **One fix:** `search.md` reranker estimate `~$0.001 per
+  search` → `~$0.015 per search` (was off by ~15× because Haiku 4.5 input alone over
+  ~15K tokens at $1/MTok = $0.015). Math now shown inline so future readers can sanity-
+  check.
+- **Line-number citations** (every `file.ext:NNN` pattern in `docs/*.md`) verified
+  against actual source. **One fix:** `roadmap.md` Closed item 24 cited `config.py:263`
+  for the `JOURNAL_ENABLE_MOOD_SCORING` default; the literal `"true"` is on line 262.
+  All other citations (in `security-roadmap.md`, `api.md`, `fitness-schema.md`,
+  `sqlite-threading.md`) verified at exact line.
+
+### Residual uncertainty (acknowledged, not fixed)
+
+Items the verifiers flagged but couldn't resolve from the repo alone:
+
+1. Provider data-retention / policy claims (Anthropic ZDR, OpenAI training opt-out) —
+   not code-verifiable; need external policy review.
+2. Handwriting benchmark scores (~91%/95%/100%) cited from "AIMultiple" — not
+   independently verified.
+3. The `gpt-5.4` row in the prod `pricing` table is unexplained provenance — could be
+   a stub or test row.
+4. `entity-tracking.md` "$0.0001 per entity" backfill cost looks ~25× high based on
+   plausible token counts but hand-wavy enough that it wasn't worth fixing without
+   knowing the input-size assumption.
