@@ -1,6 +1,6 @@
 # Fitness Integration — Execution Plan
 
-**Status:** active. **Last updated:** 2026-05-09. **Supersedes:** none.
+**Status:** active. **Last updated:** 2026-05-09 (W9 shipped). **Supersedes:** none.
 **Created:** 2026-05-09. **Owner of decisions:** [`fitness-integration-plan.md`](./fitness-integration-plan.md).
 **Owner of schema:** [`fitness-schema.md`](./fitness-schema.md).
 **Code-grounded:** yes — `src/journal/{providers,services,api,mcp_server,db,cli,config.py}` reviewed in

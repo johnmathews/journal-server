@@ -15,6 +15,7 @@ Concretely, this module owns:
 - ``POST /api/entries/ingest/audio``  — async transcription ingest job
 - ``POST /api/entities/extract``     — async entity-extraction batch job
 - ``POST /api/mood/backfill``        — async mood-score backfill job
+- ``POST /api/fitness/sync/{source}`` — async fitness fetch+normalize job
 
 Why these and not their URL-prefix neighbours? They share a dependency
 cluster (``IngestionService``, ``JobRunner``, OCR / transcription /
@@ -585,6 +586,90 @@ def register_ingestion_routes(
             return JSONResponse({"error": str(e)}, status_code=400)
 
         log.info("POST /api/mood/backfill — queued job %s", job.id)
+        return JSONResponse(
+            {"job_id": job.id, "status": job.status},
+            status_code=202,
+        )
+
+    @mcp.custom_route(
+        "/api/fitness/sync/{source:str}",
+        methods=["POST"],
+        name="api_fitness_sync",
+    )
+    async def fitness_sync(request: Request) -> JSONResponse:
+        """Trigger a fitness fetch+normalize job for the given source.
+
+        ``source`` must be ``"strava"`` or ``"garmin"``. Returns 202 with
+        ``{job_id, status}`` on success. If a fitness sync for this user
+        and source is already in flight (``queued`` or ``running``), the
+        existing job_id is returned with ``already_running: true`` —
+        the W6 fetch service has its own single-run guard, but
+        deduping here keeps the operator-facing audit trail clean (one
+        job row per real sync, not one per button-press).
+
+        Returns 503 if the source isn't configured on this server
+        (no ``STRAVA_CLIENT_ID`` / ``STRAVA_CLIENT_SECRET`` for Strava,
+        no ``GARMIN_USERNAME`` / ``GARMIN_PASSWORD`` for Garmin) so
+        operators can tell "feature off" from "real bug".
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+        user = get_authenticated_user(request)
+        user_id = user.user_id
+        source = str(request.path_params["source"])
+        if source not in ("strava", "garmin"):
+            return JSONResponse(
+                {"error": f"Unknown fitness source: {source!r}"},
+                status_code=400,
+            )
+
+        job_type = f"fitness_sync_{source}"
+        job_repository = services["job_repository"]
+        # Dedup: a single in-flight (queued or running) job per user+source.
+        # ``list_jobs`` only filters one status at a time, so we union the
+        # two queries client-side. The result set per user is tiny (sync
+        # runs every few minutes) so this stays cheap.
+        existing = []
+        for status in ("queued", "running"):
+            jobs, _ = job_repository.list_jobs(
+                status=status, job_type=job_type, user_id=user_id, limit=1,
+            )
+            existing.extend(jobs)
+        if existing:
+            in_flight = existing[0]
+            log.info(
+                "POST /api/fitness/sync/%s — returning existing in-flight job %s "
+                "(status=%s)",
+                source, in_flight.id, in_flight.status,
+            )
+            return JSONResponse(
+                {
+                    "job_id": in_flight.id,
+                    "status": in_flight.status,
+                    "already_running": True,
+                },
+                status_code=202,
+            )
+
+        job_runner: JobRunner = services["job_runner"]
+        submit = (
+            job_runner.submit_fitness_sync_strava
+            if source == "strava"
+            else job_runner.submit_fitness_sync_garmin
+        )
+        try:
+            job = submit(user_id=user_id)
+        except RuntimeError as e:
+            # Source not configured on this server — fail-loud at submit
+            # time per W8 decision #2.
+            log.warning("POST /api/fitness/sync/%s — %s", source, e)
+            return JSONResponse({"error": str(e)}, status_code=503)
+        except ValueError as e:
+            log.warning("POST /api/fitness/sync/%s — %s", source, e)
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+        log.info("POST /api/fitness/sync/%s — queued job %s", source, job.id)
         return JSONResponse(
             {"job_id": job.id, "status": job.status},
             status_code=202,
