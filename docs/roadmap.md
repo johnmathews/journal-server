@@ -70,19 +70,23 @@ with a small corpus".
 > was never executed but no work was blocked. The next item meeting the Tier 1 criterion
 > (no upstream dependency, ready to start) is **fitness integration**.
 
-### 1. Fitness integration `[server]` — active, foundation phase shipped 2026-05-09
+### 1. Fitness integration `[server]` — active, foundation + Strava provider shipped 2026-05-09
 
 Ingestion pipeline for fitness-tracker data (Strava + Garmin Connect). Decisions in
 [`fitness-integration-plan.md`](./fitness-integration-plan.md), schema in
 [`fitness-schema.md`](./fitness-schema.md), execution sequencing in
 [`fitness-tier-plan.md`](./fitness-tier-plan.md). Sibling journal entries:
 `journal/260508-fitness-integration-planning.md`,
-`journal/260509-fitness-foundation.md`.
+`journal/260509-fitness-foundation.md`,
+`journal/260509-fitness-w4-strava-provider.md`.
 
-**Status:** foundation phase (W1–W3 of 15 work units) shipped 2026-05-09 — schema
-migrations 0023/0024/0025, `FitnessRepository`, dataclasses, config + notification
-topics, integrity-check helper. **Blocked on:** Strava + Garmin credentials before
-W4–W13 can land with real fixtures (per the tier plan's P0.1/P0.2 prerequisites).
+**Status:** W1–W4 of 15 work units shipped 2026-05-09 — schema migrations
+0023/0024/0025, `FitnessRepository`, dataclasses, config + notification topics,
+integrity-check helper, and the Strava provider (`StravalibStravaProvider` +
+`StravaProvider` Protocol, `stravalib==2.4`). P0.1 (Strava app registration) and
+P0.2 (Garmin creds, no MFA) complete; secrets in `.env` and passed through
+`docker-compose.yml`. **Next:** W5 (Garmin provider) — fixture-based, unblocked.
+Live runs (W11–W14) will use the credentials already provisioned.
 
 **Why Tier 1:** independent of the journal-text pipeline, opens a new analytical surface
 (mood vs activity correlation), and the planning doc is the most recently added active
