@@ -217,9 +217,10 @@ fill in pronoun references. Expensive if done every run; cheap if done only as p
 OCR context priming shipped 2026-04-11 but was never measured against a real baseline. Run the same handwritten sample
 through the OCR provider with and without `OCR_CONTEXT_DIR` set and eyeball the proper-noun accuracy delta.
 
-**Provider note (2026-05-09):** prod now uses Gemini 2.5 Pro as the primary OCR provider (`OCR_PROVIDER=gemini`) with
-`OCR_DUAL_PASS=true` — Anthropic Claude runs in shadow as a second pass. The evaluation should cover **both** providers
-since the context block primes both. `OCR_CONTEXT_DIR` markdown also primes Whisper / Gemini transcription via
+**Provider note (2026-05-09):** prod runs `OCR_DUAL_PASS=true` with the dual-pass factory
+(`_build_dual_pass_provider`) wiring Anthropic Claude Opus 4.6 as primary and Google Gemini 2.5 Pro as secondary; the
+runtime `ocr_provider=gemini` setting only takes effect if dual-pass is turned off. The evaluation should cover **both**
+providers since the context block primes both. `OCR_CONTEXT_DIR` markdown also primes Whisper / Gemini transcription via
 `services/transcription_context.py` (closed item 38), so any glossary growth has a side-effect on transcription
 accuracy too.
 
@@ -261,11 +262,11 @@ now at 69 entries (≥ 3× the original gating threshold), so numbers are meanin
 `OCR_CONTEXT_DIR` glossary growth is worth doing for two independent reasons: OCR accuracy on proper nouns, and (when
 running an Anthropic primary) prompt-caching economics.
 
-**Status note (2026-05-09):** prod is on Gemini (`OCR_PROVIDER=gemini`, `OCR_MODEL=gemini-2.5-pro`) with
-`OCR_DUAL_PASS=true`. Gemini has its own caching mechanics (Vertex/Gemini API context-cache vs. Anthropic's
-`cache_control`); the original 4,096-token Anthropic threshold called out in this item only applies when Anthropic is
-the primary or shadow provider. The boot-time warning quoted below still fires from the Anthropic adapter
-(`providers/ocr.py`) when it's loaded.
+**Status note (2026-05-09):** prod runs `OCR_DUAL_PASS=true`, so Anthropic Claude Opus 4.6 is the primary and Gemini
+2.5 Pro is the secondary (the runtime `ocr_provider=gemini` setting is ignored under dual-pass). Gemini has its own
+caching mechanics (Vertex/Gemini API context-cache vs. Anthropic's `cache_control`); the 4,096-token Anthropic
+threshold called out in this item still applies because Anthropic is the dual-pass primary. The boot-time warning
+quoted below fires from the Anthropic adapter (`providers/ocr.py`) when it's loaded.
 
 ```
 OCR system text is N tokens (approx) — below the 4096-token
@@ -276,9 +277,9 @@ ignored and every request will pay full input price.
 **Action:**
 
 1. Grow the context directory organically as you add proper nouns — drives accuracy on both providers.
-2. **If Anthropic is selected as primary** (or used heavily in dual-pass), continue past 4,096 tokens of composed system
-   text (≈ 15-20 KB of markdown) to clear the cache-minimum bar. Below that bar `cache_control` is silently ignored on
-   Anthropic and every request pays full input price.
+2. **Since Anthropic is the dual-pass primary**, grow the composed system text past 4,096 tokens (≈ 15-20 KB of
+   markdown) to clear the cache-minimum bar. Below that bar `cache_control` is silently ignored on Anthropic and every
+   request pays full input price.
 3. Genuine content only — both for accuracy and for caching — rather than padding with filler.
 
 **Cost pressure is low** — at ~1 page/day the uncached system block is cents per month even on the Anthropic adapter.

@@ -140,9 +140,10 @@ retention (~30 days) applies on all three. ZDR is available on enterprise plans 
 and OpenAI; `journal-server` does not currently send any ZDR headers.
 
 **Action (policy + code):** decide whether to apply for ZDR with Anthropic and OpenAI; if yes,
-add the org-level header to the SDK clients in `services/entity_extraction/`,
-`services/mood_scoring.py`, `services/transcription_*`, and the OCR providers. This is low-effort
-once the org-level entitlement is in place.
+add the org-level header to the SDK clients in `providers/extraction.py` (entity extraction),
+`services/mood_scoring.py`, `providers/transcription.py`, `providers/ocr.py`, and any other
+provider modules that instantiate Anthropic/OpenAI SDK clients. This is low-effort once the
+org-level entitlement is in place.
 
 ---
 
@@ -228,8 +229,9 @@ volume.
 
 Optional TOTP via an authenticator app (Google Authenticator, Authy). Adds a `totp_secret`
 column to users and a verification step after password auth. Library: `pyotp`. For two users,
-this is bordering on overkill given the Cloudflare Tunnel + Cloudflare Access posture; revisit
-only if the deployment grows or the Cloudflare auth layer is removed.
+this is bordering on overkill given the Cloudflare Tunnel posture (and any Cloudflare Access /
+Zero Trust policy that may be configured on the public hostname — verify before relying on it);
+revisit only if the deployment grows or the tunnel posture changes.
 
 ### 17. Add login notification emails — OPEN
 
