@@ -12,6 +12,12 @@ from journal.services.fitness.fetch import (
     GarminFetchService,
     StravaFetchService,
 )
+from journal.services.fitness.normalize import (
+    NormalizeDriftNotifier,
+    NormalizeResult,
+    normalize_garmin,
+    normalize_strava,
+)
 
 __all__ = [
     "FitnessAuthError",
@@ -21,5 +27,9 @@ __all__ = [
     "FitnessSyncResult",
     "FitnessTransientError",
     "GarminFetchService",
+    "NormalizeDriftNotifier",
+    "NormalizeResult",
     "StravaFetchService",
+    "normalize_garmin",
+    "normalize_strava",
 ]

@@ -692,6 +692,39 @@ class PushoverNotificationService:
                 user_id, source, exc_info=True,
             )
 
+    def notify_fitness_normalize_drift(
+        self, source: str, drift_count: int,
+    ) -> None:
+        """Notify admin users that the W7 normalize pass skipped rows.
+
+        Drift means a raw payload couldn't be normalized — code bug to
+        fix, not a page. Admin-only topic, fired ONCE per batch (caller
+        is responsible for batching the count, not invoking per row).
+        """
+        try:
+            label = source.capitalize()
+            title = f"{label} normalize drift"
+            message = (
+                f"{drift_count} {label} raw row(s) could not be normalized. "
+                "Investigate provider payload shapes."
+            )
+            for admin_id in self._get_admin_user_ids():
+                if not self._is_topic_enabled(
+                    admin_id, "notif_fitness_normalize_drift",
+                ):
+                    continue
+                user_key, app_token = self._resolve_credentials(admin_id)
+                if not user_key or not app_token:
+                    continue
+                self._post_to_pushover(
+                    user_key, app_token, title, message, PRIORITY_NORMAL,
+                )
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "Failed to send fitness-normalize-drift notification for %s",
+                source, exc_info=True,
+            )
+
     def notify_health_alert(
         self,
         component: str,

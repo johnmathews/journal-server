@@ -847,3 +847,46 @@ class TestNotifyFitnessSyncFailure:
         with patch("urllib.request.urlopen") as mock_urlopen:
             svc.notify_fitness_sync_failure(1, "garmin", 3)
             mock_urlopen.assert_not_called()
+
+
+class TestNotifyFitnessNormalizeDrift:
+    """notify_fitness_normalize_drift is admin-only and fires once per batch."""
+
+    def test_posts_to_admin_when_topic_enabled(
+        self,
+        svc: PushoverNotificationService,
+        mock_user_repo: MagicMock,
+    ) -> None:
+        admin = User(
+            id=42, email="admin@local",
+            display_name="admin", is_admin=True, is_active=True,
+        )
+        mock_user_repo.list_users.return_value = [admin]
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = _make_urlopen_response({"status": 1})
+            svc.notify_fitness_normalize_drift(source="strava", drift_count=4)
+
+            assert mock_urlopen.called
+            req = mock_urlopen.call_args[0][0]
+            posted_data = req.data.decode()
+            assert "Strava+normalize+drift" in posted_data
+            assert "4+Strava+raw+row" in posted_data
+
+    def test_skips_when_admin_topic_disabled(
+        self,
+        svc: PushoverNotificationService,
+        mock_user_repo: MagicMock,
+    ) -> None:
+        admin = User(
+            id=42, email="admin@local",
+            display_name="admin", is_admin=True, is_active=True,
+        )
+        mock_user_repo.list_users.return_value = [admin]
+
+        def pref_side_effect(user_id: int, key: str):
+            return False if key == "notif_fitness_normalize_drift" else None
+
+        mock_user_repo.get_preference.side_effect = pref_side_effect
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            svc.notify_fitness_normalize_drift("strava", 4)
+            mock_urlopen.assert_not_called()
