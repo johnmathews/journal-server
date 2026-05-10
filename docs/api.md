@@ -2612,6 +2612,107 @@ clear the audit trail of which upstream account the prior tokens belonged to.
 
 ---
 
+### GET /api/fitness/strava/authorize_url
+
+Issue an authorize URL plus a one-shot CSRF state token for the per-user
+Strava OAuth flow (W3 of the multi-user plan). The state token is bound to the
+calling user's `user_id` for 10 minutes; presenting it back at
+`POST /api/fitness/strava/exchange` under a different authenticated user is
+rejected with 403.
+
+**Response (200):**
+
+```json
+{
+  "authorize_url": "https://www.strava.com/oauth/authorize?client_id=…&redirect_uri=…&response_type=code&approval_prompt=auto&scope=read,activity:read_all&state=h7-…base64url…-Q",
+  "state": "h7-…base64url…-Q",
+  "expires_at": "2026-05-10T12:34:56Z"
+}
+```
+
+The `redirect_uri` query parameter is sourced from the `STRAVA_REDIRECT_URI`
+env var. Per D4 of the multi-user plan, this is the webapp callback route
+(`https://<webapp>/settings/fitness/strava/callback`) — the SPA reads `code`
+and `state` from the redirect query, then POSTs them to `exchange`.
+
+**Errors:**
+
+- `503` `{"error": "Server not initialized"}` — services dict not yet wired
+  (startup race; retry).
+- `500` `{"error": "STRAVA_CLIENT_ID is not configured"}` — operator must set
+  the env var. The endpoint refuses to mint an authorize URL with a missing
+  client id rather than redirecting users to a guaranteed Strava error page.
+
+---
+
+### POST /api/fitness/strava/exchange
+
+Complete the Strava OAuth flow: validate the state token, exchange the
+authorization `code` for a refresh/access pair, capture the upstream
+`athlete.id` for D8, and persist into `fitness_auth_state`. Idempotent up to
+state-token consumption — once a state is consumed, replaying the same code
+under the same state is a 410.
+
+**Request body:**
+
+```json
+{ "code": "…", "state": "h7-…base64url…-Q" }
+```
+
+**Response (200):**
+
+```json
+{ "connected": true, "upstream_user_id": "12345678" }
+```
+
+Strava's `athlete.id` is an integer; we store it as a string in
+`extra_state_json["upstream_user_id"]` so the D8 mismatch comparison stays
+purely string-vs-string (matching the Garmin shape). The triple of access
+token, refresh token, and ISO-8601 token expiry lands in the
+`fitness_auth_state` columns; `auth_status='ok'`, `auth_broken_since=null`,
+and `last_successful_login_at` is stamped.
+
+**Errors:**
+
+- `400` `{"error": "code and state are required"}` — body missing either
+  field.
+- `403` `{"error": "Pending state does not belong to this user.", "reason":
+  "cross_user_pending_session"}` — the state token was issued to another
+  user. Cross-user replay protection per D4.
+- `410` `{"error": "Pending state expired or unknown. Repeat the connect
+  step.", "reason": "expired_pending_state"}` — token unknown, expired
+  (10 min TTL), or already consumed.
+- `502` `{"error": "Strava rejected the authorization code.", "reason":
+  "upstream_error"}` — Strava returned 401/403 on the token exchange
+  (revoked code, mismatched client secret).
+- `409` upstream-id mismatch — same shape as the Garmin endpoints. If a
+  `fitness_auth_state` row already exists for this user/source and the
+  newly-exchanged `athlete.id` differs from the stored one, the response is
+  `{"error": "...", "reason": "upstream_account_mismatch",
+  "stored_upstream_user_id": "...", "incoming_upstream_user_id": "..."}` and
+  the user is directed to disconnect first.
+
+---
+
+### POST /api/fitness/strava/disconnect
+
+Delete the calling user's `fitness_auth_state` row for `source='strava'`.
+Idempotent — disconnecting a not-connected source returns `{disconnected:
+false}`. Existing `fitness_activities` and `fitness_daily` rows are *not*
+deleted; the user keeps their historical data and can reconnect with the same
+upstream Strava athlete to resume syncing.
+
+**Response (200):**
+
+```json
+{ "disconnected": true }
+```
+
+A subsequent successful connect with a *different* upstream `athlete.id` is
+explicitly refused (D8) — disconnecting only ungates the row.
+
+---
+
 # MCP Tool Reference
 
 The journal MCP server exposes its tools via streamable HTTP transport.

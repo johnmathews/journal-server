@@ -197,33 +197,50 @@ def exchange_code(
     client_secret: str,
     code: str,
     client_factory: Callable[..., Client] = Client,
-) -> Tokens:
-    """Exchange a Strava OAuth authorization ``code`` for an access/refresh
-    triple. Used once, the first time the user authorises the app — after
-    that the adapter's :meth:`StravalibStravaProvider.refresh_token_if_needed`
+) -> tuple[Tokens, str | None]:
+    """Exchange a Strava OAuth authorization ``code`` for tokens + athlete id.
+
+    Used once, the first time the user authorises the app — after that the
+    adapter's :meth:`StravalibStravaProvider.refresh_token_if_needed`
     handles renewals.
 
     Wraps :meth:`stravalib.Client.exchange_code_for_token` so the CLI
-    re-auth command (W11) does not import ``stravalib`` directly. Returns
-    the same :class:`Tokens` shape the persist callback consumes, so the
-    caller can hand the result straight to ``upsert_auth_state``.
+    re-auth command (W11) and the W3 in-app exchange endpoint do not
+    import ``stravalib`` directly.
+
+    Returns ``(Tokens, athlete_id_str | None)``:
+
+    - The :class:`Tokens` triple maps 1:1 to ``fitness_auth_state``
+      columns; callers hand it straight to ``upsert_auth_state``.
+    - ``athlete_id_str`` is the upstream Strava ``athlete.id`` rendered
+      as a string (so the D8 mismatch comparison stays string-vs-string,
+      matching the Garmin shape). Strava's ``return_athlete`` payload is
+      documented as best-effort — when Strava omits it the value is
+      ``None``, and the W3 endpoint fails the connect closed (502)
+      rather than persisting a row without an upstream identity (D8
+      retrofit is impossible).
 
     ``client_id`` is accepted as a string for parity with config — stravalib
     requires an int, so we coerce here. Raises ``stravalib.exc.AuthError`` /
     ``AccessUnauthorized`` if Strava rejects the exchange (revoked code,
-    wrong client secret); the CLI surfaces those to the operator.
+    wrong client secret); the CLI / endpoint surface those to the user.
     """
     client = client_factory()
-    info = client.exchange_code_for_token(
+    info, athlete = client.exchange_code_for_token(
         client_id=int(client_id),
         client_secret=client_secret,
         code=code,
+        return_athlete=True,
     )
-    return Tokens(
+    tokens = Tokens(
         access_token=str(info["access_token"]),
         refresh_token=str(info["refresh_token"]),
         token_expires_at=_epoch_to_iso(int(info["expires_at"])),
     )
+    athlete_id = (
+        str(athlete.id) if athlete is not None and athlete.id is not None else None
+    )
+    return tokens, athlete_id
 
 
 def _summary_from_stravalib(
