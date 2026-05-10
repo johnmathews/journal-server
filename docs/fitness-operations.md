@@ -175,6 +175,37 @@ before a third transport succeeds. **The `Garmin re-auth complete — token blob
 persisted.` line is authoritative.** The 429 lines are not failures (see
 [§6](#6-troubleshooting)).
 
+### 2d. Connecting via the webapp (W2 — preview)
+
+W2 of the multi-user plan ships a per-user, in-app Garmin connect flow. From
+W2 onwards each user can connect their own Garmin account through the webapp's
+Settings panel without operator involvement and without sharing credentials in
+env vars. The supporting endpoints land in W2:
+
+- `POST /api/fitness/garmin/connect` — body `{username, password}`. Authenticates
+  against Garmin synchronously; returns `{connected: true, ...}` on no-MFA
+  success, or `{mfa_required: true, pending_session, expires_at}` when Garmin
+  asks for a 6-digit code. The plaintext password is consumed once inside the
+  request handler and never persisted.
+- `POST /api/fitness/garmin/connect/mfa` — body `{pending_session, code}`.
+  Completes the MFA-required flow. The `pending_session` is bound to the
+  authenticated user's `user_id`; a token leaked to a different logged-in user
+  is rejected with 403.
+- `POST /api/fitness/garmin/disconnect` — deletes the calling user's
+  `fitness_auth_state` row for `source='garmin'`.
+
+The webapp UI that calls these endpoints lands in W8/W9 — full operator-facing
+documentation will move into a new "Connecting via the webapp" section here at
+that point. Until then, the CLI flow above remains the documented operator
+path. See [`api.md`](./api.md#post-apifitnessgarminconnect) for the full
+endpoint reference and [`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md)
+§5 W2 for context.
+
+A small in-memory pending-session store (`services/fitness/garmin_pending.py`)
+holds the live `Garmin` client between the connect and MFA endpoints. Entries
+expire after 10 minutes and are user-bound — surviving server restarts is not
+in scope (the user just repeats the connect form).
+
 ---
 
 ## 3. Historical backfill

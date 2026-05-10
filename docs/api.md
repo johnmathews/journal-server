@@ -2476,6 +2476,142 @@ regression worth triaging.
 
 ---
 
+### POST /api/fitness/garmin/connect
+
+Begin the per-user Garmin Connect login flow (W2 of the multi-user plan). The
+calling user's `user_id` is taken from the authenticated session — credentials
+in the body authenticate the *upstream* Garmin account, not the journal user.
+
+**Request body:**
+
+```json
+{ "username": "alice@example.com", "password": "..." }
+```
+
+The plaintext password is consumed once: it's passed to `garminconnect.Garmin`
+inside the request handler, the login result is captured, and the password is
+dropped before the response is sent. It is never logged or persisted.
+
+**Response (200, no MFA needed):**
+
+```json
+{ "connected": true, "upstream_user_id": "alice.j.garmin" }
+```
+
+The upstream account identifier (Garmin `displayName`, falling back to the
+username) is recorded in `fitness_auth_state.extra_state_json["upstream_user_id"]`
+to power the D8 reconnect-with-different-account check.
+
+**Response (200, MFA needed):**
+
+```json
+{
+  "mfa_required": true,
+  "pending_session": "h7-…base64url…-Q",
+  "expires_at": "2026-05-10T12:34:56Z"
+}
+```
+
+The opaque `pending_session` is a 256-bit CSPRNG token (URL-safe base64). It
+binds to the calling user's `user_id` for 10 minutes and must be presented to
+`POST /api/fitness/garmin/connect/mfa` along with the 6-digit Garmin code. After
+expiry, or after one successful consume, the entry is gone — the user repeats
+the connect flow.
+
+**Errors:**
+
+- `400` `{"error": "username and password are required"}` — body missing
+  either field.
+- `401` `{"error": "Garmin rejected those credentials.", "reason":
+  "invalid_credentials"}` — `GarminConnectAuthenticationError`. The
+  per-email cool-down counter is incremented; after 5 failures within 15
+  minutes subsequent attempts are refused with `429` (see below) until the
+  window rolls forward.
+- `429` `{"error": "Too many failed Garmin login attempts for that account…",
+  "retry_after_seconds": 240}` — either local cool-down (per-email failure
+  counter tripped) OR upstream `GarminConnectTooManyRequestsError`. The
+  cool-down keys on the supplied email so a user typo'ing twice does not
+  lock the whole server. The local check fires before any upstream call,
+  so it cannot deepen an existing Garmin lockout.
+- `502` `{"error": "Garmin login failed: …", "reason": "upstream_error"}` —
+  any other exception out of `garminconnect`.
+
+The connect endpoint also enforces the D8 *reconnect with different upstream
+account* rule. If the user already has a `fitness_auth_state` row for
+`source='garmin'` and the freshly-fetched upstream id differs from the stored
+one, the response is `409 {"error": "...", "reason":
+"upstream_account_mismatch", "stored_upstream_user_id": "...", "incoming_upstream_user_id": "..."}`
+and the user is directed to disconnect first.
+
+---
+
+### POST /api/fitness/garmin/connect/mfa
+
+Complete a pending MFA-required Garmin login. The pending session must have
+been issued to the same authenticated user — a token leaked between users is
+rejected with 403, not silently consumed.
+
+**Request body:**
+
+```json
+{ "pending_session": "…", "code": "123456" }
+```
+
+**Response (200):**
+
+```json
+{ "connected": true, "upstream_user_id": "alice.j.garmin" }
+```
+
+Success persists the token blob (`client.client.dumps()`) into
+`fitness_auth_state.extra_state_json["tokens_blob"]` plus the upstream id, sets
+`auth_status='ok'`, clears `auth_broken_since`, and stamps
+`last_successful_login_at`. Subsequent fitness syncs boot from the DB row, not
+the filesystem cache.
+
+**Errors:**
+
+- `400` `{"error": "pending_session and code are required"}` — body missing
+  either field.
+- `403` `{"error": "Pending session does not belong to this user.", "reason":
+  "cross_user_pending_session"}` — the token was issued to another user.
+  Cross-user replay protection per D2.
+- `410` `{"error": "Pending session expired or unknown. Repeat the connect
+  step.", "reason": "expired_pending_session"}` — token unknown, expired
+  (10 min TTL), or already consumed.
+- `401` `{"error": "Garmin rejected the MFA code.", "reason":
+  "invalid_mfa_code"}` — `GarminConnectAuthenticationError` from
+  `resume_login`. The pending entry is preserved so the user can retry with
+  a fresh code (subject to the per-email cool-down).
+- `502` `{"error": "Garmin accepted the MFA code but the post-login profile
+  fetch failed.", "reason": "post_mfa_profile_fetch_failed"}` — Garmin's
+  user-profile endpoint is intermittently flaky after a fresh MFA flow
+  (`python-garminconnect` issues #312/#337). Surface distinctly so the UI
+  prompts the user to retry rather than blaming bad credentials.
+- `409` upstream-id mismatch — same shape as `connect`.
+
+---
+
+### POST /api/fitness/garmin/disconnect
+
+Delete the calling user's `fitness_auth_state` row for `source='garmin'`.
+Idempotent — disconnecting a not-connected source returns `{disconnected:
+false}`. Existing `fitness_activities` and `fitness_daily` rows are *not*
+deleted; the user keeps their historical data and can reconnect with the same
+upstream account to resume syncing.
+
+**Response (200):**
+
+```json
+{ "disconnected": true }
+```
+
+A subsequent successful connect with a *different* upstream account is
+explicitly refused (D8) — disconnecting only ungates the row, it does not
+clear the audit trail of which upstream account the prior tokens belonged to.
+
+---
+
 # MCP Tool Reference
 
 The journal MCP server exposes its tools via streamable HTTP transport.
