@@ -62,8 +62,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_USER_ID = 1
-
 
 # ── Helpers ──────────────────────────────────────────────────────────
 

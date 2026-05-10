@@ -59,6 +59,11 @@ Each source is bootstrapped once via a CLI subcommand. Re-auth is also the
 recovery path when a source transitions to `auth_status="broken"` (see
 [§5](#5-status-health-and-integrity)).
 
+> **`--user-id` is required on every `fitness-*` subcommand** (per
+> `docs/fitness-multiuser-plan.md` W7). There is no implicit default — running
+> `journal fitness-sync` without `--user-id N` exits non-zero with an argparse
+> error. Every example below names the user explicitly.
+
 ### 2a. Strava — laptop / dev box
 
 When the journal-server is **not** running on the same host (or is not bound to
