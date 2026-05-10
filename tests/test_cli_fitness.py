@@ -45,8 +45,9 @@ def fitness_env(tmp_path, monkeypatch):
     monkeypatch.setenv("STRAVA_CLIENT_ID", "12345")
     monkeypatch.setenv("STRAVA_CLIENT_SECRET", "test_secret")
     monkeypatch.setenv("STRAVA_REDIRECT_URI", "http://localhost:8400/strava/callback")
-    monkeypatch.setenv("GARMIN_USERNAME", "test_user@example.com")
-    monkeypatch.setenv("GARMIN_PASSWORD", "test_password")
+    # No GARMIN_USERNAME / GARMIN_PASSWORD — those config fields were removed
+    # in W6. The CLI takes --username and reads the password via getpass;
+    # tests patch getpass directly.
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     conn = get_connection(db_path)
@@ -263,16 +264,29 @@ def _patch_garmin_client(client_holder: list[_FakeGarminClient], *, invoke_mfa: 
     )
 
 
-def test_fitness_reauth_garmin_non_mfa_happy_path(fitness_env):
-    """Login completes without invoking MFA; tokens blob persisted, auth_status='ok'."""
+def test_fitness_reauth_garmin_non_mfa_happy_path(fitness_env, monkeypatch):
+    """Login completes without invoking MFA; tokens blob persisted, auth_status='ok'.
+
+    Username comes from --username; password from getpass (mocked).
+    """
+    monkeypatch.setattr(
+        "journal.cli.fitness.getpass", lambda *a, **kw: "test_password",
+    )
+
     clients: list[_FakeGarminClient] = []
     with _patch_garmin_client(clients, invoke_mfa=False):
-        sys.argv = ["journal", "fitness-reauth-garmin", "--user-id", "1"]
+        sys.argv = [
+            "journal", "fitness-reauth-garmin",
+            "--user-id", "1",
+            "--username", "test_user@example.com",
+        ]
         main()
 
     assert len(clients) == 1
     assert clients[0].login_calls == 1
     assert clients[0].mfa_received == []
+    assert clients[0].email == "test_user@example.com"
+    assert clients[0].password == "test_password"
 
     state = _read_state(fitness_env, source="garmin")
     assert state is not None
@@ -283,17 +297,46 @@ def test_fitness_reauth_garmin_non_mfa_happy_path(fitness_env):
 
 def test_fitness_reauth_garmin_mfa_happy_path(fitness_env, monkeypatch):
     """MFA callback fires; six-digit code from stdin feeds back into the SDK."""
+    monkeypatch.setattr(
+        "journal.cli.fitness.getpass", lambda *a, **kw: "test_password",
+    )
     monkeypatch.setattr("builtins.input", lambda *a, **kw: "123456")
 
     clients: list[_FakeGarminClient] = []
     with _patch_garmin_client(clients, invoke_mfa=True):
-        sys.argv = ["journal", "fitness-reauth-garmin", "--user-id", "1"]
+        sys.argv = [
+            "journal", "fitness-reauth-garmin",
+            "--user-id", "1",
+            "--username", "test_user@example.com",
+        ]
         main()
 
     assert clients[0].mfa_received == ["123456"]
     state = _read_state(fitness_env, source="garmin")
     assert state is not None
     assert state.auth_status == "ok"
+
+
+def test_fitness_reauth_garmin_requires_username(fitness_env, monkeypatch):
+    """W6 acceptance: --username is required; argparse refuses without it."""
+    sys.argv = ["journal", "fitness-reauth-garmin", "--user-id", "1"]
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code != 0
+
+
+def test_fitness_reauth_garmin_no_env_var_fallback(fitness_env, monkeypatch, capsys):
+    """W6 acceptance: setting GARMIN_USERNAME / GARMIN_PASSWORD in env has
+    no effect — argparse still requires --username, and the password is
+    always read via getpass."""
+    monkeypatch.setenv("GARMIN_USERNAME", "leftover@example.com")
+    monkeypatch.setenv("GARMIN_PASSWORD", "leftover_pw")
+    sys.argv = ["journal", "fitness-reauth-garmin", "--user-id", "1"]
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code != 0
+    captured = capsys.readouterr()
+    assert "--username" in captured.err
 
 
 # ── fitness-sync ─────────────────────────────────────────────────────

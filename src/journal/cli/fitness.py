@@ -236,24 +236,24 @@ def _stdin_mfa_prompt() -> str:
 def cmd_fitness_reauth_garmin(args: argparse.Namespace, config: Config) -> None:
     """Run garminconnect login and persist the resulting token blob.
 
-    Username/password come from the env (``GARMIN_USERNAME`` /
-    ``GARMIN_PASSWORD``), falling back to interactive prompts. MFA, when
+    Username comes from ``--username`` (required, no env-var fallback);
+    password is read from stdin via :func:`getpass.getpass`. MFA, when
     Garmin asks for it, is read from stdin via :func:`_stdin_mfa_prompt`.
     The token blob produced by ``client.dumps`` is mirrored into
     ``fitness_auth_state.extra_state_json`` so subsequent syncs boot
     from the DB row, not the filesystem cache (D4 in the integration
     plan).
 
-    Same operator-driven semantics as :func:`cmd_fitness_reauth_strava`:
-    ``auth_status`` is forced to ``"ok"`` and ``auth_broken_since``
-    cleared on success.
+    Operator-only fallback path for the per-user webapp connect flow
+    (W2). Same operator-driven semantics as
+    :func:`cmd_fitness_reauth_strava`: ``auth_status`` is forced to
+    ``"ok"`` and ``auth_broken_since`` cleared on success.
     """
-    username = config.garmin_username or input("Garmin username: ").strip()
-    password = config.garmin_password or getpass("Garmin password: ")
+    username = args.username.strip()
+    password = getpass("Garmin password: ")
     if not username or not password:
         print(
-            "Error: GARMIN_USERNAME and GARMIN_PASSWORD required "
-            "(env or prompt).",
+            "Error: --username and a non-empty password are required.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -380,7 +380,15 @@ def _strava_provider_factory(
 def _garmin_provider_factory(
     config: Config, repo: FitnessRepository,
 ) -> Any:
-    """Build the ``provider_factory`` callback for Garmin sync."""
+    """Build the ``provider_factory`` callback for Garmin sync.
+
+    Post-W6: credentials are per-user from the DB (``tokens_blob`` on
+    ``fitness_auth_state.extra_state_json``). No global Garmin
+    username/password env vars exist; if a user has no token blob, the
+    provider falls through to the network login with empty credentials
+    and fails cleanly (the fetch service writes ``auth_status='broken'``).
+    """
+    del config  # No global Garmin credentials after W6.
 
     def _factory(auth: FitnessAuthState) -> GarminConnectGarminProvider:
         user_id = auth.user_id
@@ -415,8 +423,8 @@ def _garmin_provider_factory(
             )
 
         return GarminConnectGarminProvider(
-            username=config.garmin_username,
-            password=config.garmin_password,
+            username="",
+            password="",
             tokens_blob=tokens_blob,
             persist_tokens=_persist,
         )

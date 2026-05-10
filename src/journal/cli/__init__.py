@@ -625,8 +625,9 @@ def main():
         "fitness-reauth-garmin",
         help=(
             "Log into Garmin Connect (with optional MFA) and persist the "
-            "token blob. Reads GARMIN_USERNAME/GARMIN_PASSWORD from env, "
-            "or prompts."
+            "token blob. --username is required; password is read from "
+            "stdin via getpass (never from env vars). Operator-only "
+            "fallback for the per-user webapp connect flow."
         ),
     )
     p_fit_garmin.add_argument(
@@ -634,6 +635,13 @@ def main():
         type=int,
         required=True,
         help="Owner of the auth row (required — no default).",
+    )
+    p_fit_garmin.add_argument(
+        "--username",
+        required=True,
+        help=(
+            "Garmin Connect login email (required — no env-var fallback)."
+        ),
     )
 
     # fitness-sync
