@@ -1,15 +1,16 @@
 ## Fitness Multi-User Plan
 
-**Status:** in progress. **Last updated:** 2026-05-10. **Supersedes:** none.
+**Status:** in progress. **Last updated:** 2026-05-11. **Supersedes:** none.
 
-**Progress snapshot (2026-05-10):**
+**Progress snapshot (2026-05-11):**
 - **Shipped (server):** W1 (audit, `4dd90c4`), W2 (Garmin connect/MFA, `59f7714`),
-  W3 (Strava OAuth exchange, `5dca0cc`), W5 (backfill workers + endpoint, `be6ab80`),
-  W11 (worker-level auth_status flip test, `18d66b0`).
+  W3 (Strava OAuth exchange, `5dca0cc`), W4 (per-user integrity, `fed3775`),
+  W5 (backfill workers + endpoint, `be6ab80`), W6 (drop Garmin env vars,
+  `6064145`), W7 (CLI `--user-id` required, `14ddb6b`), W11 (worker-level
+  auth_status flip test, `18d66b0`).
 - **Shipped (webapp):** W8 (API client, `4de33c4`), W9 (settings panel, `6df8d7e`),
   W10 (Strava callback view, `d53f3a7`), W11 (banner Reconnect button, `c5968c3`).
-- **Remaining:** W4 (per-user integrity), W6 (drop Garmin env vars), W7 (CLI
-  `--user-id` required), W12 (docs sweep), W13 (Strava callback URL — operator step),
+- **Remaining:** W12 (docs sweep), W13 (Strava callback URL — operator step),
   W14 (end-to-end verification with user 2).
 
 This plan moves the fitness pipeline from its current single-user posture (operator-managed
@@ -419,6 +420,7 @@ day's work.
   Strava-side errors. Manual end-to-end with the real Strava app.
 
 ### W4. Per-user integrity check
+**Status:** shipped 2026-05-10 (server `fed3775`).
 **Priority:** High. **Depends on:** none.
 - Modify `db.fitness_integrity` (or wherever the orphan query lives) to take `user_id`.
 - Modify `GET /api/fitness/integrity` and `mcp_server/tools/fitness.fitness_integrity_check`
@@ -462,6 +464,7 @@ user to test against).
   + validation. Manual run against a small window.
 
 ### W6. Drop global Garmin env vars
+**Status:** shipped 2026-05-11 (server `6064145`).
 **Priority:** Medium. **Depends on:** W2 (the new connect endpoints are the replacement).
 - Remove `garmin_username` and `garmin_password` fields from `config.py`.
 - Update `cli/fitness.py` `cmd_fitness_reauth_garmin` to require `--username` and
@@ -475,6 +478,7 @@ user to test against).
   code.
 
 ### W7. CLI `--user-id` required
+**Status:** shipped 2026-05-10 (server `14ddb6b`).
 **Priority:** Medium. **Depends on:** none.
 - In `cli/__init__.py`, change `--user-id` arg from `default=1` to `required=True` on all
   five fitness subcommands (`fitness-reauth-strava`, `fitness-reauth-garmin`,
