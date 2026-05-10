@@ -303,6 +303,34 @@ Empty arrays = clean. Non-empty means a normalized row is referencing a raw
 row that's been deleted or never existed — a data-shape regression worth
 triaging.
 
+### `journal fitness-audit`
+
+Per-user data isolation audit. Walks every fitness table
+(`fitness_auth_state`, `fitness_sync_runs`, `fitness_activities`,
+`fitness_daily`, `fitness_raw_strava`, `fitness_raw_garmin`) and reports:
+
+- Total row count per table.
+- Per-user row count breakdown (one line per `user_id`, joined with the
+  user's email so the operator can read it without a DB lookup).
+- Violations: any row with `user_id IS NULL` or `user_id` pointing at a
+  deleted user (an "orphan" — possible if FK enforcement was off when the
+  user was deleted, or if a row was inserted via raw SQL bypassing
+  validation).
+
+Exits 0 when clean, exit code 1 when any violation is found. Used as the
+pre-flight check before the multi-user rollout (`fitness-multiuser-plan.md`
+W1) and as the post-rollout verification gate (W14): the row-count
+snapshot before W2/W3 ship is the regression target after user 2 starts
+populating their own rows.
+
+```bash
+docker exec journal-server uv run journal fitness-audit
+```
+
+The command takes no arguments; it scans every user's data because the
+whole point is to catch cross-user leakage. Run it against a copy of the
+prod DB before shipping any of the multi-user work units.
+
 ---
 
 ## 6. Troubleshooting

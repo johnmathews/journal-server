@@ -79,6 +79,7 @@ def _open_repo(db_path):
         "fitness-reauth-garmin",
         "fitness-sync",
         "fitness-status",
+        "fitness-audit",
     ],
 )
 def test_fitness_subcommand_help(capsys, subcommand):
@@ -367,3 +368,148 @@ def test_fitness_status_with_data(fitness_env, capsys):
     assert "garmin" in out
     assert "ok" in out
     assert "broken" in out
+
+
+# ── fitness-audit ────────────────────────────────────────────────────
+
+
+def _add_user(conn, *, email: str, is_admin: int = 0) -> int:
+    """Insert a user and return the new id."""
+    cur = conn.execute(
+        "INSERT INTO users (email, display_name, is_admin, email_verified) "
+        "VALUES (?, ?, ?, 1)",
+        (email, email.split("@")[0], is_admin),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def test_fitness_audit_clean_empty_db_exits_zero(fitness_env, capsys):
+    """Migrated DB with no fitness rows → audit reports zero rows + PASS."""
+    sys.argv = ["journal", "fitness-audit"]
+    main()  # must not SystemExit non-zero
+
+    out = capsys.readouterr().out
+    assert "fitness_auth_state" in out
+    assert "fitness_sync_runs" in out
+    assert "fitness_activities" in out
+    assert "fitness_daily" in out
+    assert "fitness_raw_strava" in out
+    assert "fitness_raw_garmin" in out
+    assert "violations: 0" in out
+    assert "PASS" in out
+
+
+def test_fitness_audit_with_valid_rows_groups_per_user(fitness_env, capsys):
+    """Rows owned by valid users → per-user breakdown shows their email."""
+    conn, repo = _open_repo(fitness_env)
+    user_2_id = _add_user(conn, email="user2@test.com")
+
+    repo.upsert_auth_state(
+        FitnessAuthState(
+            user_id=1, source="strava",
+            access_token="A", refresh_token="R",
+            token_expires_at="2026-06-01T00:00:00Z",
+            auth_status="ok",
+        ),
+    )
+    repo.upsert_auth_state(
+        FitnessAuthState(
+            user_id=user_2_id, source="strava",
+            access_token="B", refresh_token="C",
+            token_expires_at="2026-06-01T00:00:00Z",
+            auth_status="ok",
+        ),
+    )
+    conn.close()
+
+    sys.argv = ["journal", "fitness-audit"]
+    main()
+
+    out = capsys.readouterr().out
+    # Per-user breakdown shows both users' emails alongside their counts.
+    assert "mthwsjc@gmail.com" in out or "user_id=1" in out
+    assert "user2@test.com" in out
+    assert "violations: 0" in out
+    assert "PASS" in out
+
+
+def test_fitness_audit_orphan_user_id_fails(fitness_env, capsys):
+    """A row with user_id pointing at a deleted user is reported as a violation
+    and the command exits non-zero.
+    """
+    conn = get_connection(fitness_env)
+    # Foreign keys are enforced by default in this codebase, so disable them
+    # for this fixture so we can simulate the data-integrity bug the audit is
+    # meant to catch (a row whose user_id no longer resolves into users).
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute(
+        "INSERT INTO fitness_auth_state "
+        "(user_id, source, access_token, refresh_token, token_expires_at, "
+        " auth_status) "
+        "VALUES (?, 'strava', 'A', 'R', '2026-06-01T00:00:00Z', 'ok')",
+        (999,),  # no user with id=999 exists
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(SystemExit) as exc_info:
+        sys.argv = ["journal", "fitness-audit"]
+        main()
+    assert exc_info.value.code != 0
+
+    out = capsys.readouterr().out
+    assert "FAIL" in out
+    assert "fitness_auth_state" in out
+    # The orphan user id is named in the violation listing.
+    assert "999" in out
+
+
+def test_fitness_audit_null_user_id_fails(fitness_env, capsys):
+    """A row whose user_id is NULL is reported as a violation. Schema has
+    NOT NULL, but the audit asserts it anyway as defense-in-depth — a future
+    schema change or a raw-SQL insert could re-introduce a NULL.
+    """
+    conn = get_connection(fitness_env)
+    # Build a per-table mirror without the NOT NULL constraint so we can
+    # exercise the NULL branch without forging schema state. The audit reads
+    # the same six tables by name, so insert directly into the real one
+    # bypassing the constraint via a temporary trigger-free path.
+    #
+    # SQLite does not allow ALTER TABLE to drop NOT NULL, so we use the
+    # rebuild-and-rename trick: copy schema without the NOT NULL, swap.
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute(
+        "CREATE TABLE fitness_sync_runs_tmp ("
+        "    id              INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "    user_id         INTEGER,"
+        "    source          TEXT NOT NULL,"
+        "    started_at      TEXT NOT NULL,"
+        "    finished_at     TEXT,"
+        "    status          TEXT NOT NULL,"
+        "    error_class     TEXT,"
+        "    error_message   TEXT,"
+        "    rows_fetched    INTEGER NOT NULL DEFAULT 0,"
+        "    rows_normalized INTEGER NOT NULL DEFAULT 0,"
+        "    notes_json      TEXT NOT NULL DEFAULT '{}'"
+        ")",
+    )
+    conn.execute(
+        "INSERT INTO fitness_sync_runs_tmp "
+        "(user_id, source, started_at, status) "
+        "VALUES (NULL, 'strava', '2026-05-10T00:00:00Z', 'success')",
+    )
+    conn.execute("DROP TABLE fitness_sync_runs")
+    conn.execute("ALTER TABLE fitness_sync_runs_tmp RENAME TO fitness_sync_runs")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(SystemExit) as exc_info:
+        sys.argv = ["journal", "fitness-audit"]
+        main()
+    assert exc_info.value.code != 0
+
+    out = capsys.readouterr().out
+    assert "FAIL" in out
+    assert "fitness_sync_runs" in out
+    assert "NULL" in out
