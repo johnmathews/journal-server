@@ -609,9 +609,11 @@ def register_ingestion_routes(
         job row per real sync, not one per button-press).
 
         Returns 503 if the source isn't configured on this server
-        (no ``STRAVA_CLIENT_ID`` / ``STRAVA_CLIENT_SECRET`` for Strava,
-        no ``GARMIN_USERNAME`` / ``GARMIN_PASSWORD`` for Garmin) so
-        operators can tell "feature off" from "real bug".
+        (no ``STRAVA_CLIENT_ID`` / ``STRAVA_CLIENT_SECRET`` for Strava).
+        Garmin is always wired post-W6 — per-user creds in
+        ``fitness_auth_state`` are the source of truth — so a user
+        without a Garmin auth row produces a clean ``auth_broken`` sync
+        rather than a 503.
         """
         services = services_getter()
         if services is None:

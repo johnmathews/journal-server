@@ -295,9 +295,10 @@ class TestFitnessConfig:
     added in W3 of docs/fitness-tier-plan.md."""
 
     def _clean(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # W6: GARMIN_USERNAME / GARMIN_PASSWORD are no longer config fields.
+        # Per-user Garmin credentials live in `fitness_auth_state`.
         for key in (
             "STRAVA_CLIENT_ID", "STRAVA_CLIENT_SECRET", "STRAVA_REDIRECT_URI",
-            "GARMIN_USERNAME", "GARMIN_PASSWORD",
             "FITNESS_TRANSIENT_FAILURE_THRESHOLD", "FITNESS_BACKFILL_START",
         ):
             monkeypatch.delenv(key, raising=False)
@@ -310,8 +311,9 @@ class TestFitnessConfig:
         assert config.strava_client_id == ""
         assert config.strava_client_secret == ""
         assert config.strava_redirect_uri == "http://localhost:8400/strava/callback"
-        assert config.garmin_username == ""
-        assert config.garmin_password == ""
+        # No Garmin fields on Config post-W6.
+        assert not hasattr(config, "garmin_username")
+        assert not hasattr(config, "garmin_password")
         assert config.fitness_transient_failure_threshold == 3
         assert config.fitness_backfill_start == "2026-01-01"
 
@@ -320,18 +322,25 @@ class TestFitnessConfig:
         monkeypatch.setenv("STRAVA_CLIENT_ID", "12345")
         monkeypatch.setenv("STRAVA_CLIENT_SECRET", "shh")
         monkeypatch.setenv("STRAVA_REDIRECT_URI", "http://localhost:9000/cb")
-        monkeypatch.setenv("GARMIN_USERNAME", "u@example.com")
-        monkeypatch.setenv("GARMIN_PASSWORD", "pw")
         monkeypatch.setenv("FITNESS_TRANSIENT_FAILURE_THRESHOLD", "5")
         monkeypatch.setenv("FITNESS_BACKFILL_START", "2024-06-01")
         config = Config()
         assert config.strava_client_id == "12345"
         assert config.strava_client_secret == "shh"
         assert config.strava_redirect_uri == "http://localhost:9000/cb"
-        assert config.garmin_username == "u@example.com"
-        assert config.garmin_password == "pw"
         assert config.fitness_transient_failure_threshold == 5
         assert config.fitness_backfill_start == "2024-06-01"
+
+    def test_garmin_env_vars_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """W6 acceptance: setting GARMIN_USERNAME / GARMIN_PASSWORD does
+        not produce config fields. Operators may leave the vestigial env
+        vars set in prod during the transition; they must have no effect."""
+        self._clean(monkeypatch)
+        monkeypatch.setenv("GARMIN_USERNAME", "leftover@example.com")
+        monkeypatch.setenv("GARMIN_PASSWORD", "leftover_pw")
+        config = Config()
+        assert not hasattr(config, "garmin_username")
+        assert not hasattr(config, "garmin_password")
 
     def test_zero_threshold_rejected(
         self, monkeypatch: pytest.MonkeyPatch,

@@ -31,19 +31,29 @@ W1–W15 execution sequencing is archived at
 
 ## 1. Configuration prerequisites
 
-Both sources need credentials in the server environment before re-auth can run.
-Strava also needs a registered API application.
+Strava needs server-level env vars (one OAuth app per server, shared across
+users) plus a registered API application. Garmin needs no global env vars
+from W6 of the fitness multi-user plan onwards — credentials are per-user in
+`fitness_auth_state`, populated either via the webapp Settings panel
+(`POST /api/fitness/garmin/connect`) or via the
+`journal fitness-reauth-garmin --user-id N --username EMAIL` operator
+fallback.
 
 | Variable | Source | Required for |
 |---|---|---|
 | `STRAVA_CLIENT_ID` | Strava | Strava re-auth + sync |
 | `STRAVA_CLIENT_SECRET` | Strava | Strava re-auth + sync |
 | `STRAVA_REDIRECT_URI` | Strava (default `http://localhost:8400/strava/callback`) | Strava re-auth listener bind + authorize URL |
-| `GARMIN_USERNAME` | Garmin | Garmin re-auth + sync |
-| `GARMIN_PASSWORD` | Garmin | Garmin re-auth + sync |
 | `FITNESS_BACKFILL_START` | both (default `2026-01-01`) | `fitness-backfill` default `--start` |
 | `FITNESS_TRANSIENT_FAILURE_THRESHOLD` | both (default `3`) | W6 fetch service auth-broken trip + backfill streak abort |
 | `FITNESS_HEALTH_BROKEN_DEGRADED_HOURS` | both (default `48`) | `/api/health` downgrade when a source has been broken longer than this |
+
+**Operator note (prod env hygiene).** The legacy `GARMIN_USERNAME` /
+`GARMIN_PASSWORD` env vars are no longer read by any code path. They may
+remain in the prod `.env` during the transition; remove them on the next
+deploy that follows W6. A vestigial `STRAVA_REFRESH_TOKEN` env var (never
+read by the current codebase — predates the `fitness_auth_state` table) is
+also safe to drop at the same time.
 
 See [`configuration.md`](configuration.md#optional--fitness-integration) for
 the canonical reference.
@@ -158,20 +168,26 @@ restarted server picks it up.
 recipe on the VM. Two SSH sessions, fragile. The inline-python recipe above
 makes this go away — strongly preferred for headless deployments.
 
-### 2c. Garmin
+### 2c. Garmin (operator fallback)
 
-Garmin uses username/password auth (with optional MFA), not OAuth. No listener,
-no port collision:
+Garmin uses username/password auth (with optional MFA), not OAuth. The primary
+path is the per-user webapp connect flow (§2d) — every user connects their
+own account through the Settings panel. The CLI below remains as an operator
+fallback for headless / scripted bootstraps:
 
 ```bash
-docker exec -it journal-server uv run journal fitness-reauth-garmin --user-id 1
+docker exec -it journal-server uv run journal fitness-reauth-garmin \
+    --user-id 1 --username user@example.com
 ```
 
-The command logs into `connect.garmin.com` via `python-garminconnect`, prompts
-for an MFA code on stdin if Garmin asks for one, and persists the resulting
-token blob into `fitness_auth_state.extra_state_json["tokens_blob"]`. (Unlike
-Strava, Garmin's `access_token` column stays `NULL` — the live credential lives
-in `extra_state` because that's the shape `garth` produces.) Subsequent syncs
+`--username` is required (no env-var fallback after W6). The password is read
+from the controlling terminal via `getpass()` — never from env vars and never
+persisted. The command logs into `connect.garmin.com` via
+`python-garminconnect`, prompts for an MFA code on stdin if Garmin asks for
+one, and persists the resulting token blob into
+`fitness_auth_state.extra_state_json["tokens_blob"]`. (Unlike Strava, Garmin's
+`access_token` column stays `NULL` — the live credential lives in
+`extra_state` because that's the shape `garth` produces.) Subsequent syncs
 read the blob, not the password.
 
 The `garminconnect` library tries multiple transports in sequence and may print
@@ -460,11 +476,14 @@ next sync (CLI, REST, or MCP) picks up from the existing watermark.
 
 ### `POST /api/fitness/sync/{source}` returns 503
 
-The source isn't wired on this server — `STRAVA_CLIENT_ID` /
-`STRAVA_CLIENT_SECRET` (or `GARMIN_USERNAME` / `GARMIN_PASSWORD`) is unset
-in the container's environment. `JobRunner.submit_fitness_sync_*` fails loud
-at submit time rather than queueing a row that's guaranteed to fail. Confirm
-with the inspection recipe below.
+Only Strava can 503 here — `STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET` is
+unset in the container's environment, so
+`JobRunner.submit_fitness_sync_strava` fails loud at submit time rather than
+queueing a row that's guaranteed to fail. Garmin is always wired post-W6
+(per-user creds, no global env vars), so `submit_fitness_sync_garmin` never
+503s for a config reason — a user without a `fitness_auth_state` row just
+produces a clean `auth_broken` sync. Confirm with the inspection recipe
+below.
 
 ### Inspecting environment in a running container
 
@@ -475,7 +494,7 @@ forgot to exclude.
 
 ```bash
 docker exec journal-server printenv | \
-    grep -E '^(DB_PATH|FITNESS_|STRAVA_REDIRECT_URI|STRAVA_CLIENT_ID|GARMIN_USERNAME)='
+    grep -E '^(DB_PATH|FITNESS_|STRAVA_REDIRECT_URI|STRAVA_CLIENT_ID)='
 ```
 
 Add only the var names you actually need to verify. Never grep with a

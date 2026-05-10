@@ -420,14 +420,13 @@ class Config:
             "STRAVA_REDIRECT_URI", "http://localhost:8400/strava/callback",
         ),
     )
-    # Garmin Connect login — same credentials as the Garmin Connect web UI.
-    # No app registration. MFA prompted via CLI on first login. See P0.2.
-    garmin_username: str = field(
-        default_factory=lambda: os.environ.get("GARMIN_USERNAME", ""),
-    )
-    garmin_password: str = field(
-        default_factory=lambda: os.environ.get("GARMIN_PASSWORD", ""),
-    )
+    # Garmin Connect — credentials are per-user from W2 onwards. Users
+    # connect via POST /api/fitness/garmin/connect (webapp Settings panel)
+    # or via `journal fitness-reauth-garmin --user-id N --username EMAIL`
+    # (operator-only fallback). Token blobs are persisted in
+    # `fitness_auth_state.extra_state_json["tokens_blob"]` per user. No
+    # global GARMIN_USERNAME / GARMIN_PASSWORD env vars; see
+    # docs/fitness-multiuser-plan.md §5 W6.
     # How many consecutive transient failures before Pushover fires
     # (per D5 in fitness-integration-plan.md). 3 is a reasonable default
     # for a daily-cadence pipeline — one bad day is noise; three in a row

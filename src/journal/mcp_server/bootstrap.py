@@ -61,11 +61,14 @@ def _build_fitness_callables(
     Returns the four callables the JobRunner constructor expects
     (``fetch_strava_callable``, ``fetch_garmin_callable``,
     ``normalize_strava_callable``, ``normalize_garmin_callable``).
-    Each is ``None`` when its source is unconfigured — Strava needs
-    ``STRAVA_CLIENT_ID`` + ``STRAVA_CLIENT_SECRET``; Garmin needs
-    ``GARMIN_USERNAME`` + ``GARMIN_PASSWORD``. Callers pass the dict
-    via ``**`` so a partially-configured server still wires up the
-    half that's set.
+
+    Strava is wired only when ``STRAVA_CLIENT_ID`` and
+    ``STRAVA_CLIENT_SECRET`` are set (one OAuth app per server, shared
+    across users). Garmin is wired unconditionally — credentials are
+    per-user from W6 onwards, sourced from ``fitness_auth_state``, not
+    from env vars. A user without a Garmin auth row produces a clean
+    ``auth_broken`` sync rather than a runtime error. Callers pass the
+    dict via ``**`` so a Strava-less server still wires up Garmin.
 
     The repository is constructed in :func:`_init_services` and threaded
     through here so the API layer (W9) can read from the same instance
@@ -171,72 +174,70 @@ def _build_fitness_callables(
 
         out["backfill_strava_callable"] = _backfill_strava
 
-    garmin_configured = bool(
-        config.garmin_username and config.garmin_password,
-    )
-    if garmin_configured:
-        def _garmin_provider_factory(
-            auth: FitnessAuthState,
-        ) -> GarminConnectGarminProvider:
-            user_id = auth.user_id
-            tokens_blob = auth.extra_state.get("tokens_blob") if auth.extra_state else None
+    # Garmin is wired unconditionally — per-user credentials in
+    # `fitness_auth_state` are the source of truth from W6 onwards.
+    def _garmin_provider_factory(
+        auth: FitnessAuthState,
+    ) -> GarminConnectGarminProvider:
+        user_id = auth.user_id
+        tokens_blob = auth.extra_state.get("tokens_blob") if auth.extra_state else None
 
-            def _persist(tokens_blob: str) -> None:
-                # garminconnect emits a JSON blob covering both OAuth1
-                # and OAuth2 tokens; we stash it on extra_state so the
-                # next sync boots from the DB, not a filesystem cache.
-                existing = fitness_repo.get_auth_state(
-                    user_id=user_id, source="garmin",
-                )
-                extra = dict(existing.extra_state) if existing else {}
-                extra["tokens_blob"] = tokens_blob
-                fitness_repo.upsert_auth_state(
-                    FitnessAuthState(
-                        user_id=user_id,
-                        source="garmin",
-                        access_token=existing.access_token if existing else None,
-                        refresh_token=existing.refresh_token if existing else None,
-                        token_expires_at=(
-                            existing.token_expires_at if existing else None
-                        ),
-                        extra_state=extra,
+        def _persist(tokens_blob: str) -> None:
+            # garminconnect emits a JSON blob covering both OAuth1
+            # and OAuth2 tokens; we stash it on extra_state so the
+            # next sync boots from the DB, not a filesystem cache.
+            existing = fitness_repo.get_auth_state(
+                user_id=user_id, source="garmin",
+            )
+            extra = dict(existing.extra_state) if existing else {}
+            extra["tokens_blob"] = tokens_blob
+            fitness_repo.upsert_auth_state(
+                FitnessAuthState(
+                    user_id=user_id,
+                    source="garmin",
+                    access_token=existing.access_token if existing else None,
+                    refresh_token=existing.refresh_token if existing else None,
+                    token_expires_at=(
+                        existing.token_expires_at if existing else None
                     ),
-                )
-
-            return GarminConnectGarminProvider(
-                username=config.garmin_username,
-                password=config.garmin_password,
-                tokens_blob=tokens_blob,
-                persist_tokens=_persist,
+                    extra_state=extra,
+                ),
             )
 
-        garmin_fetch = GarminFetchService(
+        return GarminConnectGarminProvider(
+            username="",
+            password="",
+            tokens_blob=tokens_blob,
+            persist_tokens=_persist,
+        )
+
+    garmin_fetch = GarminFetchService(
+        repo=fitness_repo,
+        notifier=notification_service,
+        config=config,
+        provider_factory=_garmin_provider_factory,
+    )
+    out["fetch_garmin_callable"] = garmin_fetch.run_sync
+    out["normalize_garmin_callable"] = (
+        lambda *, user_id, **kw: normalize_garmin(
+            fitness_repo, user_id=user_id, notifier=notification_service,
+            **kw,
+        )
+    )
+
+    def _backfill_garmin(
+        *, user_id: int, start: str, end: str | None = None,
+    ) -> Any:
+        return backfill_garmin(
+            user_id=user_id,
             repo=fitness_repo,
+            fetch_service=garmin_fetch,
             notifier=notification_service,
-            config=config,
-            provider_factory=_garmin_provider_factory,
-        )
-        out["fetch_garmin_callable"] = garmin_fetch.run_sync
-        out["normalize_garmin_callable"] = (
-            lambda *, user_id, **kw: normalize_garmin(
-                fitness_repo, user_id=user_id, notifier=notification_service,
-                **kw,
-            )
+            start=start,
+            end=end,
         )
 
-        def _backfill_garmin(
-            *, user_id: int, start: str, end: str | None = None,
-        ) -> Any:
-            return backfill_garmin(
-                user_id=user_id,
-                repo=fitness_repo,
-                fetch_service=garmin_fetch,
-                notifier=notification_service,
-                start=start,
-                end=end,
-            )
-
-        out["backfill_garmin_callable"] = _backfill_garmin
+    out["backfill_garmin_callable"] = _backfill_garmin
 
     return out
 
@@ -572,12 +573,15 @@ def _init_services() -> dict:
         notification_service=notification_service,
         **fitness_callables,
     )
-    if any(v is not None for v in fitness_callables.values()):
+    # Garmin is wired unconditionally (per-user creds, W6). Strava is
+    # wired only when STRAVA_CLIENT_ID + STRAVA_CLIENT_SECRET are set.
+    strava_wired = fitness_callables.get("fetch_strava_callable") is not None
+    if strava_wired:
         log.info("  Fitness sync wired (Strava + Garmin providers)")
     else:
         log.info(
-            "  Fitness sync not wired (no STRAVA_CLIENT_ID and no "
-            "GARMIN_USERNAME — submit_fitness_sync_* will refuse)",
+            "  Fitness sync wired (Garmin only — no STRAVA_CLIENT_ID; "
+            "submit_fitness_sync_strava will refuse)",
         )
     log.info("  Jobs: JobRunner started (single-worker executor)")
 
