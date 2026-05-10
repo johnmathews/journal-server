@@ -4,13 +4,13 @@
 
 **Progress snapshot (2026-05-10):**
 - **Shipped (server):** W1 (audit, `4dd90c4`), W2 (Garmin connect/MFA, `59f7714`),
-  W3 (Strava OAuth exchange, `5dca0cc`), W5 (backfill workers + endpoint, `be6ab80`).
+  W3 (Strava OAuth exchange, `5dca0cc`), W5 (backfill workers + endpoint, `be6ab80`),
+  W11 (worker-level auth_status flip test, `18d66b0`).
 - **Shipped (webapp):** W8 (API client, `4de33c4`), W9 (settings panel, `6df8d7e`),
-  W10 (Strava callback view, `d53f3a7`).
+  W10 (Strava callback view, `d53f3a7`), W11 (banner Reconnect button, `c5968c3`).
 - **Remaining:** W4 (per-user integrity), W6 (drop Garmin env vars), W7 (CLI
-  `--user-id` required), W11 (banner copy + auth_status flip verification),
-  W12 (docs sweep), W13 (Strava callback URL — operator step), W14 (end-to-end
-  verification with user 2).
+  `--user-id` required), W12 (docs sweep), W13 (Strava callback URL — operator step),
+  W14 (end-to-end verification with user 2).
 
 This plan moves the fitness pipeline from its current single-user posture (operator-managed
 credentials in env vars, CLI re-auth with `--user-id 1` defaults, all data attributed to
@@ -527,6 +527,7 @@ user to test against).
   bad state, exchange error). Manual end-to-end against real Strava.
 
 ### W11. Update the FitnessAuthBanner copy + verify the `auth_status='broken'` path
+**Status:** shipped 2026-05-10 (server `18d66b0`, webapp `c5968c3`).
 **Priority:** Medium. **Depends on:** W9.
 - The existing `FitnessAuthBanner.vue` directs broken users to CLI commands. Change the
   CTA to a "Reconnect" button that routes to `/settings#fitness`.
