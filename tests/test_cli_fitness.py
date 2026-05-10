@@ -92,6 +92,31 @@ def test_fitness_subcommand_help(capsys, subcommand):
     assert subcommand in captured.out
 
 
+@pytest.mark.parametrize(
+    "subcommand",
+    [
+        "fitness-reauth-strava",
+        "fitness-reauth-garmin",
+        "fitness-sync",
+        "fitness-backfill",
+        "fitness-status",
+    ],
+)
+def test_fitness_subcommand_requires_user_id(capsys, subcommand):
+    """W7 acceptance: every fitness-* subcommand requires --user-id.
+
+    argparse exits 2 (non-zero) with an error message naming the missing
+    argument when the flag is omitted. ``fitness-audit`` is excluded — it
+    audits every user and does not take --user-id.
+    """
+    sys.argv = ["journal", subcommand]
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code != 0
+    captured = capsys.readouterr()
+    assert "--user-id" in captured.err
+
+
 # ── Strava OAuth ─────────────────────────────────────────────────────
 
 
@@ -107,7 +132,7 @@ def test_fitness_reauth_strava_happy_path(fitness_env, capsys):
              "journal.cli.fitness.exchange_code",
              return_value=(fake_tokens, "777777"),
          ) as mock_exchange:
-        sys.argv = ["journal", "fitness-reauth-strava"]
+        sys.argv = ["journal", "fitness-reauth-strava", "--user-id", "1"]
         main()
 
     assert mock_exchange.call_count == 1
@@ -131,7 +156,7 @@ def test_fitness_reauth_strava_user_cancellation(fitness_env, capsys):
     with patch(
         "journal.cli.fitness._oauth_listener", side_effect=KeyboardInterrupt,
     ), patch("journal.cli.fitness.exchange_code") as mock_exchange:
-        sys.argv = ["journal", "fitness-reauth-strava"]
+        sys.argv = ["journal", "fitness-reauth-strava", "--user-id", "1"]
         with pytest.raises(SystemExit) as exc_info:
             main()
         assert exc_info.value.code != 0
@@ -166,7 +191,7 @@ def test_fitness_reauth_strava_preserves_existing_extra_state(fitness_env):
              "journal.cli.fitness.exchange_code",
              return_value=(fake_tokens, None),
          ):
-        sys.argv = ["journal", "fitness-reauth-strava"]
+        sys.argv = ["journal", "fitness-reauth-strava", "--user-id", "1"]
         main()
 
     state = _read_state(fitness_env, source="strava")
@@ -242,7 +267,7 @@ def test_fitness_reauth_garmin_non_mfa_happy_path(fitness_env):
     """Login completes without invoking MFA; tokens blob persisted, auth_status='ok'."""
     clients: list[_FakeGarminClient] = []
     with _patch_garmin_client(clients, invoke_mfa=False):
-        sys.argv = ["journal", "fitness-reauth-garmin"]
+        sys.argv = ["journal", "fitness-reauth-garmin", "--user-id", "1"]
         main()
 
     assert len(clients) == 1
@@ -262,7 +287,7 @@ def test_fitness_reauth_garmin_mfa_happy_path(fitness_env, monkeypatch):
 
     clients: list[_FakeGarminClient] = []
     with _patch_garmin_client(clients, invoke_mfa=True):
-        sys.argv = ["journal", "fitness-reauth-garmin"]
+        sys.argv = ["journal", "fitness-reauth-garmin", "--user-id", "1"]
         main()
 
     assert clients[0].mfa_received == ["123456"]
@@ -289,7 +314,7 @@ def test_fitness_sync_source_both_runs_each(fitness_env, capsys):
         }
 
     with patch("journal.cli.fitness._run_one_source_sync", side_effect=fake_run):
-        sys.argv = ["journal", "fitness-sync", "--source", "both"]
+        sys.argv = ["journal", "fitness-sync", "--source", "both", "--user-id", "1"]
         main()
 
     assert calls == [("strava", 1), ("garmin", 1)]
@@ -310,7 +335,7 @@ def test_fitness_sync_default_source_is_both(fitness_env):
         }
 
     with patch("journal.cli.fitness._run_one_source_sync", side_effect=fake_run):
-        sys.argv = ["journal", "fitness-sync"]
+        sys.argv = ["journal", "fitness-sync", "--user-id", "1"]
         main()
 
     assert sorted(calls) == ["garmin", "strava"]
@@ -328,7 +353,7 @@ def test_fitness_sync_single_source(fitness_env):
         }
 
     with patch("journal.cli.fitness._run_one_source_sync", side_effect=fake_run):
-        sys.argv = ["journal", "fitness-sync", "--source", "strava"]
+        sys.argv = ["journal", "fitness-sync", "--source", "strava", "--user-id", "1"]
         main()
 
     assert calls == ["strava"]
@@ -339,7 +364,7 @@ def test_fitness_sync_single_source(fitness_env):
 
 def test_fitness_status_empty_db(fitness_env, capsys):
     """No auth_state rows → friendly message, exit 0."""
-    sys.argv = ["journal", "fitness-status"]
+    sys.argv = ["journal", "fitness-status", "--user-id", "1"]
     main()  # Must not SystemExit non-zero.
 
     captured = capsys.readouterr()
@@ -368,7 +393,7 @@ def test_fitness_status_with_data(fitness_env, capsys):
     )
     conn.close()
 
-    sys.argv = ["journal", "fitness-status"]
+    sys.argv = ["journal", "fitness-status", "--user-id", "1"]
     main()
 
     out = capsys.readouterr().out

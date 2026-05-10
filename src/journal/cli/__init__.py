@@ -616,8 +616,8 @@ def main():
     p_fit_strava.add_argument(
         "--user-id",
         type=int,
-        default=1,
-        help="Owner of the auth row (default: 1 = admin)",
+        required=True,
+        help="Owner of the auth row (required — no default).",
     )
 
     # fitness-reauth-garmin
@@ -632,8 +632,8 @@ def main():
     p_fit_garmin.add_argument(
         "--user-id",
         type=int,
-        default=1,
-        help="Owner of the auth row (default: 1 = admin)",
+        required=True,
+        help="Owner of the auth row (required — no default).",
     )
 
     # fitness-sync
@@ -661,8 +661,8 @@ def main():
     p_fit_sync.add_argument(
         "--user-id",
         type=int,
-        default=1,
-        help="Owner of the sync (default: 1 = admin)",
+        required=True,
+        help="Owner of the sync (required — no default).",
     )
 
     # fitness-backfill
@@ -693,8 +693,8 @@ def main():
     p_fit_backfill.add_argument(
         "--user-id",
         type=int,
-        default=1,
-        help="Owner of the backfill (default: 1 = admin)",
+        required=True,
+        help="Owner of the backfill (required — no default).",
     )
 
     # fitness-status
@@ -708,8 +708,8 @@ def main():
     p_fit_status.add_argument(
         "--user-id",
         type=int,
-        default=1,
-        help="User to query (default: 1 = admin)",
+        required=True,
+        help="User to query (required — no default).",
     )
 
     # fitness-audit
