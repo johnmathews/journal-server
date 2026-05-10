@@ -1,33 +1,58 @@
 # Fitness Integration — Execution Plan
 
-**Status:** active. **Last updated:** 2026-05-10 (W14 shipped — server-side
-W1–W14 complete; only W15 webapp remains). **Supersedes:** none.
-**Created:** 2026-05-09. **Owner of decisions:** [`fitness-integration-plan.md`](./fitness-integration-plan.md).
-**Owner of schema:** [`fitness-schema.md`](./fitness-schema.md).
+**Status:** closed 2026-05-10. All 15 work units (W1–W15) shipped — server-side
+W1–W14 at journal-server `c1422fc`, webapp W15 at journal-webapp `352145e`.
+Kept as a record of the execution sequencing and the per-unit acceptance
+criteria. Decisions and rationale live in
+[`../fitness-integration-plan.md`](../fitness-integration-plan.md); the running
+schema is in [`../fitness-schema.md`](../fitness-schema.md); operator guidance
+is in [`../fitness-operations.md`](../fitness-operations.md) and the
+engineer-facing data flow in [`../fitness-pipeline.md`](../fitness-pipeline.md).
+
+**Created:** 2026-05-09. **Owner of decisions:** [`../fitness-integration-plan.md`](../fitness-integration-plan.md).
+**Owner of schema:** [`../fitness-schema.md`](../fitness-schema.md).
 **Code-grounded:** yes — `src/journal/{providers,services,api,mcp_server,db,cli,config.py}` reviewed in
 worktree before writing; existing patterns (jobs runner, notifications topics, migration style) referenced
 inline.
 
-> **W14 ship note (2026-05-10).** All W14 documentation deliverables landed:
-> new [`fitness-pipeline.md`](./fitness-pipeline.md) (engineer-facing data
-> flow) and [`fitness-operations.md`](./fitness-operations.md) (operator
-> runbook), plus updates to `architecture.md`, `external-services.md`,
-> `configuration.md`, `api.md`, `jobs.md`, `roadmap.md`, and the project
-> `README.md`. The four W13-smoke findings the journal surfaced (OAuth
-> headless recipe, dense-backfill normalize quirk, Garmin login
-> transport-fallback noise, secrets-allowlist pattern) are now documented
-> for operators in `fitness-operations.md` §2b / §3 / §6.
->
-> This tier plan is **not archived** — `fitness-integration-plan.md` and
-> `fitness-schema.md` aren't either. Their decisions and rationale (sacred
-> raw archive, four-layer pipeline, per-source resume predicate,
-> daily-cadence single-user posture, etc.) remain load-bearing context for
-> W15 and any future fitness work. They will be reviewed for archive after
-> W15 lands.
+**Closeout summary (2026-05-10):**
+
+1. **W1–W3 (foundation):** config, secrets, migration scaffolding shipped.
+2. **W4–W5 (providers):** Strava (`stravalib`) and Garmin (`garth`) provider
+   adapters behind Protocol interfaces.
+3. **W6 (fetch service):** orchestrates per-source fetches, persists raw
+   blobs, advances watermarks. Garmin auth check fixed in follow-up commit
+   `3a51ffb` (2026-05-10) after smoke surfaced the missing `tokens_blob`
+   guard.
+4. **W7 (normalize):** raw → normalized projection. The dense-backfill
+   `normalized < fetched` under-projection is documented in
+   `fitness-operations.md` §7 as a known limitation; three remediation
+   options recorded for the next time the watermark logic is touched.
+5. **W8–W12 (jobs / API / MCP / CLI / health):** background fetch + normalize
+   workers, REST endpoints, MCP tools, CLI re-auth flow, health probe.
+6. **W13 (backfill):** first live fetch on 2026-05-10 — 80 Strava activities,
+   80 Garmin daily-wellness rows, 80 normalized activities.
+7. **W14 (docs):** `fitness-pipeline.md`, `fitness-operations.md`, plus
+   updates to `architecture.md`, `external-services.md`, `configuration.md`,
+   `api.md`, `jobs.md`, `roadmap.md`, `README.md`. Four W13-smoke findings
+   captured for operators (OAuth headless recipe, dense-backfill normalize
+   quirk, Garmin login transport-fallback noise, secrets-allowlist pattern).
+8. **W15 (webapp):** fitness views in journal-webapp at commit `352145e`.
+
+**Deferred follow-ups (independent of this archive — pick up ad-hoc):**
+
+1. `fitness-reauth-strava --code <code>` flag for headless / port-collision
+   re-auth (workaround documented in `fitness-operations.md` §2b).
+2. W7 dense-backfill watermark fix (composite watermark, sub-second
+   timestamps, or per-backfill force-renormalize).
+3. Explicit `Rowing → other` activity-type map entry.
+4. In-app re-auth flow once the Strava OAuth roundtrip can be hosted by the
+   webapp without a CLI dependency.
+5. Mood × fitness correlation views (webapp, several work units).
 
 This document is the execution sequencing for the fitness integration. Decisions and rationale are upstream
-in [`fitness-integration-plan.md`](./fitness-integration-plan.md); concrete schema is in
-[`fitness-schema.md`](./fitness-schema.md). **This doc only covers "what to build, in what order, with
+in [`fitness-integration-plan.md`](../fitness-integration-plan.md); concrete schema is in
+[`fitness-schema.md`](../fitness-schema.md). **This doc only covers "what to build, in what order, with
 what tests."** It does not relitigate decisions.
 
 ## Contents
@@ -68,7 +93,7 @@ end-to-end until both are done. **W1–W10 can ship without either** (fixture-ba
    - These are well within the daily-cadence single-user budget. No request to raise limits is
      needed.
 
-> **Cross-doc fix needed.** [`fitness-integration-plan.md`](./fitness-integration-plan.md) §6 Q1
+> **Cross-doc fix needed.** [`fitness-integration-plan.md`](../fitness-integration-plan.md) §6 Q1
 > currently says "600 / 15 min, 30k / day" — that's incorrect. The accurate figures are above. The
 > master plan should be updated in the same commit that lands this tier plan.
 
@@ -194,7 +219,7 @@ repository tests use under `tests/test_db/`.**
 - `tests/test_db/test_fitness_migrations.py` *(new)*
 - `tests/test_db/test_fitness_integrity.py` *(new)*
 
-**SQL content:** copy verbatim from [`fitness-schema.md`](./fitness-schema.md) §2, §3, §4. Use
+**SQL content:** copy verbatim from [`fitness-schema.md`](../fitness-schema.md) §2, §3, §4. Use
 `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` exactly as the existing
 migrations do. Add a header comment block to each file mirroring the style of
 `migrations/0022_*.sql`.
@@ -328,7 +353,7 @@ Dataclasses for `FitnessAuthState`, `FitnessActivity`, `FitnessDaily`, `RawRow` 
 
 - `src/journal/config.py` *(modify — add fields per below)*
 - `src/journal/services/notifications.py` *(modify — append 4 entries to `TOPICS`, per
-  [`fitness-schema.md`](./fitness-schema.md) §5)*
+  [`fitness-schema.md`](../fitness-schema.md) §5)*
 - `.env.example` *(modify — add P0.3 keys)*
 - `tests/test_config.py` *(modify — add cases for new fields)*
 - `tests/test_services/test_notifications.py` *(modify — assert new topic keys present)*
@@ -352,7 +377,7 @@ fitness_backfill_start: str = field(default_factory=lambda: os.environ.get(
 ```
 
 **Notification topics:** copy the four entries from
-[`fitness-schema.md`](./fitness-schema.md) §5 verbatim into the `TOPICS` list. Do **not** create a parallel
+[`fitness-schema.md`](../fitness-schema.md) §5 verbatim into the `TOPICS` list. Do **not** create a parallel
 notification mechanism (master plan D5).
 
 **Tests:**
@@ -362,7 +387,7 @@ notification mechanism (master plan D5).
    how `anthropic_api_key` already works).
 2. New env vars override defaults.
 3. The four new `TOPICS` keys exist with `group` / `default` / `admin_only` matching
-   [`fitness-schema.md`](./fitness-schema.md) §5 table.
+   [`fitness-schema.md`](../fitness-schema.md) §5 table.
 
 **Acceptance criteria:**
 
@@ -610,7 +635,7 @@ even if normalization has a bug — the raw is captured first, derivatives secon
    one row in `fitness_sync_runs` with `status='success'`, `auth_status` flips to `'ok'`.
 2. **Happy path Garmin** — fake provider yields one daily metrics object covering 6 endpoints; assert
    6 rows in `fitness_raw_garmin` (one per endpoint) sharing the same `(source_id, fetched_at)` only
-   if intended — actually each endpoint has its own `source_id` (per [`fitness-schema.md`](./fitness-schema.md) §2 table), so it's
+   if intended — actually each endpoint has its own `source_id` (per [`fitness-schema.md`](../fitness-schema.md) §2 table), so it's
    `endpoint='sleep', source_id='2026-04-15'`, etc.
 3. **Auth-broken on first failure** — fake raises `StravaAuthError`. Auth state transitions to
    `'broken'`, Pushover fired exactly once. Run again with same fake — auth still broken, Pushover NOT
@@ -669,7 +694,7 @@ clock, so a partial batch leaves a coherent watermark for the next run.
 Each entry point reads raw rows since the watermark, groups them by `(source_id, endpoint)` for
 Garmin (so all 6 daily endpoints for a given day fan in to one `fitness_daily` row), maps fields,
 and `INSERT OR REPLACE`s. Activity-type collapsing uses the table from
-[`fitness-schema.md`](./fitness-schema.md) §3 — implemented once in
+[`fitness-schema.md`](../fitness-schema.md) §3 — implemented once in
 `_activity_type_map.py` and the docstring explicitly notes that the source of truth is the schema
 doc; if they ever diverge, the doc wins (the test in W7-#6 will fail).
 
@@ -709,7 +734,7 @@ batch continues for everything that *can* be normalized. Drift is a code bug to 
 
 - `uv run pytest tests/test_services/test_fitness/test_normalize.py` green.
 - The activity-type map is a single source of truth used both by code and exported back to
-  [`fitness-schema.md`](./fitness-schema.md) §3 (no drift between docs and code).
+  [`fitness-schema.md`](../fitness-schema.md) §3 (no drift between docs and code).
 - A drift event never raises out of the function — it's recorded, alerted, and the loop continues.
 
 ---
@@ -934,7 +959,7 @@ Tools to expose (master plan D6: every meaningful query and operational lever is
 | `fitness_correlate_hrv_mood(start, end, window=7)` | Q3 — rolling HRV × mood |
 
 Each tool is a thin wrapper around the same repository methods and SQL queries documented in
-[`fitness-schema.md`](./fitness-schema.md) §8. All return JSON-serialisable dicts/lists.
+[`fitness-schema.md`](../fitness-schema.md) §8. All return JSON-serialisable dicts/lists.
 
 **Tests:** invoke each tool against a seeded in-memory DB; assert returned shape and basic content.
 Use the existing tool-test pattern from `tests/test_mcp_server/`.
@@ -1280,6 +1305,6 @@ before starting the next.
 
 ## 7. Kill criteria (reference)
 
-The master plan ([`fitness-integration-plan.md`](./fitness-integration-plan.md) §7) holds the
+The master plan ([`fitness-integration-plan.md`](../fitness-integration-plan.md) §7) holds the
 cross-cutting kill criteria. This document does not duplicate them — review them at any natural
 checkpoint.

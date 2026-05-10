@@ -30,12 +30,11 @@ the top of the linked doc tells you whether it's active, closed, or superseded.
 - [`fitness-integration-plan.md`](./fitness-integration-plan.md) — fitness-tracker
   ingestion design (open questions resolved 2026-05-08). See also
   [`fitness-schema.md`](./fitness-schema.md) (concrete schema),
-  [`fitness-tier-plan.md`](./fitness-tier-plan.md) (execution sequencing — 15
-  work units across 5 phases; W1–W14 shipped 2026-05-09 → 2026-05-10; W15 is
-  webapp-only and tracked separately),
   [`fitness-pipeline.md`](./fitness-pipeline.md) (engineer-facing data-flow
-  overview), and [`fitness-operations.md`](./fitness-operations.md) (operator
-  runbook for re-auth, backfill, and troubleshooting). Promoted to Tier 1 below.
+  overview), [`fitness-operations.md`](./fitness-operations.md) (operator
+  runbook for re-auth, backfill, and troubleshooting), and
+  [`archive/fitness-tier-plan.md`](./archive/fitness-tier-plan.md) (W1–W15
+  execution sequencing — closed 2026-05-10, all work units shipped). Item 1 below.
 - [`code-quality-principles.md`](./code-quality-principles.md) — standing rules referenced
   by the refactor docs.
 - [`mood-scoring.md`](./mood-scoring.md) — pipeline reference. Note: mood scoring is now
@@ -70,39 +69,37 @@ with a small corpus".
 > The four original Tier 1 items (entity-extraction first run, `/health`, dashboard, search
 > UI) all closed by 2026-04-21 — see [`archive/tier-1-plan.md`](./archive/tier-1-plan.md) and
 > Closed items 13–15, 28 below for the shipped detail. T1.1.b dedup-threshold tuning (`0.88`)
-> was never executed but no work was blocked. The next item meeting the Tier 1 criterion
-> (no upstream dependency, ready to start) is **fitness integration**.
+> was never executed but no work was blocked. **Fitness integration (Item 1 below) shipped
+> 2026-05-10** — kept here for reference until the next Tier 1 candidate is promoted; the
+> deferred follow-ups listed inline are independent ad-hoc work, not blocking.
 
-### 1. Fitness integration `[server]` — server-side complete, W15 webapp pending
+### 1. Fitness integration `[both]` — shipped 2026-05-10
 
 Ingestion pipeline for fitness-tracker data (Strava + Garmin Connect). Decisions in
 [`fitness-integration-plan.md`](./fitness-integration-plan.md), schema in
-[`fitness-schema.md`](./fitness-schema.md), execution sequencing in
-[`fitness-tier-plan.md`](./fitness-tier-plan.md), engineer-facing data flow in
+[`fitness-schema.md`](./fitness-schema.md), engineer-facing data flow in
 [`fitness-pipeline.md`](./fitness-pipeline.md), operator runbook in
-[`fitness-operations.md`](./fitness-operations.md). The first live exercise
-against real credentials is captured in
+[`fitness-operations.md`](./fitness-operations.md). The original W1–W15
+execution sequencing is archived at
+[`archive/fitness-tier-plan.md`](./archive/fitness-tier-plan.md). The first
+live exercise against real credentials is captured in
 `journal/260510-fitness-first-fetch.md`.
 
-**Status:** W1–W14 of 15 work units shipped 2026-05-09 → 2026-05-10. End-to-end
-pipeline in production: schema (W1–W3), Strava + Garmin providers (W4/W5),
-fetch service with auth-state machine (W6), normalize service (W7), job workers
-(W8), REST endpoints (W9), MCP tools (W10), CLI re-auth + sync (W11), health
-endpoint extension (W12), backfill orchestrator + first live smoke (W13),
-operator + engineer documentation (W14). Production currently holds 80 Strava
-activities + 80 Garmin activities + 129 Garmin daily wellness rows for
-2026-01-07 → 2026-05-09.
+**Status:** all 15 work units shipped. Server-side W1–W14 at journal-server
+`c1422fc` (2026-05-09 → 2026-05-10); webapp W15 at journal-webapp `352145e`
+(2026-05-10). End-to-end pipeline in production: schema (W1–W3), Strava +
+Garmin providers (W4/W5), fetch service with auth-state machine (W6),
+normalize service (W7), job workers (W8), REST endpoints (W9), MCP tools
+(W10), CLI re-auth + sync (W11), health endpoint extension (W12), backfill
+orchestrator + first live smoke (W13), operator + engineer documentation
+(W14), webapp views (W15). Production currently holds 80 Strava activities +
+80 Garmin activities + 129 Garmin daily wellness rows for 2026-01-07 →
+2026-05-09.
 
-**Next:** W15 — webapp views for fitness data (sync-status panel, auth-broken
-banner, charts grounded in real backfilled data, Strava↔Garmin distinct-workout
-reconciliation). Lives in the `webapp/` repo, not `server/`. Three small
-optional follow-ups documented in `journal/260510-fitness-first-fetch.md` are
-deferred (the `--code <code>` CLI flag, the W7 watermark fix, and an explicit
-`Rowing → other` activity-type map entry).
-
-**Why Tier 1:** independent of the journal-text pipeline, opens a new analytical surface
-(mood vs activity correlation), and the planning doc is the most recently added active
-workstream.
+**Deferred follow-ups (independent, ad-hoc):** `--code <code>` CLI flag for
+headless Strava re-auth; W7 dense-backfill watermark fix; explicit
+`Rowing → other` activity-type map entry; in-app re-auth flow; mood × fitness
+correlation views (webapp).
 
 ---
 

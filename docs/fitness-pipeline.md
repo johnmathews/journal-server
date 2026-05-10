@@ -9,9 +9,10 @@ points at the detail docs; it does not relitigate decisions or restate schema.
 For architectural decisions and constraints, read
 [`fitness-integration-plan.md`](fitness-integration-plan.md).
 For tables, columns, and migration sequencing, read
-[`fitness-schema.md`](fitness-schema.md). For execution sequencing of the
-W1–W15 work units, read [`fitness-tier-plan.md`](fitness-tier-plan.md). For
-operator runbooks (re-auth, backfill, troubleshooting), read
+[`fitness-schema.md`](fitness-schema.md). For the original W1–W15 execution
+sequencing (now closed), see
+[`archive/fitness-tier-plan.md`](archive/fitness-tier-plan.md). For operator
+runbooks (re-auth, backfill, troubleshooting), read
 [`fitness-operations.md`](fitness-operations.md).
 
 ---
