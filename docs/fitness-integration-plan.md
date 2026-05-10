@@ -1,7 +1,9 @@
 # Fitness Integration Plan
 
-**Status:** active — foundation phase shipped 2026-05-09 (see [`fitness-tier-plan.md`](./fitness-tier-plan.md)).
-**Last updated:** 2026-05-09 (Strava rate-limit figures corrected against current docs).
+**Status:** active — decisions and rationale doc. Execution sequencing (W1–W15) shipped
+2026-05-10; the tier plan is archived at
+[`archive/fitness-tier-plan.md`](./archive/fitness-tier-plan.md).
+**Last updated:** 2026-05-10 (tier-plan link updated after archive).
 **Created:** 2026-05-08. **Supersedes:** none.
 **Related docs:** [`architecture.md`](./architecture.md), [`external-services.md`](./external-services.md),
 [`jobs.md`](./jobs.md), [`mood-scoring.md`](./mood-scoring.md), [`roadmap.md`](./roadmap.md),
@@ -11,8 +13,10 @@
 This document captures the architectural decisions and constraints for adding personal fitness data
 (activities, sleep, recovery metrics) as a complementary data source alongside journal entries. It
 is the single source of truth for **what we're building and why**. Concrete schema lives in
-[`fitness-schema.md`](./fitness-schema.md); execution sequencing will be drafted once schema is
-settled (planned `fitness-tier-plan.md`, not yet written).
+[`fitness-schema.md`](./fitness-schema.md); execution sequencing was drafted in
+`fitness-tier-plan.md` (now archived at
+[`archive/fitness-tier-plan.md`](./archive/fitness-tier-plan.md) as of 2026-05-10
+after all 15 work units shipped).
 
 > **Discipline note.** This plan is intentionally a decisions-and-rationale doc, not an
 > execution plan. Prefer keeping it short, but length is not capped — if scope or detail genuinely warrants more, add

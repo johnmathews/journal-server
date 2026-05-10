@@ -23,3 +23,4 @@ For the current state of the codebase and the active workstreams, see:
 | [`refactor-mcp-server-plan.md`](./refactor-mcp-server-plan.md) | `mcp_server.py` split plan, **closed 2026-05-07**. Split landed. |
 | [`refactor-repository-plan.md`](./refactor-repository-plan.md) | `db/repository.py` split plan, **closed 2026-05-07**. Split landed. |
 | [`tier-1-plan.md`](./tier-1-plan.md) | Tier 1 implementation plan, **closed 2026-05-09**. All four items done. |
+| [`fitness-tier-plan.md`](./fitness-tier-plan.md) | Fitness integration W1–W15 execution plan, **closed 2026-05-10**. All 15 work units shipped. Decisions live in `../fitness-integration-plan.md`; schema in `../fitness-schema.md`. |

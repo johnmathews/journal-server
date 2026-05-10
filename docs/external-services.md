@@ -495,7 +495,7 @@ operational runbooks, see [`fitness-pipeline.md`](fitness-pipeline.md) and
   thereafter via a `persist_tokens` callback that writes back through
   `FitnessRepository.upsert_auth_state`.
 - **App registration:** required, free, single-user — see
-  [`fitness-tier-plan.md` §1.P0.1](fitness-tier-plan.md#p01--strava-api-application-registration).
+  [`archive/fitness-tier-plan.md` §1.P0.1](archive/fitness-tier-plan.md#p01--strava-api-application-registration).
 - **Rate limits (read endpoints):** 100 requests / 15 min, 1000 / day. Single-user
   daily-cadence pipeline sits well inside that envelope; no rate-limit cliff hit
   during the W13 backfill of 80 activities.

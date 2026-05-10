@@ -10,8 +10,10 @@ For the architectural picture and data flow, see
 [`fitness-pipeline.md`](fitness-pipeline.md). For schema and migration details,
 see [`fitness-schema.md`](fitness-schema.md). The decisions and constraints
 behind every piece below are in
-[`fitness-integration-plan.md`](fitness-integration-plan.md) and
-[`fitness-tier-plan.md`](fitness-tier-plan.md).
+[`fitness-integration-plan.md`](fitness-integration-plan.md). The original
+W1–W15 execution sequencing is archived at
+[`archive/fitness-tier-plan.md`](archive/fitness-tier-plan.md) (closed
+2026-05-10).
 
 ---
 
@@ -47,7 +49,7 @@ See [`configuration.md`](configuration.md#optional--fitness-integration) for
 the canonical reference.
 
 For Strava-app registration steps, see
-[`fitness-tier-plan.md` §1](fitness-tier-plan.md#1-preparation--credential-acquisition-blocking-p0).
+[`archive/fitness-tier-plan.md` §1](archive/fitness-tier-plan.md#1-preparation--credential-acquisition-blocking-p0).
 
 ---
 
