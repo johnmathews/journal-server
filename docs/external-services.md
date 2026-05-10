@@ -479,6 +479,67 @@ retrieved chunks, rather than just returning raw results. This would use the sam
 
 ---
 
+## Fitness Data Sources
+
+The fitness pipeline pulls activity and recovery data from two external services
+alongside the LLM-powered text pipeline. Provider adapters live behind Protocol
+interfaces in `src/journal/providers/{strava,garmin}.py`. For the data flow and
+operational runbooks, see [`fitness-pipeline.md`](fitness-pipeline.md) and
+[`fitness-operations.md`](fitness-operations.md).
+
+### Strava
+
+- **Role:** Activity ingestion (runs, rides, swims, walks, hikes, strength, other).
+- **Auth:** OAuth 2.0 with refresh tokens. The W11 CLI (`fitness-reauth-strava`)
+  runs the one-time authorize flow; `stravalib` auto-refreshes access tokens
+  thereafter via a `persist_tokens` callback that writes back through
+  `FitnessRepository.upsert_auth_state`.
+- **App registration:** required, free, single-user — see
+  [`fitness-tier-plan.md` §1.P0.1](fitness-tier-plan.md#p01--strava-api-application-registration).
+- **Rate limits (read endpoints):** 100 requests / 15 min, 1000 / day. Single-user
+  daily-cadence pipeline sits well inside that envelope; no rate-limit cliff hit
+  during the W13 backfill of 80 activities.
+- **Reliability:** Strava's API is stable; OAuth shape has not shifted in years.
+  The library (`stravalib==2.4`, last updated 2026-01-23) is actively maintained.
+- **API agreement note:** Strava's third-party app agreement (Nov 2024 update)
+  restricts data display to the user's own data and prohibits AI/ML training on
+  the data. Compliant for the single-user personal pipeline; flag if scope
+  expands.
+- **Pricing:** free.
+
+### Garmin Connect
+
+- **Role:** Activity ingestion (overlapping with Strava when the user uploads
+  Garmin → Strava) plus daily wellness rollups (sleep, HRV, resting HR, body
+  battery, stress, training load, training readiness).
+- **Auth:** unofficial library (`python-garminconnect`) that wraps `garth`. Login
+  with username/password (and MFA when prompted) via the W11 CLI
+  (`fitness-reauth-garmin`); subsequent calls reuse a persistent token blob
+  stored in `fitness_auth_state.extra_state_json["tokens_blob"]`.
+- **App registration:** none. The official Garmin Health API is gated to
+  approved partners and is out of scope.
+- **Rate limits:** unpublished. Login may rate-limit at 429 after rapid retries
+  (the `garminconnect` library cycles through three transports — multiple 429s
+  during a single login attempt are normal, not failure). API call rate during
+  steady-state polling has not been a problem in practice.
+- **Reliability:** the library had ~3.5 weeks of total breakage in
+  March–April 2026 when Garmin changed SSO and `garth` was deprecated. The
+  D5 alerting taxonomy and the manual re-auth path
+  (see [`fitness-operations.md` §2c](fitness-operations.md#2c-garmin)) are
+  the mitigation. Pin `garminconnect` to an exact version; upgrade only after
+  a dev-environment dry run.
+- **Pricing:** free. The user must already be a Garmin Connect customer.
+
+### Provider SDK pins
+
+| Package | Pin | Why |
+|---|---|---|
+| `stravalib` | `~=2.2` | Pydantic 2.x, Python 3.13 support, OAuth refresh + rate limiting built in. |
+| `garminconnect` | `==0.3.3` | Reliability research mandates an exact pin so an upstream change cannot break prod silently. Upgrades go through dev-environment dry run before pinning forward. |
+| (transitive) `garth` | follow `garminconnect`'s pin | Don't pin separately — `garminconnect` controls the version that matches its expectations. |
+
+---
+
 ## Infrastructure Services
 
 ### ChromaDB (Vector Store)
@@ -601,6 +662,8 @@ openai>=2.29,<3             # Transcription, embeddings
 chromadb-client>=1.5,<2     # Vector store
 mcp[cli]>=1.26,<2           # MCP server framework
 tiktoken>=0.9,<1            # Token counting (cl100k_base)
+stravalib~=2.2              # Strava activity ingestion (OAuth + rate limiting)
+garminconnect==0.3.3        # Garmin Connect (exact pin per reliability research)
 ```
 
 ---

@@ -1,11 +1,29 @@
 # Fitness Integration — Execution Plan
 
-**Status:** active. **Last updated:** 2026-05-09 (W10 shipped). **Supersedes:** none.
+**Status:** active. **Last updated:** 2026-05-10 (W14 shipped — server-side
+W1–W14 complete; only W15 webapp remains). **Supersedes:** none.
 **Created:** 2026-05-09. **Owner of decisions:** [`fitness-integration-plan.md`](./fitness-integration-plan.md).
 **Owner of schema:** [`fitness-schema.md`](./fitness-schema.md).
 **Code-grounded:** yes — `src/journal/{providers,services,api,mcp_server,db,cli,config.py}` reviewed in
 worktree before writing; existing patterns (jobs runner, notifications topics, migration style) referenced
 inline.
+
+> **W14 ship note (2026-05-10).** All W14 documentation deliverables landed:
+> new [`fitness-pipeline.md`](./fitness-pipeline.md) (engineer-facing data
+> flow) and [`fitness-operations.md`](./fitness-operations.md) (operator
+> runbook), plus updates to `architecture.md`, `external-services.md`,
+> `configuration.md`, `api.md`, `jobs.md`, `roadmap.md`, and the project
+> `README.md`. The four W13-smoke findings the journal surfaced (OAuth
+> headless recipe, dense-backfill normalize quirk, Garmin login
+> transport-fallback noise, secrets-allowlist pattern) are now documented
+> for operators in `fitness-operations.md` §2b / §3 / §6.
+>
+> This tier plan is **not archived** — `fitness-integration-plan.md` and
+> `fitness-schema.md` aren't either. Their decisions and rationale (sacred
+> raw archive, four-layer pipeline, per-source resume predicate,
+> daily-cadence single-user posture, etc.) remain load-bearing context for
+> W15 and any future fitness work. They will be reviewed for archive after
+> W15 lands.
 
 This document is the execution sequencing for the fitness integration. Decisions and rationale are upstream
 in [`fitness-integration-plan.md`](./fitness-integration-plan.md); concrete schema is in
@@ -1138,7 +1156,34 @@ further. **Per-source filtering is the load-bearing detail.**
 
 ### W14 — Documentation + roadmap index update + journal entry
 
-**Priority:** Medium. **Files:**
+**Status: shipped 2026-05-10.** Final file list differs from the planned set
+(see "Plan-drift notes" below): two new docs (`fitness-pipeline.md`,
+`fitness-operations.md`) plus updates to `architecture.md`,
+`external-services.md`, `configuration.md`, `api.md`, `jobs.md`, `roadmap.md`,
+`README.md`, and a status header on this tier plan and on `fitness-tier-plan.md`
+itself. No archives — both `fitness-integration-plan.md` and `fitness-schema.md`
+remain load-bearing for W15. Journal entry: `journal/260510-fitness-w14-docs.md`.
+
+**Plan-drift notes (W14):**
+
+1. The planned `journal/<YYMMDD>-fitness-implementation-summary.md` was
+   redundant — the W4–W13 journal series already documents what shipped
+   per unit, and the W13 first-fetch entry consolidates the full pipeline.
+   The W14 journal entry documents only what W14 itself changed (docs +
+   archive decisions).
+2. The plan called for adding a "Fitness pipeline" section to
+   `architecture.md` plus pointer entries to other docs. Implementation
+   added a thin section to `architecture.md` and a separate
+   `fitness-pipeline.md` carrying the actual layered diagram and detail —
+   the architecture doc kept its prose-heavy character while the new doc
+   answers "how does data flow from watch to webapp" without bloating
+   the architecture overview to 50k.
+3. The four W13-smoke findings (not in the original plan) are documented
+   in `fitness-operations.md` §2b / §3 / §6 / §7, with the inline-python
+   OAuth recipe, the force-renormalize one-liner, the Garmin transport
+   429-noise note, and the env-allowlist pattern.
+
+**Original planned files** (kept for historical reference):
 
 - `docs/architecture.md` *(modify — add a "Fitness pipeline" section describing the four layers and
   pointing at the schema doc)*
