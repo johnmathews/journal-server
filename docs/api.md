@@ -2050,8 +2050,40 @@ values are any JSON-serialisable scalars/objects.
 
 ### GET /api/health
 
-Authenticated mirror of `/health`. Identical payload — provided because the webapp's nginx only proxies `/api/*`
-through to the server, so the unauthenticated `/health` path is unreachable from the browser.
+Authenticated mirror of `/health` plus a per-user `fitness` block surfacing the
+configured sources' auth status and freshness. Provided because the webapp's
+nginx only proxies `/api/*` through to the server, so the unauthenticated
+`/health` path is unreachable from the browser. The unauthenticated `/health`
+does **not** include the `fitness` block — the per-user filter only applies on
+this route.
+
+The `fitness` block, when populated, has one entry per source the user has
+configured:
+
+```json
+{
+ "fitness": {
+  "strava": {
+   "auth_status": "ok",
+   "last_success_at": "2026-05-09T18:42:11Z",
+   "auth_broken_since": null
+  },
+  "garmin": {
+   "auth_status": "broken",
+   "last_success_at": "2026-05-07T06:11:02Z",
+   "auth_broken_since": "2026-05-08T11:14:33Z"
+  }
+ }
+}
+```
+
+A source is omitted when the user has no `fitness_auth_state` row and no
+`fitness_sync_runs` rows for it (i.e. never connected).
+
+The overall `status` downgrades to `degraded` when any source has been
+`auth_status="broken"` for longer than `FITNESS_HEALTH_BROKEN_DEGRADED_HOURS`
+(default 48). See [`fitness-operations.md`](fitness-operations.md) for the
+operator runbook.
 
 ---
 
@@ -2237,6 +2269,210 @@ candidate by future extraction runs.
 ```
 
 **Response (404):** `{"error": "Decision not found"}` if the decision id is unknown or not owned by the caller.
+
+---
+
+## Fitness endpoints
+
+Five endpoints expose the W4–W13 fitness pipeline. Read routes live in
+`api/fitness.py`; the job-creation `POST /api/fitness/sync/{source}` lives in
+`api/ingestion.py` per the codebase's write-in-ingestion-router convention. For
+the data flow, see [`fitness-pipeline.md`](fitness-pipeline.md); for re-auth,
+backfill, and troubleshooting, see [`fitness-operations.md`](fitness-operations.md).
+
+### GET /api/fitness/activities
+
+Activities (run, ride, swim, walk, hike, strength, other) in a date window.
+
+**Query parameters:**
+
+| Parameter | Type   | Required | Description                                                              |
+| --------- | ------ | -------- | ------------------------------------------------------------------------ |
+| `start`   | string | yes      | Inclusive start date (`YYYY-MM-DD`).                                     |
+| `end`    | string | yes      | Inclusive end date (`YYYY-MM-DD`).                                       |
+| `type`    | string | no       | Filter by canonical activity type. Omit for all types.                   |
+
+**Response (200):**
+
+```json
+{
+ "items": [
+  {
+   "id": 42,
+   "user_id": 1,
+   "source": "strava",
+   "source_id": "16971789898",
+   "activity_type": "run",
+   "source_subtype": "Run",
+   "start_time": "2026-05-09T07:14:33Z",
+   "local_date": "2026-05-09",
+   "duration_s": 1832,
+   "moving_time_s": 1820,
+   "distance_m": 5210.4,
+   "elevation_gain_m": 31.5,
+   "avg_hr_bpm": 154,
+   "max_hr_bpm": 178,
+   "avg_pace_s_per_km": 351.6,
+   "calories_kcal": 412,
+   "perceived_exertion": null,
+   "extras": {},
+   "raw_ref_id": 891,
+   "normalized_at": "2026-05-09T07:25:18Z"
+  }
+ ]
+}
+```
+
+Empty `items` is a valid response — out-of-range windows are not an error.
+
+**Errors:** `400` if `start` or `end` is missing; `503` if services aren't
+initialised (server still booting).
+
+---
+
+### GET /api/fitness/daily
+
+Daily wellness rollups (sleep, HRV, body battery, stress, training load /
+readiness, resting HR) in a date window. Strava does not contribute daily rows;
+this endpoint returns Garmin data exclusively today.
+
+**Query parameters:**
+
+| Parameter | Type   | Required | Description                          |
+| --------- | ------ | -------- | ------------------------------------ |
+| `start`   | string | yes      | Inclusive start date (`YYYY-MM-DD`). |
+| `end`    | string | yes      | Inclusive end date (`YYYY-MM-DD`).   |
+
+**Response (200):**
+
+```json
+{
+ "items": [
+  {
+   "id": 7,
+   "user_id": 1,
+   "source": "garmin",
+   "local_date": "2026-05-09",
+   "sleep_score": 78,
+   "sleep_duration_s": 25200,
+   "sleep_efficiency_pct": 91.2,
+   "hrv_overnight_ms": 78.4,
+   "resting_hr_bpm": 41,
+   "body_battery_high": 72,
+   "body_battery_low": 18,
+   "stress_avg": 24,
+   "training_load_acute": 412,
+   "training_load_chronic": 388,
+   "training_readiness": 73,
+   "extras": {},
+   "raw_ref_ids": [1023, 1024, 1025, 1026, 1027, 1028],
+   "normalized_at": "2026-05-09T08:11:02Z"
+  }
+ ]
+}
+```
+
+`raw_ref_ids` carries one id per upstream daily endpoint (six for Garmin) so
+the soft-pointer integrity check can verify provenance.
+
+---
+
+### GET /api/fitness/sync/status
+
+Per-source snapshot — auth status, last success, and the most recent ten sync
+runs. Mirrors `journal fitness-status`.
+
+**Response (200):**
+
+```json
+{
+ "strava": {
+  "auth_status": "ok",
+  "auth_broken_since": null,
+  "last_success_at": "2026-05-09T18:42:11Z",
+  "last_runs": [
+   {
+    "id": 233,
+    "started_at": "2026-05-09T18:42:08Z",
+    "finished_at": "2026-05-09T18:42:11Z",
+    "status": "success",
+    "rows_fetched": 12,
+    "rows_normalized": 12,
+    "error_class": null,
+    "error_message": null
+   }
+  ]
+ },
+ "garmin": null
+}
+```
+
+A source is `null` (rather than a default-populated dict) when this user has
+neither a `fitness_auth_state` row nor any `fitness_sync_runs` rows for it.
+`null` lets the webapp distinguish "first-use, never connected" from
+"configured but no successful sync yet" — only the first deserves a connect
+CTA.
+
+---
+
+### POST /api/fitness/sync/{source}
+
+Queue a fitness fetch + normalize job for `source` (`"strava"` or `"garmin"`).
+Asynchronous — the job runs through the W8 worker and JobRunner; poll
+`GET /api/jobs/{job_id}` for status.
+
+**Path parameter:**
+
+| Parameter | Type   | Description              |
+| --------- | ------ | ------------------------ |
+| `source`  | string | `"strava"` or `"garmin"` |
+
+**Response (202, queued):**
+
+```json
+{ "job_id": "8e12...", "status": "queued" }
+```
+
+**Response (202, dedup'd against an in-flight job):**
+
+```json
+{ "job_id": "8e12...", "status": "running", "already_running": true }
+```
+
+A single in-flight (`queued` or `running`) job per `(user_id, source)` is
+allowed. Subsequent submits return the existing job id with `already_running:
+true` instead of queueing a duplicate. The W6 fetch service has its own
+single-run guard at the layer below — deduping here keeps the operator-facing
+audit trail clean (one job row per real sync, not one per button-press).
+
+**Errors:**
+
+- `400` `{"error": "Unknown fitness source: ..."}` — `source` is not
+  `"strava"` or `"garmin"`.
+- `503` `{"error": "Strava fitness sync is not configured on this server ..."}`
+  — the source's credential vars (`STRAVA_CLIENT_ID` /
+  `STRAVA_CLIENT_SECRET` for Strava, `GARMIN_USERNAME` / `GARMIN_PASSWORD`
+  for Garmin) are unset. Operator can tell *feature off* from *real bug*.
+
+---
+
+### GET /api/fitness/integrity
+
+Soft-pointer orphan report — normalized rows whose `raw_ref_id` (or any id in
+`raw_ref_ids_json`) doesn't resolve into the matching per-source raw table.
+
+**Response (200):**
+
+```json
+{
+ "activities": [],
+ "daily": []
+}
+```
+
+Empty arrays indicate a clean database. A non-empty entry means a normalized
+row references a raw row that's been deleted or never existed — a data-shape
+regression worth triaging.
 
 ---
 
@@ -2545,6 +2781,109 @@ the webapp started) from inside an MCP conversation.
 **Returns:** the full serialised job dict —
 `{id, type, status, params, progress_current, progress_total, result, error_message, created_at, started_at, finished_at}`.
 If the job is not found, the returned dict is `{"error": "Job not found", "job_id": "..."}`.
+
+## Fitness Tools
+
+MCP twins for the fitness REST endpoints plus three correlation queries that
+are MCP-only. Read tools mirror `GET /api/fitness/*` exactly so callers can
+use either entry point interchangeably. The correlation queries are the
+journal × fitness joins from
+[`fitness-schema.md` §8](fitness-schema.md#8-correlation-queries-proves-schema-supports-them) — that doc is the source of truth for the queries.
+
+### fitness_list_activities
+
+List activities in a date window. Mirrors `GET /api/fitness/activities`.
+
+| Parameter       | Type   | Required | Description                                                                              |
+| --------------- | ------ | -------- | ---------------------------------------------------------------------------------------- |
+| `start`         | string | yes      | Inclusive start date (`YYYY-MM-DD`).                                                     |
+| `end`           | string | yes      | Inclusive end date (`YYYY-MM-DD`).                                                       |
+| `activity_type` | string | no       | Filter by canonical activity type (`run`, `ride`, `swim`, `walk`, `hike`, `strength`, `other`). |
+
+**Returns:** `{"items": [...]}` — same shape as the REST endpoint.
+
+### fitness_list_daily
+
+List daily wellness rollups in a date window. Mirrors `GET /api/fitness/daily`.
+
+| Parameter | Type   | Required | Description                          |
+| --------- | ------ | -------- | ------------------------------------ |
+| `start`   | string | yes      | Inclusive start date (`YYYY-MM-DD`). |
+| `end`     | string | yes      | Inclusive end date (`YYYY-MM-DD`).   |
+
+**Returns:** `{"items": [...]}` — same shape as the REST endpoint.
+
+### fitness_sync_status
+
+Per-source auth + last-runs snapshot. No parameters. Mirrors
+`GET /api/fitness/sync/status` exactly — each of `strava` / `garmin` is
+either `null` (never connected) or a dict with `auth_status`,
+`auth_broken_since`, `last_success_at`, and the last 10 sync runs.
+
+### fitness_integrity_check
+
+Run the soft-pointer integrity check. No parameters. Mirrors
+`GET /api/fitness/integrity`. Returns `{"activities": [...], "daily": [...]}`
+— empty arrays = clean.
+
+### fitness_trigger_sync
+
+Submit a fitness fetch + normalize job for the given source. Mirrors
+`POST /api/fitness/sync/{source}` including the same dedup posture (returns
+the existing job id with `already_running: true` instead of queueing a
+duplicate).
+
+| Parameter | Type   | Required | Description              |
+| --------- | ------ | -------- | ------------------------ |
+| `source`  | string | yes      | `"strava"` or `"garmin"` |
+
+**Returns:** `{"job_id", "status", "already_running"?}` on success;
+`{"error": "...", "job_id": null}` if the source isn't configured on this
+server.
+
+### fitness_correlate_sleep_mood
+
+Daily-grain sleep score × mood (energy & joy). Q1 from
+[`fitness-schema.md` §8](fitness-schema.md#8-correlation-queries-proves-schema-supports-them).
+
+| Parameter | Type   | Required | Description                          |
+| --------- | ------ | -------- | ------------------------------------ |
+| `start`   | string | yes      | Inclusive start date (`YYYY-MM-DD`). |
+| `end`     | string | yes      | Inclusive end date (`YYYY-MM-DD`).   |
+
+**Returns:**
+`{"rows": [{"local_date", "sleep_score", "sleep_efficiency_pct", "energy", "joy"}, ...]}`.
+Days with sleep but no journal entry have `null` mood values.
+
+### fitness_correlate_weekly_runs_stress
+
+Weekly running distance × stress proxy (Monday-of-week buckets). Q2 from
+the schema doc. The `stress_proxy` is the average `frustration` mood-dimension
+score for entries in that week — closest dimension we have to "stress".
+
+| Parameter | Type   | Required | Description                          |
+| --------- | ------ | -------- | ------------------------------------ |
+| `start`   | string | yes      | Inclusive start date (`YYYY-MM-DD`). |
+| `end`     | string | yes      | Inclusive end date (`YYYY-MM-DD`).   |
+
+**Returns:** `{"rows": [{"week_start", "distance_km", "stress_proxy"}, ...]}`.
+`stress_proxy` is `null` for weeks where the user ran but didn't journal.
+
+### fitness_correlate_hrv_mood
+
+Rolling-window HRV × mood (joy & energy). Q3 from the schema doc.
+Materialises a calendar-day series so the rolling window measures *days*,
+not row-count days — missing days neither corrupt the rolling mean nor
+shorten the window.
+
+| Parameter | Type   | Required | Default | Description                                                |
+| --------- | ------ | -------- | ------- | ---------------------------------------------------------- |
+| `start`   | string | yes      |         | Inclusive start date (`YYYY-MM-DD`).                       |
+| `end`     | string | yes      |         | Inclusive end date (`YYYY-MM-DD`).                         |
+| `window`  | int    | no       | `7`     | Rolling-window size in calendar days (schema doc recommends 7 or 14). |
+
+**Returns:** `{"rows": [{"d", "hrv_roll", "joy_roll", "energy_roll"}, ...]}`
+— one row per calendar day in the window.
 
 ## Transport
 

@@ -13,7 +13,7 @@ A single `jobs` table (migration `0006_jobs.sql`) holds one row per submitted ba
 | column             | type    | notes                                                        |
 | ------------------ | ------- | ------------------------------------------------------------ |
 | `id`               | TEXT PK | UUID v4 assigned at submission time                          |
-| `type`             | TEXT    | One of: `entity_extraction`, `mood_backfill`, `mood_score_entry`, `entity_reembed`, `reprocess_embeddings`, `ingest_images`, `ingest_audio`, `save_entry_pipeline` (8 types as of 2026-05-09). |
+| `type`             | TEXT    | One of: `entity_extraction`, `mood_backfill`, `mood_score_entry`, `entity_reembed`, `reprocess_embeddings`, `ingest_images`, `ingest_audio`, `save_entry_pipeline`, `fitness_sync_strava`, `fitness_sync_garmin` (10 types as of 2026-05-10). |
 | `status`           | TEXT    | `queued` → `running` → `succeeded` \| `failed`               |
 | `params_json`      | TEXT    | JSON-encoded submission params (e.g. `{"stale_only": true}`) |
 | `progress_current` | INTEGER | Updated after each entry finishes                            |
@@ -119,6 +119,29 @@ Response on success (**202 Accepted**):
 ```json
 { "job_id": "8e12...", "status": "queued" }
 ```
+
+### `POST /api/fitness/sync/{source}`
+
+Submit a fitness fetch + normalize job. `source` is `"strava"` or `"garmin"`.
+No request body. The job carries only `{"user_id": int}` (validated against
+`FITNESS_SYNC_KEYS`) — the source identity rides in the `type` column
+(`fitness_sync_strava` or `fitness_sync_garmin`), mirroring how
+`mood_score_entry` doesn't carry a `dimension` parameter.
+
+Response on success (**202 Accepted**):
+
+```json
+{ "job_id": "8e12...", "status": "queued" }
+```
+
+A single in-flight (`queued` or `running`) job per `(user_id, source)` is
+allowed; subsequent submits return the existing job id with `"already_running":
+true` instead of queueing a duplicate. **503** is returned when the source's
+credential vars (`STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET` for Strava,
+`GARMIN_USERNAME` / `GARMIN_PASSWORD` for Garmin) are unset — fail-loud at
+submit time per W8 decision #2 rather than queueing a row that's guaranteed to
+fail. The full route shape is documented in
+[`api.md` § Fitness endpoints](api.md#post-apifitnesssyncsource).
 
 ### `GET /api/jobs/{job_id}`
 
@@ -260,6 +283,37 @@ Entity-reembed jobs (triggered by `PATCH /api/entities/{id}` when the descriptio
 The job recomputes the entity's stored embedding from `f"{canonical_name} {description}"` so the stage-c similarity
 match in entity extraction reflects later edits. Notification topic `notif_job_success_entity_reembed` defaults off
 (these fire on every description edit and are routine); failures still go through the global `notif_job_failed`.
+
+`fitness_sync_strava` and `fitness_sync_garmin` jobs store the fetch and normalize summaries:
+
+```json
+{
+ "fetch": {
+  "run_id": 233,
+  "status": "success",
+  "rows_fetched": 12,
+  "started_at": "2026-05-09T18:42:08Z",
+  "finished_at": "2026-05-09T18:42:11Z",
+  "...": "..."
+ },
+ "normalize": {
+  "rows_normalized": 12,
+  "drift_events": []
+ }
+}
+```
+
+When the fetch service short-circuits with `status="running"` (a routine sync
+is already in flight under W6's single-run guard), the job marks succeeded
+with `{"skipped": true, "reason": "already_running", "fetch": {...}}`
+instead of re-running. Auth-broken and transient-failure paths mark the job
+**failed** with operator-facing messages (`"Strava authorization is broken
+— please re-authorize"`, `"Strava sync failed transiently — will retry on
+next run"`); the W6 fetch service has already recorded the run row and
+fired the once-per-transition Pushover before the worker sees the result,
+so the failed jobs row only needs to surface the outcome to the webapp.
+See [`fitness-pipeline.md`](fitness-pipeline.md) for the layer-by-layer
+view.
 
 Consumers should not assume any field beyond these — if the server adds new counters in a future version, clients must
 tolerate unknown keys.

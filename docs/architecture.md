@@ -82,6 +82,26 @@ Adapters for external APIs, each behind a Protocol interface:
 
 - **EntryRepository** — SQLite with FTS5 for structured data and keyword search
 - **VectorStore** — ChromaDB for semantic similarity search
+- **FitnessRepository** — SQLite tables for the fitness pipeline (raw archive
+  per source, normalized activities and daily wellness rollups, auth state,
+  sync-run audit trail). See "Fitness Pipeline" below.
+
+### Fitness Pipeline
+
+A four-layer ingestion pipeline (provider → fetch → raw → normalize) for
+personal fitness data — Strava activities and Garmin Connect activities +
+daily wellness metrics. Lives in `src/journal/{providers,services/fitness,
+db/fitness_repository.py,db/migrations/0023..0025}` plus the `fitness_sync_*`
+job workers and the `api/fitness.py` + MCP twin surfaces.
+
+The pipeline is independent of the journal-text pipeline above. Correlation
+queries (sleep × mood, weekly distance × stress, rolling HRV × mood) live
+in the MCP layer (`mcp_server/tools/fitness.py`). For the data flow, see
+[`fitness-pipeline.md`](fitness-pipeline.md). For schema, see
+[`fitness-schema.md`](fitness-schema.md). For decisions and rationale, see
+[`fitness-integration-plan.md`](fitness-integration-plan.md). For operator
+runbooks (re-auth, backfill, troubleshooting), see
+[`fitness-operations.md`](fitness-operations.md).
 
 ## Data Model: raw_text vs final_text
 

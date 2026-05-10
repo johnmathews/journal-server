@@ -171,6 +171,29 @@ See [`entity-tracking.md`](entity-tracking.md) for the pipeline.
 | --------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `ENTITY_CASING_EXCEPTIONS_PATH`   | `config/entity-casing-exceptions.toml`   | TOML file defining canonical-casing exceptions for `smart_title_case` (e.g. `iPhone`, `eBay`). Reload with `POST /api/admin/reload/entity-casing`. |
 
+## Optional — fitness integration
+
+See [`fitness-pipeline.md`](fitness-pipeline.md) for the data flow,
+[`fitness-operations.md`](fitness-operations.md) for re-auth and backfill
+runbooks, and [`external-services.md`](external-services.md#fitness-data-sources)
+for the Strava + Garmin provider entries.
+
+A source counts as "wired on this server" when both its credential vars are set.
+Without those, `submit_fitness_sync_*` raises a `RuntimeError` and the matching
+REST endpoint returns `503` so operators can tell *feature off* from *bug*.
+
+| Variable                                | Default                                | Description                                                                                                                                                  |
+| --------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `STRAVA_CLIENT_ID`                      |                                        | Strava API app client id from <https://www.strava.com/settings/api>. Required for Strava re-auth and sync.                                                   |
+| `STRAVA_CLIENT_SECRET`                  |                                        | Strava API app client secret. Required for Strava re-auth and sync.                                                                                          |
+| `STRAVA_REDIRECT_URI`                   | `http://localhost:8400/strava/callback`| OAuth callback URL — both the host:port the W11 listener binds and the value embedded in the authorize URL. The host:port must match where the listener can bind (see [`fitness-operations.md` §2b](fitness-operations.md#2b-strava--headless-deployment-server-already-on-8400) for the headless workaround). |
+| `GARMIN_USERNAME`                       |                                        | Garmin Connect login email. Required for Garmin re-auth and sync.                                                                                            |
+| `GARMIN_PASSWORD`                       |                                        | Garmin Connect login password. Required for Garmin re-auth and sync.                                                                                         |
+| `FITNESS_BACKFILL_START`                | `2026-01-01`                           | Default `--start` for `journal fitness-backfill` when no flag is passed. Activities and daily wellness rows from before this date are not retroactively pulled even if they exist upstream. |
+| `FITNESS_TRANSIENT_FAILURE_THRESHOLD`   | `3`                                    | Number of consecutive transient failures before W6 transitions a source to `auth_status="broken"`. Also the streak ceiling backfill aborts at. Must be ≥ 1.  |
+| `FITNESS_HEALTH_BROKEN_DEGRADED_HOURS`  | `48`                                   | Hours a source can be `auth_status="broken"` before `/api/health` downgrades the overall `status` to `degraded`. Must be ≥ 1.                                |
+
+
 ## Runtime-toggleable settings
 
 The following env vars seed the initial value at startup, but are overlaid at runtime by rows in the `runtime_settings`
