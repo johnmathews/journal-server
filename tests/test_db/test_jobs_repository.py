@@ -191,3 +191,136 @@ class TestHasActiveJobsForEntry:
 
     def test_returns_empty_when_no_jobs(self, jobs_repo):
         assert jobs_repo.has_active_jobs_for_entry(42) == []
+
+
+class TestFindActiveFitnessFetchJob:
+    """W5 — the spanning idempotency helper finds any queued/running
+    sync OR backfill job for ``(user_id, source)``.
+    """
+
+    def test_returns_none_when_nothing_in_flight(self, jobs_repo):
+        assert (
+            jobs_repo.find_active_fitness_fetch_job(user_id=1, source="strava")
+            is None
+        )
+
+    def test_finds_queued_sync_job(self, jobs_repo):
+        sync = jobs_repo.create(
+            "fitness_sync_strava", {"user_id": 1}, user_id=1,
+        )
+        found = jobs_repo.find_active_fitness_fetch_job(
+            user_id=1, source="strava",
+        )
+        assert found is not None
+        assert found.id == sync.id
+
+    def test_finds_running_backfill_job(self, jobs_repo):
+        bf = jobs_repo.create(
+            "fitness_backfill_strava",
+            {"user_id": 1, "start": "2026-01-01"},
+            user_id=1,
+        )
+        jobs_repo.mark_running(bf.id)
+        found = jobs_repo.find_active_fitness_fetch_job(
+            user_id=1, source="strava",
+        )
+        assert found is not None
+        assert found.id == bf.id
+        assert found.status == "running"
+
+    def test_sync_blocks_backfill_submit_check(self, jobs_repo):
+        """A queued sync should appear when a backfill caller checks —
+        the dedup spans both worker classes."""
+        sync = jobs_repo.create(
+            "fitness_sync_garmin", {"user_id": 1}, user_id=1,
+        )
+        jobs_repo.mark_running(sync.id)
+        # Caller is about to submit a backfill — uses the same helper.
+        found = jobs_repo.find_active_fitness_fetch_job(
+            user_id=1, source="garmin",
+        )
+        assert found is not None
+        assert found.id == sync.id
+        assert found.type == "fitness_sync_garmin"
+
+    def test_backfill_blocks_sync_submit_check(self, jobs_repo):
+        bf = jobs_repo.create(
+            "fitness_backfill_garmin",
+            {"user_id": 1, "start": "2026-01-01"},
+            user_id=1,
+        )
+        found = jobs_repo.find_active_fitness_fetch_job(
+            user_id=1, source="garmin",
+        )
+        assert found is not None
+        assert found.id == bf.id
+        assert found.type == "fitness_backfill_garmin"
+
+    def test_terminal_jobs_do_not_block(self, jobs_repo):
+        sync = jobs_repo.create(
+            "fitness_sync_strava", {"user_id": 1}, user_id=1,
+        )
+        jobs_repo.mark_succeeded(sync.id, {"ok": True})
+        bf = jobs_repo.create(
+            "fitness_backfill_strava",
+            {"user_id": 1, "start": "2026-01-01"},
+            user_id=1,
+        )
+        jobs_repo.mark_failed(bf.id, "boom")
+        assert (
+            jobs_repo.find_active_fitness_fetch_job(user_id=1, source="strava")
+            is None
+        )
+
+    def test_scoped_per_user(self, jobs_repo, db_conn):
+        # User 2's running sync must not block user 1. Seed user 2 first
+        # to satisfy the jobs.user_id FK against users(id).
+        db_conn.execute(
+            "INSERT OR IGNORE INTO users (id, email, password_hash, "
+            "display_name, email_verified, is_admin) "
+            "VALUES (2, 'u2@example.com', 'x', 'u2', 1, 0)",
+        )
+        db_conn.commit()
+        sync_u2 = jobs_repo.create(
+            "fitness_sync_strava", {"user_id": 2}, user_id=2,
+        )
+        jobs_repo.mark_running(sync_u2.id)
+        assert (
+            jobs_repo.find_active_fitness_fetch_job(user_id=1, source="strava")
+            is None
+        )
+        found = jobs_repo.find_active_fitness_fetch_job(
+            user_id=2, source="strava",
+        )
+        assert found is not None
+        assert found.id == sync_u2.id
+
+    def test_scoped_per_source(self, jobs_repo):
+        # A Garmin sync must not block a Strava submit check.
+        jobs_repo.create(
+            "fitness_sync_garmin", {"user_id": 1}, user_id=1,
+        )
+        assert (
+            jobs_repo.find_active_fitness_fetch_job(user_id=1, source="strava")
+            is None
+        )
+
+    def test_returns_oldest_when_multiple_in_flight(self, jobs_repo):
+        """If two rows exist (race condition outcome), the first-enqueued
+        wins per the W5 policy — ``ORDER BY created_at ASC``."""
+        import time
+        first = jobs_repo.create(
+            "fitness_sync_strava", {"user_id": 1}, user_id=1,
+        )
+        # Ensure created_at moves forward (resolution may be coarse).
+        time.sleep(0.01)
+        jobs_repo.create(
+            "fitness_backfill_strava",
+            {"user_id": 1, "start": "2026-01-01"},
+            user_id=1,
+        )
+        found = jobs_repo.find_active_fitness_fetch_job(
+            user_id=1, source="strava",
+        )
+        assert found is not None
+        assert found.id == first.id

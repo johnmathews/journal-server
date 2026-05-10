@@ -69,6 +69,15 @@ FITNESS_SYNC_KEYS: dict[str, type | tuple[type, ...]] = {
     "user_id": int,
 }
 
+# Fitness backfill (W5) wraps services/fitness/backfill.py — same
+# source-in-the-type-name pattern; the params describe the date window.
+# ``end`` is optional and defaults to today (UTC) inside the orchestrator.
+FITNESS_BACKFILL_KEYS: dict[str, type | tuple[type, ...]] = {
+    "user_id": int,
+    "start": str,
+    "end": str,
+}
+
 
 def validate_params(
     params: dict[str, Any],

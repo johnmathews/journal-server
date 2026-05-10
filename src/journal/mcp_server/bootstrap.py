@@ -74,6 +74,10 @@ def _build_fitness_callables(
     from journal.models import FitnessAuthState
     from journal.providers.garmin import GarminConnectGarminProvider
     from journal.providers.strava import StravalibStravaProvider, Tokens
+    from journal.services.fitness.backfill import (
+        backfill_garmin,
+        backfill_strava,
+    )
     from journal.services.fitness.fetch import (
         GarminFetchService,
         StravaFetchService,
@@ -87,6 +91,8 @@ def _build_fitness_callables(
         "fetch_garmin_callable": None,
         "normalize_strava_callable": None,
         "normalize_garmin_callable": None,
+        "backfill_strava_callable": None,
+        "backfill_garmin_callable": None,
     }
 
     strava_configured = bool(
@@ -147,6 +153,23 @@ def _build_fitness_callables(
                 **kw,
             )
         )
+        # W5 backfill — wraps the existing CLI orchestrator with the
+        # same fetch service so resume / abort semantics are identical
+        # to ``journal fitness-backfill``. ``end=None`` means "today
+        # (UTC)" inside the orchestrator.
+        def _backfill_strava(
+            *, user_id: int, start: str, end: str | None = None,
+        ) -> Any:
+            return backfill_strava(
+                user_id=user_id,
+                repo=fitness_repo,
+                fetch_service=strava_fetch,
+                notifier=notification_service,
+                start=start,
+                end=end,
+            )
+
+        out["backfill_strava_callable"] = _backfill_strava
 
     garmin_configured = bool(
         config.garmin_username and config.garmin_password,
@@ -200,6 +223,20 @@ def _build_fitness_callables(
                 **kw,
             )
         )
+
+        def _backfill_garmin(
+            *, user_id: int, start: str, end: str | None = None,
+        ) -> Any:
+            return backfill_garmin(
+                user_id=user_id,
+                repo=fitness_repo,
+                fetch_service=garmin_fetch,
+                notifier=notification_service,
+                start=start,
+                end=end,
+            )
+
+        out["backfill_garmin_callable"] = _backfill_garmin
 
     return out
 

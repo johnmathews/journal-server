@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from journal.db.repository import EntryRepository
     from journal.services.backfill import MoodBackfillResult
     from journal.services.entity_extraction import EntityExtractionService
+    from journal.services.fitness.backfill import BackfillResult
     from journal.services.fitness.fetch import FitnessSyncResult
     from journal.services.fitness.normalize import NormalizeResult
     from journal.services.ingestion import IngestionService
@@ -69,3 +70,11 @@ class WorkerContext:
     fetch_garmin: Callable[..., FitnessSyncResult] | None = None
     normalize_strava: Callable[..., NormalizeResult] | None = None
     normalize_garmin: Callable[..., NormalizeResult] | None = None
+    # Fitness backfill seams (W5). Wrap
+    # ``services/fitness/backfill.{backfill_strava,backfill_garmin}``
+    # with the per-source fetch service + repo + notifier already
+    # bound; the worker only supplies ``user_id``, ``start``, ``end``.
+    # ``None`` when the source isn't configured on this server (same
+    # opt-in gate as the fetch_*/normalize_* callables above).
+    backfill_strava: Callable[..., BackfillResult] | None = None
+    backfill_garmin: Callable[..., BackfillResult] | None = None

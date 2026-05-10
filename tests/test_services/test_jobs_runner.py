@@ -258,6 +258,8 @@ def runner_factory(jobs_repo, threadsafe_conn):
         fetch_garmin_callable: Any = None,
         normalize_strava_callable: Any = None,
         normalize_garmin_callable: Any = None,
+        backfill_strava_callable: Any = None,
+        backfill_garmin_callable: Any = None,
     ) -> JobRunner:
         runner = JobRunner(
             job_repository=jobs_repo,
@@ -273,6 +275,8 @@ def runner_factory(jobs_repo, threadsafe_conn):
             fetch_garmin_callable=fetch_garmin_callable,
             normalize_strava_callable=normalize_strava_callable,
             normalize_garmin_callable=normalize_garmin_callable,
+            backfill_strava_callable=backfill_strava_callable,
+            backfill_garmin_callable=backfill_garmin_callable,
         )
         created.append(runner)
         return runner
@@ -1757,3 +1761,108 @@ class TestFitnessSync:
         )
         with pytest.raises(ValueError, match="user_id"):
             runner.submit_fitness_sync_strava(user_id="42")  # type: ignore[arg-type]
+
+
+class TestFitnessBackfill:
+    """W5 — ``submit_fitness_backfill_strava`` / ``submit_fitness_backfill_garmin``
+    queue jobs that run the existing CLI backfill orchestrator inside
+    the JobRunner.
+    """
+
+    def test_submit_strava_backfill_creates_queued_job(
+        self, runner_factory, jobs_repo,
+    ) -> None:
+        from journal.services.fitness.backfill import BackfillResult
+
+        calls: list[dict[str, Any]] = []
+
+        def fake_backfill(**kwargs: Any) -> BackfillResult:
+            calls.append(kwargs)
+            return BackfillResult(
+                source="strava", final_status="complete",
+                windows_attempted=1, windows_succeeded=1,
+                rows_fetched=2, rows_normalized=2,
+            )
+
+        runner = runner_factory(backfill_strava_callable=fake_backfill)
+        job = runner.submit_fitness_backfill_strava(
+            user_id=1, start="2026-01-01", end="2026-02-01",
+        )
+        assert job.type == "fitness_backfill_strava"
+        assert job.params == {
+            "user_id": 1, "start": "2026-01-01", "end": "2026-02-01",
+        }
+        _wait_terminal(jobs_repo, job.id)
+        runner.shutdown(wait=True)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "succeeded"
+        assert final.result["final_status"] == "complete"
+        assert calls == [
+            {"user_id": 1, "start": "2026-01-01", "end": "2026-02-01"},
+        ]
+
+    def test_submit_garmin_backfill_creates_queued_job(
+        self, runner_factory, jobs_repo,
+    ) -> None:
+        from journal.services.fitness.backfill import BackfillResult
+
+        def fake_backfill(**_kw: Any) -> BackfillResult:
+            return BackfillResult(
+                source="garmin", final_status="complete",
+                windows_attempted=1, windows_succeeded=1,
+                rows_fetched=3, rows_normalized=3,
+            )
+
+        runner = runner_factory(backfill_garmin_callable=fake_backfill)
+        job = runner.submit_fitness_backfill_garmin(
+            user_id=1, start="2026-01-01",
+        )
+        # Optional end omitted — params should not carry the key.
+        assert job.type == "fitness_backfill_garmin"
+        assert job.params == {"user_id": 1, "start": "2026-01-01"}
+        _wait_terminal(jobs_repo, job.id)
+        runner.shutdown(wait=True)
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "succeeded"
+
+    def test_submit_strava_backfill_raises_when_not_configured(
+        self, runner_factory,
+    ) -> None:
+        runner = runner_factory()  # no backfill callables
+        with pytest.raises(RuntimeError, match="not configured"):
+            runner.submit_fitness_backfill_strava(
+                user_id=1, start="2026-01-01",
+            )
+
+    def test_submit_garmin_backfill_raises_when_not_configured(
+        self, runner_factory,
+    ) -> None:
+        runner = runner_factory()
+        with pytest.raises(RuntimeError, match="not configured"):
+            runner.submit_fitness_backfill_garmin(
+                user_id=1, start="2026-01-01",
+            )
+
+    def test_submit_backfill_validates_param_types(
+        self, runner_factory,
+    ) -> None:
+        from journal.services.fitness.backfill import BackfillResult
+
+        runner = runner_factory(
+            backfill_strava_callable=lambda **_kw: BackfillResult(
+                source="strava", final_status="complete",
+                windows_attempted=0, windows_succeeded=0,
+                rows_fetched=0, rows_normalized=0,
+            ),
+        )
+        with pytest.raises(ValueError, match="user_id"):
+            runner.submit_fitness_backfill_strava(
+                user_id="42", start="2026-01-01",  # type: ignore[arg-type]
+            )
+        with pytest.raises(ValueError, match="start"):
+            runner.submit_fitness_backfill_strava(
+                user_id=1, start=123,  # type: ignore[arg-type]
+            )

@@ -180,6 +180,26 @@ class FitnessRepository:
             ).fetchone()
         return _row_to_auth_state(row) if row else None
 
+    def get_auth_status(
+        self, *, user_id: int, source: str,
+    ) -> str | None:
+        """Cheap projection: just the ``auth_status`` column (or ``None``
+        when the row has been deleted).
+
+        Workers use this between provider calls to detect a mid-run
+        disconnect or auth-broken transition without paying for the full
+        :meth:`get_auth_state` JSON parse on every iteration. Returns
+        the literal column value (``"unknown" | "ok" | "broken"``) or
+        ``None`` if no row exists for this ``(user_id, source)``.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT auth_status FROM fitness_auth_state "
+                "WHERE user_id = ? AND source = ?",
+                (user_id, source),
+            ).fetchone()
+        return row["auth_status"] if row else None
+
     def upsert_auth_state(self, state: FitnessAuthState) -> None:
         """Insert or update one auth-state row. Always sets
         ``updated_at`` to now (per schema §4 — app-managed)."""

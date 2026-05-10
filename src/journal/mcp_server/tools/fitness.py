@@ -158,12 +158,12 @@ def fitness_trigger_sync(
 ) -> dict[str, Any]:
     """Submit a fitness fetch+normalize job for the given source.
 
-    Mirrors ``POST /api/fitness/sync/{source}`` including the dedup
-    posture: if a fitness sync for this user and source is already
-    in flight (``queued`` or ``running``), the existing ``job_id``
-    is returned with ``already_running: true`` instead of queueing a
-    duplicate. The job runs asynchronously — use
-    ``journal_get_job_status`` (jobs tool) to check progress.
+    Mirrors ``POST /api/fitness/sync/{source}`` including the W5
+    spanning dedup posture: if **any** in-flight fetch job for this
+    user and source (sync **or** backfill) already exists, the
+    existing ``job_id`` is returned with ``already_running: true``
+    instead of queueing a duplicate. The job runs asynchronously —
+    use ``journal_get_job_status`` (jobs tool) to check progress.
 
     Args:
         source: Either ``"strava"`` or ``"garmin"``.
@@ -181,20 +181,18 @@ def fitness_trigger_sync(
             "job_id": None,
         }
     user_id = _user_id(ctx)
-    job_type = f"fitness_sync_{source}"
     job_repository = _get_job_repository(ctx)
-    # Dedup against existing in-flight job (same posture as the REST route).
-    for status in ("queued", "running"):
-        jobs, _ = job_repository.list_jobs(
-            status=status, job_type=job_type, user_id=user_id, limit=1,
-        )
-        if jobs:
-            existing = jobs[0]
-            return {
-                "job_id": existing.id,
-                "status": existing.status,
-                "already_running": True,
-            }
+    # W5: spanning dedup — sync ↔ backfill collisions both return the
+    # in-flight job rather than enqueueing a duplicate.
+    in_flight = job_repository.find_active_fitness_fetch_job(
+        user_id=user_id, source=source,
+    )
+    if in_flight is not None:
+        return {
+            "job_id": in_flight.id,
+            "status": in_flight.status,
+            "already_running": True,
+        }
 
     runner = _get_job_runner(ctx)
     submit = (
@@ -206,6 +204,76 @@ def fitness_trigger_sync(
         job = submit(user_id=user_id)
     except RuntimeError as e:
         # Source not wired on this server (no STRAVA_CLIENT_ID etc.).
+        return {"error": str(e), "job_id": None}
+    return {"job_id": job.id, "status": job.status}
+
+
+@mcp.tool()
+def fitness_trigger_backfill(
+    source: str,
+    start: str,
+    end: str | None = None,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """Submit a historical backfill job (W5).
+
+    Mirrors ``POST /api/fitness/backfill/{source}`` and shares the W5
+    spanning idempotency with :func:`fitness_trigger_sync` — only one
+    fetch job per ``(user_id, source)`` runs at a time, across both
+    sync and backfill worker classes.
+
+    Args:
+        source: Either ``"strava"`` or ``"garmin"``.
+        start: Inclusive start date (``"YYYY-MM-DD"``).
+        end: Inclusive end date (``"YYYY-MM-DD"``). Defaults to today
+            (UTC) when omitted.
+
+    Returns:
+        ``{"job_id", "status", ...}`` on success;
+        ``{"error": "...", "job_id": None}`` if the source isn't
+        configured on this server, or validation fails.
+    """
+    log.info(
+        "Tool call: fitness_trigger_backfill(source=%s, start=%s, end=%s)",
+        source, start, end,
+    )
+    if source not in _VALID_SOURCES:
+        return {
+            "error": f"Unknown fitness source: {source!r}",
+            "job_id": None,
+        }
+    if not isinstance(start, str) or not start:
+        return {
+            "error": "'start' is required and must be a YYYY-MM-DD string",
+            "job_id": None,
+        }
+    # Defer richer date-format validation to the runner / orchestrator
+    # so the MCP surface stays thin; the orchestrator parses with
+    # ``date.fromisoformat`` and surfaces ValueError, which the runner
+    # turns into a friendly job-failure message.
+    user_id = _user_id(ctx)
+    job_repository = _get_job_repository(ctx)
+    in_flight = job_repository.find_active_fitness_fetch_job(
+        user_id=user_id, source=source,
+    )
+    if in_flight is not None:
+        return {
+            "job_id": in_flight.id,
+            "status": in_flight.status,
+            "already_running": True,
+        }
+
+    runner = _get_job_runner(ctx)
+    submit = (
+        runner.submit_fitness_backfill_strava
+        if source == "strava"
+        else runner.submit_fitness_backfill_garmin
+    )
+    try:
+        job = submit(user_id=user_id, start=start, end=end)
+    except RuntimeError as e:
+        return {"error": str(e), "job_id": None}
+    except ValueError as e:
         return {"error": str(e), "job_id": None}
     return {"job_id": job.id, "status": job.status}
 

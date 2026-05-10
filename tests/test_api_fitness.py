@@ -116,6 +116,7 @@ def configured_runner(
     """JobRunner wired with no-op fitness callables so submit_fitness_sync_*
     accepts the request. The callables return a result that mirrors
     a successful zero-row sync."""
+    from journal.services.fitness.backfill import BackfillResult
     from journal.services.fitness.fetch import FitnessSyncResult
     from journal.services.fitness.normalize import NormalizeResult
 
@@ -133,6 +134,19 @@ def configured_runner(
         _normalize.__name__ = f"_normalize_{source}"
         return _normalize
 
+    def _make_backfill(source: str):
+        def _backfill(
+            *, user_id: int, start: str, end: str | None = None,
+        ) -> BackfillResult:
+            return BackfillResult(
+                source=source,  # type: ignore[arg-type]
+                final_status="complete",
+                windows_attempted=1, windows_succeeded=1,
+                rows_fetched=0, rows_normalized=0,
+            )
+        _backfill.__name__ = f"_backfill_{source}"
+        return _backfill
+
     runner = JobRunner(
         job_repository=jobs_repository,
         entity_extraction_service=object(),  # type: ignore[arg-type]
@@ -143,6 +157,8 @@ def configured_runner(
         fetch_garmin_callable=_make_fetch("garmin"),
         normalize_strava_callable=_make_normalize("strava"),
         normalize_garmin_callable=_make_normalize("garmin"),
+        backfill_strava_callable=_make_backfill("strava"),
+        backfill_garmin_callable=_make_backfill("garmin"),
     )
     yield runner
     runner.shutdown(wait=True)
@@ -618,3 +634,152 @@ def test_integrity_with_orphans(
     daily_orphan = body["daily"][0]
     assert daily_orphan["source"] == "garmin"
     assert daily_orphan["missing_raw_ids"] == [88888]
+
+
+# --------------------------------------------------------------------
+# POST /api/fitness/backfill/{source}   (W5)
+# --------------------------------------------------------------------
+
+
+def test_backfill_post_strava_returns_202_with_job_id(
+    configured_client: TestClient,
+) -> None:
+    resp = configured_client.post(
+        "/api/fitness/backfill/strava",
+        json={"start": "2026-01-01", "end": "2026-02-01"},
+    )
+    assert resp.status_code == 202
+    body = resp.json()
+    assert "job_id" in body
+    assert body["status"] in ("queued", "running", "succeeded")
+
+
+def test_backfill_post_garmin_returns_202_with_job_id(
+    configured_client: TestClient,
+) -> None:
+    resp = configured_client.post(
+        "/api/fitness/backfill/garmin",
+        json={"start": "2026-01-01"},  # end optional
+    )
+    assert resp.status_code == 202
+    assert "job_id" in resp.json()
+
+
+def test_backfill_post_unknown_source_400(
+    configured_client: TestClient,
+) -> None:
+    resp = configured_client.post(
+        "/api/fitness/backfill/whoop", json={"start": "2026-01-01"},
+    )
+    assert resp.status_code == 400
+    assert "source" in resp.json()["error"].lower()
+
+
+def test_backfill_post_missing_start_400(
+    configured_client: TestClient,
+) -> None:
+    resp = configured_client.post("/api/fitness/backfill/strava", json={})
+    assert resp.status_code == 400
+    assert "start" in resp.json()["error"].lower()
+
+
+def test_backfill_post_malformed_start_date_400(
+    configured_client: TestClient,
+) -> None:
+    resp = configured_client.post(
+        "/api/fitness/backfill/strava",
+        json={"start": "not-a-date"},
+    )
+    assert resp.status_code == 400
+    assert "yyyy-mm-dd" in resp.json()["error"].lower()
+
+
+def test_backfill_post_end_before_start_400(
+    configured_client: TestClient,
+) -> None:
+    resp = configured_client.post(
+        "/api/fitness/backfill/strava",
+        json={"start": "2026-03-01", "end": "2026-01-01"},
+    )
+    assert resp.status_code == 400
+    assert "end" in resp.json()["error"].lower()
+
+
+def test_backfill_post_unconfigured_source_503(
+    client: TestClient,  # unconfigured runner
+) -> None:
+    resp = client.post(
+        "/api/fitness/backfill/strava",
+        json={"start": "2026-01-01"},
+    )
+    assert resp.status_code == 503
+    assert "not configured" in resp.json()["error"].lower()
+
+
+def test_backfill_post_returns_existing_running_sync_job_id(
+    configured_services: dict,
+    jobs_repository: SQLiteJobRepository,
+) -> None:
+    """W5 spanning idempotency, direction A: a running ``fitness_sync_strava``
+    job blocks a backfill submit; the existing sync job_id comes back."""
+    existing = jobs_repository.create(
+        "fitness_sync_strava", {"user_id": _TEST_USER_ID},
+        user_id=_TEST_USER_ID,
+    )
+    jobs_repository.mark_running(existing.id)
+
+    with _build_client(configured_services) as tc:
+        resp = tc.post(
+            "/api/fitness/backfill/strava",
+            json={"start": "2026-01-01"},
+        )
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["job_id"] == existing.id
+        assert body["status"] == "running"
+        assert body.get("already_running") is True
+
+
+def test_sync_post_returns_existing_running_backfill_job_id(
+    configured_services: dict,
+    jobs_repository: SQLiteJobRepository,
+) -> None:
+    """W5 spanning idempotency, direction B: a queued
+    ``fitness_backfill_strava`` blocks a sync submit; the existing
+    backfill job_id comes back."""
+    existing = jobs_repository.create(
+        "fitness_backfill_strava",
+        {"user_id": _TEST_USER_ID, "start": "2026-01-01"},
+        user_id=_TEST_USER_ID,
+    )
+
+    with _build_client(configured_services) as tc:
+        resp = tc.post("/api/fitness/sync/strava")
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["job_id"] == existing.id
+        assert body["status"] == "queued"
+        assert body.get("already_running") is True
+
+
+def test_backfill_post_returns_existing_queued_backfill_job_id(
+    configured_services: dict,
+    jobs_repository: SQLiteJobRepository,
+) -> None:
+    """Same-class collision: a queued backfill returns its own job id
+    when a second backfill submit hits."""
+    existing = jobs_repository.create(
+        "fitness_backfill_garmin",
+        {"user_id": _TEST_USER_ID, "start": "2026-01-01"},
+        user_id=_TEST_USER_ID,
+    )
+
+    with _build_client(configured_services) as tc:
+        resp = tc.post(
+            "/api/fitness/backfill/garmin",
+            json={"start": "2026-02-01"},
+        )
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["job_id"] == existing.id
+        assert body.get("already_running") is True

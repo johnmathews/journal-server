@@ -16,6 +16,7 @@ Concretely, this module owns:
 - ``POST /api/entities/extract``     — async entity-extraction batch job
 - ``POST /api/mood/backfill``        — async mood-score backfill job
 - ``POST /api/fitness/sync/{source}`` — async fitness fetch+normalize job
+- ``POST /api/fitness/backfill/{source}`` — async fitness historical backfill job
 
 Why these and not their URL-prefix neighbours? They share a dependency
 cluster (``IngestionService``, ``JobRunner``, OCR / transcription /
@@ -624,24 +625,18 @@ def register_ingestion_routes(
                 status_code=400,
             )
 
-        job_type = f"fitness_sync_{source}"
         job_repository = services["job_repository"]
-        # Dedup: a single in-flight (queued or running) job per user+source.
-        # ``list_jobs`` only filters one status at a time, so we union the
-        # two queries client-side. The result set per user is tiny (sync
-        # runs every few minutes) so this stays cheap.
-        existing = []
-        for status in ("queued", "running"):
-            jobs, _ = job_repository.list_jobs(
-                status=status, job_type=job_type, user_id=user_id, limit=1,
-            )
-            existing.extend(jobs)
-        if existing:
-            in_flight = existing[0]
+        # W5: dedup spans both worker classes — a sync submitted while a
+        # backfill is in flight (or vice versa) returns the existing
+        # job_id. See SQLiteJobRepository.find_active_fitness_fetch_job.
+        in_flight = job_repository.find_active_fitness_fetch_job(
+            user_id=user_id, source=source,
+        )
+        if in_flight is not None:
             log.info(
-                "POST /api/fitness/sync/%s — returning existing in-flight job %s "
-                "(status=%s)",
-                source, in_flight.id, in_flight.status,
+                "POST /api/fitness/sync/%s — returning existing in-flight "
+                "fetch job %s (type=%s, status=%s)",
+                source, in_flight.id, in_flight.type, in_flight.status,
             )
             return JSONResponse(
                 {
@@ -670,6 +665,130 @@ def register_ingestion_routes(
             return JSONResponse({"error": str(e)}, status_code=400)
 
         log.info("POST /api/fitness/sync/%s — queued job %s", source, job.id)
+        return JSONResponse(
+            {"job_id": job.id, "status": job.status},
+            status_code=202,
+        )
+
+    @mcp.custom_route(
+        "/api/fitness/backfill/{source:str}",
+        methods=["POST"],
+        name="api_fitness_backfill",
+    )
+    async def fitness_backfill(request: Request) -> JSONResponse:
+        """Queue a historical backfill job for ``source`` (W5).
+
+        Body: ``{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"?}``. Returns
+        ``{job_id, status}`` on 202. Shares the W5 spanning idempotency
+        with ``POST /api/fitness/sync/{source}`` — only one fetch job
+        per ``(user_id, source)`` may be in flight at once, and a sync
+        in flight blocks a backfill (and vice versa). When a colliding
+        job is found, the existing ``{job_id, status, already_running:
+        true}`` is returned instead of queueing a duplicate.
+
+        The job runs the same orchestrator that backs the
+        ``journal fitness-backfill`` CLI, so resume / abort /
+        transient-streak semantics are identical.
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+        user = get_authenticated_user(request)
+        user_id = user.user_id
+        source = str(request.path_params["source"])
+        if source not in ("strava", "garmin"):
+            return JSONResponse(
+                {"error": f"Unknown fitness source: {source!r}"},
+                status_code=400,
+            )
+
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return JSONResponse(
+                {"error": "Request body must be valid JSON"},
+                status_code=400,
+            )
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "Request body must be a JSON object"},
+                status_code=400,
+            )
+
+        start = body.get("start")
+        end = body.get("end")
+        if not isinstance(start, str) or not start:
+            return JSONResponse(
+                {"error": "'start' is required and must be a YYYY-MM-DD string"},
+                status_code=400,
+            )
+        if end is not None and (not isinstance(end, str) or not end):
+            return JSONResponse(
+                {"error": "'end' must be a YYYY-MM-DD string when provided"},
+                status_code=400,
+            )
+
+        # Validate date strings + ordering. ISO parsing surfaces typos
+        # before we burn a job row that would crash inside the worker.
+        try:
+            start_d = datetime.strptime(start, "%Y-%m-%d").date()
+        except ValueError:
+            return JSONResponse(
+                {"error": f"'start' must be YYYY-MM-DD, got {start!r}"},
+                status_code=400,
+            )
+        if end is not None:
+            try:
+                end_d = datetime.strptime(end, "%Y-%m-%d").date()
+            except ValueError:
+                return JSONResponse(
+                    {"error": f"'end' must be YYYY-MM-DD, got {end!r}"},
+                    status_code=400,
+                )
+            if end_d < start_d:
+                return JSONResponse(
+                    {"error": "'end' must be on or after 'start'"},
+                    status_code=400,
+                )
+
+        job_repository = services["job_repository"]
+        in_flight = job_repository.find_active_fitness_fetch_job(
+            user_id=user_id, source=source,
+        )
+        if in_flight is not None:
+            log.info(
+                "POST /api/fitness/backfill/%s — returning existing in-flight "
+                "fetch job %s (type=%s, status=%s)",
+                source, in_flight.id, in_flight.type, in_flight.status,
+            )
+            return JSONResponse(
+                {
+                    "job_id": in_flight.id,
+                    "status": in_flight.status,
+                    "already_running": True,
+                },
+                status_code=202,
+            )
+
+        job_runner: JobRunner = services["job_runner"]
+        submit = (
+            job_runner.submit_fitness_backfill_strava
+            if source == "strava"
+            else job_runner.submit_fitness_backfill_garmin
+        )
+        try:
+            job = submit(user_id=user_id, start=start, end=end)
+        except RuntimeError as e:
+            log.warning("POST /api/fitness/backfill/%s — %s", source, e)
+            return JSONResponse({"error": str(e)}, status_code=503)
+        except ValueError as e:
+            log.warning("POST /api/fitness/backfill/%s — %s", source, e)
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+        log.info(
+            "POST /api/fitness/backfill/%s — queued job %s (start=%s end=%s)",
+            source, job.id, start, end,
+        )
         return JSONResponse(
             {"job_id": job.id, "status": job.status},
             status_code=202,
