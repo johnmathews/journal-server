@@ -192,7 +192,7 @@ def cmd_fitness_reauth_strava(args: argparse.Namespace, config: Config) -> None:
         print("\nCancelled — no tokens written.", file=sys.stderr)
         sys.exit(130)
 
-    tokens = exchange_code(
+    tokens, athlete_id = exchange_code(
         client_id=config.strava_client_id,
         client_secret=config.strava_client_secret,
         code=code,
@@ -203,6 +203,12 @@ def cmd_fitness_reauth_strava(args: argparse.Namespace, config: Config) -> None:
     run_migrations(conn)
     repo = FitnessRepository(conn)
     existing = repo.get_auth_state(user_id=user_id, source="strava")
+    extra = dict(existing.extra_state) if existing else {}
+    # Capture the upstream athlete id (D8) so a later reconnect with a
+    # different Strava account is detected. The CLI path is operator-driven,
+    # but the captured field is checked in the W3 webapp endpoint too.
+    if athlete_id is not None:
+        extra["upstream_user_id"] = athlete_id
     repo.upsert_auth_state(
         FitnessAuthState(
             user_id=user_id,
@@ -210,7 +216,7 @@ def cmd_fitness_reauth_strava(args: argparse.Namespace, config: Config) -> None:
             access_token=tokens["access_token"],
             refresh_token=tokens["refresh_token"],
             token_expires_at=tokens["token_expires_at"],
-            extra_state=dict(existing.extra_state) if existing else {},
+            extra_state=extra,
             last_successful_login_at=_now_iso(),
             last_refresh_at=existing.last_refresh_at if existing else None,
             auth_status="ok",

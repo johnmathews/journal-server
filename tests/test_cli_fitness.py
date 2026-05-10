@@ -104,7 +104,8 @@ def test_fitness_reauth_strava_happy_path(fitness_env, capsys):
     )
     with patch("journal.cli.fitness._oauth_listener", return_value="TEST_CODE"), \
          patch(
-             "journal.cli.fitness.exchange_code", return_value=fake_tokens,
+             "journal.cli.fitness.exchange_code",
+             return_value=(fake_tokens, "777777"),
          ) as mock_exchange:
         sys.argv = ["journal", "fitness-reauth-strava"]
         main()
@@ -121,6 +122,8 @@ def test_fitness_reauth_strava_happy_path(fitness_env, capsys):
     assert state.auth_status == "ok"
     assert state.auth_broken_since is None
     assert state.last_successful_login_at is not None
+    # Athlete id captured from the W3 return-tuple shape (D8 retrofit).
+    assert state.extra_state.get("upstream_user_id") == "777777"
 
 
 def test_fitness_reauth_strava_user_cancellation(fitness_env, capsys):
@@ -156,8 +159,13 @@ def test_fitness_reauth_strava_preserves_existing_extra_state(fitness_env):
         access_token="NEW", refresh_token="NEW",
         token_expires_at="2026-06-01T00:00:00Z",
     )
+    # Pass athlete_id=None so this test isolates extra_state preservation
+    # from the upstream-id capture path covered above.
     with patch("journal.cli.fitness._oauth_listener", return_value="C"), \
-         patch("journal.cli.fitness.exchange_code", return_value=fake_tokens):
+         patch(
+             "journal.cli.fitness.exchange_code",
+             return_value=(fake_tokens, None),
+         ):
         sys.argv = ["journal", "fitness-reauth-strava"]
         main()
 

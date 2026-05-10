@@ -206,6 +206,41 @@ holds the live `Garmin` client between the connect and MFA endpoints. Entries
 expire after 10 minutes and are user-bound — surviving server restarts is not
 in scope (the user just repeats the connect form).
 
+### 2e. Connecting Strava via the webapp (W3 — preview)
+
+W3 of the multi-user plan ships the symmetric per-user, in-app Strava connect
+flow. From W3 onwards each user can authorise their own Strava account through
+the webapp without sharing the laptop OAuth listener path. The supporting
+endpoints land in W3:
+
+- `GET /api/fitness/strava/authorize_url` — returns
+  `{authorize_url, state, expires_at}`. The `state` is a 256-bit CSPRNG token
+  bound to the authenticated user's `user_id` for 10 minutes; presenting it
+  back from a different user fails 403.
+- `POST /api/fitness/strava/exchange` — body `{code, state}`. Validates the
+  state against the calling user, calls
+  `providers.strava.exchange_code(..., return_athlete=True)` to capture the
+  upstream `athlete.id` in the same SDK roundtrip, and persists tokens +
+  upstream id. Idempotent up to state-token consumption.
+- `POST /api/fitness/strava/disconnect` — deletes the calling user's
+  `fitness_auth_state` row for `source='strava'`.
+
+The redirect URI is the *webapp* callback route
+(`<webapp>/settings/fitness/strava/callback`) per D4 — `STRAVA_REDIRECT_URI`
+becomes a build-time webapp URL. The Vue route that posts the redirect
+parameters back to `exchange` lands in W10. Until then, the CLI listener flow
+in §2a / §2b remains the documented operator path.
+
+A small in-memory pending-state store
+(`services/fitness/strava_pending.py`) holds the `(user_id, expires_at)` entry
+between issuing the authorize URL and exchanging the code. Entries expire
+after 10 minutes; restart loses them. The store is parallel to (not derived
+from) `garmin_pending.py` because the Strava entry has no live SDK client to
+park — see the W3 journal entry for the parallel-modules-vs-shared-helper
+decision. See [`api.md`](./api.md#get-apifitnessstravaauthorize_url) for the
+full endpoint reference and [`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md)
+§5 W3 for context.
+
 ---
 
 ## 3. Historical backfill
