@@ -87,6 +87,8 @@ All external APIs are behind provider-agnostic interfaces (Python Protocols), ma
 - [Transcription Providers](docs/transcription-providers.md) — Multi-provider stack, retry/fallback, shadow mode
 - [Fitness Pipeline](docs/fitness-pipeline.md) — Strava + Garmin data flow (engineer-facing overview)
 - [Fitness Operations](docs/fitness-operations.md) — Re-auth, backfill, troubleshooting (operator runbook)
+- [Fitness Integration Plan](docs/fitness-integration-plan.md) — Decisions and rationale (sacred raw archive, four-layer pipeline, daily cadence, library pins)
+- [Fitness Schema](docs/fitness-schema.md) — Tables, columns, indexes, migration sequencing
 - [Development](docs/development.md) — Local setup and contributing
 - [API Reference](docs/api.md) — MCP tool documentation
 
