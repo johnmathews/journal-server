@@ -630,6 +630,89 @@ def cmd_fitness_backfill(args: argparse.Namespace, config: Config) -> None:
 # ── fitness-status ───────────────────────────────────────────────────
 
 
+_FITNESS_TABLES: tuple[str, ...] = (
+    "fitness_auth_state",
+    "fitness_sync_runs",
+    "fitness_activities",
+    "fitness_daily",
+    "fitness_raw_strava",
+    "fitness_raw_garmin",
+)
+
+
+def cmd_fitness_audit(args: argparse.Namespace, config: Config) -> None:
+    """Audit per-user data isolation across every fitness table.
+
+    For each of the six fitness tables, reports total row count, per-user
+    breakdown (joined with ``users.email`` so the operator can read the
+    output without a DB lookup), and any violations: rows with
+    ``user_id IS NULL`` or ``user_id`` pointing at a non-existent user
+    (FK orphan). Exits 0 on a clean audit, 1 if any violations are found.
+
+    Used as the W1 pre-flight check for the multi-user rollout (see
+    ``docs/fitness-multiuser-plan.md``) and as the W14 verification gate
+    after user 2 starts populating their own rows.
+    """
+    conn = get_connection(config.db_path)
+    run_migrations(conn)
+
+    print(f"fitness data audit (db: {config.db_path})")
+    print("=" * 60)
+
+    violations: list[str] = []
+    snapshot: dict[str, int] = {}
+
+    for table in _FITNESS_TABLES:
+        total_row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+        total = total_row[0] if total_row is not None else 0
+        snapshot[table] = total
+
+        print(f"\n[{table}] rows={total}")
+
+        if total == 0:
+            continue
+
+        # Per-user breakdown joined with users.email. LEFT JOIN so orphans
+        # (user_id with no matching users row) still appear, with email NULL.
+        breakdown = conn.execute(
+            f"""
+            SELECT t.user_id, u.email, COUNT(*) AS n
+            FROM {table} AS t
+            LEFT JOIN users AS u ON u.id = t.user_id
+            GROUP BY t.user_id
+            ORDER BY t.user_id IS NULL DESC, t.user_id
+            """,
+        ).fetchall()
+
+        for row in breakdown:
+            user_id, email, count = row[0], row[1], row[2]
+            if user_id is None:
+                label = "user_id=NULL"
+                violations.append(
+                    f"{table}: {count} row(s) with user_id IS NULL",
+                )
+            elif email is None:
+                label = f"user_id={user_id} (orphan: no matching users row)"
+                violations.append(
+                    f"{table}: {count} row(s) with orphan user_id={user_id} "
+                    "(referenced user no longer exists)",
+                )
+            else:
+                label = f"user_id={user_id} ({email})"
+            print(f"  {label:<60} rows={count}")
+
+    print()
+    print("=" * 60)
+    print(f"violations: {len(violations)}")
+    if violations:
+        for v in violations:
+            print(f"  - {v}")
+        print("result: FAIL")
+        sys.exit(1)
+    else:
+        print("result: PASS")
+
+
 def cmd_fitness_status(args: argparse.Namespace, config: Config) -> None:
     """Print per-source auth + last-runs snapshot.
 

@@ -28,6 +28,7 @@ from journal.cli.entities import (
     cmd_repair_entity_names,
 )
 from journal.cli.fitness import (
+    cmd_fitness_audit,
     cmd_fitness_backfill,
     cmd_fitness_reauth_garmin,
     cmd_fitness_reauth_strava,
@@ -711,6 +712,16 @@ def main():
         help="User to query (default: 1 = admin)",
     )
 
+    # fitness-audit
+    subparsers.add_parser(
+        "fitness-audit",
+        help=(
+            "Audit per-user data isolation across every fitness table. "
+            "Reports row counts and any rows with NULL or orphan user_id. "
+            "Exits 1 on violations."
+        ),
+    )
+
     args = parser.parse_args()
     setup_logging(args.log_level)
     config = load_config()
@@ -737,5 +748,6 @@ def main():
         "fitness-sync": cmd_fitness_sync,
         "fitness-backfill": cmd_fitness_backfill,
         "fitness-status": cmd_fitness_status,
+        "fitness-audit": cmd_fitness_audit,
     }
     commands[args.command](args, config)
