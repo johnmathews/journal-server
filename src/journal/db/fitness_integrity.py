@@ -55,9 +55,18 @@ class IntegrityReport:
         return bool(self.activities or self.daily)
 
 
-def check_fitness_integrity(conn: sqlite3.Connection) -> IntegrityReport:
+def check_fitness_integrity(
+    conn: sqlite3.Connection, *, user_id: int,
+) -> IntegrityReport:
     """Verify every normalized row's soft pointer resolves into the
-    matching per-source raw table.
+    matching per-source raw table for the given user.
+
+    Per-user scoped (W4 of the fitness multi-user plan): only orphans
+    owned by ``user_id`` are returned. A non-admin caller never sees the
+    existence of other users' raw rows in their report. The inner
+    ``fitness_raw_garmin`` lookup for daily references is also scoped
+    by ``user_id`` so a raw row belonging to a different user cannot
+    silently satisfy another user's soft pointer.
 
     Returns a report; does not raise. Callers decide what to do with
     orphans (alert via Pushover, surface in /health, etc.).
@@ -69,9 +78,11 @@ def check_fitness_integrity(conn: sqlite3.Connection) -> IntegrityReport:
         """
         SELECT fa.id, fa.raw_ref_id
         FROM fitness_activities fa
-        LEFT JOIN fitness_raw_strava r ON r.id = fa.raw_ref_id
-        WHERE fa.source = 'strava' AND r.id IS NULL
+        LEFT JOIN fitness_raw_strava r
+            ON r.id = fa.raw_ref_id AND r.user_id = fa.user_id
+        WHERE fa.user_id = ? AND fa.source = 'strava' AND r.id IS NULL
         """,
+        (user_id,),
     ).fetchall()
     for row in strava_orphans:
         activities.append(
@@ -87,9 +98,11 @@ def check_fitness_integrity(conn: sqlite3.Connection) -> IntegrityReport:
         """
         SELECT fa.id, fa.raw_ref_id
         FROM fitness_activities fa
-        LEFT JOIN fitness_raw_garmin r ON r.id = fa.raw_ref_id
-        WHERE fa.source = 'garmin' AND r.id IS NULL
+        LEFT JOIN fitness_raw_garmin r
+            ON r.id = fa.raw_ref_id AND r.user_id = fa.user_id
+        WHERE fa.user_id = ? AND fa.source = 'garmin' AND r.id IS NULL
         """,
+        (user_id,),
     ).fetchall()
     for row in garmin_orphans:
         activities.append(
@@ -110,19 +123,24 @@ def check_fitness_integrity(conn: sqlite3.Connection) -> IntegrityReport:
         """
         SELECT fd.id, fd.source, fd.raw_ref_ids_json
         FROM fitness_daily fd
+        WHERE fd.user_id = ?
         """,
+        (user_id,),
     ).fetchall()
     for row in daily_rows:
         ref_ids = json.loads(row["raw_ref_ids_json"]) if row["raw_ref_ids_json"] else []
         if not ref_ids:
             continue
         # Cheap to do per-row when row count is small (≤365/year).
+        # Filter by user_id so a raw row owned by a different user cannot
+        # silently satisfy this user's soft pointer.
         placeholders = ",".join("?" * len(ref_ids))
         existing = {
             r["id"]
             for r in conn.execute(
-                f"SELECT id FROM fitness_raw_garmin WHERE id IN ({placeholders})",
-                ref_ids,
+                f"SELECT id FROM fitness_raw_garmin "
+                f"WHERE user_id = ? AND id IN ({placeholders})",
+                (user_id, *ref_ids),
             ).fetchall()
         }
         missing = [rid for rid in ref_ids if rid not in existing]
