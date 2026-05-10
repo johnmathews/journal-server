@@ -215,6 +215,23 @@ class FitnessRepository:
             )
             self._conn.commit()
 
+    def delete_auth_state(self, *, user_id: int, source: str) -> bool:
+        """Delete the auth row for ``(user_id, source)``. Returns True if a
+        row was deleted, False if no matching row existed.
+
+        Used by the W2 disconnect endpoint. Note that this only removes
+        the credential row — historical ``fitness_activities`` /
+        ``fitness_daily`` rows remain so a user can reconnect with the
+        same upstream account and pick up where they left off.
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM fitness_auth_state WHERE user_id = ? AND source = ?",
+                (user_id, source),
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+
     def transition_auth(
         self,
         *,
