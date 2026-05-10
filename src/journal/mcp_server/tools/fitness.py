@@ -138,10 +138,14 @@ def fitness_integrity_check(
     ``raw_ref_id`` (or any id in ``raw_ref_ids_json``) does not
     resolve into the matching per-source raw table. Mirrors
     ``GET /api/fitness/integrity``. Empty arrays mean a clean DB.
+
+    Per-user scoped (W4 of the fitness multi-user plan): only orphans
+    owned by the calling user are returned.
     """
     log.info("Tool call: fitness_integrity_check()")
     conn = _get_db_conn(ctx)
-    report = check_fitness_integrity(conn)
+    user_id = _user_id(ctx)
+    report = check_fitness_integrity(conn, user_id=user_id)
     return {
         "activities": [asdict(o) for o in report.activities],
         "daily": [asdict(o) for o in report.daily],

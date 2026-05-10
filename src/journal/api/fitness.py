@@ -332,23 +332,22 @@ def register_fitness_routes(
         services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
-        # Auth required even though the integrity check itself is
-        # global — there is no per-user filter on raw orphans, so an
-        # un-authed read would leak the existence of orphans across
-        # tenants. (The pipeline is single-user today, but keeping the
-        # gate consistent with every other route avoids a regression
-        # if a second tenant is ever added.)
-        get_authenticated_user(request)
+        # Per-user scoped (W4 of the fitness multi-user plan): each caller
+        # sees only their own orphans. A non-admin caller never sees other
+        # users' raw rows in their report, even via the existence of orphan
+        # references.
+        user = get_authenticated_user(request)
         conn: sqlite3.Connection = services["db_conn"]
 
-        report = check_fitness_integrity(conn)
+        report = check_fitness_integrity(conn, user_id=user.user_id)
         body = {
             "activities": [asdict(o) for o in report.activities],
             "daily": [asdict(o) for o in report.daily],
         }
         log.info(
-            "GET /api/fitness/integrity — %d activity orphans, %d daily orphans",
-            len(report.activities), len(report.daily),
+            "GET /api/fitness/integrity — user_id=%d %d activity orphans, "
+            "%d daily orphans",
+            user.user_id, len(report.activities), len(report.daily),
         )
         return JSONResponse(body)
 
