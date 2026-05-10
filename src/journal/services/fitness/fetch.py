@@ -41,7 +41,7 @@ from journal.providers.strava import (
     StravaAuthError,
     StravaProvider,
 )
-from journal.services.fitness.errors import FitnessAuthError
+from journal.services.fitness.errors import FitnessAuthError, MidRunAuthLost
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -158,6 +158,25 @@ class _FetchServiceBase:
                 until=until_dt,
                 sync_run_id=run_id,
                 user_id=user_id,
+                initial_auth_status=auth.auth_status,
+            )
+        except MidRunAuthLost as exc:
+            # W5 hardening: the user disconnected mid-run (row deleted)
+            # or another path flipped auth_status to 'broken'. Record
+            # the run cleanly as auth_broken and exit without touching
+            # fitness_auth_state — calling transition_auth here would
+            # *recreate* a broken row the user just deleted, undoing
+            # the disconnect. The existing transition_auth in the
+            # FitnessAuthError branch only fires the notification on a
+            # status flip, so we also stay out of that path.
+            self._repo.finish_sync_run(
+                run_id, status="auth_broken",
+                error_class="MidRunAuthLost",
+                error_message=str(exc),
+            )
+            return FitnessSyncResult(
+                status="auth_broken", run_id=run_id,
+                rows_fetched=0, rows_normalized=0,
             )
         except FitnessAuthError as exc:
             transitioned = self._repo.transition_auth(
@@ -206,6 +225,42 @@ class _FetchServiceBase:
 
     # ── Subclass hooks ──────────────────────────────────────────────
 
+    def _verify_auth_live(
+        self, user_id: int, *, initial_status: str,
+    ) -> None:
+        """Re-read auth state mid-run and raise :class:`MidRunAuthLost`
+        if it's gone or has *transitioned* to ``broken`` since this run
+        started.
+
+        Subclasses call this between provider API calls. Cheap — single
+        ``SELECT auth_status FROM fitness_auth_state`` per invocation
+        (no JSON parsing, no extra_state hydration), so calling it
+        per-loop-iteration during a Garmin backfill is well within
+        budget. Note that this does **not** rebuild the provider — the
+        in-memory token already loaded into the SDK is fine for the
+        rest of this run; we just need to know whether the persistent
+        credential row still says the user wants the sync to proceed.
+
+        ``initial_status`` is the value captured at the top of
+        :meth:`run_sync`. We use it to preserve auto-recovery: a run
+        that **started** with ``auth_status='broken'`` is deliberately
+        attempting to push through (maybe the user re-authenticated
+        from another path; maybe the upstream auth issue has cleared).
+        Only a status that has *degraded* during the run is treated as
+        a mid-run abort condition — that means either the fetch service
+        itself just flipped the row (in which case the run is already
+        terminating via the FitnessAuthError path and never reaches the
+        next ``_verify_auth_live``) or an external path flipped it.
+        Either way, we bail without recursively re-broken-transitioning.
+        """
+        status = self._repo.get_auth_status(
+            user_id=user_id, source=self.SOURCE,
+        )
+        if status is None:
+            raise MidRunAuthLost("auth removed during run", reason="removed")
+        if status == "broken" and initial_status != "broken":
+            raise MidRunAuthLost("auth broken during run", reason="broken")
+
     def _has_credentials(self, auth: FitnessAuthState) -> bool:
         """Whether ``auth`` carries the credential this source needs.
 
@@ -233,6 +288,7 @@ class _FetchServiceBase:
         until: datetime,
         sync_run_id: int,
         user_id: int,
+        initial_auth_status: str,
     ) -> int:
         raise NotImplementedError
 
@@ -294,9 +350,19 @@ class StravaFetchService(_FetchServiceBase):
         until: datetime,
         sync_run_id: int,
         user_id: int,
+        initial_auth_status: str,
     ) -> int:
         try:
+            # W5 hardening: bail out if the user disconnected between
+            # ``run_sync`` reading auth and us reaching the provider.
+            # See ``_verify_auth_live`` for the auto-recovery carve-out.
+            self._verify_auth_live(
+                user_id, initial_status=initial_auth_status,
+            )
             provider.refresh_token_if_needed()
+            self._verify_auth_live(
+                user_id, initial_status=initial_auth_status,
+            )
             activities: Iterable[StravaActivitySummary] = provider.list_activities(
                 after=since, before=until,
             )
@@ -346,16 +412,32 @@ class GarminFetchService(_FetchServiceBase):
         until: datetime,
         sync_run_id: int,
         user_id: int,
+        initial_auth_status: str,
     ) -> int:
         try:
+            # W5 hardening: check auth-state at every meaningful step —
+            # before the login network call, between days of the daily
+            # loop (Garmin walks one day per provider call, so mid-run
+            # disconnect mid-window is plausible), and before
+            # list_activities at the end. Each check is one cheap
+            # SELECT, dominated by the SDK call it precedes.
+            self._verify_auth_live(
+                user_id, initial_status=initial_auth_status,
+            )
             provider.login()
             rows = 0
             for date_str in _dates_in_window(since, until):
+                self._verify_auth_live(
+                    user_id, initial_status=initial_auth_status,
+                )
                 metrics = provider.get_daily(date_str)
                 rows += _persist_garmin_daily_rows(
                     repo=self._repo, user_id=user_id,
                     sync_run_id=sync_run_id, metrics=metrics,
                 )
+            self._verify_auth_live(
+                user_id, initial_status=initial_auth_status,
+            )
             activities: Iterable[GarminActivitySummary] = provider.list_activities(
                 after=since, before=until,
             )

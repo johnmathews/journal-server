@@ -45,3 +45,24 @@ class FitnessNormalizeDrift(FitnessError):  # noqa: N818  named per W6 plan; W7 
     Raised by W7. W6 defines the class here so the worker import graph
     stays single-rooted at ``services/fitness/errors``.
     """
+
+
+class MidRunAuthLost(FitnessError):  # noqa: N818  matches FitnessNormalizeDrift convention
+    """Auth state vanished or flipped to ``broken`` *during* a fetch run.
+
+    Raised by the W5 retroactive hardening: workers re-read
+    ``fitness_auth_state`` between provider calls so a mid-run disconnect
+    (row deleted) or a parallel auth-broken transition aborts the
+    in-flight run cleanly. Distinct from :class:`FitnessAuthError`
+    because the recovery is different — when the row is gone, we must
+    *not* recreate it via ``transition_auth``, and when it's already
+    broken there's nothing to transition.
+
+    ``reason`` is ``"removed"`` (auth row deleted) or ``"broken"``
+    (row still present, ``auth_status='broken'``). The fetch service
+    uses it to populate ``fitness_sync_runs.error_message``.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason

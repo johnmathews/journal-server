@@ -96,6 +96,7 @@ def configured_runner(
 ) -> Generator[JobRunner]:
     """Runner with no-op fitness callables wired so submit_fitness_sync_*
     accepts the request without raising."""
+    from journal.services.fitness.backfill import BackfillResult
     from journal.services.fitness.fetch import FitnessSyncResult
     from journal.services.fitness.normalize import NormalizeResult
 
@@ -109,6 +110,18 @@ def configured_runner(
             return NormalizeResult(source=source, rows_normalized=0, drift_count=0)
         return _do
 
+    def _bf(source: str):
+        def _do(
+            *, user_id: int, start: str, end: str | None = None,
+        ) -> BackfillResult:
+            return BackfillResult(
+                source=source,  # type: ignore[arg-type]
+                final_status="complete",
+                windows_attempted=1, windows_succeeded=1,
+                rows_fetched=0, rows_normalized=0,
+            )
+        return _do
+
     runner = JobRunner(
         job_repository=jobs_repository,
         entity_extraction_service=object(),  # type: ignore[arg-type]
@@ -119,6 +132,8 @@ def configured_runner(
         fetch_garmin_callable=_fetch,
         normalize_strava_callable=_norm("strava"),
         normalize_garmin_callable=_norm("garmin"),
+        backfill_strava_callable=_bf("strava"),
+        backfill_garmin_callable=_bf("garmin"),
     )
     yield runner
     runner.shutdown(wait=True)
@@ -410,6 +425,84 @@ def test_trigger_sync_dedup_returns_existing_job(
     assert out["already_running"] is True
 
 
+def test_trigger_sync_blocked_by_running_backfill(
+    configured_ctx: SimpleNamespace, jobs_repository: SQLiteJobRepository,
+) -> None:
+    """W5 spanning idempotency: a running backfill should block a sync
+    submit via the MCP tool surface, mirroring the REST surface."""
+    existing = jobs_repository.create(
+        "fitness_backfill_strava",
+        {"user_id": _TEST_USER_ID, "start": "2026-01-01"},
+        user_id=_TEST_USER_ID,
+    )
+    jobs_repository.mark_running(existing.id)
+    out = fitness_tools.fitness_trigger_sync(source="strava", ctx=configured_ctx)
+    assert out["job_id"] == existing.id
+    assert out["already_running"] is True
+
+
+# --------------------------------------------------------------------
+# Operational tool: fitness_trigger_backfill (W5)
+# --------------------------------------------------------------------
+
+
+def test_trigger_backfill_unknown_source_returns_error(
+    ctx: SimpleNamespace,
+) -> None:
+    out = fitness_tools.fitness_trigger_backfill(
+        source="whoop", start="2026-01-01", ctx=ctx,
+    )
+    assert "error" in out
+    assert out["job_id"] is None
+
+
+def test_trigger_backfill_unconfigured_returns_error(
+    ctx: SimpleNamespace,
+) -> None:
+    out = fitness_tools.fitness_trigger_backfill(
+        source="strava", start="2026-01-01", ctx=ctx,
+    )
+    assert out["job_id"] is None
+    assert "not configured" in out["error"].lower()
+
+
+def test_trigger_backfill_missing_start_returns_error(
+    configured_ctx: SimpleNamespace,
+) -> None:
+    out = fitness_tools.fitness_trigger_backfill(
+        source="strava", start="", ctx=configured_ctx,
+    )
+    assert out["job_id"] is None
+    assert "start" in out["error"].lower()
+
+
+def test_trigger_backfill_configured_returns_job_id(
+    configured_ctx: SimpleNamespace,
+) -> None:
+    out = fitness_tools.fitness_trigger_backfill(
+        source="strava", start="2026-01-01", end="2026-02-01",
+        ctx=configured_ctx,
+    )
+    assert out["job_id"] is not None
+    assert "already_running" not in out
+
+
+def test_trigger_backfill_blocked_by_running_sync(
+    configured_ctx: SimpleNamespace, jobs_repository: SQLiteJobRepository,
+) -> None:
+    """A running sync blocks a backfill submit through the MCP tool."""
+    existing = jobs_repository.create(
+        "fitness_sync_strava", {"user_id": _TEST_USER_ID},
+        user_id=_TEST_USER_ID,
+    )
+    jobs_repository.mark_running(existing.id)
+    out = fitness_tools.fitness_trigger_backfill(
+        source="strava", start="2026-01-01", ctx=configured_ctx,
+    )
+    assert out["job_id"] == existing.id
+    assert out["already_running"] is True
+
+
 # --------------------------------------------------------------------
 # Correlation queries
 # --------------------------------------------------------------------
@@ -583,6 +676,7 @@ def test_all_eight_tools_registered() -> None:
         "fitness_sync_status",
         "fitness_integrity_check",
         "fitness_trigger_sync",
+        "fitness_trigger_backfill",
         "fitness_correlate_sleep_mood",
         "fitness_correlate_weekly_runs_stress",
         "fitness_correlate_hrv_mood",

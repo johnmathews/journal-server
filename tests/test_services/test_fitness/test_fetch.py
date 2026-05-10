@@ -23,7 +23,7 @@ from journal.providers.garmin import (
     GarminDailyMetrics,
 )
 from journal.providers.strava import StravaActivitySummary, StravaAuthError
-from journal.services.fitness.errors import FitnessAuthError
+from journal.services.fitness.errors import FitnessAuthError, MidRunAuthLost
 from journal.services.fitness.fetch import (
     FitnessSyncResult,
     GarminFetchService,
@@ -663,3 +663,199 @@ def test_fetch_service_raises_fitness_auth_error_not_provider_error(
     catches one and re-raises the other."""
     assert not issubclass(StravaAuthError, FitnessAuthError)
     assert not issubclass(GarminAuthError, FitnessAuthError)
+
+
+# 13. W5 — mid-run auth removal / broken handled cleanly --------------
+
+
+def test_strava_midrun_disconnect_marks_run_auth_broken_no_recreate(
+    repo: FitnessRepository, config: Any, db_conn: sqlite3.Connection,
+) -> None:
+    """User disconnects mid-run (deletes fitness_auth_state). The W5
+    hardening must mark the run ``auth_broken`` with error_class
+    ``MidRunAuthLost`` and NOT recreate the auth row (calling the
+    normal transition_auth path would silently un-do the disconnect).
+    """
+    _seed_auth(repo, "strava")
+
+    fake = _FakeStravaProvider()
+
+    def _delete_during_refresh() -> None:
+        repo.delete_auth_state(user_id=1, source="strava")
+
+    # Hook the delete into the provider's refresh step so it fires
+    # between the run_sync top-level auth read and the next
+    # _verify_auth_live call inside _do_fetch_and_persist.
+    original_refresh = fake.refresh_token_if_needed
+
+    def _refresh_then_delete() -> None:
+        original_refresh()
+        _delete_during_refresh()
+
+    fake.refresh_token_if_needed = _refresh_then_delete  # type: ignore[method-assign]
+
+    notifier = _FakeNotifier()
+    svc = _make_strava(repo=repo, config=config, fake=fake, notifier=notifier)
+
+    result = svc.run_sync(user_id=1, since=datetime(2026, 4, 1, tzinfo=UTC))
+
+    assert result.status == "auth_broken"
+    # No `running`-stuck rows — the run finished in a terminal state.
+    runs = db_conn.execute(
+        "SELECT status, error_class, error_message, finished_at "
+        "FROM fitness_sync_runs WHERE user_id=1",
+    ).fetchall()
+    assert len(runs) == 1
+    assert runs[0]["status"] == "auth_broken"
+    assert runs[0]["error_class"] == "MidRunAuthLost"
+    assert "removed" in runs[0]["error_message"]
+    assert runs[0]["finished_at"] is not None
+
+    # The auth row stays DELETED — transition_auth must not have run.
+    assert repo.get_auth_state(user_id=1, source="strava") is None
+    # No notification fired — the user explicitly disconnected.
+    assert notifier.auth_broken_calls == []
+
+
+def test_strava_midrun_auth_status_flips_to_broken_clean_abort(
+    repo: FitnessRepository, config: Any, db_conn: sqlite3.Connection,
+) -> None:
+    """Auth row stays in place but ``auth_status`` flips to ``broken``
+    mid-run (another path detected the failure). The run aborts cleanly
+    without recursively re-broken-transitioning the row or notifying."""
+    _seed_auth(repo, "strava")
+
+    fake = _FakeStravaProvider()
+    original_refresh = fake.refresh_token_if_needed
+
+    def _refresh_then_break() -> None:
+        original_refresh()
+        repo.transition_auth(
+            user_id=1, source="strava", status="broken",
+            at="2026-05-09T12:00:00Z",
+        )
+
+    fake.refresh_token_if_needed = _refresh_then_break  # type: ignore[method-assign]
+
+    notifier = _FakeNotifier()
+    svc = _make_strava(repo=repo, config=config, fake=fake, notifier=notifier)
+
+    result = svc.run_sync(user_id=1, since=datetime(2026, 4, 1, tzinfo=UTC))
+
+    assert result.status == "auth_broken"
+    runs = db_conn.execute(
+        "SELECT status, error_class, error_message FROM fitness_sync_runs "
+        "WHERE user_id=1",
+    ).fetchall()
+    assert runs[0]["status"] == "auth_broken"
+    assert runs[0]["error_class"] == "MidRunAuthLost"
+    assert "broken" in runs[0]["error_message"]
+    # Row remains broken, not recreated, not re-notified.
+    auth = repo.get_auth_state(user_id=1, source="strava")
+    assert auth is not None
+    assert auth.auth_status == "broken"
+    assert notifier.auth_broken_calls == []
+
+
+def test_garmin_midrun_disconnect_during_day_loop_marks_auth_broken(
+    repo: FitnessRepository, config: Any, db_conn: sqlite3.Connection,
+) -> None:
+    """User disconnects between the first and second day of a multi-day
+    Garmin window. The per-day _verify_auth_live check catches it."""
+    _seed_auth(repo, "garmin")
+
+    fake = _FakeGarminProvider()
+    fake.daily_by_date = {
+        "2026-04-15": _empty_daily("2026-04-15"),
+        "2026-04-16": _empty_daily("2026-04-16"),
+    }
+
+    days_seen: list[str] = []
+    original_get_daily = fake.get_daily
+
+    def _get_daily_then_disconnect(date: str) -> GarminDailyMetrics:
+        days_seen.append(date)
+        result = original_get_daily(date)
+        # After the first day, the user disconnects.
+        if len(days_seen) == 1:
+            repo.delete_auth_state(user_id=1, source="garmin")
+        return result
+
+    fake.get_daily = _get_daily_then_disconnect  # type: ignore[method-assign]
+
+    notifier = _FakeNotifier()
+    svc = _make_garmin(repo=repo, config=config, fake=fake, notifier=notifier)
+
+    result = svc.run_sync(
+        user_id=1,
+        since=datetime(2026, 4, 15, tzinfo=UTC),
+        until=datetime(2026, 4, 16, 23, 59, tzinfo=UTC),
+    )
+
+    assert result.status == "auth_broken"
+    # Day-1 was attempted; the day-2 loop iteration aborted before
+    # provider.get_daily ran for the second date.
+    assert days_seen == ["2026-04-15"]
+
+    runs = db_conn.execute(
+        "SELECT status, error_class, error_message FROM fitness_sync_runs "
+        "WHERE user_id=1",
+    ).fetchall()
+    assert len(runs) == 1
+    assert runs[0]["status"] == "auth_broken"
+    assert runs[0]["error_class"] == "MidRunAuthLost"
+    assert "removed" in runs[0]["error_message"]
+    assert repo.get_auth_state(user_id=1, source="garmin") is None
+    assert notifier.auth_broken_calls == []
+
+
+def test_garmin_midrun_auth_status_flips_to_broken_clean_abort(
+    repo: FitnessRepository, config: Any, db_conn: sqlite3.Connection,
+) -> None:
+    """Garmin equivalent of the auth_status='broken' mid-run test."""
+    _seed_auth(repo, "garmin")
+
+    fake = _FakeGarminProvider()
+    fake.daily_by_date = {"2026-04-15": _empty_daily("2026-04-15")}
+    original_login = fake.login
+
+    def _login_then_break(*, mfa_callback: Any = None) -> None:
+        original_login(mfa_callback=mfa_callback)
+        repo.transition_auth(
+            user_id=1, source="garmin", status="broken",
+            at="2026-05-09T12:00:00Z",
+        )
+
+    fake.login = _login_then_break  # type: ignore[method-assign]
+
+    notifier = _FakeNotifier()
+    svc = _make_garmin(repo=repo, config=config, fake=fake, notifier=notifier)
+
+    result = svc.run_sync(
+        user_id=1,
+        since=datetime(2026, 4, 15, tzinfo=UTC),
+        until=datetime(2026, 4, 15, 23, 59, tzinfo=UTC),
+    )
+
+    assert result.status == "auth_broken"
+    runs = db_conn.execute(
+        "SELECT status, error_class, error_message FROM fitness_sync_runs "
+        "WHERE user_id=1",
+    ).fetchall()
+    assert runs[0]["status"] == "auth_broken"
+    assert runs[0]["error_class"] == "MidRunAuthLost"
+    assert notifier.auth_broken_calls == []
+
+
+def test_midrun_auth_lost_error_class_carries_reason() -> None:
+    """The exception's ``reason`` attribute distinguishes removed vs broken
+    so future callers (e.g., a more granular UI message) can branch on it."""
+    removed = MidRunAuthLost("auth removed during run", reason="removed")
+    broken = MidRunAuthLost("auth broken during run", reason="broken")
+    assert removed.reason == "removed"
+    assert broken.reason == "broken"
+    assert str(removed) == "auth removed during run"
+    # Subclass of FitnessError so callers depending on the base type
+    # still catch it.
+    from journal.services.fitness.errors import FitnessError
+    assert isinstance(removed, FitnessError)

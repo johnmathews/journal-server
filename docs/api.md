@@ -2439,11 +2439,14 @@ Asynchronous — the job runs through the W8 worker and JobRunner; poll
 { "job_id": "8e12...", "status": "running", "already_running": true }
 ```
 
-A single in-flight (`queued` or `running`) job per `(user_id, source)` is
-allowed. Subsequent submits return the existing job id with `already_running:
-true` instead of queueing a duplicate. The W6 fetch service has its own
-single-run guard at the layer below — deduping here keeps the operator-facing
-audit trail clean (one job row per real sync, not one per button-press).
+A single in-flight (`queued` or `running`) **fetch** job per
+`(user_id, source)` is allowed — and "fetch" here spans both
+`fitness_sync_{source}` and `fitness_backfill_{source}`. Submitting a sync
+while a backfill for the same source is in flight (or vice versa) returns
+the existing job id with `already_running: true` instead of queueing a
+duplicate. Whichever job arrived first wins; the colliding submit is
+rejected idempotently so the data plane never has two fetch loops
+interleaving writes to the same `(user_id, source)` window.
 
 **Errors:**
 
@@ -2453,6 +2456,64 @@ audit trail clean (one job row per real sync, not one per button-press).
   — the source's credential vars (`STRAVA_CLIENT_ID` /
   `STRAVA_CLIENT_SECRET` for Strava, `GARMIN_USERNAME` / `GARMIN_PASSWORD`
   for Garmin) are unset. Operator can tell *feature off* from *real bug*.
+
+---
+
+### POST /api/fitness/backfill/{source}
+
+Queue a historical fitness backfill job for `source` (`"strava"` or
+`"garmin"`). Asynchronous — the job runs through the W5 backfill worker
+and JobRunner; poll `GET /api/jobs/{job_id}` for status. The worker
+wraps the same orchestrator used by the `journal fitness-backfill` CLI
+(`services/fitness/backfill.{backfill_strava,backfill_garmin}`), so it
+inherits per-window resume, transient-streak abort, and auth-broken
+short-circuit behaviour from §3 of `fitness-operations.md`.
+
+**Path parameter:**
+
+| Parameter | Type   | Description              |
+| --------- | ------ | ------------------------ |
+| `source`  | string | `"strava"` or `"garmin"` |
+
+**Request body:**
+
+```json
+{ "start": "2026-01-01", "end": "2026-03-01" }
+```
+
+| Field   | Type   | Required | Description                                                              |
+| ------- | ------ | -------- | ------------------------------------------------------------------------ |
+| `start` | string | yes      | Inclusive start date (`YYYY-MM-DD`).                                     |
+| `end`   | string | no       | Inclusive end date (`YYYY-MM-DD`). Defaults to today (UTC) when omitted. |
+
+**Response (202, queued):**
+
+```json
+{ "job_id": "9a44...", "status": "queued" }
+```
+
+**Response (202, dedup'd against an in-flight fetch job):**
+
+```json
+{ "job_id": "9a44...", "status": "running", "already_running": true }
+```
+
+The same spanning idempotency rule applies as for `POST /api/fitness/sync/
+{source}`: at most one fetch job (sync **or** backfill) per
+`(user_id, source)` is in flight at a time. A backfill submitted while a
+sync is queued/running returns the sync's job id; a sync submitted while
+a backfill is in flight returns the backfill's job id. Whichever was
+enqueued first wins.
+
+**Errors:**
+
+- `400` `{"error": "Unknown fitness source: ..."}` — `source` is not
+  `"strava"` or `"garmin"`.
+- `400` `{"error": "..."}` — body is missing `start`, dates fail
+  `YYYY-MM-DD` parsing, or `end < start`.
+- `503` `{"error": "Strava fitness backfill is not configured on this server ..."}`
+  — the source's credential vars are unset (see the equivalent error on
+  `POST /api/fitness/sync/{source}`).
 
 ---
 
@@ -3066,9 +3127,10 @@ Run the soft-pointer integrity check. No parameters. Mirrors
 ### fitness_trigger_sync
 
 Submit a fitness fetch + normalize job for the given source. Mirrors
-`POST /api/fitness/sync/{source}` including the same dedup posture (returns
-the existing job id with `already_running: true` instead of queueing a
-duplicate).
+`POST /api/fitness/sync/{source}` including the spanning dedup posture
+(at most one fetch job — sync **or** backfill — per `(user_id, source)`
+at a time; returns the existing job id with `already_running: true`
+instead of queueing a duplicate).
 
 | Parameter | Type   | Required | Description              |
 | --------- | ------ | -------- | ------------------------ |
@@ -3077,6 +3139,22 @@ duplicate).
 **Returns:** `{"job_id", "status", "already_running"?}` on success;
 `{"error": "...", "job_id": null}` if the source isn't configured on this
 server.
+
+### fitness_trigger_backfill
+
+Submit a historical backfill job for the given source. Mirrors
+`POST /api/fitness/backfill/{source}` and shares the same spanning
+idempotency policy with `fitness_trigger_sync`.
+
+| Parameter | Type   | Required | Description                                                          |
+| --------- | ------ | -------- | -------------------------------------------------------------------- |
+| `source`  | string | yes      | `"strava"` or `"garmin"`                                             |
+| `start`   | string | yes      | Inclusive start date (`YYYY-MM-DD`).                                 |
+| `end`     | string | no       | Inclusive end date (`YYYY-MM-DD`). Defaults to today (UTC).          |
+
+**Returns:** `{"job_id", "status", "already_running"?}` on success;
+`{"error": "...", "job_id": null}` if the source isn't configured or
+validation fails.
 
 ### fitness_correlate_sleep_mood
 

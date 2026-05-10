@@ -227,6 +227,36 @@ class SQLiteJobRepository:
             self._conn.commit()
             return cursor.rowcount == 1
 
+    def find_active_fitness_fetch_job(
+        self, *, user_id: int, source: str,
+    ) -> Job | None:
+        """Return the in-flight fetch job for ``(user_id, source)`` or ``None``.
+
+        "Fetch" spans both worker classes that read from the upstream
+        provider — ``fitness_sync_{source}`` and
+        ``fitness_backfill_{source}``. The W5 idempotency policy
+        permits only one such job per ``(user_id, source)`` at a time,
+        so this method is the single source of truth all submit paths
+        (REST endpoint, MCP tool) consult before enqueueing.
+
+        Ordered by ``created_at ASC`` so that if (by race) multiple
+        rows exist, the *oldest* one is returned — that's the winner
+        per the "first enqueued wins" policy.
+        """
+        sync_type = f"fitness_sync_{source}"
+        backfill_type = f"fitness_backfill_{source}"
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM jobs"
+                " WHERE user_id = ?"
+                "   AND status IN ('queued', 'running')"
+                "   AND type IN (?, ?)"
+                " ORDER BY created_at ASC"
+                " LIMIT 1",
+                (user_id, sync_type, backfill_type),
+            ).fetchone()
+        return _row_to_job(row) if row else None
+
     def has_active_jobs_for_entry(self, entry_id: int) -> list[Job]:
         """Return queued/running jobs whose params reference *entry_id*.
 

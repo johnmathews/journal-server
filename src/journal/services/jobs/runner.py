@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from journal.models import Job
     from journal.services.backfill import MoodBackfillResult
     from journal.services.entity_extraction import EntityExtractionService
+    from journal.services.fitness.backfill import BackfillResult
     from journal.services.fitness.fetch import FitnessSyncResult
     from journal.services.fitness.normalize import NormalizeResult
     from journal.services.ingestion import IngestionService
@@ -66,6 +67,7 @@ from journal.services.jobs.save_pipeline import submit_save_entry_pipeline
 from journal.services.jobs.validation import (
     ENTITY_EXTRACTION_KEYS,
     ENTITY_REEMBED_KEYS,
+    FITNESS_BACKFILL_KEYS,
     FITNESS_SYNC_KEYS,
     INGEST_AUDIO_KEYS,
     INGEST_IMAGES_KEYS,
@@ -79,6 +81,12 @@ from journal.services.jobs.workers import WorkerContext
 from journal.services.jobs.workers.audio_ingestion import run_audio_ingestion
 from journal.services.jobs.workers.entity_extraction import run_entity_extraction
 from journal.services.jobs.workers.entity_reembed import run_entity_reembed
+from journal.services.jobs.workers.fitness_backfill_garmin import (
+    run_fitness_backfill_garmin,
+)
+from journal.services.jobs.workers.fitness_backfill_strava import (
+    run_fitness_backfill_strava,
+)
 from journal.services.jobs.workers.fitness_sync_garmin import (
     run_fitness_sync_garmin,
 )
@@ -151,6 +159,8 @@ class JobRunner:
         fetch_garmin_callable: Callable[..., FitnessSyncResult] | None = None,
         normalize_strava_callable: Callable[..., NormalizeResult] | None = None,
         normalize_garmin_callable: Callable[..., NormalizeResult] | None = None,
+        backfill_strava_callable: Callable[..., BackfillResult] | None = None,
+        backfill_garmin_callable: Callable[..., BackfillResult] | None = None,
     ) -> None:
         self._jobs = job_repository
         # Default the reembedder to the extraction service: it implements
@@ -194,6 +204,8 @@ class JobRunner:
             fetch_garmin=fetch_garmin_callable,
             normalize_strava=normalize_strava_callable,
             normalize_garmin=normalize_garmin_callable,
+            backfill_strava=backfill_strava_callable,
+            backfill_garmin=backfill_garmin_callable,
         )
 
     # ------------------------------------------------------------------
@@ -429,6 +441,63 @@ class JobRunner:
         validate_params(params, FITNESS_SYNC_KEYS, job_type="fitness_sync_garmin")
         job = self._jobs.create("fitness_sync_garmin", params, user_id=user_id)
         self._executor.submit(run_fitness_sync_garmin, self._ctx, job.id, params)
+        return job
+
+    def submit_fitness_backfill_strava(
+        self, *, user_id: int, start: str, end: str | None = None,
+    ) -> Job:
+        """Queue a Strava historical backfill job (W5).
+
+        The submit-time idempotency policy (one fetch job per
+        ``(user_id, source)`` across both sync and backfill worker
+        classes) is enforced at the *endpoint / MCP-tool* layer via
+        :meth:`SQLiteJobRepository.find_active_fitness_fetch_job`. The
+        runner itself stays the dumb dispatcher — its only contract is
+        "create + submit," matching ``submit_fitness_sync_*``.
+        """
+        if self._ctx.backfill_strava is None:
+            raise RuntimeError(
+                "Strava fitness backfill is not configured on this server "
+                "(no backfill_strava_callable passed to JobRunner)",
+            )
+        params: dict[str, Any] = {"user_id": user_id, "start": start}
+        if end is not None:
+            params["end"] = end
+        validate_params(
+            params, FITNESS_BACKFILL_KEYS, job_type="fitness_backfill_strava",
+        )
+        job = self._jobs.create(
+            "fitness_backfill_strava", params, user_id=user_id,
+        )
+        self._executor.submit(
+            run_fitness_backfill_strava, self._ctx, job.id, params,
+        )
+        return job
+
+    def submit_fitness_backfill_garmin(
+        self, *, user_id: int, start: str, end: str | None = None,
+    ) -> Job:
+        """Queue a Garmin historical backfill job (W5).
+
+        Same dispatcher posture as :meth:`submit_fitness_backfill_strava`.
+        """
+        if self._ctx.backfill_garmin is None:
+            raise RuntimeError(
+                "Garmin fitness backfill is not configured on this server "
+                "(no backfill_garmin_callable passed to JobRunner)",
+            )
+        params: dict[str, Any] = {"user_id": user_id, "start": start}
+        if end is not None:
+            params["end"] = end
+        validate_params(
+            params, FITNESS_BACKFILL_KEYS, job_type="fitness_backfill_garmin",
+        )
+        job = self._jobs.create(
+            "fitness_backfill_garmin", params, user_id=user_id,
+        )
+        self._executor.submit(
+            run_fitness_backfill_garmin, self._ctx, job.id, params,
+        )
         return job
 
     def shutdown(self, wait: bool = False) -> None:

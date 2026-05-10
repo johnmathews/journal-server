@@ -245,7 +245,16 @@ full endpoint reference and [`fitness-multiuser-plan.md`](./fitness-multiuser-pl
 
 ## 3. Historical backfill
 
-After both sources are authorized, populate history with the backfill orchestrator:
+After both sources are authorized, populate history with the backfill
+orchestrator. Two front doors call the same `services/fitness/backfill.py`
+orchestrator under the hood:
+
+- **In-app (W5, recommended for end users)** — `POST /api/fitness/backfill/
+  {source}` with body `{start, end?}`, called by the webapp's Backfill
+  button. Returns `{job_id}` immediately; progress shows up in the jobs
+  view and in `journal fitness-status` as windows complete.
+- **CLI (operator fallback)** — `journal fitness-backfill` for headless
+  / multi-source / repair runs.
 
 ```bash
 docker exec journal-server uv run journal fitness-backfill \
@@ -253,6 +262,15 @@ docker exec journal-server uv run journal fitness-backfill \
     --start 2026-01-01 \
     --user-id 1
 ```
+
+**Idempotency (spans sync + backfill).** Only one *fetch* job per
+`(user_id, source)` runs at a time, and "fetch" covers both
+`fitness_sync_{source}` and `fitness_backfill_{source}` worker classes.
+Whichever was queued first wins; the colliding submit (whether a
+scheduled sync running into a click-triggered backfill, or vice versa)
+returns the in-flight job's id with `already_running: true` instead of
+queueing a duplicate. This prevents double-clicks and stops a backfill
+from interleaving writes with a routine sync on the same date window.
 
 The orchestrator walks `[start, end]` in 30-day windows, calling the W6 fetch
 service once per window. Per-window progress is recorded in `fitness_sync_runs`
