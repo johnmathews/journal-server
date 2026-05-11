@@ -599,7 +599,7 @@ class EntityExtractionService:
         # use case. The repo is the SQLite implementation in practice,
         # and the service-level Protocol only wraps read methods we
         # already have; sneaking in a conn read here is pragmatic.
-        conn = getattr(self._repo, "_conn", None)
+        conn = getattr(self._repo, "connection", None)
         if conn is None:
             raise RuntimeError(
                 "EntityExtractionService.extract_batch requires a"

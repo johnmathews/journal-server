@@ -5,7 +5,9 @@ Owns ``search_text`` (entries matching), ``search_text_with_snippets``
 ``count_text_matches`` (hit count for badge/UX). All three go through
 the ``entries_fts`` virtual table.
 
-Methods stay bound to ``self`` so they keep using ``self._conn``.
+Methods route through ``self._conn()`` so each call gets the
+appropriate connection — thread-local on the factory path, the
+shared connection on the legacy path.
 """
 
 from journal.db.repository.protocol import _row_to_entry
@@ -35,7 +37,8 @@ class _SearchMixin:
             sql += " AND e.entry_date <= ?"
             params.append(end_date)
         sql += " ORDER BY rank"
-        rows = self._conn.execute(sql, params).fetchall()
+        conn = self._conn()
+        rows = conn.execute(sql, params).fetchall()
         return [_row_to_entry(r) for r in rows]
 
     def search_text_with_snippets(
@@ -80,7 +83,8 @@ class _SearchMixin:
             params.append(end_date)
         sql += " ORDER BY rank LIMIT ? OFFSET ?"
         params.extend([limit, offset])
-        rows = self._conn.execute(sql, params).fetchall()
+        conn = self._conn()
+        rows = conn.execute(sql, params).fetchall()
         return [(_row_to_entry(r), r["snippet"]) for r in rows]
 
     def count_text_matches(
@@ -105,5 +109,6 @@ class _SearchMixin:
         if end_date:
             sql += " AND e.entry_date <= ?"
             params.append(end_date)
-        row = self._conn.execute(sql, params).fetchone()
+        conn = self._conn()
+        row = conn.execute(sql, params).fetchone()
         return row["cnt"]

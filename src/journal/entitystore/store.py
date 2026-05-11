@@ -17,6 +17,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
+from journal.db.factory import ConnectionFactory
 from journal.entitystore.mentions import _MentionsMixin
 from journal.entitystore.merge import _MergeMixin
 from journal.entitystore.protocol import (
@@ -43,20 +44,62 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
     Owns entity-CRUD + listing + embeddings directly; mentions /
     relationships / merge / quarantine / merge-candidate operations
     are pulled in from ``mentions.py`` and ``merge.py`` mixins.
+
+    Construction accepts either a :class:`ConnectionFactory` (preferred,
+    used by production via ``mcp_server/bootstrap.py``) or a bare
+    ``sqlite3.Connection`` (legacy, retained for tests that haven't
+    been migrated to the factory model yet — see
+    ``docs/sqlite-per-thread-connections-plan.md`` W3).
+
+    Mixin and own methods call ``conn = self._conn()`` at the top and
+    operate on that local variable, so each thread gets its own
+    connection on the factory path and the shared-state commit race
+    documented in ``docs/sqlite-threading.md`` is structurally
+    impossible. ``merge_entities`` is the only multi-statement
+    implicit-transaction method here; under per-thread connections it
+    runs entirely on the calling thread's connection so transaction
+    boundaries are unaffected by the migration.
     """
 
     def __init__(
         self,
-        conn: sqlite3.Connection,
+        factory_or_conn: ConnectionFactory | sqlite3.Connection,
         casing_exceptions: Mapping[str, str] | None = None,
     ) -> None:
-        self._conn = conn
+        if isinstance(factory_or_conn, ConnectionFactory):
+            self._factory: ConnectionFactory | None = factory_or_conn
+            self._direct_conn: sqlite3.Connection | None = None
+        else:
+            self._factory = None
+            self._direct_conn = factory_or_conn
         # Stored as a dict so the reload helper can rebind it in place by
         # calling `store.set_casing_exceptions(...)`. A None value at construction
         # time means "no exceptions" — the algorithm degrades to plain smart-title-case.
         self._casing_exceptions: dict[str, str] = (
             dict(casing_exceptions) if casing_exceptions else {}
         )
+
+    def _conn(self) -> sqlite3.Connection:
+        """Return the connection for the current call.
+
+        Factory path: returns this thread's connection (lazily opened
+        on first use). Legacy path: returns the single shared
+        connection passed at construction.
+        """
+        if self._factory is not None:
+            return self._factory.get()
+        assert self._direct_conn is not None
+        return self._direct_conn
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """Underlying SQLite connection for the current thread.
+
+        On the factory path this returns the *calling* thread's
+        connection (committed rows are visible via WAL). On the
+        legacy path this returns the single shared connection.
+        """
+        return self._conn()
 
     def set_casing_exceptions(self, exceptions: Mapping[str, str]) -> None:
         """Swap in a fresh exceptions table. Called by the reload helper.
@@ -70,7 +113,8 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
     # ---- entity lookup and creation -----------------------------------
 
     def _load_aliases(self, entity_id: int) -> list[str]:
-        rows = self._conn.execute(
+        conn = self._conn()
+        rows = conn.execute(
             "SELECT alias_normalised FROM entity_aliases"
             " WHERE entity_id = ? ORDER BY alias_normalised",
             (entity_id,),
@@ -87,7 +131,8 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
         if user_id is not None:
             sql += " AND user_id = ?"
             params.append(user_id)
-        row = self._conn.execute(sql, params).fetchone()
+        conn = self._conn()
+        row = conn.execute(sql, params).fetchone()
         return self._hydrate(row) if row else None
 
     def get_entity_by_name(
@@ -101,7 +146,8 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
         if user_id is not None:
             sql += " AND user_id = ?"
             params.append(user_id)
-        row = self._conn.execute(sql, params).fetchone()
+        conn = self._conn()
+        row = conn.execute(sql, params).fetchone()
         return self._hydrate(row) if row else None
 
     def find_by_alias(
@@ -117,7 +163,8 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
             sql += " AND e.user_id = ?"
             params.append(user_id)
         sql += " LIMIT 1"
-        row = self._conn.execute(sql, params).fetchone()
+        conn = self._conn()
+        row = conn.execute(sql, params).fetchone()
         return self._hydrate(row) if row else None
 
     def create_entity(
@@ -131,13 +178,14 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
         normalised_name = smart_title_case(
             canonical_name, exceptions=self._casing_exceptions
         )
-        cursor = self._conn.execute(
+        conn = self._conn()
+        cursor = conn.execute(
             "INSERT INTO entities"
             " (user_id, entity_type, canonical_name, description, first_seen)"
             " VALUES (?, ?, ?, ?, ?)",
             (user_id, entity_type, normalised_name, description, first_seen),
         )
-        self._conn.commit()
+        conn.commit()
         entity_id = cursor.lastrowid
         assert entity_id is not None
         log.info(
@@ -151,23 +199,25 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
         normalised = _normalise(alias)
         if not normalised:
             return
-        self._conn.execute(
+        conn = self._conn()
+        conn.execute(
             "INSERT OR IGNORE INTO entity_aliases"
             " (entity_id, alias_normalised) VALUES (?, ?)",
             (entity_id, normalised),
         )
-        self._conn.commit()
+        conn.commit()
 
     def remove_alias(self, entity_id: int, alias: str) -> bool:
         normalised = _normalise(alias)
         if not normalised:
             return False
-        cursor = self._conn.execute(
+        conn = self._conn()
+        cursor = conn.execute(
             "DELETE FROM entity_aliases"
             " WHERE entity_id = ? AND alias_normalised = ?",
             (entity_id, normalised),
         )
-        self._conn.commit()
+        conn.commit()
         return cursor.rowcount > 0
 
     def find_entity_by_alias_for_user(
@@ -176,7 +226,8 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
         normalised = _normalise(alias)
         if not normalised:
             return None
-        row = self._conn.execute(
+        conn = self._conn()
+        row = conn.execute(
             "SELECT e.* FROM entities e"
             " JOIN entity_aliases a ON a.entity_id = e.id"
             " WHERE a.alias_normalised = ? AND e.user_id = ?"
@@ -188,7 +239,8 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
     # ---- embeddings ---------------------------------------------------
 
     def get_entity_embedding(self, entity_id: int) -> list[float] | None:
-        row = self._conn.execute(
+        conn = self._conn()
+        row = conn.execute(
             "SELECT embedding_json FROM entities WHERE id = ?",
             (entity_id,),
         ).fetchone()
@@ -200,13 +252,14 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
     def set_entity_embedding(
         self, entity_id: int, embedding: list[float]
     ) -> None:
-        self._conn.execute(
+        conn = self._conn()
+        conn.execute(
             "UPDATE entities SET embedding_json = ?,"
             " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
             " WHERE id = ?",
             (json.dumps(embedding), entity_id),
         )
-        self._conn.commit()
+        conn.commit()
 
     def list_entities_of_type_with_embeddings(
         self, entity_type: str, user_id: int | None = None
@@ -219,7 +272,8 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
         if user_id is not None:
             sql += " AND user_id = ?"
             params.append(user_id)
-        rows = self._conn.execute(sql, params).fetchall()
+        conn = self._conn()
+        rows = conn.execute(sql, params).fetchall()
         result: list[tuple[Entity, list[float]]] = []
         for row in rows:
             entity = self._hydrate(row)
@@ -253,7 +307,8 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
             sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY entity_type, canonical_name LIMIT ? OFFSET ?"
         params.extend([limit, offset])
-        rows = self._conn.execute(sql, params).fetchall()
+        conn = self._conn()
+        rows = conn.execute(sql, params).fetchall()
         return [self._hydrate(r) for r in rows]
 
     def list_entities_with_mention_counts(
@@ -300,7 +355,8 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
             " LIMIT ? OFFSET ?"
         )
         params.extend([limit, offset])
-        rows = self._conn.execute(sql, params).fetchall()
+        conn = self._conn()
+        rows = conn.execute(sql, params).fetchall()
         return [
             (self._hydrate(r), int(r["mention_count"]), r["last_seen"] or "")
             for r in rows
@@ -336,7 +392,8 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
             params.extend([needle, needle])
         if conditions:
             sql += " WHERE " + " AND ".join(conditions)
-        row = self._conn.execute(sql, params).fetchone()
+        conn = self._conn()
+        row = conn.execute(sql, params).fetchone()
         return int(row["cnt"])
 
     # ---- mentions -----------------------------------------------------
@@ -376,11 +433,12 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
             return entity
         sets.append("updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')")
         params.append(entity_id)
-        self._conn.execute(
+        conn = self._conn()
+        conn.execute(
             f"UPDATE entities SET {', '.join(sets)} WHERE id = ?",
             params,
         )
-        self._conn.commit()
+        conn.commit()
         updated = self.get_entity(entity_id)
         assert updated is not None
         log.info("Updated entity %d: %s", entity_id, updated.canonical_name)
@@ -395,8 +453,9 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
         if user_id is not None:
             sql += " AND user_id = ?"
             params.append(user_id)
-        self._conn.execute(sql, params)
-        self._conn.commit()
+        conn = self._conn()
+        conn.execute(sql, params)
+        conn.commit()
         log.info(
             "Deleted entity %d: %s (%s)",
             entity_id, entity.canonical_name, entity.entity_type,

@@ -1,9 +1,14 @@
 """Tests for the RuntimeSettings service."""
 
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+from journal.db.factory import ConnectionFactory
+from journal.db.migrations import run_migrations
 from journal.services.runtime_settings import (
     SETTING_DEFS_BY_KEY,
     RuntimeSettings,
@@ -24,6 +29,19 @@ def mock_config():
 @pytest.fixture
 def settings(db_conn, mock_config):
     return RuntimeSettings(db_conn, mock_config)
+
+
+@pytest.fixture
+def settings_factory(tmp_path: Path) -> ConnectionFactory:
+    """ConnectionFactory pointing at a migrated temp DB."""
+    factory = ConnectionFactory(tmp_path / "settings.db")
+    run_migrations(factory.get())
+    return factory
+
+
+@pytest.fixture
+def settings_via_factory(settings_factory: ConnectionFactory, mock_config) -> RuntimeSettings:
+    return RuntimeSettings(settings_factory, mock_config)
 
 
 class TestLoad:
@@ -126,3 +144,92 @@ class TestGetAll:
         result = settings.get_all()
         by_key = {s["key"]: s for s in result}
         assert "choices" not in by_key["preprocess_images"]
+
+
+class TestFactoryPathSemantics:
+    """Production-path coverage for the ``ConnectionFactory`` model.
+
+    ``RuntimeSettings.set()`` is called from API request threads
+    (admin toggles in the webapp), so it genuinely writes from
+    multiple threads under realistic load. Under the old
+    shared-``Connection`` model this would risk
+    ``no transaction is active`` from a concurrent commit; under the
+    factory model each request thread owns its own connection and
+    the collision becomes structurally impossible.
+    """
+
+    def test_set_round_trip_under_factory(
+        self, settings_via_factory: RuntimeSettings,
+    ) -> None:
+        # The bool defaults from `mock_config` survive the seed step.
+        assert settings_via_factory.get("preprocess_images") is True
+
+        settings_via_factory.set("preprocess_images", False)
+        assert settings_via_factory.get("preprocess_images") is False
+
+        # A second instance over the same factory's DB sees the
+        # committed value (proves it really hit disk).
+        config = MagicMock()
+        config.preprocess_images = True  # opposite of what we set
+        config.ocr_dual_pass = False
+        config.enable_mood_scoring = True
+        config.ocr_provider = "anthropic"
+        config.registration_enabled = False
+        second = RuntimeSettings(settings_via_factory._factory, config)  # type: ignore[arg-type]
+        assert second.get("preprocess_images") is False
+
+    def test_concurrent_set_under_load(
+        self, settings_via_factory: RuntimeSettings,
+    ) -> None:
+        """Many threads each flipping bool settings on the shared
+        factory. Under the old shared-``Connection`` model this would
+        surface ``no transaction is active`` from a concurrent commit;
+        under the factory model it must complete cleanly with the
+        last write winning.
+        """
+        thread_count = 6
+        flips_per_thread = 10
+        errors: list[BaseException] = []
+
+        def worker(thread_idx: int) -> None:
+            try:
+                for i in range(flips_per_thread):
+                    # Alternate keys so threads aren't fighting over
+                    # the same row every iteration; the SQLite write
+                    # lock still serialises them at the file level.
+                    key = (
+                        "preprocess_images" if thread_idx % 2 == 0
+                        else "ocr_dual_pass"
+                    )
+                    settings_via_factory.set(key, bool(i % 2))
+            except BaseException as exc:  # noqa: BLE001 — test-only
+                errors.append(exc)
+
+        with ThreadPoolExecutor(max_workers=thread_count) as ex:
+            futures = [ex.submit(worker, i) for i in range(thread_count)]
+            for f in as_completed(futures):
+                f.result()
+
+        assert errors == []
+        # Both keys ended on a deterministic-modulo value (the very
+        # last iteration of any thread that touched them). We only
+        # care that no exceptions fired and the cache is consistent
+        # with the DB.
+        for key in ("preprocess_images", "ocr_dual_pass"):
+            cached = settings_via_factory.get(key)
+            assert isinstance(cached, bool)
+
+    def test_each_thread_gets_distinct_connection(
+        self, settings_via_factory: RuntimeSettings,
+    ) -> None:
+        main_conn_id = id(settings_via_factory._conn())
+        captured: list[int] = []
+
+        def worker() -> None:
+            captured.append(id(settings_via_factory._conn()))
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        assert len(captured) == 1
+        assert captured[0] != main_conn_id

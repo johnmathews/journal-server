@@ -4,8 +4,13 @@ Holds the entity-lifecycle operations that go beyond plain CRUD:
 ``merge_entities``, ``delete_orphaned_entities``, the quarantine
 trio (``quarantine_entity`` / ``release_quarantine`` /
 ``list_quarantined_entities``), the merge-candidate workflow, and
-``get_merge_history``. Methods stay bound to ``self`` so they keep
-using ``self._conn`` and ``self.get_entity`` from the base store.
+``get_merge_history``. Methods route through ``self._conn()`` (defined
+on the base store) so each call gets the appropriate connection —
+thread-local on the factory path, the shared connection on the
+legacy path. ``merge_entities`` runs an implicit multi-statement
+transaction on the calling thread's connection; under per-thread
+connections that transaction is owned by exactly one thread, so it
+cannot collide with other repos' writes.
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ class _MergeMixin:
         if survivor is None:
             raise ValueError(f"Survivor entity {survivor_id} not found")
 
+        conn = self._conn()  # type: ignore[attr-defined]
         total_mentions = 0
         total_relationships = 0
         total_aliases = 0
@@ -55,7 +61,7 @@ class _MergeMixin:
             # Snapshot the absorbed entity for merge history. Quarantine
             # state is included so the audit trail survives merges of
             # previously-quarantined entities.
-            self._conn.execute(  # type: ignore[attr-defined]
+            conn.execute(
                 "INSERT INTO entity_merge_history"
                 " (survivor_id, absorbed_id, absorbed_name,"
                 "  absorbed_type, absorbed_desc, absorbed_aliases,"
@@ -76,7 +82,7 @@ class _MergeMixin:
             )
 
             # Reassign mentions
-            cursor = self._conn.execute(  # type: ignore[attr-defined]
+            cursor = conn.execute(
                 "UPDATE entity_mentions SET entity_id = ?"
                 " WHERE entity_id = ?",
                 (survivor_id, absorbed_id),
@@ -84,13 +90,13 @@ class _MergeMixin:
             total_mentions += cursor.rowcount
 
             # Reassign relationships (both sides)
-            cursor = self._conn.execute(  # type: ignore[attr-defined]
+            cursor = conn.execute(
                 "UPDATE entity_relationships SET subject_entity_id = ?"
                 " WHERE subject_entity_id = ?",
                 (survivor_id, absorbed_id),
             )
             total_relationships += cursor.rowcount
-            cursor = self._conn.execute(  # type: ignore[attr-defined]
+            cursor = conn.execute(
                 "UPDATE entity_relationships SET object_entity_id = ?"
                 " WHERE object_entity_id = ?",
                 (survivor_id, absorbed_id),
@@ -103,7 +109,7 @@ class _MergeMixin:
                 _normalise(absorbed.canonical_name),
             ]:
                 if alias and alias != _normalise(survivor.canonical_name):
-                    self._conn.execute(  # type: ignore[attr-defined]
+                    conn.execute(
                         "INSERT OR IGNORE INTO entity_aliases"
                         " (entity_id, alias_normalised) VALUES (?, ?)",
                         (survivor_id, alias),
@@ -122,12 +128,12 @@ class _MergeMixin:
 
             # Delete the absorbed entity (cascades aliases + any
             # remaining pair-decision rows still referencing it)
-            self._conn.execute(  # type: ignore[attr-defined]
+            conn.execute(
                 "DELETE FROM entities WHERE id = ?", (absorbed_id,),
             )
 
             # Dismiss any pending merge candidates involving the absorbed entity
-            self._conn.execute(  # type: ignore[attr-defined]
+            conn.execute(
                 "UPDATE entity_merge_candidates SET status = 'accepted',"
                 " resolved_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
                 " WHERE status = 'pending'"
@@ -141,7 +147,7 @@ class _MergeMixin:
                 survivor_id, survivor.canonical_name,
             )
 
-        self._conn.commit()  # type: ignore[attr-defined]
+        conn.commit()
         return MergeResult(
             survivor_id=survivor_id,
             absorbed_ids=absorbed_ids,
@@ -154,12 +160,13 @@ class _MergeMixin:
         if not entity_ids:
             return 0
         placeholders = ", ".join("?" for _ in entity_ids)
-        cursor = self._conn.execute(  # type: ignore[attr-defined]
+        conn = self._conn()  # type: ignore[attr-defined]
+        cursor = conn.execute(
             f"DELETE FROM entities WHERE id IN ({placeholders})"
             f" AND id NOT IN (SELECT DISTINCT entity_id FROM entity_mentions)",
             entity_ids,
         )
-        self._conn.commit()  # type: ignore[attr-defined]
+        conn.commit()
         deleted = cursor.rowcount
         if deleted:
             log.info("Deleted %d orphaned entities (zero mentions)", deleted)
@@ -183,7 +190,8 @@ class _MergeMixin:
         existing = self.get_entity(entity_id)  # type: ignore[attr-defined]
         if existing is None:
             raise ValueError(f"Entity {entity_id} not found")
-        self._conn.execute(  # type: ignore[attr-defined]
+        conn = self._conn()  # type: ignore[attr-defined]
+        conn.execute(
             "UPDATE entities SET is_quarantined = 1,"
             " quarantine_reason = ?,"
             " quarantined_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),"
@@ -191,7 +199,7 @@ class _MergeMixin:
             " WHERE id = ?",
             (reason, entity_id),
         )
-        self._conn.commit()  # type: ignore[attr-defined]
+        conn.commit()
         log.info(
             "Quarantined entity %d (%s): %s",
             entity_id, existing.canonical_name, reason,
@@ -207,7 +215,8 @@ class _MergeMixin:
         existing = self.get_entity(entity_id)  # type: ignore[attr-defined]
         if existing is None:
             raise ValueError(f"Entity {entity_id} not found")
-        self._conn.execute(  # type: ignore[attr-defined]
+        conn = self._conn()  # type: ignore[attr-defined]
+        conn.execute(
             "UPDATE entities SET is_quarantined = 0,"
             " quarantine_reason = '',"
             " quarantined_at = '',"
@@ -215,7 +224,7 @@ class _MergeMixin:
             " WHERE id = ?",
             (entity_id,),
         )
-        self._conn.commit()  # type: ignore[attr-defined]
+        conn.commit()
         log.info(
             "Released quarantine on entity %d (%s)",
             entity_id, existing.canonical_name,
@@ -227,7 +236,8 @@ class _MergeMixin:
         Ordering matches ``list_entities`` (entity_type then
         canonical_name) so the operator UI is stable.
         """
-        rows = self._conn.execute(  # type: ignore[attr-defined]
+        conn = self._conn()  # type: ignore[attr-defined]
+        rows = conn.execute(
             "SELECT * FROM entities"
             " WHERE user_id = ? AND is_quarantined = 1"
             " ORDER BY entity_type, canonical_name",
@@ -258,7 +268,8 @@ class _MergeMixin:
         # Normalise order so (a, b) == (b, a) — matches the table's
         # CHECK (entity_id_a < entity_id_b).
         lo, hi = sorted([entity_id_a, entity_id_b])
-        self._conn.execute(  # type: ignore[attr-defined]
+        conn = self._conn()  # type: ignore[attr-defined]
+        conn.execute(
             "INSERT INTO entity_merge_candidates"
             " (entity_id_a, entity_id_b, similarity, extraction_run_id)"
             " VALUES (?, ?, ?, ?)"
@@ -269,7 +280,7 @@ class _MergeMixin:
             " WHERE entity_merge_candidates.status = 'pending'",
             (lo, hi, similarity, extraction_run_id),
         )
-        self._conn.commit()  # type: ignore[attr-defined]
+        conn.commit()
 
     def list_merge_candidates(
         self,
@@ -279,9 +290,10 @@ class _MergeMixin:
     ) -> list[MergeCandidate]:
         from journal.models import MergeCandidate
 
+        conn = self._conn()  # type: ignore[attr-defined]
         if user_id is not None:
             # Filter at DB level: both entities must belong to the user.
-            rows = self._conn.execute(  # type: ignore[attr-defined]
+            rows = conn.execute(
                 "SELECT c.* FROM entity_merge_candidates c"
                 " JOIN entities ea ON ea.id = c.entity_id_a"
                 " JOIN entities eb ON eb.id = c.entity_id_b"
@@ -290,7 +302,7 @@ class _MergeMixin:
                 (status, user_id, user_id, limit),
             ).fetchall()
         else:
-            rows = self._conn.execute(  # type: ignore[attr-defined]
+            rows = conn.execute(
                 "SELECT * FROM entity_merge_candidates"
                 " WHERE status = ? ORDER BY similarity DESC LIMIT ?",
                 (status, limit),
@@ -324,12 +336,13 @@ class _MergeMixin:
         """
         if status not in ("accepted", "dismissed"):
             raise ValueError(f"Invalid status: {status}")
-        row = self._conn.execute(  # type: ignore[attr-defined]
+        conn = self._conn()  # type: ignore[attr-defined]
+        row = conn.execute(
             "SELECT entity_id_a, entity_id_b FROM entity_merge_candidates"
             " WHERE id = ?",
             (candidate_id,),
         ).fetchone()
-        self._conn.execute(  # type: ignore[attr-defined]
+        conn.execute(
             "UPDATE entity_merge_candidates SET status = ?,"
             " resolved_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
             " WHERE id = ?",
@@ -338,7 +351,7 @@ class _MergeMixin:
         if status == "dismissed" and row is not None:
             entity_id_a = int(row["entity_id_a"])
             entity_id_b = int(row["entity_id_b"])
-            user_row = self._conn.execute(  # type: ignore[attr-defined]
+            user_row = conn.execute(
                 "SELECT user_id FROM entities WHERE id = ?",
                 (entity_id_a,),
             ).fetchone()
@@ -348,7 +361,7 @@ class _MergeMixin:
                     entity_id_a=entity_id_a,
                     entity_id_b=entity_id_b,
                 )
-        self._conn.commit()  # type: ignore[attr-defined]
+        conn.commit()
 
     # ---- pair decisions (persistent "not a duplicate") ---------------
 
@@ -364,7 +377,8 @@ class _MergeMixin:
         if entity_id_a == entity_id_b:
             return
         lo, hi = sorted([entity_id_a, entity_id_b])
-        self._conn.execute(  # type: ignore[attr-defined]
+        conn = self._conn()  # type: ignore[attr-defined]
+        conn.execute(
             "INSERT OR IGNORE INTO entity_pair_decisions"
             " (user_id, entity_id_lo, entity_id_hi, decision)"
             " VALUES (?, ?, ?, 'rejected')",
@@ -384,7 +398,8 @@ class _MergeMixin:
             entity_id_a=entity_id_a,
             entity_id_b=entity_id_b,
         )
-        self._conn.commit()  # type: ignore[attr-defined]
+        conn = self._conn()  # type: ignore[attr-defined]
+        conn.commit()
 
     def is_pair_rejected(
         self, user_id: int, entity_id_a: int, entity_id_b: int,
@@ -393,7 +408,8 @@ class _MergeMixin:
         if entity_id_a == entity_id_b:
             return False
         lo, hi = sorted([entity_id_a, entity_id_b])
-        row = self._conn.execute(  # type: ignore[attr-defined]
+        conn = self._conn()  # type: ignore[attr-defined]
+        row = conn.execute(
             "SELECT 1 FROM entity_pair_decisions"
             " WHERE user_id = ? AND entity_id_lo = ? AND entity_id_hi = ?",
             (user_id, lo, hi),
@@ -406,7 +422,8 @@ class _MergeMixin:
         """Return the user's rejected pairs, newest first."""
         from journal.models import PairDecision
 
-        rows = self._conn.execute(  # type: ignore[attr-defined]
+        conn = self._conn()  # type: ignore[attr-defined]
+        rows = conn.execute(
             "SELECT * FROM entity_pair_decisions"
             " WHERE user_id = ?"
             " ORDER BY decided_at DESC, id DESC"
@@ -434,7 +451,8 @@ class _MergeMixin:
 
     def count_pair_rejections(self, user_id: int) -> int:
         """Total rejections for the user (for paginated list metadata)."""
-        row = self._conn.execute(  # type: ignore[attr-defined]
+        conn = self._conn()  # type: ignore[attr-defined]
+        row = conn.execute(
             "SELECT COUNT(*) AS n FROM entity_pair_decisions"
             " WHERE user_id = ?",
             (user_id,),
@@ -445,12 +463,13 @@ class _MergeMixin:
         self, user_id: int, decision_id: int,
     ) -> bool:
         """Remove a rejection. Returns True if a row was deleted."""
-        cursor = self._conn.execute(  # type: ignore[attr-defined]
+        conn = self._conn()  # type: ignore[attr-defined]
+        cursor = conn.execute(
             "DELETE FROM entity_pair_decisions"
             " WHERE id = ? AND user_id = ?",
             (decision_id, user_id),
         )
-        self._conn.commit()  # type: ignore[attr-defined]
+        conn.commit()
         return cursor.rowcount > 0
 
     def _transfer_pair_rejections_for_merge(
@@ -471,7 +490,8 @@ class _MergeMixin:
         The FK CASCADE on the absorbed entity's deletion is a safety
         net for any rows the loop missed (it shouldn't miss any).
         """
-        rows = self._conn.execute(  # type: ignore[attr-defined]
+        conn = self._conn()  # type: ignore[attr-defined]
+        rows = conn.execute(
             "SELECT id, user_id, entity_id_lo, entity_id_hi"
             " FROM entity_pair_decisions"
             " WHERE entity_id_lo = ? OR entity_id_hi = ?",
@@ -485,19 +505,19 @@ class _MergeMixin:
             )
             if other == survivor_id:
                 # Self-pair after the merge — drop it.
-                self._conn.execute(  # type: ignore[attr-defined]
+                conn.execute(
                     "DELETE FROM entity_pair_decisions WHERE id = ?",
                     (row["id"],),
                 )
                 continue
             new_lo, new_hi = sorted([survivor_id, other])
-            self._conn.execute(  # type: ignore[attr-defined]
+            conn.execute(
                 "INSERT OR IGNORE INTO entity_pair_decisions"
                 " (user_id, entity_id_lo, entity_id_hi, decision)"
                 " VALUES (?, ?, ?, 'rejected')",
                 (row["user_id"], new_lo, new_hi),
             )
-            self._conn.execute(  # type: ignore[attr-defined]
+            conn.execute(
                 "DELETE FROM entity_pair_decisions WHERE id = ?",
                 (row["id"],),
             )
@@ -507,7 +527,8 @@ class _MergeMixin:
     def get_merge_history(
         self, entity_id: int,
     ) -> list[dict[str, object]]:
-        rows = self._conn.execute(  # type: ignore[attr-defined]
+        conn = self._conn()  # type: ignore[attr-defined]
+        rows = conn.execute(
             "SELECT * FROM entity_merge_history"
             " WHERE survivor_id = ? ORDER BY merged_at DESC",
             (entity_id,),

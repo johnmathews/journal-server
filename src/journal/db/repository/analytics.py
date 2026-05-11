@@ -12,8 +12,9 @@ slice results over a time bucket:
 - ``get_mood_entity_correlation`` — avg mood-by-entity vs. overall.
 
 Granularity-bucketed methods use ``_bin_start_sql`` from
-``protocol``. Methods stay bound to ``self`` so they keep using
-``self._conn``.
+``protocol``. Methods route through ``self._conn()`` so each call
+gets the appropriate connection — thread-local on the factory
+path, the shared connection on the legacy path.
 """
 
 from journal.db.repository.protocol import _SUPPORTED_BINS, _bin_start_sql
@@ -63,7 +64,8 @@ class _AnalyticsMixin:
             params.append(end_date)
         sql += " GROUP BY en.id ORDER BY mention_count DESC LIMIT ?"
         params.append(limit)
-        rows = self._conn.execute(sql, params).fetchall()
+        conn = self._conn()
+        rows = conn.execute(sql, params).fetchall()
         return [
             EntityDistributionBin(
                 canonical_name=row["canonical_name"],
@@ -117,7 +119,8 @@ class _AnalyticsMixin:
             params.append(end_date)
         top_sql += " GROUP BY en.id ORDER BY total DESC LIMIT ?"
         params.append(limit)
-        top_rows = self._conn.execute(top_sql, params).fetchall()
+        conn = self._conn()
+        top_rows = conn.execute(top_sql, params).fetchall()
         entity_names = [row["canonical_name"] for row in top_rows]
 
         if not entity_names:
@@ -151,7 +154,7 @@ class _AnalyticsMixin:
             bin_sql += " AND e.entry_date <= ?"
             bin_params.append(end_date)
         bin_sql += f" GROUP BY {bin_expr}, en.canonical_name ORDER BY period, entity"
-        bin_rows = self._conn.execute(bin_sql, bin_params).fetchall()
+        bin_rows = conn.execute(bin_sql, bin_params).fetchall()
         bins = [
             EntityTrendBin(
                 period=row["period"],
@@ -226,7 +229,8 @@ class _AnalyticsMixin:
             params.append(end_date)
         sql += " GROUP BY bin_start ORDER BY bin_start ASC"
 
-        rows = self._conn.execute(sql, params).fetchall()
+        conn = self._conn()
+        rows = conn.execute(sql, params).fetchall()
         return [
             WritingFrequencyBin(
                 bin_start=row["bin_start"],
@@ -268,7 +272,8 @@ class _AnalyticsMixin:
         if end_date:
             overall_sql += " AND e.entry_date <= ?"
             overall_params.append(end_date)
-        overall_row = self._conn.execute(overall_sql, overall_params).fetchone()
+        conn = self._conn()
+        overall_row = conn.execute(overall_sql, overall_params).fetchone()
         overall_avg = round(float(overall_row["overall_avg"]), 4)
 
         # Per-entity averages.
@@ -299,7 +304,7 @@ class _AnalyticsMixin:
             params.append(end_date)
         sql += " GROUP BY en.id ORDER BY entry_count DESC LIMIT ?"
         params.append(limit)
-        rows = self._conn.execute(sql, params).fetchall()
+        rows = conn.execute(sql, params).fetchall()
         items = [
             MoodEntityCorrelation(
                 entity=row["entity"],

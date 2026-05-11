@@ -27,6 +27,7 @@ import threading
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
+from journal.db.factory import ConnectionFactory
 from journal.models import (
     FitnessActivity,
     FitnessAuthState,
@@ -155,26 +156,69 @@ def _raw_table_for(source: str) -> str:
 class FitnessRepository:
     """Data layer for the fitness pipeline.
 
-    Methods are thread-safe via the same ``threading.Lock`` discipline
-    used by ``SQLiteJobRepository`` — multiple writers (the API thread
-    and the JobRunner worker thread) share one ``sqlite3.Connection``.
+    Construction accepts either a :class:`ConnectionFactory` (preferred,
+    used by production via ``mcp_server/bootstrap.py``) or a bare
+    ``sqlite3.Connection`` (legacy, retained for tests that haven't been
+    migrated to the factory model yet — see
+    ``docs/sqlite-per-thread-connections-plan.md`` W3).
+
+    On the **factory** path each thread that calls a method gets its
+    own ``sqlite3.Connection`` via ``threading.local`` inside the
+    factory, so the shared-state commit race documented in
+    ``docs/sqlite-threading.md`` is structurally impossible. The
+    ``_lock`` is a no-op on this path.
+
+    On the **legacy connection** path the same ``Connection`` instance
+    is shared across threads. The per-method ``threading.Lock``
+    serialises ``execute`` + ``commit`` pairs within this repo. This
+    path is deliberately less safe than the factory path and exists
+    only as a migration ramp — new code should pass a
+    ``ConnectionFactory``.
     """
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self._conn = conn
+    def __init__(
+        self,
+        factory_or_conn: ConnectionFactory | sqlite3.Connection,
+    ) -> None:
+        if isinstance(factory_or_conn, ConnectionFactory):
+            self._factory: ConnectionFactory | None = factory_or_conn
+            self._direct_conn: sqlite3.Connection | None = None
+        else:
+            self._factory = None
+            self._direct_conn = factory_or_conn
         self._lock = threading.Lock()
+
+    def _conn(self) -> sqlite3.Connection:
+        """Return the connection for the current call.
+
+        Factory path: returns this thread's connection (lazily opened
+        on first use). Legacy path: returns the single shared
+        connection passed at construction.
+        """
+        if self._factory is not None:
+            return self._factory.get()
+        assert self._direct_conn is not None
+        return self._direct_conn
 
     @property
     def connection(self) -> sqlite3.Connection:
-        return self._conn
+        """Underlying SQLite connection for the current thread.
+
+        On the factory path this returns the *calling* thread's
+        connection (committed rows are visible via WAL across
+        connections). On the legacy path this returns the single
+        shared connection.
+        """
+        return self._conn()
 
     # ── Auth state ────────────────────────────────────────────────
 
     def get_auth_state(
         self, *, user_id: int, source: str,
     ) -> FitnessAuthState | None:
+        conn = self._conn()
         with self._lock:
-            row = self._conn.execute(
+            row = conn.execute(
                 "SELECT * FROM fitness_auth_state WHERE user_id = ? AND source = ?",
                 (user_id, source),
             ).fetchone()
@@ -192,8 +236,9 @@ class FitnessRepository:
         the literal column value (``"unknown" | "ok" | "broken"``) or
         ``None`` if no row exists for this ``(user_id, source)``.
         """
+        conn = self._conn()
         with self._lock:
-            row = self._conn.execute(
+            row = conn.execute(
                 "SELECT auth_status FROM fitness_auth_state "
                 "WHERE user_id = ? AND source = ?",
                 (user_id, source),
@@ -204,8 +249,9 @@ class FitnessRepository:
         """Insert or update one auth-state row. Always sets
         ``updated_at`` to now (per schema §4 — app-managed)."""
         now = _now_iso()
+        conn = self._conn()
         with self._lock:
-            self._conn.execute(
+            conn.execute(
                 """
                 INSERT INTO fitness_auth_state (
                     user_id, source, access_token, refresh_token, token_expires_at,
@@ -233,7 +279,7 @@ class FitnessRepository:
                     now,
                 ),
             )
-            self._conn.commit()
+            conn.commit()
 
     def delete_auth_state(self, *, user_id: int, source: str) -> bool:
         """Delete the auth row for ``(user_id, source)``. Returns True if a
@@ -244,12 +290,13 @@ class FitnessRepository:
         ``fitness_daily`` rows remain so a user can reconnect with the
         same upstream account and pick up where they left off.
         """
+        conn = self._conn()
         with self._lock:
-            cursor = self._conn.execute(
+            cursor = conn.execute(
                 "DELETE FROM fitness_auth_state WHERE user_id = ? AND source = ?",
                 (user_id, source),
             )
-            self._conn.commit()
+            conn.commit()
             return cursor.rowcount > 0
 
     def transition_auth(
@@ -269,14 +316,15 @@ class FitnessRepository:
         creates it and returns True.
         """
         now = _now_iso()
+        conn = self._conn()
         with self._lock:
-            existing = self._conn.execute(
+            existing = conn.execute(
                 "SELECT auth_status FROM fitness_auth_state WHERE user_id = ? AND source = ?",
                 (user_id, source),
             ).fetchone()
             if existing is None:
                 broken_since = at if status == "broken" else None
-                self._conn.execute(
+                conn.execute(
                     """
                     INSERT INTO fitness_auth_state (
                         user_id, source, auth_status, auth_broken_since, updated_at
@@ -284,12 +332,12 @@ class FitnessRepository:
                     """,
                     (user_id, source, status, broken_since, now),
                 )
-                self._conn.commit()
+                conn.commit()
                 return True
             if existing["auth_status"] == status:
                 return False
             broken_since = at if status == "broken" else None
-            self._conn.execute(
+            conn.execute(
                 """
                 UPDATE fitness_auth_state
                 SET auth_status = ?, auth_broken_since = ?, updated_at = ?
@@ -297,7 +345,7 @@ class FitnessRepository:
                 """,
                 (status, broken_since, now, user_id, source),
             )
-            self._conn.commit()
+            conn.commit()
             return True
 
     def get_health_summary(self, *, user_id: int) -> list[dict[str, Any]]:
@@ -318,8 +366,9 @@ class FitnessRepository:
         successful run. Sub-millisecond against a personal-scale DB; the
         endpoint is low-traffic so we don't cache.
         """
+        conn = self._conn()
         with self._lock:
-            rows = self._conn.execute(
+            rows = conn.execute(
                 """
                 SELECT
                     src.source AS source,
@@ -357,15 +406,16 @@ class FitnessRepository:
 
     def start_sync_run(self, *, user_id: int, source: str) -> int:
         """Insert a new ``running`` sync-run row; returns its id."""
+        conn = self._conn()
         with self._lock:
-            cur = self._conn.execute(
+            cur = conn.execute(
                 """
                 INSERT INTO fitness_sync_runs (user_id, source, status)
                 VALUES (?, ?, 'running')
                 """,
                 (user_id, source),
             )
-            self._conn.commit()
+            conn.commit()
             assert cur.lastrowid is not None
             return cur.lastrowid
 
@@ -382,8 +432,9 @@ class FitnessRepository:
         rows_normalized: int = 0,
         notes: dict[str, Any] | None = None,
     ) -> None:
+        conn = self._conn()
         with self._lock:
-            self._conn.execute(
+            conn.execute(
                 """
                 UPDATE fitness_sync_runs
                 SET status = ?, finished_at = ?, error_class = ?, error_message = ?,
@@ -397,7 +448,7 @@ class FitnessRepository:
                     run_id,
                 ),
             )
-            self._conn.commit()
+            conn.commit()
 
     def record_normalized_rows(
         self, run_id: int, rows_normalized: int,
@@ -411,8 +462,9 @@ class FitnessRepository:
         this amend the UI's ``Norm.`` column shows 0 on every successful
         run — see ``docs/fitness-followup-plan.md`` F1.
         """
+        conn = self._conn()
         with self._lock:
-            self._conn.execute(
+            conn.execute(
                 """
                 UPDATE fitness_sync_runs
                 SET rows_normalized = ?
@@ -420,7 +472,7 @@ class FitnessRepository:
                 """,
                 (rows_normalized, run_id),
             )
-            self._conn.commit()
+            conn.commit()
 
     def find_running_sync_run(
         self, *, user_id: int, source: str,
@@ -431,8 +483,9 @@ class FitnessRepository:
         token-refresh races (the JobRunner header's hazard list) cannot
         happen for fitness syncs in practice.
         """
+        conn = self._conn()
         with self._lock:
-            row = self._conn.execute(
+            row = conn.execute(
                 """
                 SELECT id FROM fitness_sync_runs
                 WHERE user_id = ? AND source = ? AND status = 'running'
@@ -445,8 +498,9 @@ class FitnessRepository:
     def last_successful_sync_at(
         self, *, user_id: int, source: str,
     ) -> str | None:
+        conn = self._conn()
         with self._lock:
-            row = self._conn.execute(
+            row = conn.execute(
                 """
                 SELECT MAX(started_at) AS at FROM fitness_sync_runs
                 WHERE user_id = ? AND source = ? AND status = 'success'
@@ -458,8 +512,9 @@ class FitnessRepository:
     def list_recent_sync_runs(
         self, *, user_id: int, source: str, limit: int = 10,
     ) -> list[FitnessSyncRun]:
+        conn = self._conn()
         with self._lock:
-            rows = self._conn.execute(
+            rows = conn.execute(
                 """
                 SELECT * FROM fitness_sync_runs
                 WHERE user_id = ? AND source = ?
@@ -488,8 +543,9 @@ class FitnessRepository:
         the old row stays in place per the append-only rule (D3)."""
         table = _raw_table_for(source)
         sha = _sha256_hex(payload_json)
+        conn = self._conn()
         with self._lock:
-            cur = self._conn.execute(
+            cur = conn.execute(
                 f"""
                 INSERT OR IGNORE INTO {table} (
                     user_id, source_id, endpoint, payload_json, payload_sha256, sync_run_id
@@ -497,7 +553,7 @@ class FitnessRepository:
                 """,  # noqa: S608 — table name is from a closed allowlist via _raw_table_for
                 (user_id, source_id, endpoint, payload_json, sha, sync_run_id),
             )
-            self._conn.commit()
+            conn.commit()
             return cur.lastrowid if cur.rowcount else None
 
     def list_raw_since(
@@ -508,14 +564,15 @@ class FitnessRepository:
         since: str | None = None,
     ) -> Iterator[FitnessRawRow]:
         table = _raw_table_for(source)
+        conn = self._conn()
         with self._lock:
             if since is None:
-                rows = self._conn.execute(
+                rows = conn.execute(
                     f"SELECT * FROM {table} WHERE user_id = ? ORDER BY fetched_at",  # noqa: S608
                     (user_id,),
                 ).fetchall()
             else:
-                rows = self._conn.execute(
+                rows = conn.execute(
                     f"""
                     SELECT * FROM {table}
                     WHERE user_id = ? AND fetched_at > ?
@@ -529,8 +586,9 @@ class FitnessRepository:
     # ── Normalized ────────────────────────────────────────────────
 
     def upsert_activity(self, activity: FitnessActivity) -> None:
+        conn = self._conn()
         with self._lock:
-            self._conn.execute(
+            conn.execute(
                 """
                 INSERT INTO fitness_activities (
                     user_id, source, source_id, activity_type, source_subtype,
@@ -570,11 +628,12 @@ class FitnessRepository:
                     activity.raw_ref_id, _now_iso(),
                 ),
             )
-            self._conn.commit()
+            conn.commit()
 
     def upsert_daily(self, daily: FitnessDaily) -> None:
+        conn = self._conn()
         with self._lock:
-            self._conn.execute(
+            conn.execute(
                 """
                 INSERT INTO fitness_daily (
                     user_id, source, local_date, sleep_score, sleep_duration_s,
@@ -612,7 +671,7 @@ class FitnessRepository:
                     _now_iso(),
                 ),
             )
-            self._conn.commit()
+            conn.commit()
 
     def list_activities(
         self,
@@ -623,9 +682,10 @@ class FitnessRepository:
         activity_type: str | None = None,
     ) -> list[FitnessActivity]:
         """Inclusive on both sides of the date range."""
+        conn = self._conn()
         with self._lock:
             if activity_type is None:
-                rows = self._conn.execute(
+                rows = conn.execute(
                     """
                     SELECT * FROM fitness_activities
                     WHERE user_id = ? AND local_date BETWEEN ? AND ?
@@ -634,7 +694,7 @@ class FitnessRepository:
                     (user_id, start, end),
                 ).fetchall()
             else:
-                rows = self._conn.execute(
+                rows = conn.execute(
                     """
                     SELECT * FROM fitness_activities
                     WHERE user_id = ? AND local_date BETWEEN ? AND ?
@@ -648,8 +708,9 @@ class FitnessRepository:
     def list_daily(
         self, *, user_id: int, start: str, end: str,
     ) -> list[FitnessDaily]:
+        conn = self._conn()
         with self._lock:
-            rows = self._conn.execute(
+            rows = conn.execute(
                 """
                 SELECT * FROM fitness_daily
                 WHERE user_id = ? AND local_date BETWEEN ? AND ?
@@ -679,8 +740,9 @@ class FitnessRepository:
         """
         # Closed allowlist — table is never callee-supplied.
         table = "fitness_activities" if kind == "activities" else "fitness_daily"
+        conn = self._conn()
         with self._lock:
-            row = self._conn.execute(
+            row = conn.execute(
                 f"""
                 SELECT MAX(local_date) AS d FROM {table}
                 WHERE user_id = ? AND source = ?
@@ -710,9 +772,10 @@ class FitnessRepository:
         ``fitness_daily.raw_ref_ids_json`` array.
         """
         raw_table = _raw_table_for(source)
+        conn = self._conn()
         with self._lock:
             if kind == "activities":
-                row = self._conn.execute(
+                row = conn.execute(
                     f"""
                     SELECT MAX(r.fetched_at) AS at
                     FROM fitness_activities fa
@@ -722,7 +785,7 @@ class FitnessRepository:
                     (user_id, source),
                 ).fetchone()
             else:
-                row = self._conn.execute(
+                row = conn.execute(
                     f"""
                     SELECT MAX(r.fetched_at) AS at
                     FROM fitness_daily fd, json_each(fd.raw_ref_ids_json) j

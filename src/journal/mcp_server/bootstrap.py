@@ -24,6 +24,7 @@ from mcp.server.fastmcp import FastMCP
 
 from journal.config import load_config
 from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
@@ -272,7 +273,18 @@ def _init_services() -> dict:
     # requires redesigning the threading model first.
     conn = get_connection(config.db_path, check_same_thread=False)
     run_migrations(conn)
-    repo = SQLiteEntryRepository(conn)
+
+    # One process-wide ``ConnectionFactory`` — each thread that calls
+    # into a migrated repo opens its own ``sqlite3.Connection``, so
+    # the shared-state commit race documented in
+    # ``docs/sqlite-threading.md`` cannot happen. Repos migrated so
+    # far (W2, W3): ``SQLiteJobRepository``, ``SQLiteEntryRepository``.
+    # The remaining repos (``FitnessRepository``, ``SQLiteEntityStore``,
+    # ``SQLiteUserRepository``, ``RuntimeSettings``) still share
+    # ``conn`` until the rest of W3 lands.
+    db_factory = ConnectionFactory(config.db_path)
+
+    repo = SQLiteEntryRepository(db_factory)
     log.info("  SQLite connected and migrated")
 
     # Vector store
@@ -325,7 +337,7 @@ def _init_services() -> dict:
         config.entity_casing_exceptions_path,
     )
     entity_store = SQLiteEntityStore(
-        conn, casing_exceptions=entity_casing_exceptions
+        db_factory, casing_exceptions=entity_casing_exceptions
     )
     extraction_provider = AnthropicExtractionProvider(
         api_key=config.anthropic_api_key,
@@ -383,7 +395,7 @@ def _init_services() -> dict:
     # per-user display names for the LLM author prompt.
     from journal.db.user_repository import SQLiteUserRepository
 
-    user_repo = SQLiteUserRepository(conn)
+    user_repo = SQLiteUserRepository(db_factory)
 
     entity_extraction_service = EntityExtractionService(
         repository=repo,
@@ -511,7 +523,7 @@ def _init_services() -> dict:
                 ingestion_service.replace_heading_detector(None)
                 log.info("Date-heading detection disabled via runtime settings")
 
-    runtime_settings = RuntimeSettings(conn, config, on_change=_on_runtime_setting_change)
+    runtime_settings = RuntimeSettings(db_factory, config, on_change=_on_runtime_setting_change)
     log.info("  Runtime settings loaded")
 
     # Ingestion service — created before the JobRunner so the runner
@@ -548,18 +560,13 @@ def _init_services() -> dict:
 
     # Jobs infrastructure: repository + single-worker runner.
     #
-    # The jobs repo owns a ``ConnectionFactory`` so each thread that
-    # touches it (ASGI request handler, JobRunner worker, lifespan
-    # hooks) opens its own ``sqlite3.Connection``. That eliminates the
-    # shared-state commit race that bit prod on 2026-04-XX and
-    # 2026-05-11 — see ``docs/sqlite-per-thread-connections-plan.md``.
-    # Other repos (``SQLiteEntryRepository``, ``FitnessRepository``,
-    # ``RuntimeSettings``) still share ``conn`` and will be migrated
-    # to the factory in W3.
-    from journal.db.factory import ConnectionFactory
-
-    job_db_factory = ConnectionFactory(config.db_path)
-    job_repository = SQLiteJobRepository(job_db_factory)
+    # The jobs repo uses the process-wide ``ConnectionFactory`` (see
+    # ``db_factory`` above) so each thread that touches it (ASGI
+    # request handler, JobRunner worker, lifespan hooks) opens its
+    # own ``sqlite3.Connection``. That eliminates the shared-state
+    # commit race that bit prod on 2026-04-XX and 2026-05-11 — see
+    # ``docs/sqlite-per-thread-connections-plan.md``.
+    job_repository = SQLiteJobRepository(db_factory)
     reconciled = job_repository.reconcile_stuck_jobs()
     log.info(
         "  Jobs: reconciled %d stuck job(s) from previous process",
@@ -567,7 +574,7 @@ def _init_services() -> dict:
     )
     from journal.db.fitness_repository import FitnessRepository
 
-    fitness_repo = FitnessRepository(conn)
+    fitness_repo = FitnessRepository(db_factory)
     fitness_callables = _build_fitness_callables(
         fitness_repo=fitness_repo,
         config=config,

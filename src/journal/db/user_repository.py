@@ -7,6 +7,7 @@ import threading
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
+from journal.db.factory import ConnectionFactory
 from journal.models import ApiKeyInfo, User
 
 log = logging.getLogger(__name__)
@@ -112,13 +113,56 @@ class UserRepository(Protocol):
 class SQLiteUserRepository:
     """SQLite-backed repository for users, sessions, and API keys.
 
-    All methods are thread-safe: a ``threading.Lock`` serialises access
-    to the shared ``sqlite3.Connection``.
+    Construction accepts either a :class:`ConnectionFactory` (preferred,
+    used by production via ``mcp_server/bootstrap.py``) or a bare
+    ``sqlite3.Connection`` (legacy, retained for tests that haven't been
+    migrated to the factory model yet — see
+    ``docs/sqlite-per-thread-connections-plan.md`` W3).
+
+    On the **factory** path each thread that calls a method gets its
+    own ``sqlite3.Connection`` via ``threading.local`` inside the
+    factory, so the shared-state commit race documented in
+    ``docs/sqlite-threading.md`` is structurally impossible. The
+    ``_lock`` is a no-op on this path.
+
+    On the **legacy connection** path the same ``Connection`` instance
+    is shared across threads. The per-method ``threading.Lock``
+    serialises ``execute`` + ``commit`` pairs within this repo.
     """
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self._conn = conn
+    def __init__(
+        self,
+        factory_or_conn: ConnectionFactory | sqlite3.Connection,
+    ) -> None:
+        if isinstance(factory_or_conn, ConnectionFactory):
+            self._factory: ConnectionFactory | None = factory_or_conn
+            self._direct_conn: sqlite3.Connection | None = None
+        else:
+            self._factory = None
+            self._direct_conn = factory_or_conn
         self._lock = threading.Lock()
+
+    def _conn(self) -> sqlite3.Connection:
+        """Return the connection for the current call.
+
+        Factory path: returns this thread's connection (lazily opened
+        on first use). Legacy path: returns the single shared
+        connection passed at construction.
+        """
+        if self._factory is not None:
+            return self._factory.get()
+        assert self._direct_conn is not None
+        return self._direct_conn
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """Underlying SQLite connection for the current thread.
+
+        On the factory path this returns the *calling* thread's
+        connection (committed rows are visible via WAL). On the
+        legacy path this returns the single shared connection.
+        """
+        return self._conn()
 
     # ── Users ───────────────────────────────────────────────────────────
 
@@ -130,13 +174,14 @@ class SQLiteUserRepository:
         is_admin: bool = False,
     ) -> User:
         now = _now_iso()
+        conn = self._conn()
         with self._lock:
-            cursor = self._conn.execute(
+            cursor = conn.execute(
                 "INSERT INTO users (email, display_name, password_hash, is_admin, "
                 "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (email, display_name, password_hash, int(is_admin), now, now),
             )
-            self._conn.commit()
+            conn.commit()
             user_id = cursor.lastrowid
         log.info("Created user %d (%s)", user_id, email)
         user = self.get_user_by_id(user_id)  # type: ignore[arg-type]
@@ -144,22 +189,25 @@ class SQLiteUserRepository:
         return user
 
     def get_user_by_id(self, user_id: int) -> User | None:
+        conn = self._conn()
         with self._lock:
-            row = self._conn.execute(
+            row = conn.execute(
                 "SELECT * FROM users WHERE id = ?", (user_id,)
             ).fetchone()
         return _row_to_user(row) if row else None
 
     def get_user_by_email(self, email: str) -> User | None:
+        conn = self._conn()
         with self._lock:
-            row = self._conn.execute(
+            row = conn.execute(
                 "SELECT * FROM users WHERE email = ?", (email,)
             ).fetchone()
         return _row_to_user(row) if row else None
 
     def get_password_hash(self, user_id: int) -> str | None:
+        conn = self._conn()
         with self._lock:
-            row = self._conn.execute(
+            row = conn.execute(
                 "SELECT password_hash FROM users WHERE id = ?", (user_id,)
             ).fetchone()
         if row is None:
@@ -197,56 +245,62 @@ class SQLiteUserRepository:
         params.append(user_id)
 
         sql = f"UPDATE users SET {', '.join(set_clauses)} WHERE id = ?"
+        conn = self._conn()
         with self._lock:
-            cursor = self._conn.execute(sql, params)
-            self._conn.commit()
+            cursor = conn.execute(sql, params)
+            conn.commit()
         if cursor.rowcount == 0:
             return None
         return self.get_user_by_id(user_id)
 
     def list_users(self) -> list[User]:
+        conn = self._conn()
         with self._lock:
-            rows = self._conn.execute(
+            rows = conn.execute(
                 "SELECT * FROM users ORDER BY created_at DESC"
             ).fetchall()
         return [_row_to_user(r) for r in rows]
 
     def increment_failed_logins(self, user_id: int) -> None:
+        conn = self._conn()
         with self._lock:
-            self._conn.execute(
+            conn.execute(
                 "UPDATE users SET failed_login_attempts = failed_login_attempts + 1 "
                 "WHERE id = ?",
                 (user_id,),
             )
-            self._conn.commit()
+            conn.commit()
 
     def reset_failed_logins(self, user_id: int) -> None:
+        conn = self._conn()
         with self._lock:
-            self._conn.execute(
+            conn.execute(
                 "UPDATE users SET failed_login_attempts = 0, locked_until = NULL "
                 "WHERE id = ?",
                 (user_id,),
             )
-            self._conn.commit()
+            conn.commit()
 
     def lock_user(self, user_id: int, until: str) -> None:
         """Conditionally lock a user if their failed attempts meet the threshold.
 
         Only sets ``locked_until`` when ``failed_login_attempts >= 5``.
         """
+        conn = self._conn()
         with self._lock:
-            cursor = self._conn.execute(
+            cursor = conn.execute(
                 "UPDATE users SET locked_until = ? "
                 "WHERE id = ? AND failed_login_attempts >= 5",
                 (until, user_id),
             )
-            self._conn.commit()
+            conn.commit()
         if cursor.rowcount > 0:
             log.warning("Locked user %d until %s", user_id, until)
 
     def get_lock_status(self, user_id: int) -> str | None:
+        conn = self._conn()
         with self._lock:
-            row = self._conn.execute(
+            row = conn.execute(
                 "SELECT locked_until FROM users WHERE id = ?", (user_id,)
             ).fetchone()
         if row is None:
@@ -264,19 +318,21 @@ class SQLiteUserRepository:
         ip_address: str | None = None,
     ) -> None:
         now = _now_iso()
+        conn = self._conn()
         with self._lock:
-            self._conn.execute(
+            conn.execute(
                 "INSERT INTO user_sessions (id, user_id, created_at, expires_at, "
                 "last_seen_at, user_agent, ip_address) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (session_id, user_id, now, expires_at, now, user_agent, ip_address),
             )
-            self._conn.commit()
+            conn.commit()
         log.info("Created session for user %d", user_id)
 
     def get_session(self, session_id: str) -> dict | None:
         """Return session data joined with user info, or None if expired/missing."""
+        conn = self._conn()
         with self._lock:
-            row = self._conn.execute(
+            row = conn.execute(
                 "SELECT s.*, u.email, u.display_name, u.is_admin, u.is_active, "
                 "u.email_verified "
                 "FROM user_sessions s "
@@ -290,37 +346,41 @@ class SQLiteUserRepository:
 
     def update_session_last_seen(self, session_id: str) -> None:
         now = _now_iso()
+        conn = self._conn()
         with self._lock:
-            self._conn.execute(
+            conn.execute(
                 "UPDATE user_sessions SET last_seen_at = ? WHERE id = ?",
                 (now, session_id),
             )
-            self._conn.commit()
+            conn.commit()
 
     def delete_session(self, session_id: str) -> None:
+        conn = self._conn()
         with self._lock:
-            self._conn.execute(
+            conn.execute(
                 "DELETE FROM user_sessions WHERE id = ?", (session_id,)
             )
-            self._conn.commit()
+            conn.commit()
 
     def delete_user_sessions(self, user_id: int) -> int:
+        conn = self._conn()
         with self._lock:
-            cursor = self._conn.execute(
+            cursor = conn.execute(
                 "DELETE FROM user_sessions WHERE user_id = ?", (user_id,)
             )
-            self._conn.commit()
+            conn.commit()
         count = cursor.rowcount
         if count:
             log.info("Deleted %d session(s) for user %d", count, user_id)
         return count
 
     def cleanup_expired_sessions(self) -> int:
+        conn = self._conn()
         with self._lock:
-            cursor = self._conn.execute(
+            cursor = conn.execute(
                 "DELETE FROM user_sessions WHERE expires_at <= datetime('now')"
             )
-            self._conn.commit()
+            conn.commit()
         count = cursor.rowcount
         if count:
             log.info("Cleaned up %d expired session(s)", count)
@@ -336,21 +396,23 @@ class SQLiteUserRepository:
         name: str,
         expires_at: str | None = None,
     ) -> int:
+        conn = self._conn()
         with self._lock:
-            cursor = self._conn.execute(
+            cursor = conn.execute(
                 "INSERT INTO api_keys (user_id, key_prefix, key_hash, name, expires_at) "
                 "VALUES (?, ?, ?, ?, ?)",
                 (user_id, key_prefix, key_hash, name, expires_at),
             )
-            self._conn.commit()
+            conn.commit()
             key_id = cursor.lastrowid
         log.info("Created API key %d for user %d", key_id, user_id)
         return key_id  # type: ignore[return-value]
 
     def get_api_key_by_hash(self, key_hash: str) -> dict | None:
         """Return API key data joined with user info, or None if revoked/expired/missing."""
+        conn = self._conn()
         with self._lock:
-            row = self._conn.execute(
+            row = conn.execute(
                 "SELECT k.id AS key_id, k.user_id, k.key_prefix, k.name, "
                 "k.created_at, k.expires_at, k.last_used_at, k.revoked_at, "
                 "u.email, u.display_name, u.is_admin, u.is_active, u.email_verified "
@@ -366,8 +428,9 @@ class SQLiteUserRepository:
         return dict(row)
 
     def list_api_keys(self, user_id: int) -> list[ApiKeyInfo]:
+        conn = self._conn()
         with self._lock:
-            rows = self._conn.execute(
+            rows = conn.execute(
                 "SELECT id, user_id, key_prefix, name, created_at, expires_at, "
                 "last_used_at, revoked_at "
                 "FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",
@@ -389,13 +452,14 @@ class SQLiteUserRepository:
 
     def revoke_api_key(self, key_id: int, user_id: int) -> bool:
         now = _now_iso()
+        conn = self._conn()
         with self._lock:
-            cursor = self._conn.execute(
+            cursor = conn.execute(
                 "UPDATE api_keys SET revoked_at = ? "
                 "WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
                 (now, key_id, user_id),
             )
-            self._conn.commit()
+            conn.commit()
         if cursor.rowcount > 0:
             log.info("Revoked API key %d for user %d", key_id, user_id)
             return True
@@ -403,18 +467,20 @@ class SQLiteUserRepository:
 
     def update_api_key_last_used(self, key_id: int) -> None:
         now = _now_iso()
+        conn = self._conn()
         with self._lock:
-            self._conn.execute(
+            conn.execute(
                 "UPDATE api_keys SET last_used_at = ? WHERE id = ?",
                 (now, key_id),
             )
-            self._conn.commit()
+            conn.commit()
 
     # ── Admin queries ───────────────────────────────────────────────────
 
     def get_user_stats(self) -> list[dict]:
+        conn = self._conn()
         with self._lock:
-            rows = self._conn.execute(
+            rows = conn.execute(
                 "SELECT u.id, u.email, u.display_name, u.is_admin, u.is_active, "
                 "u.email_verified, u.created_at, "
                 "COALESCE(es.entry_count, 0) AS entry_count, "
@@ -449,7 +515,7 @@ class SQLiteUserRepository:
                 "reprocess_embeddings": 0.01,
             }
 
-            cost_rows = self._conn.execute(
+            cost_rows = conn.execute(
                 "SELECT j.user_id, j.type, COUNT(*) AS cnt, "
                 "MAX(j.created_at) AS last_job_at "
                 "FROM jobs j "
@@ -457,7 +523,7 @@ class SQLiteUserRepository:
             ).fetchall()
 
             # Also get this-week job costs
-            week_cost_rows = self._conn.execute(
+            week_cost_rows = conn.execute(
                 "SELECT j.user_id, j.type, COUNT(*) AS cnt "
                 "FROM jobs j "
                 "WHERE j.created_at >= date('now', '-7 days') "
@@ -488,16 +554,18 @@ class SQLiteUserRepository:
     # ── Preferences ────────────────────────────────────────────────────
 
     def get_preferences(self, user_id: int) -> dict[str, Any]:
+        conn = self._conn()
         with self._lock:
-            rows = self._conn.execute(
+            rows = conn.execute(
                 "SELECT key, value FROM user_preferences WHERE user_id = ?",
                 (user_id,),
             ).fetchall()
         return {r["key"]: json.loads(r["value"]) for r in rows}
 
     def get_preference(self, user_id: int, key: str) -> Any | None:
+        conn = self._conn()
         with self._lock:
-            row = self._conn.execute(
+            row = conn.execute(
                 "SELECT value FROM user_preferences WHERE user_id = ? AND key = ?",
                 (user_id, key),
             ).fetchone()
@@ -508,20 +576,22 @@ class SQLiteUserRepository:
     def set_preference(self, user_id: int, key: str, value: Any) -> None:
         now = _now_iso()
         encoded = json.dumps(value)
+        conn = self._conn()
         with self._lock:
-            self._conn.execute(
+            conn.execute(
                 "INSERT INTO user_preferences (user_id, key, value, updated_at) "
                 "VALUES (?, ?, ?, ?) "
                 "ON CONFLICT (user_id, key) DO UPDATE SET value = ?, updated_at = ?",
                 (user_id, key, encoded, now, encoded, now),
             )
-            self._conn.commit()
+            conn.commit()
 
     def delete_preference(self, user_id: int, key: str) -> bool:
+        conn = self._conn()
         with self._lock:
-            cursor = self._conn.execute(
+            cursor = conn.execute(
                 "DELETE FROM user_preferences WHERE user_id = ? AND key = ?",
                 (user_id, key),
             )
-            self._conn.commit()
+            conn.commit()
         return cursor.rowcount > 0

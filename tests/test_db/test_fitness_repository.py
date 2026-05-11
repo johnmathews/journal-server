@@ -10,10 +10,15 @@ watermark used by W7.
 
 import json
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import pytest
 
+from journal.db.factory import ConnectionFactory
 from journal.db.fitness_repository import FitnessRepository
+from journal.db.migrations import run_migrations
 from journal.models import (
     FitnessActivity,
     FitnessAuthState,
@@ -35,6 +40,22 @@ def _seed_user(conn: sqlite3.Connection) -> None:
 def repo(db_conn: sqlite3.Connection) -> FitnessRepository:
     _seed_user(db_conn)
     return FitnessRepository(db_conn)
+
+
+@pytest.fixture
+def fitness_factory(tmp_path: Path) -> ConnectionFactory:
+    """ConnectionFactory pointing at a migrated temp DB seeded with one user."""
+    factory = ConnectionFactory(tmp_path / "fitness.db")
+    conn = factory.get()
+    run_migrations(conn)
+    _seed_user(conn)
+    conn.commit()
+    return factory
+
+
+@pytest.fixture
+def repo_via_factory(fitness_factory: ConnectionFactory) -> FitnessRepository:
+    return FitnessRepository(fitness_factory)
 
 
 # ── Auth state ──────────────────────────────────────────────────────
@@ -529,3 +550,122 @@ def test_max_normalized_fetched_at_tracks_latest_raw(
         source="strava", user_id=1, kind="activities",
     )
     assert watermark == "2026-05-09T00:00:00Z"
+
+
+# ── Factory path ───────────────────────────────────────────────────
+
+
+class TestFactoryPathSemantics:
+    """Production-path coverage for the ``ConnectionFactory`` model.
+
+    The functions above exercise the bare-``Connection`` legacy path
+    (kept until W4 of ``docs/sqlite-per-thread-connections-plan.md``
+    retires the dual-constructor). These tests cover the factory path
+    that production now uses: each thread owns its own
+    ``sqlite3.Connection``, so the cross-thread implicit-transaction
+    collision documented in ``docs/sqlite-threading.md`` becomes
+    structurally impossible.
+    """
+
+    def test_lifecycle_round_trip(self, repo_via_factory: FitnessRepository) -> None:
+        repo_via_factory.upsert_auth_state(
+            FitnessAuthState(
+                user_id=1,
+                source="strava",
+                access_token="a",
+                refresh_token="r",
+                token_expires_at="2099-01-01T00:00:00Z",
+                extra_state={"k": "v"},
+                auth_status="ok",
+            ),
+        )
+        state = repo_via_factory.get_auth_state(user_id=1, source="strava")
+        assert state is not None
+        assert state.access_token == "a"
+        assert state.extra_state == {"k": "v"}
+
+        run_id = repo_via_factory.start_sync_run(user_id=1, source="strava")
+        repo_via_factory.finish_sync_run(run_id, status="success", rows_fetched=1)
+        recent = repo_via_factory.list_recent_sync_runs(user_id=1, source="strava")
+        assert len(recent) == 1
+        assert recent[0].status == "success"
+
+    def test_each_thread_gets_distinct_connection(
+        self, repo_via_factory: FitnessRepository,
+    ) -> None:
+        main_conn_id = id(repo_via_factory.connection)
+        captured: list[int] = []
+
+        def worker() -> None:
+            captured.append(id(repo_via_factory.connection))
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        assert len(captured) == 1
+        assert captured[0] != main_conn_id
+
+    def test_concurrent_writes_under_load(
+        self, repo_via_factory: FitnessRepository,
+    ) -> None:
+        """Many threads each writing sync runs + raw rows. Under the
+        old shared-``Connection`` model this would surface
+        ``no transaction is active`` from a concurrent commit; under
+        the factory model it must complete cleanly.
+        """
+        thread_count = 6
+        runs_per_thread = 10
+        errors: list[BaseException] = []
+
+        def worker(prefix: str) -> None:
+            try:
+                for i in range(runs_per_thread):
+                    run_id = repo_via_factory.start_sync_run(
+                        user_id=1, source="strava",
+                    )
+                    repo_via_factory.insert_raw(
+                        source="strava",
+                        user_id=1,
+                        endpoint="activities",
+                        source_id=f"{prefix}-{i}",
+                        payload_json=json.dumps({"k": f"{prefix}-{i}"}),
+                        sync_run_id=run_id,
+                    )
+                    repo_via_factory.finish_sync_run(
+                        run_id, status="success", rows_fetched=1,
+                    )
+            except BaseException as exc:  # noqa: BLE001 — test-only
+                errors.append(exc)
+
+        with ThreadPoolExecutor(max_workers=thread_count) as ex:
+            futures = [
+                ex.submit(worker, f"t{i}") for i in range(thread_count)
+            ]
+            for f in as_completed(futures):
+                f.result()
+
+        assert errors == []
+        recent = repo_via_factory.list_recent_sync_runs(
+            user_id=1, source="strava", limit=thread_count * runs_per_thread + 1,
+        )
+        assert len(recent) == thread_count * runs_per_thread
+        assert all(r.status == "success" for r in recent)
+
+    def test_cross_thread_visibility_via_wal(
+        self, repo_via_factory: FitnessRepository,
+    ) -> None:
+        from threading import Event
+
+        written = Event()
+
+        def writer() -> None:
+            repo_via_factory.start_sync_run(user_id=1, source="garmin")
+            repo_via_factory.start_sync_run(user_id=1, source="garmin")
+            written.set()
+
+        t = threading.Thread(target=writer)
+        t.start()
+        written.wait(timeout=5.0)
+        t.join()
+        runs = repo_via_factory.list_recent_sync_runs(user_id=1, source="garmin")
+        assert len(runs) == 2

@@ -1,7 +1,6 @@
 # SQLite Per-Thread Connections Refactor
 
-**Status:** active. **Last updated:** 2026-05-11 (W1 + W2 shipped).
-**Supersedes:** none.
+**Status:** active. **Last updated:** 2026-05-11 (W3 shipped). **Supersedes:** none.
 
 ## Progress
 
@@ -17,8 +16,56 @@
   `_lock` and `_commit` workaround stay live for the legacy path — they
   are no-ops on the factory path. `TestSharedConnectionCommitRace` also
   stays (legacy path is still reachable from tests); both get removed
-  when W3 retires the bare-Connection branch of the constructor.
-- **W3 — remaining repos:** next up.
+  when W4 retires the bare-Connection branch of the constructor.
+- **W3 — remaining repos:** **shipped 2026-05-11** (5 separate
+  commits, one per repo cluster). Per-repo migration, hybrid
+  constructor on each (mirrors W2). The bootstrap now constructs
+  one process-wide `ConnectionFactory` (`db_factory`) and passes it
+  to every migrated repo. The bare `conn` opened with
+  `check_same_thread=False` still lingers — used by `run_migrations`,
+  `HealthPoller`'s read-only liveness check, and the `db_conn` slot
+  in `_services` (read by `api/settings.py`, `api/fitness.py`, and
+  `mcp_server/tools/_ctx.py`). Those non-repo consumers retire in
+  W4 alongside the bare-`Connection` constructor branch.
+  - `SQLiteEntryRepository`: **shipped 2026-05-11**. Package-wide
+    migration (`store` + 7 mixin sub-modules — `core`, `pages`,
+    `chunks`, `search`, `mood`, `stats`, `analytics`). Every mixin
+    method routes through `self._conn()` so the factory path gets a
+    thread-local connection. Bootstrap now constructs one process-wide
+    `ConnectionFactory` (`db_factory`) and reuses it for both the
+    entry and jobs repos; remaining repos still share `conn` until
+    they migrate. Factory-path `TestFactoryPathSemantics` added in
+    `tests/test_db/test_repository.py` (4 tests incl. a 6-thread x
+    10-entry concurrent-write stress test).
+  - `FitnessRepository`: **shipped 2026-05-11**. Same hybrid-
+    constructor pattern. Lock retained as a no-op on the factory path
+    / protective on the legacy path. Bootstrap passes the shared
+    `db_factory`. Factory-path `TestFactoryPathSemantics` added (4
+    tests incl. a 6-thread x 10-run concurrent-write stress test).
+  - `SQLiteEntityStore` (+ `_MentionsMixin`, `_MergeMixin`):
+    **shipped 2026-05-11**. Hybrid constructor on `store.py`, with
+    `_conn()` defined there and consumed by both mixins
+    (`# type: ignore[attr-defined]` because the mixins don't declare
+    the method themselves — same pattern as the existing
+    `self._hydrate` cross-references). `merge_entities` runs an
+    implicit multi-statement transaction; under per-thread connections
+    that whole transaction is owned by exactly one thread, which is
+    exactly what `BEGIN`-`COMMIT` already expected. Bootstrap passes
+    the shared `db_factory`. Factory-path `TestFactoryPathSemantics`
+    added (4 tests incl. concurrent-writes stress + a merge-under-
+    factory test that exercises the multi-statement transaction).
+  - `SQLiteUserRepository`: **shipped 2026-05-11**. Single-file
+    auth/sessions/API-keys repo. Same hybrid-constructor pattern;
+    lock retained as no-op on factory path. Bootstrap passes the
+    shared `db_factory`. Factory-path `TestFactoryPathSemantics`
+    added (4 tests incl. a 6-thread x 5-user concurrent-write
+    stress test).
+  - `RuntimeSettings`: **shipped 2026-05-11**. Confirmed it does
+    write at runtime via `set()` (admin toggles from the API), so
+    it needed the factory — no read-only carve-out. No `_lock` on
+    this class (never had one); under per-thread connections it
+    doesn't need one. Factory-path tests added (3 tests incl. a
+    6-thread x 10-flip concurrent-set stress test).
 - **W4, W5:** pending.
 
 This plan moves the server from one shared `sqlite3.Connection` (used across the
