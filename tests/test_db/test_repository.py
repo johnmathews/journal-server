@@ -1,9 +1,14 @@
 """Tests for SQLite repository."""
 
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import pytest
 
+from journal.db.factory import ConnectionFactory
+from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
 from journal.models import ChunkSpan
 
@@ -11,6 +16,20 @@ from journal.models import ChunkSpan
 @pytest.fixture
 def repo(db_conn):
     return SQLiteEntryRepository(db_conn)
+
+
+@pytest.fixture
+def repo_factory(tmp_path: Path) -> ConnectionFactory:
+    """ConnectionFactory pointing at a migrated temp DB."""
+    factory = ConnectionFactory(tmp_path / "repo.db")
+    run_migrations(factory.get())
+    return factory
+
+
+@pytest.fixture
+def repo_via_factory(repo_factory: ConnectionFactory) -> SQLiteEntryRepository:
+    """Factory-backed repo — production-equivalent path."""
+    return SQLiteEntryRepository(repo_factory)
 
 
 class TestCreateAndGetEntry:
@@ -1032,3 +1051,121 @@ class TestMoodTrendsScoreBounds:
         assert trends[0].score_min == 0.6
         assert trends[0].score_max == 0.6
         assert trends[0].avg_score == 0.6
+
+
+class TestFactoryPathSemantics:
+    """Production-path coverage for the ``ConnectionFactory`` model.
+
+    The classes above exercise the bare-``Connection`` legacy path
+    (kept until W4 of ``docs/sqlite-per-thread-connections-plan.md``
+    retires the dual-constructor). These tests cover the factory path
+    that production now uses: each thread owns its own
+    ``sqlite3.Connection``, so the cross-thread implicit-transaction
+    collision becomes structurally impossible.
+    """
+
+    def test_lifecycle_round_trip(self, repo_via_factory):
+        entry = repo_via_factory.create_entry(
+            "2026-05-01", "photo", "Hello factory.", 2,
+        )
+        fetched = repo_via_factory.get_entry(entry.id)
+        assert fetched is not None
+        assert fetched.raw_text == "Hello factory."
+
+        repo_via_factory.add_entry_page(entry.id, 1, "Hello factory.")
+        pages = repo_via_factory.get_entry_pages(entry.id)
+        assert len(pages) == 1
+
+        repo_via_factory.add_mood_score(entry.id, "joy_sadness", 0.5)
+        assert len(repo_via_factory.get_mood_scores(entry.id)) == 1
+
+    def test_each_thread_gets_distinct_connection(self, repo_via_factory):
+        """The factory hands each thread its own connection. The repo's
+        ``connection`` property must reflect the *calling* thread's
+        connection — that is the structural property that makes the
+        prod commit race impossible.
+        """
+        main_conn_id = id(repo_via_factory.connection)
+        captured: list[int] = []
+
+        def worker() -> None:
+            captured.append(id(repo_via_factory.connection))
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        assert len(captured) == 1
+        assert captured[0] != main_conn_id
+
+    def test_concurrent_writes_under_load(self, repo_via_factory):
+        """Many threads each creating entries + pages + chunks +
+        mood scores on the same factory. Under the old shared-
+        ``Connection`` model this would surface
+        ``no transaction is active`` from a concurrent commit;
+        under the factory model it must complete cleanly with every
+        row persisted.
+        """
+        thread_count = 6
+        entries_per_thread = 10
+        errors: list[BaseException] = []
+
+        def worker(prefix: str) -> None:
+            try:
+                for i in range(entries_per_thread):
+                    entry = repo_via_factory.create_entry(
+                        "2026-05-02",
+                        "photo",
+                        f"{prefix}-{i} text",
+                        3,
+                    )
+                    repo_via_factory.add_entry_page(
+                        entry.id, 1, f"{prefix}-{i} page",
+                    )
+                    repo_via_factory.replace_chunks(
+                        entry.id,
+                        [
+                            ChunkSpan(
+                                text=f"{prefix}-{i} chunk",
+                                char_start=0,
+                                char_end=10,
+                                token_count=3,
+                            ),
+                        ],
+                    )
+                    repo_via_factory.add_mood_score(
+                        entry.id, "joy_sadness", 0.1,
+                    )
+            except BaseException as exc:  # noqa: BLE001 — test-only
+                errors.append(exc)
+
+        with ThreadPoolExecutor(max_workers=thread_count) as ex:
+            futures = [
+                ex.submit(worker, f"t{i}") for i in range(thread_count)
+            ]
+            for f in as_completed(futures):
+                f.result()
+
+        assert errors == []
+        total = repo_via_factory.count_entries()
+        assert total == thread_count * entries_per_thread
+
+    def test_cross_thread_visibility_via_wal(self, repo_via_factory):
+        """A worker thread writes; the test thread reads. WAL +
+        per-thread connections must make the writer's committed rows
+        visible to the reader without any explicit cross-connection
+        coordination.
+        """
+        from threading import Event
+
+        written = Event()
+
+        def writer() -> None:
+            repo_via_factory.create_entry("2026-05-03", "photo", "one", 1)
+            repo_via_factory.create_entry("2026-05-03", "photo", "two", 1)
+            written.set()
+
+        t = threading.Thread(target=writer)
+        t.start()
+        written.wait(timeout=5.0)
+        t.join()
+        assert repo_via_factory.count_entries() == 2

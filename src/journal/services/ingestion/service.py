@@ -302,7 +302,7 @@ class IngestionService(
 
     def _is_duplicate(self, file_hash: str) -> bool:
         """Check if a file with this hash has already been ingested."""
-        row = self._repo._conn.execute(  # type: ignore[attr-defined]
+        row = self._repo.connection.execute(
             "SELECT id FROM source_files WHERE file_hash = ?", (file_hash,)
         ).fetchone()
         return row is not None
@@ -456,6 +456,7 @@ class IngestionService(
             "INSERT INTO source_files (entry_id, file_path, file_type, file_hash)"
             " VALUES (?, ?, ?, ?)"
         )
-        cursor = self._repo._conn.execute(sql, (entry_id, file_path, file_type, file_hash))  # type: ignore[attr-defined]
-        self._repo._conn.commit()  # type: ignore[attr-defined]
+        conn = self._repo.connection
+        cursor = conn.execute(sql, (entry_id, file_path, file_type, file_hash))
+        conn.commit()
         return cursor.lastrowid

@@ -250,7 +250,7 @@ def backfill_mood_scores(
             # rather than the real prune keeps the dry-run path
             # side-effect-free.
             placeholders = ",".join("?" for _ in dim_names)
-            row = repository._conn.execute(  # type: ignore[attr-defined]
+            row = repository.connection.execute(
                 f"SELECT COUNT(*) AS cnt FROM mood_scores "
                 f"WHERE dimension NOT IN ({placeholders})",
                 tuple(dim_names),

@@ -4,7 +4,9 @@ Owns the core entry table operations: create, fetch, list (paginated
 or by date), update text/word/chunk counts, update entry date,
 delete.
 
-Methods stay bound to ``self`` so they keep using ``self._conn``.
+Methods route through ``self._conn()`` so each call gets the
+appropriate connection — thread-local on the factory path, the
+shared connection on the legacy path.
 """
 
 import logging
@@ -30,31 +32,34 @@ class _CoreMixin:
             " VALUES (?, ?, ?, ?, ?, ?)"
         )
         params = (user_id, entry_date, source_type, raw_text, actual_final, word_count)
-        with self._conn:
-            cursor = self._conn.execute(sql, params)
+        conn = self._conn()
+        with conn:
+            cursor = conn.execute(sql, params)
         entry_id = cursor.lastrowid
         log.info("Created entry %d for date %s", entry_id, entry_date)
         return self.get_entry(entry_id)  # type: ignore[return-value]
 
     def get_entry(self, entry_id: int, user_id: int | None = None) -> Entry | None:
+        conn = self._conn()
         if user_id is not None:
-            row = self._conn.execute(
+            row = conn.execute(
                 "SELECT * FROM entries WHERE id = ? AND user_id = ?", (entry_id, user_id)
             ).fetchone()
         else:
-            row = self._conn.execute(
+            row = conn.execute(
                 "SELECT * FROM entries WHERE id = ?", (entry_id,)
             ).fetchone()
         return _row_to_entry(row) if row else None
 
     def get_entries_by_date(self, date: str, user_id: int | None = None) -> list[Entry]:
+        conn = self._conn()
         if user_id is not None:
-            rows = self._conn.execute(
+            rows = conn.execute(
                 "SELECT * FROM entries WHERE entry_date = ? AND user_id = ? ORDER BY created_at",
                 (date, user_id),
             ).fetchall()
         else:
-            rows = self._conn.execute(
+            rows = conn.execute(
                 "SELECT * FROM entries WHERE entry_date = ? ORDER BY created_at", (date,)
             ).fetchall()
         return [_row_to_entry(r) for r in rows]
@@ -80,23 +85,25 @@ class _CoreMixin:
             params.append(end_date)
         query += " ORDER BY entry_date DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
-        rows = self._conn.execute(query, params).fetchall()
+        conn = self._conn()
+        rows = conn.execute(query, params).fetchall()
         return [_row_to_entry(r) for r in rows]
 
     def update_final_text(
         self, entry_id: int, final_text: str, word_count: int, chunk_count: int,
         user_id: int | None = None,
     ) -> Entry | None:
-        with self._conn:
+        conn = self._conn()
+        with conn:
             if user_id is not None:
-                self._conn.execute(
+                conn.execute(
                     "UPDATE entries SET final_text = ?, word_count = ?, chunk_count = ?,"
                     " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
                     " WHERE id = ? AND user_id = ?",
                     (final_text, word_count, chunk_count, entry_id, user_id),
                 )
             else:
-                self._conn.execute(
+                conn.execute(
                     "UPDATE entries SET final_text = ?, word_count = ?, chunk_count = ?,"
                     " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
                     (final_text, word_count, chunk_count, entry_id),
@@ -107,16 +114,17 @@ class _CoreMixin:
     def update_entry_date(
         self, entry_id: int, entry_date: str, user_id: int | None = None,
     ) -> Entry | None:
-        with self._conn:
+        conn = self._conn()
+        with conn:
             if user_id is not None:
-                self._conn.execute(
+                conn.execute(
                     "UPDATE entries SET entry_date = ?,"
                     " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
                     " WHERE id = ? AND user_id = ?",
                     (entry_date, entry_id, user_id),
                 )
             else:
-                self._conn.execute(
+                conn.execute(
                     "UPDATE entries SET entry_date = ?,"
                     " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
                     (entry_date, entry_id),
@@ -126,13 +134,14 @@ class _CoreMixin:
 
     def delete_entry(self, entry_id: int, user_id: int | None = None) -> bool:
         """Delete an entry and all cascading rows. Returns True if a row was deleted."""
-        with self._conn:
+        conn = self._conn()
+        with conn:
             if user_id is not None:
-                cursor = self._conn.execute(
+                cursor = conn.execute(
                     "DELETE FROM entries WHERE id = ? AND user_id = ?", (entry_id, user_id)
                 )
             else:
-                cursor = self._conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
+                cursor = conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
         deleted = cursor.rowcount > 0
         if deleted:
             log.info("Deleted entry %d", entry_id)

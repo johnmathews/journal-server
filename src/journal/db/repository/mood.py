@@ -9,7 +9,9 @@ Owns the ``mood_scores`` table operations:
 - Time-bucketed analytics: ``get_mood_trends`` (aggregate by
   granularity), ``get_mood_drilldown`` (per-entry within a window).
 
-Methods stay bound to ``self`` so they keep using ``self._conn``.
+Methods route through ``self._conn()`` so each call gets the
+appropriate connection — thread-local on the factory path, the
+shared connection on the legacy path.
 """
 
 import logging
@@ -27,8 +29,9 @@ class _MoodMixin:
         self, entry_id: int, dimension: str, score: float,
         confidence: float | None = None, rationale: str | None = None,
     ) -> None:
-        with self._conn:
-            self._conn.execute(
+        conn = self._conn()
+        with conn:
+            conn.execute(
                 "INSERT INTO mood_scores (entry_id, dimension, score, confidence, rationale)"
                 " VALUES (?, ?, ?, ?, ?)",
                 (entry_id, dimension, score, confidence, rationale),
@@ -56,13 +59,14 @@ class _MoodMixin:
             return
         dim_names = [s[0] for s in scores]
         placeholders = ",".join("?" for _ in dim_names)
-        with self._conn:
-            self._conn.execute(
+        conn = self._conn()
+        with conn:
+            conn.execute(
                 f"DELETE FROM mood_scores WHERE entry_id = ? "
                 f"AND dimension IN ({placeholders})",
                 (entry_id, *dim_names),
             )
-            self._conn.executemany(
+            conn.executemany(
                 "INSERT INTO mood_scores "
                 "(entry_id, dimension, score, confidence, rationale) "
                 "VALUES (?, ?, ?, ?, ?)",
@@ -79,7 +83,8 @@ class _MoodMixin:
         """Return every mood score for a single entry, in dimension
         order. Used by `replace_mood_scores` callers for verification
         and by the backfill's `--stale-only` gate."""
-        rows = self._conn.execute(
+        conn = self._conn()
+        rows = conn.execute(
             "SELECT entry_id, dimension, score, confidence, rationale "
             "FROM mood_scores WHERE entry_id = ? ORDER BY dimension",
             (entry_id,),
@@ -124,7 +129,8 @@ class _MoodMixin:
         if user_id is not None:
             user_filter = " AND e.user_id = ?"
             user_params = (user_id,)
-        rows = self._conn.execute(
+        conn = self._conn()
+        rows = conn.execute(
             f"""
             SELECT e.id AS id
             FROM entries e
@@ -159,17 +165,18 @@ class _MoodMixin:
         an empty list if they really want to wipe `mood_scores`
         entirely.
         """
+        conn = self._conn()
         if not current_names:
-            with self._conn:
-                cursor = self._conn.execute("DELETE FROM mood_scores")
+            with conn:
+                cursor = conn.execute("DELETE FROM mood_scores")
             log.info(
                 "Pruned ALL %d mood_scores rows (empty current set)",
                 cursor.rowcount,
             )
             return cursor.rowcount
         placeholders = ",".join("?" for _ in current_names)
-        with self._conn:
-            cursor = self._conn.execute(
+        with conn:
+            cursor = conn.execute(
                 f"DELETE FROM mood_scores "
                 f"WHERE dimension NOT IN ({placeholders})",
                 tuple(current_names),
@@ -220,7 +227,8 @@ class _MoodMixin:
             query += " AND e.entry_date <= ?"
             params.append(end_date)
         query += f" GROUP BY {period_expr}, m.dimension ORDER BY period"
-        rows = self._conn.execute(query, params).fetchall()
+        conn = self._conn()
+        rows = conn.execute(query, params).fetchall()
         return [
             MoodTrend(
                 period=row["period"],
@@ -259,7 +267,8 @@ class _MoodMixin:
             sql += " AND e.user_id = ?"
             params.append(user_id)
         sql += " ORDER BY e.entry_date ASC, e.id ASC"
-        rows = self._conn.execute(sql, params).fetchall()
+        conn = self._conn()
+        rows = conn.execute(sql, params).fetchall()
         return [
             MoodDrilldownEntry(
                 entry_id=int(row["entry_id"]),

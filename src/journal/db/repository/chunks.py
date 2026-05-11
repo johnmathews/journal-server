@@ -3,7 +3,9 @@
 Owns the ``entry_chunks`` table operations: bulk replace, fetch in
 insertion order, and the chunk-count column on the parent entry.
 
-Methods stay bound to ``self`` so they keep using ``self._conn``.
+Methods route through ``self._conn()`` so each call gets the
+appropriate connection — thread-local on the factory path, the
+shared connection on the legacy path.
 """
 
 import logging
@@ -17,8 +19,9 @@ class _ChunksMixin:
     """Chunks methods on SQLiteEntryRepository."""
 
     def update_chunk_count(self, entry_id: int, chunk_count: int) -> None:
-        with self._conn:
-            self._conn.execute(
+        conn = self._conn()
+        with conn:
+            conn.execute(
                 "UPDATE entries SET chunk_count = ? WHERE id = ?",
                 (chunk_count, entry_id),
             )
@@ -32,12 +35,13 @@ class _ChunksMixin:
         the most recent run of the chunker. Safe to call with an empty
         list — the entry simply ends up with no stored chunks.
         """
-        with self._conn:
-            self._conn.execute(
+        conn = self._conn()
+        with conn:
+            conn.execute(
                 "DELETE FROM entry_chunks WHERE entry_id = ?", (entry_id,)
             )
             if chunks:
-                self._conn.executemany(
+                conn.executemany(
                     "INSERT INTO entry_chunks "
                     "(entry_id, chunk_index, chunk_text, char_start, char_end, token_count)"
                     " VALUES (?, ?, ?, ?, ?, ?)",
@@ -66,7 +70,8 @@ class _ChunksMixin:
         "entry exists but no chunks" from "entry not found" should check
         entry existence separately.
         """
-        rows = self._conn.execute(
+        conn = self._conn()
+        rows = conn.execute(
             "SELECT chunk_index, chunk_text, char_start, char_end, token_count"
             " FROM entry_chunks WHERE entry_id = ? ORDER BY chunk_index",
             (entry_id,),

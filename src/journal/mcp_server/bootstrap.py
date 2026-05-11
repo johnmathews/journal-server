@@ -24,6 +24,7 @@ from mcp.server.fastmcp import FastMCP
 
 from journal.config import load_config
 from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
@@ -272,7 +273,18 @@ def _init_services() -> dict:
     # requires redesigning the threading model first.
     conn = get_connection(config.db_path, check_same_thread=False)
     run_migrations(conn)
-    repo = SQLiteEntryRepository(conn)
+
+    # One process-wide ``ConnectionFactory`` — each thread that calls
+    # into a migrated repo opens its own ``sqlite3.Connection``, so
+    # the shared-state commit race documented in
+    # ``docs/sqlite-threading.md`` cannot happen. Repos migrated so
+    # far (W2, W3): ``SQLiteJobRepository``, ``SQLiteEntryRepository``.
+    # The remaining repos (``FitnessRepository``, ``SQLiteEntityStore``,
+    # ``SQLiteUserRepository``, ``RuntimeSettings``) still share
+    # ``conn`` until the rest of W3 lands.
+    db_factory = ConnectionFactory(config.db_path)
+
+    repo = SQLiteEntryRepository(db_factory)
     log.info("  SQLite connected and migrated")
 
     # Vector store
@@ -548,18 +560,13 @@ def _init_services() -> dict:
 
     # Jobs infrastructure: repository + single-worker runner.
     #
-    # The jobs repo owns a ``ConnectionFactory`` so each thread that
-    # touches it (ASGI request handler, JobRunner worker, lifespan
-    # hooks) opens its own ``sqlite3.Connection``. That eliminates the
-    # shared-state commit race that bit prod on 2026-04-XX and
-    # 2026-05-11 — see ``docs/sqlite-per-thread-connections-plan.md``.
-    # Other repos (``SQLiteEntryRepository``, ``FitnessRepository``,
-    # ``RuntimeSettings``) still share ``conn`` and will be migrated
-    # to the factory in W3.
-    from journal.db.factory import ConnectionFactory
-
-    job_db_factory = ConnectionFactory(config.db_path)
-    job_repository = SQLiteJobRepository(job_db_factory)
+    # The jobs repo uses the process-wide ``ConnectionFactory`` (see
+    # ``db_factory`` above) so each thread that touches it (ASGI
+    # request handler, JobRunner worker, lifespan hooks) opens its
+    # own ``sqlite3.Connection``. That eliminates the shared-state
+    # commit race that bit prod on 2026-04-XX and 2026-05-11 — see
+    # ``docs/sqlite-per-thread-connections-plan.md``.
+    job_repository = SQLiteJobRepository(db_factory)
     reconciled = job_repository.reconcile_stuck_jobs()
     log.info(
         "  Jobs: reconciled %d stuck job(s) from previous process",

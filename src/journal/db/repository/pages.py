@@ -6,7 +6,9 @@ Owns ``add_entry_page`` / ``get_entry_pages`` / ``get_page_count``
 ``verify_doubts`` (OCR-uncertainty span tracking and the verified
 flag that gates the count).
 
-Methods stay bound to ``self`` so they keep using ``self._conn``.
+Methods route through ``self._conn()`` so each call gets the
+appropriate connection — thread-local on the factory path, the
+shared connection on the legacy path.
 """
 
 import logging
@@ -22,8 +24,9 @@ class _PagesMixin:
     def add_entry_page(
         self, entry_id: int, page_number: int, raw_text: str, source_file_id: int | None = None
     ) -> None:
-        with self._conn:
-            self._conn.execute(
+        conn = self._conn()
+        with conn:
+            conn.execute(
                 "INSERT INTO entry_pages (entry_id, page_number, raw_text, source_file_id)"
                 " VALUES (?, ?, ?, ?)",
                 (entry_id, page_number, raw_text, source_file_id),
@@ -31,7 +34,8 @@ class _PagesMixin:
         log.info("Added page %d to entry %d", page_number, entry_id)
 
     def get_entry_pages(self, entry_id: int) -> list[EntryPage]:
-        rows = self._conn.execute(
+        conn = self._conn()
+        rows = conn.execute(
             "SELECT * FROM entry_pages WHERE entry_id = ? ORDER BY page_number",
             (entry_id,),
         ).fetchall()
@@ -48,7 +52,8 @@ class _PagesMixin:
         ]
 
     def get_page_count(self, entry_id: int) -> int:
-        row = self._conn.execute(
+        conn = self._conn()
+        row = conn.execute(
             "SELECT COUNT(*) as cnt FROM entry_pages WHERE entry_id = ?",
             (entry_id,),
         ).fetchone()
@@ -69,8 +74,9 @@ class _PagesMixin:
         """
         if not spans:
             return
-        with self._conn:
-            self._conn.executemany(
+        conn = self._conn()
+        with conn:
+            conn.executemany(
                 "INSERT INTO entry_uncertain_spans "
                 "(entry_id, char_start, char_end) VALUES (?, ?, ?)",
                 [(entry_id, start, end) for start, end in spans],
@@ -87,7 +93,8 @@ class _PagesMixin:
         pass" and "it ran and found zero uncertain words" — the webapp
         simply renders no highlight in either case.
         """
-        rows = self._conn.execute(
+        conn = self._conn()
+        rows = conn.execute(
             "SELECT char_start, char_end FROM entry_uncertain_spans "
             "WHERE entry_id = ? ORDER BY char_start ASC",
             (entry_id,),
@@ -101,13 +108,14 @@ class _PagesMixin:
         (``doubts_verified = 1``), even if span rows still exist in the
         database. The raw spans are preserved for future analysis.
         """
-        row = self._conn.execute(
+        conn = self._conn()
+        row = conn.execute(
             "SELECT doubts_verified FROM entries WHERE id = ?",
             (entry_id,),
         ).fetchone()
         if row and row["doubts_verified"]:
             return 0
-        row = self._conn.execute(
+        row = conn.execute(
             "SELECT COUNT(*) as cnt FROM entry_uncertain_spans WHERE entry_id = ?",
             (entry_id,),
         ).fetchone()
@@ -120,14 +128,15 @@ class _PagesMixin:
         uncertain span rows are preserved for future use. Returns
         ``True`` if the entry exists, ``False`` otherwise.
         """
-        with self._conn:
+        conn = self._conn()
+        with conn:
             if user_id is not None:
-                cursor = self._conn.execute(
+                cursor = conn.execute(
                     "UPDATE entries SET doubts_verified = 1 WHERE id = ? AND user_id = ?",
                     (entry_id, user_id),
                 )
             else:
-                cursor = self._conn.execute(
+                cursor = conn.execute(
                     "UPDATE entries SET doubts_verified = 1 WHERE id = ?",
                     (entry_id,),
                 )

@@ -20,7 +20,9 @@ Cross-axis analytics (entity / topic / mood joins, time-bucketed
 trends) live in ``analytics.py``. The split keeps both modules under
 the 500-line readable-context target.
 
-Methods stay bound to ``self`` so they keep using ``self._conn``.
+Methods route through ``self._conn()`` so each call gets the
+appropriate connection — thread-local on the factory path, the
+shared connection on the legacy path.
 """
 
 from datetime import datetime
@@ -72,7 +74,8 @@ class _StatsMixin:
         if end_date:
             query += " AND entry_date <= ?"
             params.append(end_date)
-        row = self._conn.execute(query, params).fetchone()
+        conn = self._conn()
+        row = conn.execute(query, params).fetchone()
 
         # Calculate entries per month
         total_entries = row["total_entries"]
@@ -92,7 +95,7 @@ class _StatsMixin:
             if end_date:
                 months_query += " AND entry_date <= ?"
                 months_params.append(end_date)
-            months_row = self._conn.execute(months_query, months_params).fetchone()
+            months_row = conn.execute(months_query, months_params).fetchone()
             months = months_row["months"] or 1
             entries_per_month = total_entries / months
 
@@ -120,7 +123,8 @@ class _StatsMixin:
         if end_date:
             query += " AND entry_date <= ?"
             params.append(end_date)
-        row = self._conn.execute(query, params).fetchone()
+        conn = self._conn()
+        row = conn.execute(query, params).fetchone()
         return row["cnt"]
 
     def get_calendar_heatmap(
@@ -149,7 +153,8 @@ class _StatsMixin:
             sql += " AND entry_date <= ?"
             params.append(end_date)
         sql += " GROUP BY entry_date ORDER BY entry_date"
-        rows = self._conn.execute(sql, params).fetchall()
+        conn = self._conn()
+        rows = conn.execute(sql, params).fetchall()
         return [
             CalendarDay(
                 date=row["entry_date"],
@@ -190,7 +195,8 @@ class _StatsMixin:
             sql += " AND entry_date <= ?"
             params.append(end_date)
         sql += " GROUP BY range_start ORDER BY range_start"
-        rows = self._conn.execute(sql, params).fetchall()
+        conn = self._conn()
+        rows = conn.execute(sql, params).fetchall()
         buckets = [
             WordCountBucket(
                 range_start=int(row["range_start"]),
@@ -220,7 +226,7 @@ class _StatsMixin:
         if end_date:
             stats_sql += " AND entry_date <= ?"
             stats_params.append(end_date)
-        stats_row = self._conn.execute(stats_sql, stats_params).fetchone()
+        stats_row = conn.execute(stats_sql, stats_params).fetchone()
 
         # Median via SQL: order by word_count and take the middle value(s).
         median_sql = """
@@ -237,7 +243,7 @@ class _StatsMixin:
             median_sql += " AND entry_date <= ?"
             median_params.append(end_date)
         median_sql += " ORDER BY word_count"
-        all_wc = self._conn.execute(median_sql, median_params).fetchall()
+        all_wc = conn.execute(median_sql, median_params).fetchall()
         if all_wc:
             n = len(all_wc)
             mid = n // 2
@@ -258,7 +264,8 @@ class _StatsMixin:
         return buckets, stats
 
     def get_entity_mention_count(self, entry_id: int) -> int:
-        row = self._conn.execute(
+        conn = self._conn()
+        row = conn.execute(
             "SELECT COUNT(*) as cnt FROM entity_mentions WHERE entry_id = ?",
             (entry_id,),
         ).fetchone()
@@ -279,8 +286,9 @@ class _StatsMixin:
         cutoff_7d = (now.date() - timedelta(days=7)).isoformat()
         cutoff_30d = (now.date() - timedelta(days=30)).isoformat()
 
+        conn = self._conn()
         if user_id is not None:
-            total_row = self._conn.execute(
+            total_row = conn.execute(
                 "SELECT COUNT(*) AS cnt, "
                 "COALESCE(AVG(word_count), 0.0) AS avg_words, "
                 "COALESCE(AVG(chunk_count), 0.0) AS avg_chunks, "
@@ -289,24 +297,24 @@ class _StatsMixin:
                 (user_id,),
             ).fetchone()
 
-            last_7d = self._conn.execute(
+            last_7d = conn.execute(
                 "SELECT COUNT(*) AS cnt FROM entries WHERE user_id = ? AND entry_date >= ?",
                 (user_id, cutoff_7d),
             ).fetchone()["cnt"]
-            last_30d = self._conn.execute(
+            last_30d = conn.execute(
                 "SELECT COUNT(*) AS cnt FROM entries WHERE user_id = ? AND entry_date >= ?",
                 (user_id, cutoff_30d),
             ).fetchone()["cnt"]
 
             by_source: dict[str, int] = {}
-            for row in self._conn.execute(
+            for row in conn.execute(
                 "SELECT source_type, COUNT(*) AS cnt FROM entries "
                 "WHERE user_id = ? GROUP BY source_type",
                 (user_id,),
             ).fetchall():
                 by_source[row["source_type"]] = row["cnt"]
         else:
-            total_row = self._conn.execute(
+            total_row = conn.execute(
                 "SELECT COUNT(*) AS cnt, "
                 "COALESCE(AVG(word_count), 0.0) AS avg_words, "
                 "COALESCE(AVG(chunk_count), 0.0) AS avg_chunks, "
@@ -314,23 +322,23 @@ class _StatsMixin:
                 "FROM entries"
             ).fetchone()
 
-            last_7d = self._conn.execute(
+            last_7d = conn.execute(
                 "SELECT COUNT(*) AS cnt FROM entries WHERE entry_date >= ?",
                 (cutoff_7d,),
             ).fetchone()["cnt"]
-            last_30d = self._conn.execute(
+            last_30d = conn.execute(
                 "SELECT COUNT(*) AS cnt FROM entries WHERE entry_date >= ?",
                 (cutoff_30d,),
             ).fetchone()["cnt"]
 
             by_source = {}
-            for row in self._conn.execute(
+            for row in conn.execute(
                 "SELECT source_type, COUNT(*) AS cnt FROM entries "
                 "GROUP BY source_type"
             ).fetchall():
                 by_source[row["source_type"]] = row["cnt"]
 
-        total_chunks_row = self._conn.execute(
+        total_chunks_row = conn.execute(
             "SELECT COALESCE(SUM(chunk_count), 0) AS total FROM entries"
         ).fetchone()
         total_chunks = int(total_chunks_row["total"] or 0)
@@ -341,7 +349,7 @@ class _StatsMixin:
             # so interpolation here is safe. SQLite rejects placeholders
             # for identifiers, so a PRAGMA or prepared statement would
             # not work even if we wanted one.
-            cnt_row = self._conn.execute(
+            cnt_row = conn.execute(
                 f"SELECT COUNT(*) AS cnt FROM {table}"
             ).fetchone()
             row_counts[table] = int(cnt_row["cnt"])

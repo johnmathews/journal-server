@@ -1,6 +1,6 @@
 # SQLite Per-Thread Connections Refactor
 
-**Status:** active. **Last updated:** 2026-05-11 (W1 + W2 shipped).
+**Status:** active. **Last updated:** 2026-05-11 (W3 SQLiteEntryRepository shipped).
 **Supersedes:** none.
 
 ## Progress
@@ -17,8 +17,25 @@
   `_lock` and `_commit` workaround stay live for the legacy path — they
   are no-ops on the factory path. `TestSharedConnectionCommitRace` also
   stays (legacy path is still reachable from tests); both get removed
-  when W3 retires the bare-Connection branch of the constructor.
-- **W3 — remaining repos:** next up.
+  when W4 retires the bare-Connection branch of the constructor.
+- **W3 — remaining repos:** in progress. Per-repo migration, hybrid
+  constructor on each (mirrors W2):
+  - `SQLiteEntryRepository`: **shipped 2026-05-11**. Package-wide
+    migration (`store` + 7 mixin sub-modules — `core`, `pages`,
+    `chunks`, `search`, `mood`, `stats`, `analytics`). Every mixin
+    method routes through `self._conn()` so the factory path gets a
+    thread-local connection. Bootstrap now constructs one process-wide
+    `ConnectionFactory` (`db_factory`) and reuses it for both the
+    entry and jobs repos; remaining repos still share `conn` until
+    they migrate. Factory-path `TestFactoryPathSemantics` added in
+    `tests/test_db/test_repository.py` (4 tests incl. a 6-thread x
+    10-entry concurrent-write stress test).
+  - `FitnessRepository`: pending.
+  - `SQLiteEntityStore` (+ `_MentionsMixin`, `_MergeMixin`): pending.
+  - `SQLiteUserRepository`: pending.
+  - `RuntimeSettings`: pending. Confirmed it does write at runtime via
+    `set()` (admin toggles from the API), so it needs the factory —
+    no read-only carve-out.
 - **W4, W5:** pending.
 
 This plan moves the server from one shared `sqlite3.Connection` (used across the
