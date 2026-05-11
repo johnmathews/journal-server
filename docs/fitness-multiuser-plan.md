@@ -10,8 +10,11 @@
   auth_status flip test, `18d66b0`), W12 (docs sweep, `46ba985`).
 - **Shipped (webapp):** W8 (API client, `4de33c4`), W9 (settings panel, `6df8d7e`),
   W10 (Strava callback view, `d53f3a7`), W11 (banner Reconnect button, `c5968c3`).
-- **Remaining:** W13 (Strava callback URL — operator step),
-  W14 (end-to-end verification with user 2).
+- **Shipped (operator):** W13 (Strava callback URL — Authorization Callback
+  Domain at developers.strava.com updated to the prod webapp hostname,
+  `STRAVA_REDIRECT_URI` in prod `.env` flipped to the webapp callback,
+  2026-05-11; see `journal/260511-fitness-multiuser-w13-strava-callback.md`).
+- **Remaining:** W14 (end-to-end verification with user 2).
 
 This plan moves the fitness pipeline from its current single-user posture (operator-managed
 credentials in env vars, CLI re-auth with `--user-id 1` defaults, all data attributed to
