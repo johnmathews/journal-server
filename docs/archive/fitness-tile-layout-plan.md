@@ -1,7 +1,11 @@
-**Status:** active. **Last updated:** 2026-05-11 (T2–T4 closed; T5 superseded — same
-arrow-button reorder model adopted on `/fitness` rather than HTML5 drag-drop, which
-the dashboard never shipped). **Supersedes:** none — picks up after
-[`archive/fitness-followup-plan.md`](./archive/fitness-followup-plan.md) (F1–F8) closed.
+**Status:** closed 2026-05-12. All seven work units (T1–T7) shipped or
+substituted: T1/T2/T3/T4/T6/T7 with code, T5 by model substitution
+(same arrow-button reorder model adopted on `/fitness` rather than
+HTML5 drag-drop, which the dashboard never shipped). Verified
+post-deploy 2026-05-12 via the T4 acceptance test (hide tile, reload,
+tile stays hidden) plus dashboard regression check.
+**Supersedes:** none — picks up after
+[`fitness-followup-plan.md`](./fitness-followup-plan.md) (F1–F8) closed.
 
 # Fitness tile-layout plan — bring dashboard tile customization to /fitness
 
@@ -353,7 +357,7 @@ Original work-unit body kept below as a record.
 
 
 
-Carried forward from the closed [`archive/fitness-followup-plan.md`](./archive/fitness-followup-plan.md)
+Carried forward from the closed [`fitness-followup-plan.md`](./fitness-followup-plan.md)
 "Open follow-ups" item #2: the Garmin Recent-runs table reports one `Fetched` count that pools
 workouts (Garmin activities) and wellness rows (Sleep / HRV / RHR / etc.), which obscures what
 each sync actually pulled. With F1 making `Norm.` accurate, the next legibility win is the

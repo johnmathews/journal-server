@@ -49,10 +49,12 @@ the top of the linked doc tells you whether it's active, closed, or superseded.
   correctly), tabbed Settings, moved sync panels there, extracted RangeBinControls (shared with
   Dashboard), aligned fitness chart hover with the dashboard, added 3-day MA overlay on
   Sleep/HRV/RHR, and shipped the chart style guide. Kept as a record of decisions.
-- [`fitness-tile-layout-plan.md`](./fitness-tile-layout-plan.md) — follow-on captured 2026-05-11
-  after user review of the deploy: bring the dashboard's tile-layout system (rearrange, remove,
-  resize wide/narrow, edit-layout mode, persisted preferences) to `/fitness`, plus chase the
-  remaining tooltip-implementation gap the user flagged. Not yet started.
+- [`archive/fitness-tile-layout-plan.md`](./archive/fitness-tile-layout-plan.md) —
+  **closed 2026-05-12**, all seven units (T1–T7) shipped or substituted. Brought the
+  dashboard's tile-layout system to `/fitness` (rearrange via arrow buttons, hide/show,
+  three-width resize, edit-layout mode, persisted preferences). Also closed the
+  tooltip-parity ask (T6) and the Garmin Workouts/Wellness column split (T7). Verified
+  post-deploy 2026-05-12. Kept as a record of decisions.
 - [`code-quality-principles.md`](./code-quality-principles.md) — standing rules referenced
   by the refactor docs.
 - **SQLite threading refactor — closed 2026-05-11.** All repos use a
