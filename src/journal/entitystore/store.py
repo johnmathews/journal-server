@@ -51,7 +51,7 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
     Mixin and own methods call ``conn = self._conn()`` at the top and
     operate on that local variable, so each thread gets its own
     connection and the shared-state commit race documented in
-    ``docs/sqlite-per-thread-connections-plan.md`` is structurally
+    ``docs/archive/sqlite-per-thread-connections-plan.md`` is structurally
     impossible. ``merge_entities`` is the only multi-statement
     implicit-transaction method here; under per-thread connections it
     runs entirely on the calling thread's connection so transaction

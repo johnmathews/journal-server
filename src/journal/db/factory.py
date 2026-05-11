@@ -3,7 +3,7 @@
 Replaces the shared-``Connection`` model that produced the
 ``OperationalError: not an error`` (2026-04) and
 ``OperationalError: cannot commit - no transaction is active``
-(2026-05-11) races. See ``docs/sqlite-per-thread-connections-plan.md``
+(2026-05-11) races. See ``docs/archive/sqlite-per-thread-connections-plan.md``
 for the rationale and the migration sequence (W1 builds this; W2
 onwards migrates each repo to use it).
 

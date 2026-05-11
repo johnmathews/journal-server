@@ -12,7 +12,7 @@ relies on Python's built-in same-thread guard as a tripwire. Multi-
 thread access to one connection caused the
 ``OperationalError: cannot commit - no transaction is active``
 incident on 2026-05-11; see
-``docs/sqlite-per-thread-connections-plan.md`` for the structural fix.
+``docs/archive/sqlite-per-thread-connections-plan.md`` for the structural fix.
 """
 
 import logging

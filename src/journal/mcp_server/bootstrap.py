@@ -259,7 +259,7 @@ def _init_services() -> dict:
     # Database — one process-wide ``ConnectionFactory``. Each thread
     # that touches a repo opens its own ``sqlite3.Connection`` via
     # ``threading.local`` inside the factory, so the shared-state
-    # commit race documented in ``docs/sqlite-threading.md`` cannot
+    # commit race documented in ``docs/archive/sqlite-threading.md`` cannot
     # happen. ``check_same_thread=True`` (the factory's default) is
     # the tripwire: if a connection ever leaks across threads, Python
     # raises ``ProgrammingError`` immediately rather than silently
@@ -548,7 +548,7 @@ def _init_services() -> dict:
     # request handler, JobRunner worker, lifespan hooks) opens its
     # own ``sqlite3.Connection``. That eliminates the shared-state
     # commit race that bit prod on 2026-04-XX and 2026-05-11 — see
-    # ``docs/sqlite-per-thread-connections-plan.md``.
+    # ``docs/archive/sqlite-per-thread-connections-plan.md``.
     job_repository = SQLiteJobRepository(db_factory)
     reconciled = job_repository.reconcile_stuck_jobs()
     log.info(

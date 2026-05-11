@@ -115,7 +115,7 @@ class SQLiteUserRepository:
     Construction takes a :class:`ConnectionFactory`. Each thread that
     calls a method gets its own ``sqlite3.Connection`` via
     ``threading.local`` inside the factory, so the shared-state commit
-    race documented in ``docs/sqlite-per-thread-connections-plan.md``
+    race documented in ``docs/archive/sqlite-per-thread-connections-plan.md``
     is structurally impossible.
     """
 

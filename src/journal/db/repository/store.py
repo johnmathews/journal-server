@@ -13,7 +13,7 @@ working — the canonical compat path is via the package
 Construction takes a :class:`ConnectionFactory`. Mixin methods call
 ``conn = self._conn()`` at the top and operate on that local variable,
 so each thread gets its own connection and the shared-state commit
-race documented in ``docs/sqlite-per-thread-connections-plan.md`` is
+race documented in ``docs/archive/sqlite-per-thread-connections-plan.md`` is
 structurally impossible.
 """
 

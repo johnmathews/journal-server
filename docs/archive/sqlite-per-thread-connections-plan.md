@@ -1,6 +1,7 @@
 # SQLite Per-Thread Connections Refactor
 
-**Status:** active. **Last updated:** 2026-05-11 (W3 shipped). **Supersedes:** none.
+**Status:** closed 2026-05-11 (W1–W4 shipped; this commit closes the plan).
+**Last updated:** 2026-05-11. **Supersedes:** none.
 
 ## Progress
 
