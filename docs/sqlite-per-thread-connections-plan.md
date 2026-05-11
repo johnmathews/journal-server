@@ -35,7 +35,18 @@
     / protective on the legacy path. Bootstrap passes the shared
     `db_factory`. Factory-path `TestFactoryPathSemantics` added (4
     tests incl. a 6-thread x 10-run concurrent-write stress test).
-  - `SQLiteEntityStore` (+ `_MentionsMixin`, `_MergeMixin`): pending.
+  - `SQLiteEntityStore` (+ `_MentionsMixin`, `_MergeMixin`):
+    **shipped 2026-05-11**. Hybrid constructor on `store.py`, with
+    `_conn()` defined there and consumed by both mixins
+    (`# type: ignore[attr-defined]` because the mixins don't declare
+    the method themselves — same pattern as the existing
+    `self._hydrate` cross-references). `merge_entities` runs an
+    implicit multi-statement transaction; under per-thread connections
+    that whole transaction is owned by exactly one thread, which is
+    exactly what `BEGIN`-`COMMIT` already expected. Bootstrap passes
+    the shared `db_factory`. Factory-path `TestFactoryPathSemantics`
+    added (4 tests incl. concurrent-writes stress + a merge-under-
+    factory test that exercises the multi-statement transaction).
   - `SQLiteUserRepository`: pending.
   - `RuntimeSettings`: pending. Confirmed it does write at runtime via
     `set()` (admin toggles from the API), so it needs the factory —

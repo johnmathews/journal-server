@@ -1,9 +1,14 @@
 """Tests for SQLiteEntityStore."""
 
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import pytest
 
+from journal.db.factory import ConnectionFactory
+from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
 from journal.entitystore.store import SQLiteEntityStore
 
@@ -11,6 +16,24 @@ from journal.entitystore.store import SQLiteEntityStore
 @pytest.fixture
 def store(db_conn: sqlite3.Connection) -> SQLiteEntityStore:
     return SQLiteEntityStore(db_conn)
+
+
+@pytest.fixture
+def entity_factory(tmp_path: Path) -> ConnectionFactory:
+    """ConnectionFactory pointing at a migrated temp DB."""
+    factory = ConnectionFactory(tmp_path / "entities.db")
+    run_migrations(factory.get())
+    return factory
+
+
+@pytest.fixture
+def store_via_factory(entity_factory: ConnectionFactory) -> SQLiteEntityStore:
+    return SQLiteEntityStore(entity_factory)
+
+
+@pytest.fixture
+def repo_via_factory(entity_factory: ConnectionFactory) -> SQLiteEntryRepository:
+    return SQLiteEntryRepository(entity_factory)
 
 
 @pytest.fixture
@@ -1054,3 +1077,116 @@ class TestEntityQuarantine:
         assert post_merge is not None
         assert post_merge.is_quarantined is True
         assert post_merge.quarantine_reason == "looks broken"
+
+
+class TestFactoryPathSemantics:
+    """Production-path coverage for the ``ConnectionFactory`` model.
+
+    The classes above exercise the bare-``Connection`` legacy path
+    (kept until W4 of ``docs/sqlite-per-thread-connections-plan.md``
+    retires the dual-constructor). These tests cover the factory path
+    that production now uses: each thread owns its own connection,
+    so the cross-thread implicit-transaction collision documented in
+    ``docs/sqlite-threading.md`` becomes structurally impossible.
+    """
+
+    def test_lifecycle_round_trip(
+        self,
+        store_via_factory: SQLiteEntityStore,
+        repo_via_factory: SQLiteEntryRepository,
+    ) -> None:
+        entry = repo_via_factory.create_entry(
+            "2026-05-01", "photo", "Atlas walks.", 2,
+        )
+        entity = store_via_factory.create_entity(
+            "person", "Atlas", "a person", "2026-05-01",
+        )
+        store_via_factory.add_alias(entity.id, "atlas")
+        store_via_factory.create_mention(entity.id, entry.id, "Atlas", 0.9, "r1")
+
+        fetched = store_via_factory.get_entity(entity.id)
+        assert fetched is not None
+        assert "atlas" in fetched.aliases
+        assert store_via_factory.count_entities() == 1
+
+    def test_each_thread_gets_distinct_connection(
+        self, store_via_factory: SQLiteEntityStore,
+    ) -> None:
+        main_conn_id = id(store_via_factory.connection)
+        captured: list[int] = []
+
+        def worker() -> None:
+            captured.append(id(store_via_factory.connection))
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        assert len(captured) == 1
+        assert captured[0] != main_conn_id
+
+    def test_concurrent_writes_under_load(
+        self,
+        store_via_factory: SQLiteEntityStore,
+        repo_via_factory: SQLiteEntryRepository,
+    ) -> None:
+        """Many threads each create entries, entities, and mentions on
+        the shared factory. Under the old shared-``Connection`` model
+        this would surface ``no transaction is active`` from a
+        concurrent commit; under the factory model it must complete
+        cleanly with every row persisted.
+        """
+        thread_count = 6
+        per_thread = 10
+        errors: list[BaseException] = []
+
+        def worker(prefix: str) -> None:
+            try:
+                for i in range(per_thread):
+                    entry = repo_via_factory.create_entry(
+                        "2026-05-02", "photo", f"{prefix}-{i}", 1,
+                    )
+                    entity = store_via_factory.create_entity(
+                        "person", f"{prefix}-{i}", "", "2026-05-02",
+                    )
+                    store_via_factory.create_mention(
+                        entity.id, entry.id, f"{prefix}-{i}", 0.9, "run",
+                    )
+            except BaseException as exc:  # noqa: BLE001 — test-only
+                errors.append(exc)
+
+        with ThreadPoolExecutor(max_workers=thread_count) as ex:
+            futures = [
+                ex.submit(worker, f"t{i}") for i in range(thread_count)
+            ]
+            for f in as_completed(futures):
+                f.result()
+
+        assert errors == []
+        assert store_via_factory.count_entities() == thread_count * per_thread
+
+    def test_merge_runs_under_factory(
+        self,
+        store_via_factory: SQLiteEntityStore,
+        repo_via_factory: SQLiteEntryRepository,
+    ) -> None:
+        """``merge_entities`` opens an implicit multi-statement
+        transaction. On the factory path that whole transaction runs
+        on the calling thread's own connection, so it commits cleanly
+        without colliding with concurrent writes from other threads.
+        """
+        entry = repo_via_factory.create_entry("2026-05-03", "photo", "x", 1)
+        survivor = store_via_factory.create_entity(
+            "person", "Atlas", "", "2026-05-03",
+        )
+        absorbed = store_via_factory.create_entity(
+            "person", "Atlas W", "", "2026-05-03",
+        )
+        store_via_factory.create_mention(absorbed.id, entry.id, "Atlas W", 0.9, "r")
+
+        result = store_via_factory.merge_entities(survivor.id, [absorbed.id])
+        assert result.mentions_reassigned == 1
+        # The merge consumed the absorbed entity.
+        assert store_via_factory.get_entity(absorbed.id) is None
+        # And the survivor inherited the mention.
+        mentions = store_via_factory.get_mentions_for_entity(survivor.id)
+        assert len(mentions) == 1
