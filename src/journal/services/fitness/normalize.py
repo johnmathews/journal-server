@@ -145,7 +145,12 @@ def normalize_strava(
         rows_normalized += 1
 
     if sync_run_id is not None:
-        repo.record_normalized_rows(sync_run_id, rows_normalized)
+        # Strava is workouts-only — every normalized row is a workout.
+        repo.record_normalized_rows(
+            sync_run_id, rows_normalized,
+            workouts_normalized=rows_normalized,
+            wellness_normalized=0,
+        )
     _record_drift_if_any(
         repo=repo, source="strava", user_id=user_id,
         drift_count=drift_count, notifier=notifier,
@@ -256,7 +261,8 @@ def normalize_garmin(
         source="garmin", user_id=user_id, kind="activities",
     )
 
-    rows_normalized = 0
+    workouts_normalized = 0
+    wellness_normalized = 0
     drift_count = 0
 
     daily_raws_by_date: dict[str, dict[str, FitnessRawRow]] = defaultdict(dict)
@@ -283,7 +289,7 @@ def normalize_garmin(
             drift_count += 1
             continue
         repo.upsert_daily(daily)
-        rows_normalized += 1
+        wellness_normalized += 1
 
     for raw in repo.list_raw_since(
         source="garmin", user_id=user_id, since=activity_watermark,
@@ -300,10 +306,16 @@ def normalize_garmin(
             drift_count += 1
             continue
         repo.upsert_activity(activity)
-        rows_normalized += 1
+        workouts_normalized += 1
+
+    rows_normalized = workouts_normalized + wellness_normalized
 
     if sync_run_id is not None:
-        repo.record_normalized_rows(sync_run_id, rows_normalized)
+        repo.record_normalized_rows(
+            sync_run_id, rows_normalized,
+            workouts_normalized=workouts_normalized,
+            wellness_normalized=wellness_normalized,
+        )
     _record_drift_if_any(
         repo=repo, source="garmin", user_id=user_id,
         drift_count=drift_count, notifier=notifier,

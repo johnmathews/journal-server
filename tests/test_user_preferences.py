@@ -344,6 +344,37 @@ class TestPatchPreferencesAPI:
         assert prefs["count"] == 42
         assert prefs["active"] is True
 
+    def test_fitness_layout_round_trip(self, client: TestClient) -> None:
+        """T1: fitness_layout shape matches dashboard_layout — tileOrder /
+        hiddenTiles / tileWidths — and round-trips through the preferences
+        endpoint. The endpoint is JSON-shape-agnostic, so this test pins the
+        contract from the webapp's perspective rather than introducing a
+        server-side schema validation step."""
+        body = {
+            "fitness_layout": {
+                "tileOrder": ["weekly-distinct", "sleep", "hrv", "rhr"],
+                "hiddenTiles": ["recent-workouts"],
+                "tileWidths": {"sleep": "third", "hrv": "third", "rhr": "half"},
+            },
+        }
+        resp = client.patch("/api/users/me/preferences", json=body)
+        assert resp.status_code == 200
+        prefs = resp.json()["preferences"]
+        assert prefs["fitness_layout"] == body["fitness_layout"]
+
+        # Confirm dashboard_layout and fitness_layout coexist without
+        # one clobbering the other.
+        resp2 = client.patch(
+            "/api/users/me/preferences",
+            json={
+                "dashboard_layout": {"tileOrder": ["calendar-heatmap"]},
+            },
+        )
+        assert resp2.status_code == 200
+        prefs2 = resp2.json()["preferences"]
+        assert prefs2["fitness_layout"] == body["fitness_layout"]
+        assert prefs2["dashboard_layout"] == {"tileOrder": ["calendar-heatmap"]}
+
     def test_invalid_json_returns_400(self, client: TestClient) -> None:
         resp = client.patch(
             "/api/users/me/preferences",

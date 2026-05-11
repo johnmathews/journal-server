@@ -57,6 +57,25 @@ SyncStatus = Literal["success", "auth_broken", "transient_failure", "running"]
 
 
 @dataclass(frozen=True)
+class _FetchCounts:
+    """Internal split-by-bucket counts threaded out of
+    :meth:`_FetchServiceBase._do_fetch_and_persist`.
+
+    ``workouts`` is activities; ``wellness`` is the per-day Garmin
+    metrics (sleep, HRV, RHR, etc.). Strava is workouts-only so its
+    ``wellness`` is always 0. Backward-compat: ``rows_fetched`` on
+    :class:`FitnessSyncResult` is the sum of the two.
+    """
+
+    workouts: int = 0
+    wellness: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.workouts + self.wellness
+
+
+@dataclass(frozen=True)
 class FitnessSyncResult:
     """Outcome of one ``run_sync`` call.
 
@@ -152,7 +171,7 @@ class _FetchServiceBase:
         since_dt, until_dt = self._derive_window(user_id, since, until)
 
         try:
-            rows_fetched = self._do_fetch_and_persist(
+            counts = self._do_fetch_and_persist(
                 provider=provider,
                 since=since_dt,
                 until=until_dt,
@@ -216,11 +235,13 @@ class _FetchServiceBase:
         )
         self._repo.finish_sync_run(
             run_id, status="success",
-            rows_fetched=rows_fetched,
+            rows_fetched=counts.total,
+            workouts_fetched=counts.workouts,
+            wellness_fetched=counts.wellness,
         )
         return FitnessSyncResult(
             status="success", run_id=run_id,
-            rows_fetched=rows_fetched, rows_normalized=0,
+            rows_fetched=counts.total, rows_normalized=0,
         )
 
     # ── Subclass hooks ──────────────────────────────────────────────
@@ -289,7 +310,7 @@ class _FetchServiceBase:
         sync_run_id: int,
         user_id: int,
         initial_auth_status: str,
-    ) -> int:
+    ) -> _FetchCounts:
         raise NotImplementedError
 
     # ── Internals ───────────────────────────────────────────────────
@@ -351,7 +372,7 @@ class StravaFetchService(_FetchServiceBase):
         sync_run_id: int,
         user_id: int,
         initial_auth_status: str,
-    ) -> int:
+    ) -> _FetchCounts:
         try:
             # W5 hardening: bail out if the user disconnected between
             # ``run_sync`` reading auth and us reaching the provider.
@@ -366,11 +387,13 @@ class StravaFetchService(_FetchServiceBase):
             activities: Iterable[StravaActivitySummary] = provider.list_activities(
                 after=since, before=until,
             )
-            return _persist_activity_rows(
+            workouts = _persist_activity_rows(
                 repo=self._repo, source="strava",
                 user_id=user_id, sync_run_id=sync_run_id,
                 summaries=(_strava_raw_row(a) for a in activities),
             )
+            # Strava is workouts-only — no wellness data to count.
+            return _FetchCounts(workouts=workouts, wellness=0)
         except StravaAuthError as exc:
             raise FitnessAuthError(str(exc)) from exc
 
@@ -413,7 +436,7 @@ class GarminFetchService(_FetchServiceBase):
         sync_run_id: int,
         user_id: int,
         initial_auth_status: str,
-    ) -> int:
+    ) -> _FetchCounts:
         try:
             # W5 hardening: check auth-state at every meaningful step —
             # before the login network call, between days of the daily
@@ -425,13 +448,13 @@ class GarminFetchService(_FetchServiceBase):
                 user_id, initial_status=initial_auth_status,
             )
             provider.login()
-            rows = 0
+            wellness = 0
             for date_str in _dates_in_window(since, until):
                 self._verify_auth_live(
                     user_id, initial_status=initial_auth_status,
                 )
                 metrics = provider.get_daily(date_str)
-                rows += _persist_garmin_daily_rows(
+                wellness += _persist_garmin_daily_rows(
                     repo=self._repo, user_id=user_id,
                     sync_run_id=sync_run_id, metrics=metrics,
                 )
@@ -441,12 +464,12 @@ class GarminFetchService(_FetchServiceBase):
             activities: Iterable[GarminActivitySummary] = provider.list_activities(
                 after=since, before=until,
             )
-            rows += _persist_activity_rows(
+            workouts = _persist_activity_rows(
                 repo=self._repo, source="garmin",
                 user_id=user_id, sync_run_id=sync_run_id,
                 summaries=(_garmin_activity_raw_row(a) for a in activities),
             )
-            return rows
+            return _FetchCounts(workouts=workouts, wellness=wellness)
         except GarminAuthError as exc:
             raise FitnessAuthError(str(exc)) from exc
 
