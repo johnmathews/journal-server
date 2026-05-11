@@ -153,7 +153,12 @@ on the dashboard) and ship first.
 
 ## Work units
 
-### T1. Extend `/api/preferences` to accept `fitness_layout` `[server]`
+### T1. Extend `/api/preferences` to accept `fitness_layout` `[server]` — closed 2026-05-11
+
+Turned out the endpoint already accepts arbitrary JSON keys, so no schema or
+endpoint change was needed. Shipped a round-trip test pinning the contract
+and a co-existence test confirming `fitness_layout` and `dashboard_layout`
+don't clobber each other. Original work-unit body kept below as a record.
 
 - **Priority:** Medium.
 - **Risk:** Low — additive schema change, no new endpoint, no migration.
@@ -267,7 +272,24 @@ with the rule.
 Kept in the plan as a closed record so future readers can see what "tooltip parity" actually
 shook out to.
 
-### T7. Split Garmin "Fetched" / "Norm." into workouts vs. wellness `[server + webapp]`
+### T7. Split Garmin "Fetched" / "Norm." into workouts vs. wellness `[server + webapp]` — closed 2026-05-11
+
+Shipped end-to-end: migration 0026, fetch + normalize plumbing, API
+serialisation, webapp `FitnessSyncRun` type update, and `FitnessSyncPanels`
+source-aware column rendering. The legacy `rows_fetched` / `rows_normalized`
+columns stay populated as the workouts+wellness sum so any unmigrated
+consumer keeps working. Pre-T7 rows fall back to the legacy total in the
+most-likely bucket via `formatCounts` in the webapp.
+
+Also took a related housekeeping change: the migration runner now tolerates
+"duplicate column name" errors as no-ops so `ALTER TABLE ADD COLUMN`
+migrations are idempotent for the
+`test_idempotent_rerun_from_pre_fitness_baseline` test. SQLite has no
+native `IF NOT EXISTS` clause for `ADD COLUMN`.
+
+Original work-unit body kept below as a record.
+
+
 
 Carried forward from the closed [`archive/fitness-followup-plan.md`](./archive/fitness-followup-plan.md)
 "Open follow-ups" item #2: the Garmin Recent-runs table reports one `Fetched` count that pools
