@@ -20,7 +20,7 @@ W1–W15 execution sequencing is archived at
 ## Contents
 
 1. [Configuration prerequisites](#1-configuration-prerequisites)
-2. [Initial re-auth](#2-initial-re-auth)
+2. [Initial connection](#2-initial-connection)
 3. [Historical backfill](#3-historical-backfill)
 4. [Routine sync](#4-routine-sync)
 5. [Status, health, and integrity](#5-status-health-and-integrity)
@@ -63,36 +63,168 @@ For Strava-app registration steps, see
 
 ---
 
-## 2. Initial re-auth
+## 2. Initial connection
 
-Each source is bootstrapped once via a CLI subcommand. Re-auth is also the
-recovery path when a source transitions to `auth_status="broken"` (see
-[§5](#5-status-health-and-integrity)).
+Each user connects their own fitness sources. The webapp is the primary
+path (§2a Garmin, §2b Strava) — it's what every user uses to bootstrap
+and to recover from broken auth via the W11 banner's Reconnect button.
+The CLI subcommands (§2c–§2e) remain as an operator fallback for
+headless / scripted deployments where browser access is impractical.
 
-> **`--user-id` is required on every `fitness-*` subcommand** (per
-> `docs/fitness-multiuser-plan.md` W7). There is no implicit default — running
-> `journal fitness-sync` without `--user-id N` exits non-zero with an argparse
-> error. Every example below names the user explicitly.
+Re-connect is also the recovery path when a source transitions to
+`auth_status="broken"` (see [§5](#5-status-health-and-integrity)).
 
-### 2a. Strava — laptop / dev box
+> **`--user-id` is required on every `fitness-*` CLI subcommand** (per
+> `docs/fitness-multiuser-plan.md` W7). There is no implicit default —
+> running `journal fitness-sync` without `--user-id N` exits non-zero
+> with an argparse error. Every CLI example below names the user
+> explicitly.
 
-When the journal-server is **not** running on the same host (or is not bound to
-the redirect URI's port), re-auth is straightforward:
+### 2a. Garmin — connecting via the webapp (primary)
+
+From the webapp's Settings panel, click "Connect Garmin" on the Fitness
+Connections card, enter Garmin account credentials, and (if Garmin asks)
+the 6-digit MFA code. The webapp posts the form to three endpoints
+shipped in W2 of the multi-user plan:
+
+- `POST /api/fitness/garmin/connect` — body `{username, password}`.
+  Authenticates against Garmin synchronously; returns `{connected: true,
+  upstream_user_id}` on no-MFA success, or `{mfa_required: true,
+  pending_session, expires_at}` when Garmin asks for a 6-digit code.
+  The plaintext password is consumed once inside the request handler
+  and never persisted.
+- `POST /api/fitness/garmin/connect/mfa` — body
+  `{pending_session, code}`. Completes the MFA-required flow. The
+  `pending_session` is bound to the authenticated user's `user_id`; a
+  token leaked to a different logged-in user is rejected with 403.
+- `POST /api/fitness/garmin/disconnect` — deletes the calling user's
+  `fitness_auth_state` row for `source='garmin'`.
+
+A small in-memory pending-session store
+(`services/fitness/garmin_pending.py`) holds the live `Garmin` client
+between the connect and MFA endpoints. Entries expire after 10 minutes
+and are user-bound — surviving server restarts is not in scope (the user
+just repeats the connect form).
+
+Successful logins record the upstream Garmin identifier (`displayName`)
+into `fitness_auth_state.extra_state_json["upstream_user_id"]`. A
+subsequent reconnect with a *different* Garmin account is refused with
+409 — D8 of the multi-user plan: disconnect first if you genuinely want
+to switch upstream accounts.
+
+Garmin's auth rate-limiter keys on clientId + account email rather than
+IP, so a user typo'ing their password a few times can lock themselves
+out account-wide. The connect endpoint applies a per-email cool-down
+(5 failures within ~15 minutes → 429 with `retry_after_seconds`) so a
+user mistyping does not deepen an existing upstream lockout. The webapp
+surfaces 429 responses as "try again in N minutes" rather than
+auto-retrying.
+
+See [`api.md`](./api.md#post-apifitnessgarminconnect) for the full
+endpoint reference (including the `post_mfa_profile_fetch_failed`
+branch that surfaces intermittent Garmin profile-endpoint flakiness as
+a distinct retry signal) and
+[`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md) §5 W2 for
+context.
+
+### 2b. Strava — connecting via the webapp (primary)
+
+From the webapp's Settings panel, click "Connect Strava" on the Fitness
+Connections card. The browser navigates to Strava's OAuth approval
+page; on approval Strava redirects to the webapp callback
+(`/settings/fitness/strava/callback`), which POSTs the resulting `code`
+and `state` to the exchange endpoint. The supporting endpoints shipped
+in W3 of the multi-user plan:
+
+- `GET /api/fitness/strava/authorize_url` — returns `{authorize_url,
+  state, expires_at}`. The `state` is a 256-bit CSPRNG token bound to
+  the authenticated user's `user_id` for 10 minutes; presenting it back
+  from a different user fails 403.
+- `POST /api/fitness/strava/exchange` — body `{code, state}`. Validates
+  the state against the calling user, calls
+  `providers.strava.exchange_code(..., return_athlete=True)` to capture
+  the upstream `athlete.id` in the same SDK roundtrip, and persists
+  tokens + upstream id. Idempotent up to state-token consumption — once
+  a state is consumed, replaying it under the same code is a 410.
+- `POST /api/fitness/strava/disconnect` — deletes the calling user's
+  `fitness_auth_state` row for `source='strava'`.
+
+A small in-memory pending-state store
+(`services/fitness/strava_pending.py`) holds the `(user_id, expires_at)`
+entry between issuing the authorize URL and exchanging the code.
+Entries expire after 10 minutes; restart loses them. The store is
+parallel to (not derived from) `garmin_pending.py` because the Strava
+entry has no live SDK client to park — see the W3 journal entry for the
+parallel-modules-vs-shared-helper decision.
+
+`athlete.id` is recorded in
+`fitness_auth_state.extra_state_json["upstream_user_id"]` so the same
+D8 reconnect-with-different-account check applies to Strava: switching
+upstream athletes silently is refused with 409.
+
+The OAuth `redirect_uri` is sourced from `STRAVA_REDIRECT_URI`. Per D4
+of the multi-user plan, the production value points at the webapp
+callback route (`https://<webapp>/settings/fitness/strava/callback`).
+The Strava developer app's Authorization Callback Domain must match;
+W13 of the multi-user plan is the one-time operator step that flips
+both in production. The default value (`http://localhost:8400/strava/callback`)
+still drives the CLI listener path in §2d / §2e for dev/laptop bootstrap.
+
+See [`api.md`](./api.md#get-apifitnessstravaauthorize_url) for the full
+endpoint reference and
+[`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md) §5 W3 for
+context.
+
+### 2c. Garmin — CLI operator fallback
+
+Garmin uses username/password auth (with optional MFA), not OAuth. The
+webapp flow in §2a is the primary path for every user; the CLI below
+remains as an operator fallback for headless / scripted bootstraps:
+
+```bash
+docker exec -it journal-server uv run journal fitness-reauth-garmin \
+    --user-id 1 --username user@example.com
+```
+
+`--username` is required (no env-var fallback after W6). The password is
+read from the controlling terminal via `getpass()` — never from env vars
+and never persisted. The command logs into `connect.garmin.com` via
+`python-garminconnect`, prompts for an MFA code on stdin if Garmin asks
+for one, and persists the resulting token blob into
+`fitness_auth_state.extra_state_json["tokens_blob"]`. (Unlike Strava,
+Garmin's `access_token` column stays `NULL` — the live credential lives
+in `extra_state` because that's the shape `garth` produces.) Subsequent
+syncs read the blob, not the password.
+
+The `garminconnect` library tries multiple transports in sequence and
+may print intermediate `429: Mobile login returned 429 — IP rate limited
+by Garmin` lines before a third transport succeeds. **The `Garmin
+re-auth complete — token blob persisted.` line is authoritative.** The
+429 lines are not failures (see [§6](#6-troubleshooting)).
+
+### 2d. Strava — CLI operator fallback (laptop / dev box)
+
+When the journal-server is **not** running on the same host (or is not
+bound to the redirect URI's port), the CLI listener path is
+straightforward:
 
 ```bash
 uv run journal fitness-reauth-strava --user-id 1
 ```
 
 The command prints an authorize URL and a status line, then blocks on a
-one-shot HTTP listener at the host/port from `STRAVA_REDIRECT_URI`. Open the
-URL in any browser, approve the prompt, Strava redirects to the listener, and
-tokens persist into `fitness_auth_state` with `auth_status="ok"`.
+one-shot HTTP listener at the host/port from `STRAVA_REDIRECT_URI`.
+Open the URL in any browser, approve the prompt, Strava redirects to
+the listener, and tokens persist into `fitness_auth_state` with
+`auth_status="ok"`. Useful for first-time dev/laptop setup or for
+emergency re-auth from a developer machine.
 
-### 2b. Strava — headless deployment (server already on `:8400`)
+### 2e. Strava — CLI operator fallback (headless deployment, server on `:8400`)
 
-The default `STRAVA_REDIRECT_URI` reuses port `8400`, which the long-running
-journal-server is already bound to. Two workarounds; the inline-python recipe
-below is the recommended path.
+When the default `STRAVA_REDIRECT_URI` reuses port `8400`, which the
+long-running journal-server is already bound to, the §2d listener can't
+bind. Two workarounds; the inline-python recipe below is the
+recommended path.
 
 **Recommended — skip the listener, exchange the code inline.** Build the
 authorize URL by hand, paste it into a browser, copy the `code` param out of
@@ -167,100 +299,6 @@ restarted server picks it up.
 8400:localhost:8400 user@vm`) **and** apply the stop-server-plus-`--service-ports`
 recipe on the VM. Two SSH sessions, fragile. The inline-python recipe above
 makes this go away — strongly preferred for headless deployments.
-
-### 2c. Garmin (operator fallback)
-
-Garmin uses username/password auth (with optional MFA), not OAuth. The primary
-path is the per-user webapp connect flow (§2d) — every user connects their
-own account through the Settings panel. The CLI below remains as an operator
-fallback for headless / scripted bootstraps:
-
-```bash
-docker exec -it journal-server uv run journal fitness-reauth-garmin \
-    --user-id 1 --username user@example.com
-```
-
-`--username` is required (no env-var fallback after W6). The password is read
-from the controlling terminal via `getpass()` — never from env vars and never
-persisted. The command logs into `connect.garmin.com` via
-`python-garminconnect`, prompts for an MFA code on stdin if Garmin asks for
-one, and persists the resulting token blob into
-`fitness_auth_state.extra_state_json["tokens_blob"]`. (Unlike Strava, Garmin's
-`access_token` column stays `NULL` — the live credential lives in
-`extra_state` because that's the shape `garth` produces.) Subsequent syncs
-read the blob, not the password.
-
-The `garminconnect` library tries multiple transports in sequence and may print
-intermediate `429: Mobile login returned 429 — IP rate limited by Garmin` lines
-before a third transport succeeds. **The `Garmin re-auth complete — token blob
-persisted.` line is authoritative.** The 429 lines are not failures (see
-[§6](#6-troubleshooting)).
-
-### 2d. Connecting via the webapp (W2 — preview)
-
-W2 of the multi-user plan ships a per-user, in-app Garmin connect flow. From
-W2 onwards each user can connect their own Garmin account through the webapp's
-Settings panel without operator involvement and without sharing credentials in
-env vars. The supporting endpoints land in W2:
-
-- `POST /api/fitness/garmin/connect` — body `{username, password}`. Authenticates
-  against Garmin synchronously; returns `{connected: true, ...}` on no-MFA
-  success, or `{mfa_required: true, pending_session, expires_at}` when Garmin
-  asks for a 6-digit code. The plaintext password is consumed once inside the
-  request handler and never persisted.
-- `POST /api/fitness/garmin/connect/mfa` — body `{pending_session, code}`.
-  Completes the MFA-required flow. The `pending_session` is bound to the
-  authenticated user's `user_id`; a token leaked to a different logged-in user
-  is rejected with 403.
-- `POST /api/fitness/garmin/disconnect` — deletes the calling user's
-  `fitness_auth_state` row for `source='garmin'`.
-
-The webapp UI that calls these endpoints lands in W8/W9 — full operator-facing
-documentation will move into a new "Connecting via the webapp" section here at
-that point. Until then, the CLI flow above remains the documented operator
-path. See [`api.md`](./api.md#post-apifitnessgarminconnect) for the full
-endpoint reference and [`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md)
-§5 W2 for context.
-
-A small in-memory pending-session store (`services/fitness/garmin_pending.py`)
-holds the live `Garmin` client between the connect and MFA endpoints. Entries
-expire after 10 minutes and are user-bound — surviving server restarts is not
-in scope (the user just repeats the connect form).
-
-### 2e. Connecting Strava via the webapp (W3 — preview)
-
-W3 of the multi-user plan ships the symmetric per-user, in-app Strava connect
-flow. From W3 onwards each user can authorise their own Strava account through
-the webapp without sharing the laptop OAuth listener path. The supporting
-endpoints land in W3:
-
-- `GET /api/fitness/strava/authorize_url` — returns
-  `{authorize_url, state, expires_at}`. The `state` is a 256-bit CSPRNG token
-  bound to the authenticated user's `user_id` for 10 minutes; presenting it
-  back from a different user fails 403.
-- `POST /api/fitness/strava/exchange` — body `{code, state}`. Validates the
-  state against the calling user, calls
-  `providers.strava.exchange_code(..., return_athlete=True)` to capture the
-  upstream `athlete.id` in the same SDK roundtrip, and persists tokens +
-  upstream id. Idempotent up to state-token consumption.
-- `POST /api/fitness/strava/disconnect` — deletes the calling user's
-  `fitness_auth_state` row for `source='strava'`.
-
-The redirect URI is the *webapp* callback route
-(`<webapp>/settings/fitness/strava/callback`) per D4 — `STRAVA_REDIRECT_URI`
-becomes a build-time webapp URL. The Vue route that posts the redirect
-parameters back to `exchange` lands in W10. Until then, the CLI listener flow
-in §2a / §2b remains the documented operator path.
-
-A small in-memory pending-state store
-(`services/fitness/strava_pending.py`) holds the `(user_id, expires_at)` entry
-between issuing the authorize URL and exchanging the code. Entries expire
-after 10 minutes; restart loses them. The store is parallel to (not derived
-from) `garmin_pending.py` because the Strava entry has no live SDK client to
-park — see the W3 journal entry for the parallel-modules-vs-shared-helper
-decision. See [`api.md`](./api.md#get-apifitnessstravaauthorize_url) for the
-full endpoint reference and [`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md)
-§5 W3 for context.
 
 ---
 
@@ -443,7 +481,7 @@ prod DB before shipping any of the multi-user work units.
 ### Strava re-auth fails with `OSError: [Errno 98] Address already in use`
 
 The `STRAVA_REDIRECT_URI` port collides with the long-running journal-server.
-Use the inline-python recipe from [§2b](#2b-strava--headless-deployment-server-already-on-8400).
+Use the inline-python recipe from [§2e](#2e-strava--cli-operator-fallback-headless-deployment-server-on-8400).
 
 ### Garmin re-auth prints `429: Mobile login returned 429 — IP rate limited by Garmin`
 

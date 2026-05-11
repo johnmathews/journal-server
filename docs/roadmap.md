@@ -28,13 +28,21 @@ the top of the linked doc tells you whether it's active, closed, or superseded.
 - [`security-roadmap.md`](./security-roadmap.md) — multi-tier security hardening. Tier 1
   completed 2026-04-15; later tiers remain.
 - [`fitness-integration-plan.md`](./fitness-integration-plan.md) — fitness-tracker
-  ingestion design (open questions resolved 2026-05-08). See also
+  ingestion design (open questions resolved 2026-05-08; multi-user pivot
+  recorded under Q7 2026-05-10). See also
   [`fitness-schema.md`](./fitness-schema.md) (concrete schema),
   [`fitness-pipeline.md`](./fitness-pipeline.md) (engineer-facing data-flow
   overview), [`fitness-operations.md`](./fitness-operations.md) (operator
-  runbook for re-auth, backfill, and troubleshooting), and
+  runbook covering webapp-primary connect plus CLI fallback for backfill and
+  troubleshooting), and
   [`archive/fitness-tier-plan.md`](./archive/fitness-tier-plan.md) (W1–W15
   execution sequencing — closed 2026-05-10, all work units shipped). Item 1 below.
+- [`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md) — per-user
+  posture on top of the fitness pipeline: webapp-driven Garmin / Strava
+  connect flows, drop global Garmin env vars, CLI `--user-id` required.
+  Server-side W1–W7 and W11 shipped; W12 docs sweep is the current unit;
+  W13 is an operator step (Strava callback URL); W14 is the staging-gated
+  end-to-end verification with user 2.
 - [`code-quality-principles.md`](./code-quality-principles.md) — standing rules referenced
   by the refactor docs.
 - [`mood-scoring.md`](./mood-scoring.md) — pipeline reference. Note: mood scoring is now
@@ -98,7 +106,9 @@ orchestrator + first live smoke (W13), operator + engineer documentation
 
 **Deferred follow-ups (independent, ad-hoc):** `--code <code>` CLI flag for
 headless Strava re-auth; W7 dense-backfill watermark fix; explicit
-`Rowing → other` activity-type map entry; in-app re-auth flow; mood × fitness
+`Rowing → other` activity-type map entry; ~~in-app re-auth flow~~ (shipped
+2026-05-10 as part of [`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md)
+W2/W3/W8–W11 — webapp Settings panel + Reconnect banner); mood × fitness
 correlation views (webapp).
 
 ---

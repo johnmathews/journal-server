@@ -2274,11 +2274,20 @@ candidate by future extraction runs.
 
 ## Fitness endpoints
 
-Five endpoints expose the W4–W13 fitness pipeline. Read routes live in
-`api/fitness.py`; the job-creation `POST /api/fitness/sync/{source}` lives in
-`api/ingestion.py` per the codebase's write-in-ingestion-router convention. For
-the data flow, see [`fitness-pipeline.md`](fitness-pipeline.md); for re-auth,
-backfill, and troubleshooting, see [`fitness-operations.md`](fitness-operations.md).
+Twelve endpoints expose the fitness pipeline:
+
+- Read routes (`GET /api/fitness/{activities,daily,sync/status,integrity}`) and
+  the W2/W3 per-user Garmin connect / Strava OAuth endpoints live in
+  `api/fitness.py`.
+- Job creation (`POST /api/fitness/sync/{source}` and the W5
+  `POST /api/fitness/backfill/{source}`) lives in `api/ingestion.py` per the
+  codebase's write-in-ingestion-router convention.
+
+For the data flow, see [`fitness-pipeline.md`](fitness-pipeline.md); for
+connecting, re-auth, backfill, and troubleshooting, see
+[`fitness-operations.md`](fitness-operations.md). The multi-user posture and
+per-user connect flows are spelled out in
+[`fitness-multiuser-plan.md`](fitness-multiuser-plan.md).
 
 ### GET /api/fitness/activities
 
@@ -2453,9 +2462,12 @@ interleaving writes to the same `(user_id, source)` window.
 - `400` `{"error": "Unknown fitness source: ..."}` — `source` is not
   `"strava"` or `"garmin"`.
 - `503` `{"error": "Strava fitness sync is not configured on this server ..."}`
-  — the source's credential vars (`STRAVA_CLIENT_ID` /
-  `STRAVA_CLIENT_SECRET` for Strava, `GARMIN_USERNAME` / `GARMIN_PASSWORD`
-  for Garmin) are unset. Operator can tell *feature off* from *real bug*.
+  — Strava-only: `STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET` are unset
+  on the server, so submitting a sync is guaranteed to fail. Operator
+  can tell *feature off* from *real bug*. Garmin never 503s here
+  post-multi-user-plan W6 — Garmin is always wired (per-user credentials,
+  no global env vars), so a user without a `fitness_auth_state` row just
+  produces a clean `auth_broken` sync run rather than a 503.
 
 ---
 

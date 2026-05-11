@@ -58,8 +58,11 @@ consumption by other applications, not just the journal webapp.
 - The official Garmin Health API (gated to approved partners; not available for personal projects).
 - `.fit` file ingestion (possible later as archival format; not now).
 - Real-time / sub-daily polling. Daily cadence only.
-- Multi-user fitness data. Single-user (`user_id = 1`) at the storage layer for now, but schema
-  carries `user_id` so multi-user is a future migration, not a rewrite.
+- ~~Multi-user fitness data. Single-user (`user_id = 1`) at the storage layer for now, but schema
+  carries `user_id` so multi-user is a future migration, not a rewrite.~~ **Pivoted 2026-05-10:**
+  multi-user fitness data is now in scope — each user connects their own Strava and Garmin
+  accounts through the webapp. See [Q7](#q7-multi-user-pivot-2026-05-10) for the resolution and
+  [`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md) for the execution plan.
 - Wearable integrations beyond Garmin/Strava (Whoop, Oura, Apple Health, etc.).
 - Workout planning, training load forecasts, or any predictive modelling.
 
@@ -268,6 +271,27 @@ job.
 No parallel export path. Fitness data is part of the user's data and should leave the system the
 same way journal entries do. Implementation lands in whichever module owns user-data export
 (check `services/backfill.py` or the user-export endpoints during implementation).
+
+### Q7. Multi-user pivot (2026-05-10).
+
+**Picked.** Pivoted from single-user to per-user. Each journal user connects their own Garmin
+and Strava accounts through the webapp; per-user tokens persist in `fitness_auth_state` rows
+keyed on `user_id`. Strava remains operator-global at the developer-app level (one
+`STRAVA_CLIENT_ID` per server, shared across users); Garmin credentials are inherently per-user
+and the legacy `GARMIN_USERNAME` / `GARMIN_PASSWORD` env vars are removed.
+
+**Why pivoted.** The original §2 Scope item "Single-user (`user_id = 1`) at the storage layer
+for now" was a deliberate defer — schema carried `user_id` so the migration would be additive.
+The pre-condition for promoting the defer became real when a second user joined production:
+shipping the per-user webapp connect flow before any user starts populating shared rows is
+strictly cheaper than retrofitting it later. Schema, providers, fetch service, normalize
+service, and job workers are all already per-user-aware — the pivot is purely additive (new
+connect endpoints, new pending-session stores, no migrations).
+
+**Where the work lives.** Architectural decisions and W1–W14 execution sequencing are in
+[`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md), not here. The integration plan
+remains the rationale doc for the underlying pipeline; the multi-user plan is the rationale
+doc for the multi-user posture on top.
 
 ---
 
