@@ -164,15 +164,16 @@ def test_cmd_backfill_mood_dry_run(tmp_path, capsys):
 
     from journal.cli import cmd_backfill_mood
     from journal.config import Config
-    from journal.db.connection import get_connection
+    from journal.db.factory import ConnectionFactory
     from journal.db.migrations import run_migrations
     from journal.db.repository import SQLiteEntryRepository
 
     # Seed a real DB with two entries.
     db_path = tmp_path / "mood_cli.db"
-    conn = get_connection(db_path)
-    run_migrations(conn)
-    repo = SQLiteEntryRepository(conn)
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    conn = factory.get()
+    repo = SQLiteEntryRepository(factory)
     repo.create_entry("2026-04-01", "photo", "first", 1)
     repo.create_entry("2026-04-02", "photo", "second", 1)
     conn.close()
@@ -224,16 +225,17 @@ def test_cmd_repair_entity_names_dry_run_proposes_fix(tmp_path, capsys):
 
     from journal.cli import cmd_repair_entity_names
     from journal.config import Config
-    from journal.db.connection import get_connection
+    from journal.db.factory import ConnectionFactory
     from journal.db.migrations import run_migrations
     from journal.db.repository import SQLiteEntryRepository
     from journal.entitystore.store import SQLiteEntityStore
 
     db_path = tmp_path / "repair.db"
-    conn = get_connection(db_path)
-    run_migrations(conn)
-    repo = SQLiteEntryRepository(conn)
-    store = SQLiteEntityStore(conn)
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    conn = factory.get()
+    repo = SQLiteEntryRepository(factory)
+    store = SQLiteEntityStore(factory)
 
     entry = repo.create_entry("2026-04-25", "photo", "raw", 5, user_id=1)
     entity = store.create_entity(
@@ -260,8 +262,9 @@ def test_cmd_repair_entity_names_dry_run_proposes_fix(tmp_path, capsys):
     assert "Dry-run only" in out
 
     # DB unchanged
-    conn = get_connection(db_path)
-    fresh = SQLiteEntityStore(conn).get_entity(entity.id)
+    factory = ConnectionFactory(db_path)
+    conn = factory.get()
+    fresh = SQLiteEntityStore(factory).get_entity(entity.id)
     assert fresh is not None
     assert fresh.canonical_name == "Nautilin"
     conn.close()
@@ -276,16 +279,17 @@ def test_cmd_repair_entity_names_apply_updates_canonical_name(
 
     from journal.cli import cmd_repair_entity_names
     from journal.config import Config
-    from journal.db.connection import get_connection
+    from journal.db.factory import ConnectionFactory
     from journal.db.migrations import run_migrations
     from journal.db.repository import SQLiteEntryRepository
     from journal.entitystore.store import SQLiteEntityStore
 
     db_path = tmp_path / "repair_apply.db"
-    conn = get_connection(db_path)
-    run_migrations(conn)
-    repo = SQLiteEntryRepository(conn)
-    store = SQLiteEntityStore(conn)
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    conn = factory.get()
+    repo = SQLiteEntryRepository(factory)
+    store = SQLiteEntityStore(factory)
 
     entry = repo.create_entry("2026-04-25", "photo", "raw", 5, user_id=1)
     entity = store.create_entity(
@@ -310,8 +314,10 @@ def test_cmd_repair_entity_names_apply_updates_canonical_name(
     out = capsys.readouterr().out
     assert "Applied 1/1" in out
 
-    conn = get_connection(db_path)
-    fresh = SQLiteEntityStore(conn).get_entity(entity.id)
+    factory = ConnectionFactory(db_path)
+
+    conn = factory.get()
+    fresh = SQLiteEntityStore(factory).get_entity(entity.id)
     assert fresh is not None
     assert fresh.canonical_name == "Nautiline"
     conn.close()
@@ -325,16 +331,17 @@ def test_cmd_repair_entity_names_skips_collision(tmp_path, capsys):
 
     from journal.cli import cmd_repair_entity_names
     from journal.config import Config
-    from journal.db.connection import get_connection
+    from journal.db.factory import ConnectionFactory
     from journal.db.migrations import run_migrations
     from journal.db.repository import SQLiteEntryRepository
     from journal.entitystore.store import SQLiteEntityStore
 
     db_path = tmp_path / "repair_collision.db"
-    conn = get_connection(db_path)
-    run_migrations(conn)
-    repo = SQLiteEntryRepository(conn)
-    store = SQLiteEntityStore(conn)
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    conn = factory.get()
+    repo = SQLiteEntryRepository(factory)
+    store = SQLiteEntityStore(factory)
 
     entry = repo.create_entry("2026-04-25", "photo", "raw", 5, user_id=1)
 
@@ -369,8 +376,9 @@ def test_cmd_repair_entity_names_skips_collision(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "would collide" in out
     # Should NOT have applied the colliding repair
-    conn = get_connection(db_path)
-    fresh = SQLiteEntityStore(conn).get_entity(bad.id)
+    factory = ConnectionFactory(db_path)
+    conn = factory.get()
+    fresh = SQLiteEntityStore(factory).get_entity(bad.id)
     assert fresh is not None
     assert fresh.canonical_name == "Nautilin"  # unchanged
     conn.close()
@@ -403,13 +411,14 @@ def test_cmd_renormalise_entity_casing_dry_run_lists_changes(tmp_path, capsys):
 
     from journal.cli import cmd_renormalise_entity_casing
     from journal.config import Config
-    from journal.db.connection import get_connection
+    from journal.db.factory import ConnectionFactory
     from journal.db.migrations import run_migrations
     from journal.entitystore.store import SQLiteEntityStore
 
     db_path = tmp_path / "renorm.db"
-    conn = get_connection(db_path)
-    run_migrations(conn)
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    conn = factory.get()
 
     # Pre-feature data — names that should change after renormalisation.
     legacy_running = _seed_entity_with_raw_canonical(conn, "activity", "running")
@@ -429,8 +438,9 @@ def test_cmd_renormalise_entity_casing_dry_run_lists_changes(tmp_path, capsys):
     assert "Dry-run only" in out
 
     # DB state must be unchanged.
-    conn = get_connection(db_path)
-    store = SQLiteEntityStore(conn)
+    factory = ConnectionFactory(db_path)
+    conn = factory.get()
+    store = SQLiteEntityStore(factory)
     assert store.get_entity(legacy_running).canonical_name == "running"
     assert store.get_entity(legacy_pages).canonical_name == "morning pages"
     assert store.get_entity(correct).canonical_name == "Frisbee"
@@ -443,13 +453,14 @@ def test_cmd_renormalise_entity_casing_apply_updates_rows(tmp_path, capsys):
 
     from journal.cli import cmd_renormalise_entity_casing
     from journal.config import Config
-    from journal.db.connection import get_connection
+    from journal.db.factory import ConnectionFactory
     from journal.db.migrations import run_migrations
     from journal.entitystore.store import SQLiteEntityStore
 
     db_path = tmp_path / "renorm_apply.db"
-    conn = get_connection(db_path)
-    run_migrations(conn)
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    conn = factory.get()
     a = _seed_entity_with_raw_canonical(conn, "activity", "running")
     b = _seed_entity_with_raw_canonical(conn, "topic", "kubernetes")
     c = _seed_entity_with_raw_canonical(conn, "place", "the netherlands")
@@ -461,8 +472,10 @@ def test_cmd_renormalise_entity_casing_apply_updates_rows(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Applied" in out
 
-    conn = get_connection(db_path)
-    store = SQLiteEntityStore(conn)
+    factory = ConnectionFactory(db_path)
+
+    conn = factory.get()
+    store = SQLiteEntityStore(factory)
     assert store.get_entity(a).canonical_name == "Running"
     assert store.get_entity(b).canonical_name == "Kubernetes"
     # Articles lowercased in non-leading positions via the algorithm.
@@ -477,13 +490,14 @@ def test_cmd_renormalise_entity_casing_uses_exceptions_toml(tmp_path, capsys):
 
     from journal.cli import cmd_renormalise_entity_casing
     from journal.config import Config
-    from journal.db.connection import get_connection
+    from journal.db.factory import ConnectionFactory
     from journal.db.migrations import run_migrations
     from journal.entitystore.store import SQLiteEntityStore
 
     db_path = tmp_path / "renorm_exc.db"
-    conn = get_connection(db_path)
-    run_migrations(conn)
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    conn = factory.get()
     e1 = _seed_entity_with_raw_canonical(conn, "topic", "ios")
     e2 = _seed_entity_with_raw_canonical(conn, "topic", "github")
     e3 = _seed_entity_with_raw_canonical(conn, "topic", "javascript")
@@ -492,8 +506,10 @@ def test_cmd_renormalise_entity_casing_uses_exceptions_toml(tmp_path, capsys):
     config = Config(db_path=db_path)
     cmd_renormalise_entity_casing(MagicMock(apply=True), config)
 
-    conn = get_connection(db_path)
-    store = SQLiteEntityStore(conn)
+    factory = ConnectionFactory(db_path)
+
+    conn = factory.get()
+    store = SQLiteEntityStore(factory)
     assert store.get_entity(e1).canonical_name == "iOS"
     assert store.get_entity(e2).canonical_name == "GitHub"
     assert store.get_entity(e3).canonical_name == "JavaScript"
@@ -509,13 +525,14 @@ def test_cmd_renormalise_entity_casing_skips_collisions(tmp_path, capsys):
 
     from journal.cli import cmd_renormalise_entity_casing
     from journal.config import Config
-    from journal.db.connection import get_connection
+    from journal.db.factory import ConnectionFactory
     from journal.db.migrations import run_migrations
     from journal.entitystore.store import SQLiteEntityStore
 
     db_path = tmp_path / "renorm_coll.db"
-    conn = get_connection(db_path)
-    run_migrations(conn)
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    conn = factory.get()
     correct = _seed_entity_with_raw_canonical(conn, "activity", "Running")
     legacy = _seed_entity_with_raw_canonical(conn, "activity", "running")
     conn.close()
@@ -526,8 +543,9 @@ def test_cmd_renormalise_entity_casing_skips_collisions(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "would collide" in out
     # Neither entity should be merged or destroyed by the backfill itself.
-    conn = get_connection(db_path)
-    store = SQLiteEntityStore(conn)
+    factory = ConnectionFactory(db_path)
+    conn = factory.get()
+    store = SQLiteEntityStore(factory)
     assert store.get_entity(correct).canonical_name == "Running"
     assert store.get_entity(legacy).canonical_name == "running"
     conn.close()
@@ -566,14 +584,15 @@ def test_cmd_backfill_entity_embeddings_dry_run(tmp_path, capsys):
 
     from journal.cli import cmd_backfill_entity_embeddings
     from journal.config import Config
-    from journal.db.connection import get_connection
+    from journal.db.factory import ConnectionFactory
     from journal.db.migrations import run_migrations
     from journal.entitystore.store import SQLiteEntityStore
 
     db_path = tmp_path / "reembed.db"
-    conn = get_connection(db_path)
-    run_migrations(conn)
-    store = SQLiteEntityStore(conn)
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    conn = factory.get()
+    store = SQLiteEntityStore(factory)
     # Two with descriptions, one without — only the two should count.
     store.create_entity("person", "Sarah", "my mother", "2026-01-01")
     store.create_entity("place", "Vienna", "city in Austria", "2026-01-01")
@@ -605,14 +624,15 @@ def test_cmd_backfill_entity_embeddings_writes_embeddings(
 
     from journal.cli import cmd_backfill_entity_embeddings
     from journal.config import Config
-    from journal.db.connection import get_connection
+    from journal.db.factory import ConnectionFactory
     from journal.db.migrations import run_migrations
     from journal.entitystore.store import SQLiteEntityStore
 
     db_path = tmp_path / "reembed_apply.db"
-    conn = get_connection(db_path)
-    run_migrations(conn)
-    store = SQLiteEntityStore(conn)
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    conn = factory.get()
+    store = SQLiteEntityStore(factory)
     sarah = store.create_entity("person", "Sarah", "my mother", "2026-01-01")
     vienna = store.create_entity("place", "Vienna", "city", "2026-01-01")
     store.create_entity("person", "Ghost", "", "2026-01-01")
@@ -635,8 +655,9 @@ def test_cmd_backfill_entity_embeddings_writes_embeddings(
     assert fake_provider.embed_query.call_count == 2
 
     # Verify the embeddings actually landed.
-    conn = get_connection(db_path)
-    store = SQLiteEntityStore(conn)
+    factory = ConnectionFactory(db_path)
+    conn = factory.get()
+    store = SQLiteEntityStore(factory)
     assert store.get_entity_embedding(sarah.id) == [0.5, 0.5, 0.5, 0.5]
     assert store.get_entity_embedding(vienna.id) == [0.5, 0.5, 0.5, 0.5]
     conn.close()
@@ -650,19 +671,20 @@ def test_cmd_backfill_entity_embeddings_user_id_filter(
 
     from journal.cli import cmd_backfill_entity_embeddings
     from journal.config import Config
-    from journal.db.connection import get_connection
+    from journal.db.factory import ConnectionFactory
     from journal.db.migrations import run_migrations
     from journal.entitystore.store import SQLiteEntityStore
 
     db_path = tmp_path / "reembed_userscope.db"
-    conn = get_connection(db_path)
-    run_migrations(conn)
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    conn = factory.get()
     conn.execute(
         "INSERT INTO users (email, display_name, is_admin, email_verified) "
         "VALUES ('u2@test.com', 'User Two', 0, 1)"
     )
     conn.commit()
-    store = SQLiteEntityStore(conn)
+    store = SQLiteEntityStore(factory)
     store.create_entity("person", "Sarah", "user1 entity", "2026-01-01", user_id=1)
     store.create_entity("person", "Bob",   "user2 entity", "2026-01-01", user_id=2)
     conn.close()
@@ -691,14 +713,15 @@ def test_cmd_backfill_entity_embeddings_continues_on_per_row_failure(
 
     from journal.cli import cmd_backfill_entity_embeddings
     from journal.config import Config
-    from journal.db.connection import get_connection
+    from journal.db.factory import ConnectionFactory
     from journal.db.migrations import run_migrations
     from journal.entitystore.store import SQLiteEntityStore
 
     db_path = tmp_path / "reembed_failure.db"
-    conn = get_connection(db_path)
-    run_migrations(conn)
-    store = SQLiteEntityStore(conn)
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    conn = factory.get()
+    store = SQLiteEntityStore(factory)
     store.create_entity("person", "Sarah", "first", "2026-01-01")
     store.create_entity("person", "Bob",   "second", "2026-01-01")
     conn.close()

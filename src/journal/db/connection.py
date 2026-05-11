@@ -1,4 +1,19 @@
-"""SQLite connection factory."""
+"""SQLite connection factory.
+
+Thin shim that applies the project's standard PRAGMAs to a fresh
+:class:`sqlite3.Connection`. Production code paths go through
+:class:`journal.db.factory.ConnectionFactory`, which itself calls
+``get_connection`` once per thread; this function remains as a direct
+helper for ``run_migrations`` and the short-lived per-invocation
+connections used by CLI commands.
+
+``check_same_thread`` is **not** exposed as a parameter — the project
+relies on Python's built-in same-thread guard as a tripwire. Multi-
+thread access to one connection caused the
+``OperationalError: cannot commit - no transaction is active``
+incident on 2026-05-11; see
+``docs/sqlite-per-thread-connections-plan.md`` for the structural fix.
+"""
 
 import logging
 import sqlite3
@@ -7,62 +22,20 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
-def get_connection(
-    db_path: Path, *, check_same_thread: bool = True
-) -> sqlite3.Connection:
-    """Create a configured SQLite connection.
+def get_connection(db_path: Path) -> sqlite3.Connection:
+    """Create a configured SQLite connection bound to the calling thread.
 
-    When `check_same_thread` is True (the default) the returned
-    connection is bound to the creating thread, matching sqlite3's
-    default guard. Passing `check_same_thread=False` lifts that
-    restriction so the connection can be used from threads other than
-    the one that created it — needed for the background JobRunner,
-    which executes queued work on a single-worker executor thread.
-
-    WARNING — known threading hazard:
-
-    `check_same_thread=False` is needed for the MCP server (the
-    request thread + the JobRunner's single-worker thread share
-    one connection), but Python's sqlite3 module is not actually
-    thread-safe at the connection level. Multiple operations
-    that access the connection touch shared state:
-
-      - ``execute()`` / ``executemany()`` mutate the connection's
-        transaction state.
-      - ``cursor.lastrowid`` reads ``sqlite3_last_insert_rowid()``,
-        which is per-connection. A concurrent INSERT from another
-        thread can update it before this thread's lastrowid read.
-      - ``cursor.fetchone()`` / ``fetchall()`` read from a result set
-        that the cursor binds to its statement, but the underlying
-        statement handle is owned by the connection.
-
-    A re-entrant lock around individual ``execute`` / ``commit``
-    calls (attempted in item 1.1) is *not* sufficient — the
-    multi-step "execute → fetch" or "execute → lastrowid → commit"
-    windows are still exposed. Properly closing every gap requires
-    either:
-
-      1. Per-thread connections (each thread opens its own
-         ``sqlite3.Connection``; SQLite's WAL handles cross-
-         connection coordination correctly). Big architectural
-         change — services and repos currently share one connection
-         instance.
-      2. Holding a connection-wide lock for the entire duration of
-         every multi-step read/write (every repo method must
-         acquire and release explicitly).
-
-    Today we accept the residual risk: the only race we have
-    actually observed (the within-call race in
-    ``submit_save_entry_pipeline``) was fixed in item 1 by deferring
-    worker dispatch until the API thread's writes complete. Cross-
-    call races are theoretical — workers spend most of their time
-    in LLM calls, not SQLite, so concurrent SQLite writes are rare.
-    Revisit if production logs surface fresh
-    ``sqlite3.OperationalError: not an error`` reports. See
-    ``docs/refactor-follow-ups.md`` item 1.1.
+    The returned connection has WAL mode, foreign keys, ``sqlite3.Row``
+    rows, a 5-second ``busy_timeout``, ``NORMAL`` sync, and a 64 MiB
+    cache. ``check_same_thread`` is left at its default (``True``);
+    if a caller ever passes the resulting connection across threads,
+    Python raises ``sqlite3.ProgrammingError`` immediately rather than
+    silently corrupting transaction state. Use
+    :class:`journal.db.factory.ConnectionFactory` in any code path
+    that needs cross-thread access.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), check_same_thread=check_same_thread)
+    conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")

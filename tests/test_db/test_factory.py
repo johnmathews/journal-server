@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from journal.db.connection import get_connection
 from journal.db.factory import ConnectionFactory
 
 if TYPE_CHECKING:
@@ -165,6 +166,31 @@ class TestCrossThread:
             "SELECT n FROM counters WHERE id = 1",
         ).fetchone()
         assert total == thread_count * writes_per_thread
+
+    def test_bare_get_connection_also_armed_against_cross_thread_use(
+        self, tmp_path,
+    ):
+        """``get_connection`` (the underlying shim) defaults to
+        ``check_same_thread=True``, so the tripwire fires even for
+        connections opened outside the factory — e.g. by
+        ``run_migrations`` or one-shot CLI commands. Regression guard
+        in case the parameter is ever re-added with a permissive
+        default.
+        """
+        conn = get_connection(tmp_path / "bare.db")
+        captured: list[BaseException] = []
+
+        def use_from_other_thread() -> None:
+            try:
+                conn.execute("SELECT 1")
+            except BaseException as exc:  # noqa: BLE001
+                captured.append(exc)
+
+        t = threading.Thread(target=use_from_other_thread)
+        t.start()
+        t.join()
+        assert len(captured) == 1
+        assert isinstance(captured[0], sqlite3.ProgrammingError)
 
     def test_thread_can_reopen_after_close(self, factory):
         """A worker thread that calls ``close_current()`` and then

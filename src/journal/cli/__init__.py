@@ -37,7 +37,7 @@ from journal.cli.fitness import (
 )
 from journal.cli.mood import cmd_backfill_mood
 from journal.config import load_config
-from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
 from journal.logging import setup_logging
@@ -176,9 +176,9 @@ def cmd_backfill_chunks(args, config):
     entries created before migration 0002 added the column). Does not touch
     the vector store — embeddings are not regenerated.
     """
-    conn = get_connection(config.db_path)
-    run_migrations(conn)
-    repo = SQLiteEntryRepository(conn)
+    db_factory = ConnectionFactory(config.db_path)
+    run_migrations(db_factory.get())
+    repo = SQLiteEntryRepository(db_factory)
 
     # Backfill doesn't need embeddings, so pass None — SemanticChunker
     # would require one but we're intentionally using the configured
@@ -209,9 +209,9 @@ def cmd_eval_chunking(args, config):
     """
     import json
 
-    conn = get_connection(config.db_path)
-    run_migrations(conn)
-    repo = SQLiteEntryRepository(conn)
+    db_factory = ConnectionFactory(config.db_path)
+    run_migrations(db_factory.get())
+    repo = SQLiteEntryRepository(db_factory)
 
     vector_store = ChromaVectorStore(
         host=config.chromadb_host,
@@ -270,9 +270,9 @@ def cmd_rechunk(args, config):
 
 def cmd_seed(args, config):
     """Seed the database with sample journal entries for development."""
-    conn = get_connection(config.db_path)
-    run_migrations(conn)
-    repo = SQLiteEntryRepository(conn)
+    db_factory = ConnectionFactory(config.db_path)
+    run_migrations(db_factory.get())
+    repo = SQLiteEntryRepository(db_factory)
 
     from journal.cli._seed_samples import SEED_SAMPLES
     samples = SEED_SAMPLES
@@ -363,9 +363,10 @@ def cmd_health(args, config):
         overall_status,
     )
 
-    conn = get_connection(config.db_path)
+    db_factory = ConnectionFactory(config.db_path)
+    conn = db_factory.get()
     run_migrations(conn)
-    repo = SQLiteEntryRepository(conn)
+    repo = SQLiteEntryRepository(db_factory)
     vector_store = ChromaVectorStore(
         host=config.chromadb_host,
         port=config.chromadb_port,

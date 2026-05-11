@@ -17,7 +17,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from journal.cli._services import build_services
-from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.migrations import run_migrations
 from journal.entitystore.store import SQLiteEntityStore
 from journal.providers.embeddings import OpenAIEmbeddingsProvider
@@ -97,9 +97,10 @@ def cmd_backfill_entity_embeddings(
     text-embedding-3-large pricing ($0.13/M tokens, ~50 tokens per
     entity), 500 entities is roughly $0.003.
     """
-    conn = get_connection(config.db_path)
+    db_factory = ConnectionFactory(config.db_path)
+    conn = db_factory.get()
     run_migrations(conn)
-    entity_store = SQLiteEntityStore(conn)
+    entity_store = SQLiteEntityStore(db_factory)
     embeddings = OpenAIEmbeddingsProvider(
         api_key=config.openai_api_key,
         model=config.embedding_model,
@@ -162,9 +163,9 @@ def cmd_repair_entity_names(
     """
     from journal.providers.extraction import _repair_canonical_name
 
-    conn = get_connection(config.db_path)
-    run_migrations(conn)
-    entity_store = SQLiteEntityStore(conn)
+    db_factory = ConnectionFactory(config.db_path)
+    run_migrations(db_factory.get())
+    entity_store = SQLiteEntityStore(db_factory)
 
     # Pull every entity, paginating in case the corpus is large.
     all_entities: list = []
@@ -281,7 +282,8 @@ def cmd_renormalise_entity_casing(
         config.entity_casing_exceptions_path,
     )
 
-    conn = get_connection(config.db_path)
+    db_factory = ConnectionFactory(config.db_path)
+    conn = db_factory.get()
     run_migrations(conn)
 
     rows = list(

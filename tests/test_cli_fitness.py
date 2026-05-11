@@ -24,6 +24,7 @@ import pytest
 
 from journal.cli import main
 from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.fitness_repository import FitnessRepository
 from journal.db.migrations import run_migrations
 from journal.models import FitnessAuthState
@@ -57,17 +58,14 @@ def fitness_env(tmp_path, monkeypatch):
 
 
 def _read_state(db_path, *, source: str) -> FitnessAuthState | None:
-    conn = get_connection(db_path)
-    try:
-        return FitnessRepository(conn).get_auth_state(user_id=1, source=source)
-    finally:
-        conn.close()
+    factory = ConnectionFactory(db_path)
+    return FitnessRepository(factory).get_auth_state(user_id=1, source=source)
 
 
 def _open_repo(db_path):
     """Return (conn, FitnessRepository) for direct setup/inspect in tests."""
-    conn = get_connection(db_path)
-    return conn, FitnessRepository(conn)
+    factory = ConnectionFactory(db_path)
+    return factory.get(), FitnessRepository(factory)
 
 
 # ── Help-text tests ──────────────────────────────────────────────────
