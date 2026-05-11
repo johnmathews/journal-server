@@ -546,10 +546,20 @@ def _init_services() -> dict:
     else:
         log.info("  Notification service initialized (Pushover, per-user credentials only)")
 
-    # Jobs infrastructure: repository + single-worker runner. Must
-    # share `conn` (opened with check_same_thread=False above). The
-    # runner serialises worker writes to one thread at a time.
-    job_repository = SQLiteJobRepository(conn)
+    # Jobs infrastructure: repository + single-worker runner.
+    #
+    # The jobs repo owns a ``ConnectionFactory`` so each thread that
+    # touches it (ASGI request handler, JobRunner worker, lifespan
+    # hooks) opens its own ``sqlite3.Connection``. That eliminates the
+    # shared-state commit race that bit prod on 2026-04-XX and
+    # 2026-05-11 — see ``docs/sqlite-per-thread-connections-plan.md``.
+    # Other repos (``SQLiteEntryRepository``, ``FitnessRepository``,
+    # ``RuntimeSettings``) still share ``conn`` and will be migrated
+    # to the factory in W3.
+    from journal.db.factory import ConnectionFactory
+
+    job_db_factory = ConnectionFactory(config.db_path)
+    job_repository = SQLiteJobRepository(job_db_factory)
     reconciled = job_repository.reconcile_stuck_jobs()
     log.info(
         "  Jobs: reconciled %d stuck job(s) from previous process",
