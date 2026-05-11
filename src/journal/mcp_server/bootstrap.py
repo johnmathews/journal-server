@@ -523,7 +523,7 @@ def _init_services() -> dict:
                 ingestion_service.replace_heading_detector(None)
                 log.info("Date-heading detection disabled via runtime settings")
 
-    runtime_settings = RuntimeSettings(conn, config, on_change=_on_runtime_setting_change)
+    runtime_settings = RuntimeSettings(db_factory, config, on_change=_on_runtime_setting_change)
     log.info("  Runtime settings loaded")
 
     # Ingestion service — created before the JobRunner so the runner

@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from journal.db.factory import ConnectionFactory
+
 if TYPE_CHECKING:
     import sqlite3
     from collections.abc import Callable
@@ -128,23 +130,54 @@ def _deserialize(raw: str, sdef: SettingDef) -> Any:
 
 
 class RuntimeSettings:
-    """In-memory + SQLite-backed runtime settings with change callbacks."""
+    """In-memory + SQLite-backed runtime settings with change callbacks.
+
+    Construction accepts either a :class:`ConnectionFactory` (preferred,
+    used by production via ``mcp_server/bootstrap.py``) or a bare
+    ``sqlite3.Connection`` (legacy, retained for tests that haven't been
+    migrated to the factory model yet — see
+    ``docs/sqlite-per-thread-connections-plan.md`` W3).
+
+    ``set()`` is called from API request threads (admin toggles in the
+    webapp) and writes to the DB on every call, so the factory path
+    is genuinely needed here: each request thread gets its own
+    ``sqlite3.Connection`` so cross-thread implicit-transaction
+    collisions are structurally impossible.
+    """
 
     def __init__(
         self,
-        conn: sqlite3.Connection,
+        factory_or_conn: ConnectionFactory | sqlite3.Connection,
         config: Any,
         on_change: Callable[[str, Any], None] | None = None,
     ) -> None:
-        self._conn = conn
+        if isinstance(factory_or_conn, ConnectionFactory):
+            self._factory: ConnectionFactory | None = factory_or_conn
+            self._direct_conn: sqlite3.Connection | None = None
+        else:
+            self._factory = None
+            self._direct_conn = factory_or_conn
         self._config = config
         self._on_change = on_change
         self._cache: dict[str, Any] = {}
         self._load()
 
+    def _conn(self) -> sqlite3.Connection:
+        """Return the connection for the current call.
+
+        Factory path: returns this thread's connection (lazily opened
+        on first use). Legacy path: returns the single shared
+        connection passed at construction.
+        """
+        if self._factory is not None:
+            return self._factory.get()
+        assert self._direct_conn is not None
+        return self._direct_conn
+
     def _load(self) -> None:
         """Populate cache from DB, seeding from Config for missing keys."""
-        rows = self._conn.execute(
+        conn = self._conn()
+        rows = conn.execute(
             "SELECT key, value FROM runtime_settings"
         ).fetchall()
         db_values = {row[0]: row[1] for row in rows}
@@ -156,12 +189,12 @@ class RuntimeSettings:
                 default = getattr(self._config, sdef.config_attr)
                 self._cache[sdef.key] = default
                 # Seed the DB so the value is visible even if never changed.
-                self._conn.execute(
+                conn.execute(
                     "INSERT OR IGNORE INTO runtime_settings (key, value, updated_at) "
                     "VALUES (?, ?, ?)",
                     (sdef.key, _serialize(default, sdef), _now_iso()),
                 )
-        self._conn.commit()
+        conn.commit()
         log.info("Runtime settings loaded: %s", self._cache)
 
     def get(self, key: str) -> Any:
@@ -188,14 +221,15 @@ class RuntimeSettings:
 
         old = self._cache.get(key)
         self._cache[key] = value
-        self._conn.execute(
+        conn = self._conn()
+        conn.execute(
             "INSERT INTO runtime_settings (key, value, updated_at) "
             "VALUES (?, ?, ?) "
             "ON CONFLICT(key) DO UPDATE SET "
             "value = excluded.value, updated_at = excluded.updated_at",
             (key, _serialize(value, sdef), _now_iso()),
         )
-        self._conn.commit()
+        conn.commit()
         log.info("Runtime setting %s changed: %r → %r", key, old, value)
 
         if self._on_change and old != value:

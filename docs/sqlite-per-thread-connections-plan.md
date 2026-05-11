@@ -1,7 +1,6 @@
 # SQLite Per-Thread Connections Refactor
 
-**Status:** active. **Last updated:** 2026-05-11 (W3 SQLiteEntryRepository shipped).
-**Supersedes:** none.
+**Status:** active. **Last updated:** 2026-05-11 (W3 shipped). **Supersedes:** none.
 
 ## Progress
 
@@ -18,8 +17,16 @@
   are no-ops on the factory path. `TestSharedConnectionCommitRace` also
   stays (legacy path is still reachable from tests); both get removed
   when W4 retires the bare-Connection branch of the constructor.
-- **W3 — remaining repos:** in progress. Per-repo migration, hybrid
-  constructor on each (mirrors W2):
+- **W3 — remaining repos:** **shipped 2026-05-11** (5 separate
+  commits, one per repo cluster). Per-repo migration, hybrid
+  constructor on each (mirrors W2). The bootstrap now constructs
+  one process-wide `ConnectionFactory` (`db_factory`) and passes it
+  to every migrated repo. The bare `conn` opened with
+  `check_same_thread=False` still lingers — used by `run_migrations`,
+  `HealthPoller`'s read-only liveness check, and the `db_conn` slot
+  in `_services` (read by `api/settings.py`, `api/fitness.py`, and
+  `mcp_server/tools/_ctx.py`). Those non-repo consumers retire in
+  W4 alongside the bare-`Connection` constructor branch.
   - `SQLiteEntryRepository`: **shipped 2026-05-11**. Package-wide
     migration (`store` + 7 mixin sub-modules — `core`, `pages`,
     `chunks`, `search`, `mood`, `stats`, `analytics`). Every mixin
@@ -53,9 +60,12 @@
     shared `db_factory`. Factory-path `TestFactoryPathSemantics`
     added (4 tests incl. a 6-thread x 5-user concurrent-write
     stress test).
-  - `RuntimeSettings`: pending. Confirmed it does write at runtime via
-    `set()` (admin toggles from the API), so it needs the factory —
-    no read-only carve-out.
+  - `RuntimeSettings`: **shipped 2026-05-11**. Confirmed it does
+    write at runtime via `set()` (admin toggles from the API), so
+    it needed the factory — no read-only carve-out. No `_lock` on
+    this class (never had one); under per-thread connections it
+    doesn't need one. Factory-path tests added (3 tests incl. a
+    6-thread x 10-flip concurrent-set stress test).
 - **W4, W5:** pending.
 
 This plan moves the server from one shared `sqlite3.Connection` (used across the
