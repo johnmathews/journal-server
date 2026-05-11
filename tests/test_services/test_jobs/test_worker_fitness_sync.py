@@ -138,7 +138,9 @@ class TestRunFitnessSyncStrava:
         assert final.result["normalize"]["rows_normalized"] == 3
         assert final.result["normalize"]["drift_count"] == 0
         assert fetch.calls == [{"user_id": 7}]
-        assert norm.calls == [{"user_id": 7}]
+        # F1: normalize must receive the fetch's run_id so it can amend
+        # rows_normalized on the same sync_runs row.
+        assert norm.calls == [{"user_id": 7, "sync_run_id": 1}]
 
     def test_auth_broken_short_circuits_normalize(
         self, jobs_repo: SQLiteJobRepository,
@@ -294,7 +296,9 @@ class TestRunFitnessSyncGarmin:
         assert final.result["fetch"]["rows_fetched"] == 6
         assert final.result["normalize"]["rows_normalized"] == 4
         assert fetch.calls == [{"user_id": 9}]
-        assert norm.calls == [{"user_id": 9}]
+        # F1: normalize must receive the fetch's run_id so it can amend
+        # rows_normalized on the same sync_runs row.
+        assert norm.calls == [{"user_id": 9, "sync_run_id": 1}]
 
     def test_auth_broken_short_circuits_normalize(
         self, jobs_repo: SQLiteJobRepository,

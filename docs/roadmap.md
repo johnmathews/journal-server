@@ -43,6 +43,13 @@ the top of the linked doc tells you whether it's active, closed, or superseded.
   Server-side W1–W7 and W11 shipped; W12 docs sweep is the current unit;
   W13 is an operator step (Strava callback URL); W14 is the staging-gated
   end-to-end verification with user 2.
+- [`fitness-followup-plan.md`](./fitness-followup-plan.md) — UI consistency, dedup
+  correctness, and sync-run accounting follow-on after the multiuser plan closes.
+  F1–F8: fixes `rows_normalized` always-0, switches workout dedup to time-window
+  overlap, tabs the Settings view and moves sync panels there, extracts shared
+  Range/Bin controls, unifies chart interactivity, adds 3-day MA overlay, and
+  documents the chart style guide. Active 2026-05-11; W14 of the multiuser plan
+  is independent and doesn't block this.
 - [`code-quality-principles.md`](./code-quality-principles.md) — standing rules referenced
   by the refactor docs.
 - [`sqlite-per-thread-connections-plan.md`](./sqlite-per-thread-connections-plan.md) — proper

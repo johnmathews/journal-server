@@ -1701,7 +1701,7 @@ class TestFitnessSync:
         assert final.result["fetch"]["status"] == "success"
         assert final.result["normalize"]["source"] == "strava"
         assert fetch_calls == [{"user_id": 1}]
-        assert norm_calls == [{"user_id": 1}]
+        assert norm_calls == [{"user_id": 1, "sync_run_id": 1}]
 
     def test_submit_garmin_creates_queued_job(
         self, runner_factory, jobs_repo,

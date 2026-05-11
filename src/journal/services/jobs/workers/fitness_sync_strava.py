@@ -69,7 +69,9 @@ def run_fitness_sync_strava(
             )
             return
 
-        normalize_result = ctx.normalize_strava(user_id=user_id)
+        normalize_result = ctx.normalize_strava(
+            user_id=user_id, sync_run_id=fetch_result.run_id,
+        )
         result: dict[str, Any] = {
             "fetch": asdict(fetch_result),
             "normalize": asdict(normalize_result),
