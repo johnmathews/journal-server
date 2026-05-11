@@ -462,8 +462,9 @@ class FitnessRepository:
         this amend the UI's ``Norm.`` column shows 0 on every successful
         run — see ``docs/fitness-followup-plan.md`` F1.
         """
+        conn = self._conn()
         with self._lock:
-            self._conn.execute(
+            conn.execute(
                 """
                 UPDATE fitness_sync_runs
                 SET rows_normalized = ?
@@ -471,7 +472,7 @@ class FitnessRepository:
                 """,
                 (rows_normalized, run_id),
             )
-            self._conn.commit()
+            conn.commit()
 
     def find_running_sync_run(
         self, *, user_id: int, source: str,
