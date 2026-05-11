@@ -48,6 +48,33 @@ Rejected sub-option: extract only the *types* (`TileDef`, `TileLayout`) and leav
 inline. Tried this informally during scoping — the inline render is where the divergence happens
 (edit-mode buttons, drag handles, width toggles), so types alone don't prevent drift.
 
+### D1a. Tile widths: support thirds on fitness, keep halves on dashboard
+
+User asked (2026-05-11 follow-up review) for three width options on `/fitness`: **1/3**, **1/2**,
+**full**. The dashboard today supports only 1/2 (`span: 1`) and full (`span: 2`) on a 2-column
+grid, and its tests pin specific options shapes that would break under a width-model rewrite.
+
+Resolution: parameterize `TileGrid` on **column count**. Adopters declare the grid (e.g.
+dashboard = 2 cols, fitness = 6 cols) and the named widths they offer. The tile data layer uses
+*named* widths (`'third' | 'half' | 'full'`) so the type reads cleanly; `TileGrid` maps each
+named width to a CSS `grid-column: span N` based on its column count:
+
+- 2-col grid: `half` = span 1, `full` = span 2. Dashboard semantics unchanged.
+- 6-col grid: `third` = span 2, `half` = span 3, `full` = span 6.
+
+Adopters can omit named widths they don't support (e.g. dashboard only declares `'half' | 'full'`).
+This keeps dashboard adoption a behavioural no-op and gives fitness the three-width choice.
+
+Rejected sub-options:
+
+- *Migrate dashboard to 6 columns too* — its current half/full split was chosen with the dashboard
+  tile inventory in mind, and re-flowing it risks visible regressions. Defer until there's a
+  reason.
+- *Allow arbitrary numeric spans on every grid* — too unconstrained. Named widths surface the
+  design choice (third / half / full) instead of hiding it behind a number.
+- *Add a fourth width (2/3)* — not asked for; would push the strip of width-toggle buttons past
+  what fits comfortably in the edit-mode UI.
+
 ### D2. Layout state lives on the *consuming* store, not on the TileGrid
 
 `TileGrid` is a pure presentation component. The fitness store owns `tileOrder`, `hiddenTiles`,
@@ -68,25 +95,35 @@ FitnessTileId[], tileWidths?: Partial<Record<FitnessTileId, 1 | 2>> }`.
 Migration: if the user has no `fitness_layout` saved, fall back to a default order baked into
 `FITNESS_TILES`. No server-side migration — the new key is opt-in, absent = use defaults.
 
-### D4. Tooltip parity is its own work unit, not part of TileGrid extraction
+### D4. Tooltip parity (resolved 2026-05-11)
 
-The user said "the way tooltips are implemented is not the same" but didn't specify what
-differs. F6 already aligned `interaction.mode='index'` + the styling colors, so the remaining
-gap is likely about *content* (which fields are shown, formatting), *positioning*, or
-*hover-delay behaviour on specific charts*. Without a concrete diff, scoping this is guessing.
+User followed up with a specific diff: the daily-wellness tooltips were too verbose because
+each dataset label repeated the chart panel's title (`"HRV overnight (ms) (3-day avg): 71"` /
+`"HRV overnight (ms) (daily): 76"`). Fix: drop the panel-title prefix from the dataset labels
+so the tooltip reads `"3-day avg: 71"` / `"Daily: 76"`. Same change applies to Sleep score and
+Resting HR panels.
 
-Treat it as a discovery unit that lands as one or more concrete adjustments after a side-by-side
-visual diff against the dashboard. See **Open questions** at the bottom.
+Shipped 2026-05-11 alongside this plan amendment (single-commit fix in `FitnessView.vue` —
+the F7 helper signature loses its unused `label` argument). Chart style guide (`webapp/docs/
+chart-style-guide.md`) updated to codify the rule: "panel header names the metric; dataset
+labels disambiguate within the chart only".
 
-### D5. Fitness tiles inventory (initial set)
+T6 below is closed because the only remaining tooltip ask was this label fix.
 
-The chart tiles currently rendered on `/fitness` map to these `FITNESS_TILES` entries:
+### D5. Fitness tiles inventory + default widths
 
-1. `weekly-distinct` — distinct workouts per week (stacked bar), span 2.
-2. `sleep` — Sleep score line+MA, span 1.
-3. `hrv` — HRV overnight line+MA, span 1.
-4. `rhr` — Resting heart rate line+MA, span 1.
-5. `recent-workouts` — recent workouts table, span 2.
+The chart tiles currently rendered on `/fitness` map to these `FITNESS_TILES` entries (default
+widths per D1a):
+
+1. `weekly-distinct` — distinct workouts per week (stacked bar). Default: **full**.
+2. `sleep` — Sleep score line+MA. Default: **third**.
+3. `hrv` — HRV overnight line+MA. Default: **third**.
+4. `rhr` — Resting heart rate line+MA. Default: **third**.
+5. `recent-workouts` — recent workouts table. Default: **full**.
+
+Three thirds in a row matches the current side-by-side layout the user already accepted, so the
+default visual is byte-equivalent to today. Users opting into wider Sleep / HRV / RHR is the
+new degree of freedom.
 
 The page header, the Manage-sync link, and the Range/Bin chip strip are **not** tiles — they're
 fixed page chrome. Same convention as `/admin` and the dashboard. Errors banners
@@ -215,42 +252,78 @@ on the dashboard) and ship first.
 - **Dependencies:** T2, T3.
 - **Acceptance:** Dragging a tile reorders it; release commits the new order.
 
-### T6. Tooltip parity audit and fix `[webapp]`
+### T6. Tooltip parity — daily-wellness label fix `[webapp]` — closed 2026-05-11
+
+Shipped same-day as this plan amendment. The only outstanding tooltip ask after F6 was that
+the dataset labels on the daily-wellness panels (Sleep / HRV / RHR) repeated the panel-header
+text, making the tooltip read `"HRV overnight (ms) (3-day avg): 71"` instead of just
+`"3-day avg: 71"`.
+
+Fix: `renderLineChart` in `FitnessView.vue` drops the unused `label` parameter; the two
+datasets now use fixed labels `'3-day avg'` and `'Daily'`. Tests updated to find the sleep
+chart by its border color (the unique-label identifier is gone). Chart style guide updated
+with the rule.
+
+Kept in the plan as a closed record so future readers can see what "tooltip parity" actually
+shook out to.
+
+### T7. Split Garmin "Fetched" / "Norm." into workouts vs. wellness `[server + webapp]`
+
+Carried forward from the closed [`archive/fitness-followup-plan.md`](./archive/fitness-followup-plan.md)
+"Open follow-ups" item #2: the Garmin Recent-runs table reports one `Fetched` count that pools
+workouts (Garmin activities) and wellness rows (Sleep / HRV / RHR / etc.), which obscures what
+each sync actually pulled. With F1 making `Norm.` accurate, the next legibility win is the
+split.
 
 - **Priority:** Medium.
-- **Risk:** Low (per-chart options tweaks, no shared-state changes).
-- **Size:** S (assuming the gap is one or two options-object diffs; expand if discovery
-  reveals deeper divergence).
-- **Spike first:** Open dashboard and `/fitness` in two side-by-side browser tabs after T3
-  ships. For each fitness chart, hover the dashboard equivalent (or closest analogue) and
-  diff: tooltip content (fields shown, ordering), tooltip position relative to cursor, hover
-  delay perception, tooltip border / shadow / padding, multi-series ordering, value
-  formatting (units, precision). Record the diff as a checklist in the work unit before
-  changing code.
-- **Changes:** Per-chart options tweaks in `FitnessView.vue`. Where the gap is general,
-  push the fix into `buildLineChartOptions` so future charts inherit it. Update
-  `webapp/docs/chart-style-guide.md` if any rule changes.
-- **Test impact:** Snapshot or attribute assertions on the generated options object where
-  feasible; otherwise visual verification.
-- **Reversibility:** Revert commit.
-- **Dependencies:** T3 (need the post-tile-extraction state to diff against).
+- **Risk:** Medium. Schema migration on `fitness_sync_runs`, plus the fetch and normalize
+  services need to split their counters. Garmin is the affected source; Strava is workouts-only
+  so its wellness columns are always 0.
+- **Size:** M.
+- **Changes:**
+  - **Server schema:** new migration adds two nullable INTEGER columns to `fitness_sync_runs`:
+    `workouts_fetched`, `wellness_fetched` (and parallel `workouts_normalized`,
+    `wellness_normalized`). The existing `rows_fetched` / `rows_normalized` columns stay (sum of
+    the two for backward compat); the new columns are the source of truth for the UI.
+  - `src/journal/db/fitness_repository.py`: extend `finish_sync_run` and
+    `record_normalized_rows` signatures to accept the per-bucket counts. Models
+    (`FitnessSyncRun`) add the two new fields.
+  - `src/journal/services/fitness/fetch.py`: the Garmin fetch service already iterates raw
+    rows per endpoint — track workouts vs. wellness counts during the loop and pass them to
+    `finish_sync_run`. Strava passes `wellness_fetched=0`.
+  - `src/journal/services/fitness/normalize.py`: `normalize_garmin` already separates the
+    daily fan-in from the activity loop — track and report both counts via
+    `record_normalized_rows` (extend its signature).
+  - `src/journal/api/fitness.py`: serialise the new fields on the `last_runs` response.
+  - **Webapp:** `FitnessSyncPanels.vue` table grows two columns (or merges into a single
+    "Fetched (workouts / wellness)" presentation — to be decided during the unit based on
+    column-count constraints). Strava table can hide the wellness column since it's always 0.
+- **Test impact:**
+  - Migration test: existing rows get NULL in the new columns; existing tests pass unchanged.
+  - `tests/test_db/test_fitness_repository.py`: round-trip the new fields.
+  - `tests/test_services/test_fitness/test_fetch.py`,
+    `tests/test_services/test_fitness/test_normalize.py`: assert the per-bucket counts.
+  - `tests/test_services/test_jobs/test_worker_fitness_sync.py`: re-snapshot the worker
+    result envelope if it changes.
+  - Webapp: `FitnessSyncPanels.spec.ts` covers the new columns.
+- **Reversibility:** Revert webapp commit; the server migration leaves NULL columns that the
+  reverted UI ignores. Down-migration isn't needed (additive columns).
+- **Dependencies:** None hard. Independent of T1–T6.
 - **Acceptance:**
-  1. Side-by-side hover on a fitness chart vs. the matching dashboard chart shows identical
-     tooltip content shape and positioning.
-  2. Any rule changes documented in the chart style guide.
+  1. Garmin sync at 22:20 today's data shows wellness count > 0 and workouts count = 0 (no
+     activity); future days with a run show workouts ≥ 1 and wellness ≥ 1.
+  2. Strava panel shows only the workouts column (wellness always 0; hidden).
+  3. Sum of the two equals the legacy `rows_fetched` / `rows_normalized` value the column
+     used to display, so the migration is observable but not contradictory.
 
 ## Open questions
 
-1. **Tooltip specifics — what differs?** The user flagged tooltips as not matching but didn't
-   say what. Before T6, ask for a screenshot or written description of the specific behaviour
-   the user wants matched (content, position, timing). Without that, T6 risks "fixing" something
-   the user didn't actually mean.
-2. **Default tile widths on `/fitness`.** Sleep / HRV / RHR are individually narrow today
-   (three side-by-side panels). Should the default be three narrow tiles (span=1) on a 2-col
-   grid (wraps to one tile per row on the second row), or one of them wide and one narrow?
-   The dashboard's default mix is 50/50 narrow-and-wide; the fitness default should mirror
-   that aesthetic.
-3. **Per-tile config (which metric, which window) — out of scope?** The dashboard's tiles are
-   fixed in content; only their layout is configurable. Treating fitness the same way for this
-   plan, but worth noting if the user later wants e.g. swapping out Sleep score for Body
-   Battery on a tile.
+All resolved 2026-05-11 in the same review pass that produced T7 and the tooltip fix:
+
+1. ~~Tooltip specifics~~ — resolved: drop chart-title prefix from dataset labels. T6 above.
+2. ~~Default tile widths on `/fitness`~~ — resolved: three thirds (Sleep / HRV / RHR) +
+   two fulls (weekly-distinct, recent-workouts). See D5.
+3. **Per-tile content config remains out of scope.** Confirmed: layout (order, width,
+   hide/unhide) is configurable; *what* each tile displays is not. Out-of-scope for this
+   plan; if the user later wants a per-tile metric picker (e.g. swap Sleep score for Body
+   Battery), that's a separate feature.
