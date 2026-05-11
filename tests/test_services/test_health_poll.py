@@ -67,7 +67,7 @@ class TestHealthPoller:
         db_path = tmp_path / "test.db"
         db_path.touch()
         return HealthPoller(
-            conn=mock_conn,
+            connection_provider=lambda: mock_conn,
             vector_store=mock_vector_store,
             db_path=db_path,
             notification_service=mock_notif,

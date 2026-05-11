@@ -56,9 +56,9 @@ def _seed_user(conn: sqlite3.Connection) -> None:
 
 
 @pytest.fixture
-def repo(db_conn: sqlite3.Connection) -> FitnessRepository:
+def repo(factory, db_conn: sqlite3.Connection) -> FitnessRepository:
     _seed_user(db_conn)
-    return FitnessRepository(db_conn)
+    return FitnessRepository(factory)
 
 
 def _seed_auth(repo: FitnessRepository, source: str) -> None:

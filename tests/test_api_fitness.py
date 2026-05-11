@@ -29,7 +29,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from journal.auth import AuthenticatedUser, _current_user_id
-from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.fitness_repository import FitnessRepository
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
@@ -70,25 +70,27 @@ class _FakeAuthMiddleware:
 
 
 @pytest.fixture
-def fitness_db(tmp_path: Path) -> Generator[sqlite3.Connection]:
-    """In-memory-ish DB with all migrations applied. Shared between
-    the JobRunner thread and the TestClient thread, hence
-    ``check_same_thread=False`` to match production wiring."""
+def fitness_factory(tmp_path: Path) -> ConnectionFactory:
     db_path = tmp_path / "fitness-api.db"
-    conn = get_connection(db_path, check_same_thread=False)
-    run_migrations(conn)
-    yield conn
-    conn.close()
+    f = ConnectionFactory(db_path)
+    run_migrations(f.get())
+    return f
 
 
 @pytest.fixture
-def fitness_repo(fitness_db: sqlite3.Connection) -> FitnessRepository:
-    return FitnessRepository(fitness_db)
+def fitness_db(fitness_factory: ConnectionFactory) -> sqlite3.Connection:
+    """Calling-thread connection — used for raw SQL only."""
+    return fitness_factory.get()
 
 
 @pytest.fixture
-def jobs_repository(fitness_db: sqlite3.Connection) -> SQLiteJobRepository:
-    return SQLiteJobRepository(fitness_db)
+def fitness_repo(fitness_factory: ConnectionFactory) -> FitnessRepository:
+    return FitnessRepository(fitness_factory)
+
+
+@pytest.fixture
+def jobs_repository(fitness_factory: ConnectionFactory) -> SQLiteJobRepository:
+    return SQLiteJobRepository(fitness_factory)
 
 
 @pytest.fixture
@@ -165,7 +167,7 @@ def configured_runner(
 
 
 def _make_services(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     jobs_repository: SQLiteJobRepository,
     job_runner: JobRunner,
@@ -174,28 +176,32 @@ def _make_services(
         "fitness_repo": fitness_repo,
         "job_repository": jobs_repository,
         "job_runner": job_runner,
-        "db_conn": fitness_db,
+        "db_factory": fitness_factory,
     }
 
 
 @pytest.fixture
 def services(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     jobs_repository: SQLiteJobRepository,
     job_runner: JobRunner,
 ) -> dict:
-    return _make_services(fitness_db, fitness_repo, jobs_repository, job_runner)
+    return _make_services(
+        fitness_factory, fitness_repo, jobs_repository, job_runner,
+    )
 
 
 @pytest.fixture
 def configured_services(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     jobs_repository: SQLiteJobRepository,
     configured_runner: JobRunner,
 ) -> dict:
-    return _make_services(fitness_db, fitness_repo, jobs_repository, configured_runner)
+    return _make_services(
+        fitness_factory, fitness_repo, jobs_repository, configured_runner,
+    )
 
 
 def _build_client(services: dict) -> TestClient:

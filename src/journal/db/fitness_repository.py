@@ -23,11 +23,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import threading
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from journal.db.factory import ConnectionFactory
 from journal.models import (
     FitnessActivity,
     FitnessAuthState,
@@ -39,6 +37,8 @@ from journal.models import (
 if TYPE_CHECKING:
     import sqlite3
     from collections.abc import Iterator
+
+    from journal.db.factory import ConnectionFactory
 
 
 def _now_iso() -> str:
@@ -161,59 +161,25 @@ class FitnessRepository:
     """Data layer for the fitness pipeline.
 
     Construction accepts either a :class:`ConnectionFactory` (preferred,
-    used by production via ``mcp_server/bootstrap.py``) or a bare
-    ``sqlite3.Connection`` (legacy, retained for tests that haven't been
-    migrated to the factory model yet — see
-    ``docs/sqlite-per-thread-connections-plan.md`` W3).
+    used by production via ``mcp_server/bootstrap.py``).
 
-    On the **factory** path each thread that calls a method gets its
-    own ``sqlite3.Connection`` via ``threading.local`` inside the
-    factory, so the shared-state commit race documented in
-    ``docs/sqlite-threading.md`` is structurally impossible. The
-    ``_lock`` is a no-op on this path.
-
-    On the **legacy connection** path the same ``Connection`` instance
-    is shared across threads. The per-method ``threading.Lock``
-    serialises ``execute`` + ``commit`` pairs within this repo. This
-    path is deliberately less safe than the factory path and exists
-    only as a migration ramp — new code should pass a
-    ``ConnectionFactory``.
+    Each thread that calls a method gets its own ``sqlite3.Connection``
+    via ``threading.local`` inside the factory, so the shared-state
+    commit race documented in
+    ``docs/archive/sqlite-per-thread-connections-plan.md`` is structurally
+    impossible.
     """
 
-    def __init__(
-        self,
-        factory_or_conn: ConnectionFactory | sqlite3.Connection,
-    ) -> None:
-        if isinstance(factory_or_conn, ConnectionFactory):
-            self._factory: ConnectionFactory | None = factory_or_conn
-            self._direct_conn: sqlite3.Connection | None = None
-        else:
-            self._factory = None
-            self._direct_conn = factory_or_conn
-        self._lock = threading.Lock()
+    def __init__(self, factory: ConnectionFactory) -> None:
+        self._factory = factory
 
     def _conn(self) -> sqlite3.Connection:
-        """Return the connection for the current call.
-
-        Factory path: returns this thread's connection (lazily opened
-        on first use). Legacy path: returns the single shared
-        connection passed at construction.
-        """
-        if self._factory is not None:
-            return self._factory.get()
-        assert self._direct_conn is not None
-        return self._direct_conn
+        return self._factory.get()
 
     @property
     def connection(self) -> sqlite3.Connection:
-        """Underlying SQLite connection for the current thread.
-
-        On the factory path this returns the *calling* thread's
-        connection (committed rows are visible via WAL across
-        connections). On the legacy path this returns the single
-        shared connection.
-        """
-        return self._conn()
+        """Underlying SQLite connection for the calling thread."""
+        return self._factory.get()
 
     # ── Auth state ────────────────────────────────────────────────
 
@@ -221,11 +187,10 @@ class FitnessRepository:
         self, *, user_id: int, source: str,
     ) -> FitnessAuthState | None:
         conn = self._conn()
-        with self._lock:
-            row = conn.execute(
-                "SELECT * FROM fitness_auth_state WHERE user_id = ? AND source = ?",
-                (user_id, source),
-            ).fetchone()
+        row = conn.execute(
+            "SELECT * FROM fitness_auth_state WHERE user_id = ? AND source = ?",
+            (user_id, source),
+        ).fetchone()
         return _row_to_auth_state(row) if row else None
 
     def get_auth_status(
@@ -241,12 +206,11 @@ class FitnessRepository:
         ``None`` if no row exists for this ``(user_id, source)``.
         """
         conn = self._conn()
-        with self._lock:
-            row = conn.execute(
-                "SELECT auth_status FROM fitness_auth_state "
-                "WHERE user_id = ? AND source = ?",
-                (user_id, source),
-            ).fetchone()
+        row = conn.execute(
+            "SELECT auth_status FROM fitness_auth_state "
+            "WHERE user_id = ? AND source = ?",
+            (user_id, source),
+        ).fetchone()
         return row["auth_status"] if row else None
 
     def upsert_auth_state(self, state: FitnessAuthState) -> None:
@@ -254,36 +218,35 @@ class FitnessRepository:
         ``updated_at`` to now (per schema §4 — app-managed)."""
         now = _now_iso()
         conn = self._conn()
-        with self._lock:
-            conn.execute(
-                """
-                INSERT INTO fitness_auth_state (
-                    user_id, source, access_token, refresh_token, token_expires_at,
-                    extra_state_json, last_successful_login_at, last_refresh_at,
-                    auth_status, auth_broken_since, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(user_id, source) DO UPDATE SET
-                    access_token = excluded.access_token,
-                    refresh_token = excluded.refresh_token,
-                    token_expires_at = excluded.token_expires_at,
-                    extra_state_json = excluded.extra_state_json,
-                    last_successful_login_at = excluded.last_successful_login_at,
-                    last_refresh_at = excluded.last_refresh_at,
-                    auth_status = excluded.auth_status,
-                    auth_broken_since = excluded.auth_broken_since,
-                    updated_at = ?
-                """,
-                (
-                    state.user_id, state.source, state.access_token,
-                    state.refresh_token, state.token_expires_at,
-                    json.dumps(state.extra_state),
-                    state.last_successful_login_at, state.last_refresh_at,
-                    state.auth_status, state.auth_broken_since,
-                    state.created_at or now, now,
-                    now,
-                ),
-            )
-            conn.commit()
+        conn.execute(
+            """
+            INSERT INTO fitness_auth_state (
+                user_id, source, access_token, refresh_token, token_expires_at,
+                extra_state_json, last_successful_login_at, last_refresh_at,
+                auth_status, auth_broken_since, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, source) DO UPDATE SET
+                access_token = excluded.access_token,
+                refresh_token = excluded.refresh_token,
+                token_expires_at = excluded.token_expires_at,
+                extra_state_json = excluded.extra_state_json,
+                last_successful_login_at = excluded.last_successful_login_at,
+                last_refresh_at = excluded.last_refresh_at,
+                auth_status = excluded.auth_status,
+                auth_broken_since = excluded.auth_broken_since,
+                updated_at = ?
+            """,
+            (
+                state.user_id, state.source, state.access_token,
+                state.refresh_token, state.token_expires_at,
+                json.dumps(state.extra_state),
+                state.last_successful_login_at, state.last_refresh_at,
+                state.auth_status, state.auth_broken_since,
+                state.created_at or now, now,
+                now,
+            ),
+        )
+        conn.commit()
 
     def delete_auth_state(self, *, user_id: int, source: str) -> bool:
         """Delete the auth row for ``(user_id, source)``. Returns True if a
@@ -295,13 +258,12 @@ class FitnessRepository:
         same upstream account and pick up where they left off.
         """
         conn = self._conn()
-        with self._lock:
-            cursor = conn.execute(
-                "DELETE FROM fitness_auth_state WHERE user_id = ? AND source = ?",
-                (user_id, source),
-            )
-            conn.commit()
-            return cursor.rowcount > 0
+        cursor = conn.execute(
+            "DELETE FROM fitness_auth_state WHERE user_id = ? AND source = ?",
+            (user_id, source),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
 
     def transition_auth(
         self,
@@ -321,36 +283,35 @@ class FitnessRepository:
         """
         now = _now_iso()
         conn = self._conn()
-        with self._lock:
-            existing = conn.execute(
-                "SELECT auth_status FROM fitness_auth_state WHERE user_id = ? AND source = ?",
-                (user_id, source),
-            ).fetchone()
-            if existing is None:
-                broken_since = at if status == "broken" else None
-                conn.execute(
-                    """
-                    INSERT INTO fitness_auth_state (
-                        user_id, source, auth_status, auth_broken_since, updated_at
-                    ) VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (user_id, source, status, broken_since, now),
-                )
-                conn.commit()
-                return True
-            if existing["auth_status"] == status:
-                return False
+        existing = conn.execute(
+            "SELECT auth_status FROM fitness_auth_state WHERE user_id = ? AND source = ?",
+            (user_id, source),
+        ).fetchone()
+        if existing is None:
             broken_since = at if status == "broken" else None
             conn.execute(
                 """
-                UPDATE fitness_auth_state
-                SET auth_status = ?, auth_broken_since = ?, updated_at = ?
-                WHERE user_id = ? AND source = ?
+                INSERT INTO fitness_auth_state (
+                    user_id, source, auth_status, auth_broken_since, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (status, broken_since, now, user_id, source),
+                (user_id, source, status, broken_since, now),
             )
             conn.commit()
             return True
+        if existing["auth_status"] == status:
+            return False
+        broken_since = at if status == "broken" else None
+        conn.execute(
+            """
+            UPDATE fitness_auth_state
+            SET auth_status = ?, auth_broken_since = ?, updated_at = ?
+            WHERE user_id = ? AND source = ?
+            """,
+            (status, broken_since, now, user_id, source),
+        )
+        conn.commit()
+        return True
 
     def get_health_summary(self, *, user_id: int) -> list[dict[str, Any]]:
         """Per-source snapshot for the `/api/health` fitness block.
@@ -371,31 +332,30 @@ class FitnessRepository:
         endpoint is low-traffic so we don't cache.
         """
         conn = self._conn()
-        with self._lock:
-            rows = conn.execute(
-                """
-                SELECT
-                    src.source AS source,
-                    a.auth_status AS auth_status,
-                    a.auth_broken_since AS auth_broken_since,
-                    (
-                        SELECT MAX(started_at)
-                        FROM fitness_sync_runs r
-                        WHERE r.user_id = ?
-                          AND r.source = src.source
-                          AND r.status = 'success'
-                    ) AS last_success_at
-                FROM (
-                    SELECT source FROM fitness_auth_state WHERE user_id = ?
-                    UNION
-                    SELECT DISTINCT source FROM fitness_sync_runs WHERE user_id = ?
-                ) src
-                LEFT JOIN fitness_auth_state a
-                    ON a.user_id = ? AND a.source = src.source
-                ORDER BY src.source
-                """,
-                (user_id, user_id, user_id, user_id),
-            ).fetchall()
+        rows = conn.execute(
+            """
+            SELECT
+                src.source AS source,
+                a.auth_status AS auth_status,
+                a.auth_broken_since AS auth_broken_since,
+                (
+                    SELECT MAX(started_at)
+                    FROM fitness_sync_runs r
+                    WHERE r.user_id = ?
+                      AND r.source = src.source
+                      AND r.status = 'success'
+                ) AS last_success_at
+            FROM (
+                SELECT source FROM fitness_auth_state WHERE user_id = ?
+                UNION
+                SELECT DISTINCT source FROM fitness_sync_runs WHERE user_id = ?
+            ) src
+            LEFT JOIN fitness_auth_state a
+                ON a.user_id = ? AND a.source = src.source
+            ORDER BY src.source
+            """,
+            (user_id, user_id, user_id, user_id),
+        ).fetchall()
         return [
             {
                 "source": row["source"],
@@ -411,17 +371,16 @@ class FitnessRepository:
     def start_sync_run(self, *, user_id: int, source: str) -> int:
         """Insert a new ``running`` sync-run row; returns its id."""
         conn = self._conn()
-        with self._lock:
-            cur = conn.execute(
-                """
-                INSERT INTO fitness_sync_runs (user_id, source, status)
-                VALUES (?, ?, 'running')
-                """,
-                (user_id, source),
-            )
-            conn.commit()
-            assert cur.lastrowid is not None
-            return cur.lastrowid
+        cur = conn.execute(
+            """
+            INSERT INTO fitness_sync_runs (user_id, source, status)
+            VALUES (?, ?, 'running')
+            """,
+            (user_id, source),
+        )
+        conn.commit()
+        assert cur.lastrowid is not None
+        return cur.lastrowid
 
     def finish_sync_run(
         self,
@@ -447,25 +406,24 @@ class FitnessRepository:
         ``wellness_fetched`` because Strava is workouts-only.
         """
         conn = self._conn()
-        with self._lock:
-            conn.execute(
-                """
-                UPDATE fitness_sync_runs
-                SET status = ?, finished_at = ?, error_class = ?, error_message = ?,
-                    rows_fetched = ?, rows_normalized = ?,
-                    workouts_fetched = ?, wellness_fetched = ?,
-                    notes_json = ?
-                WHERE id = ?
-                """,
-                (
-                    status, _now_iso(), error_class, error_message,
-                    rows_fetched, rows_normalized,
-                    workouts_fetched, wellness_fetched,
-                    json.dumps(notes or {}),
-                    run_id,
-                ),
-            )
-            conn.commit()
+        conn.execute(
+            """
+            UPDATE fitness_sync_runs
+            SET status = ?, finished_at = ?, error_class = ?, error_message = ?,
+                rows_fetched = ?, rows_normalized = ?,
+                workouts_fetched = ?, wellness_fetched = ?,
+                notes_json = ?
+            WHERE id = ?
+            """,
+            (
+                status, _now_iso(), error_class, error_message,
+                rows_fetched, rows_normalized,
+                workouts_fetched, wellness_fetched,
+                json.dumps(notes or {}),
+                run_id,
+            ),
+        )
+        conn.commit()
 
     def record_normalized_rows(
         self,
@@ -487,22 +445,21 @@ class FitnessRepository:
         plans for the full story.
         """
         conn = self._conn()
-        with self._lock:
-            conn.execute(
-                """
-                UPDATE fitness_sync_runs
-                SET rows_normalized = ?,
-                    workouts_normalized = ?,
-                    wellness_normalized = ?
-                WHERE id = ?
-                """,
-                (
-                    rows_normalized,
-                    workouts_normalized, wellness_normalized,
-                    run_id,
-                ),
-            )
-            conn.commit()
+        conn.execute(
+            """
+            UPDATE fitness_sync_runs
+            SET rows_normalized = ?,
+                workouts_normalized = ?,
+                wellness_normalized = ?
+            WHERE id = ?
+            """,
+            (
+                rows_normalized,
+                workouts_normalized, wellness_normalized,
+                run_id,
+            ),
+        )
+        conn.commit()
 
     def find_running_sync_run(
         self, *, user_id: int, source: str,
@@ -514,44 +471,41 @@ class FitnessRepository:
         happen for fitness syncs in practice.
         """
         conn = self._conn()
-        with self._lock:
-            row = conn.execute(
-                """
-                SELECT id FROM fitness_sync_runs
-                WHERE user_id = ? AND source = ? AND status = 'running'
-                ORDER BY started_at DESC LIMIT 1
-                """,
-                (user_id, source),
-            ).fetchone()
+        row = conn.execute(
+            """
+            SELECT id FROM fitness_sync_runs
+            WHERE user_id = ? AND source = ? AND status = 'running'
+            ORDER BY started_at DESC LIMIT 1
+            """,
+            (user_id, source),
+        ).fetchone()
         return row["id"] if row else None
 
     def last_successful_sync_at(
         self, *, user_id: int, source: str,
     ) -> str | None:
         conn = self._conn()
-        with self._lock:
-            row = conn.execute(
-                """
-                SELECT MAX(started_at) AS at FROM fitness_sync_runs
-                WHERE user_id = ? AND source = ? AND status = 'success'
-                """,
-                (user_id, source),
-            ).fetchone()
+        row = conn.execute(
+            """
+            SELECT MAX(started_at) AS at FROM fitness_sync_runs
+            WHERE user_id = ? AND source = ? AND status = 'success'
+            """,
+            (user_id, source),
+        ).fetchone()
         return row["at"] if row and row["at"] else None
 
     def list_recent_sync_runs(
         self, *, user_id: int, source: str, limit: int = 10,
     ) -> list[FitnessSyncRun]:
         conn = self._conn()
-        with self._lock:
-            rows = conn.execute(
-                """
-                SELECT * FROM fitness_sync_runs
-                WHERE user_id = ? AND source = ?
-                ORDER BY started_at DESC LIMIT ?
-                """,
-                (user_id, source, limit),
-            ).fetchall()
+        rows = conn.execute(
+            """
+            SELECT * FROM fitness_sync_runs
+            WHERE user_id = ? AND source = ?
+            ORDER BY started_at DESC LIMIT ?
+            """,
+            (user_id, source, limit),
+        ).fetchall()
         return [_row_to_sync_run(r) for r in rows]
 
     # ── Raw archive ───────────────────────────────────────────────
@@ -574,17 +528,16 @@ class FitnessRepository:
         table = _raw_table_for(source)
         sha = _sha256_hex(payload_json)
         conn = self._conn()
-        with self._lock:
-            cur = conn.execute(
-                f"""
-                INSERT OR IGNORE INTO {table} (
-                    user_id, source_id, endpoint, payload_json, payload_sha256, sync_run_id
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,  # noqa: S608 — table name is from a closed allowlist via _raw_table_for
-                (user_id, source_id, endpoint, payload_json, sha, sync_run_id),
-            )
-            conn.commit()
-            return cur.lastrowid if cur.rowcount else None
+        cur = conn.execute(
+            f"""
+            INSERT OR IGNORE INTO {table} (
+                user_id, source_id, endpoint, payload_json, payload_sha256, sync_run_id
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,  # noqa: S608 — table name is from a closed allowlist via _raw_table_for
+            (user_id, source_id, endpoint, payload_json, sha, sync_run_id),
+        )
+        conn.commit()
+        return cur.lastrowid if cur.rowcount else None
 
     def list_raw_since(
         self,
@@ -595,21 +548,20 @@ class FitnessRepository:
     ) -> Iterator[FitnessRawRow]:
         table = _raw_table_for(source)
         conn = self._conn()
-        with self._lock:
-            if since is None:
-                rows = conn.execute(
-                    f"SELECT * FROM {table} WHERE user_id = ? ORDER BY fetched_at",  # noqa: S608
-                    (user_id,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    f"""
-                    SELECT * FROM {table}
-                    WHERE user_id = ? AND fetched_at > ?
-                    ORDER BY fetched_at
-                    """,  # noqa: S608
-                    (user_id, since),
-                ).fetchall()
+        if since is None:
+            rows = conn.execute(
+                f"SELECT * FROM {table} WHERE user_id = ? ORDER BY fetched_at",  # noqa: S608
+                (user_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM {table}
+                WHERE user_id = ? AND fetched_at > ?
+                ORDER BY fetched_at
+                """,  # noqa: S608
+                (user_id, since),
+            ).fetchall()
         for row in rows:
             yield _row_to_raw(row)
 
@@ -617,91 +569,89 @@ class FitnessRepository:
 
     def upsert_activity(self, activity: FitnessActivity) -> None:
         conn = self._conn()
-        with self._lock:
-            conn.execute(
-                """
-                INSERT INTO fitness_activities (
-                    user_id, source, source_id, activity_type, source_subtype,
-                    start_time, local_date, duration_s, moving_time_s, distance_m,
-                    elevation_gain_m, avg_hr_bpm, max_hr_bpm, avg_pace_s_per_km,
-                    calories_kcal, perceived_exertion, extras_json, raw_ref_id,
-                    normalized_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(user_id, source, source_id) DO UPDATE SET
-                    activity_type = excluded.activity_type,
-                    source_subtype = excluded.source_subtype,
-                    start_time = excluded.start_time,
-                    local_date = excluded.local_date,
-                    duration_s = excluded.duration_s,
-                    moving_time_s = excluded.moving_time_s,
-                    distance_m = excluded.distance_m,
-                    elevation_gain_m = excluded.elevation_gain_m,
-                    avg_hr_bpm = excluded.avg_hr_bpm,
-                    max_hr_bpm = excluded.max_hr_bpm,
-                    avg_pace_s_per_km = excluded.avg_pace_s_per_km,
-                    calories_kcal = excluded.calories_kcal,
-                    perceived_exertion = excluded.perceived_exertion,
-                    extras_json = excluded.extras_json,
-                    raw_ref_id = excluded.raw_ref_id,
-                    normalized_at = excluded.normalized_at
-                """,
-                (
-                    activity.user_id, activity.source, activity.source_id,
-                    activity.activity_type, activity.source_subtype,
-                    activity.start_time, activity.local_date,
-                    activity.duration_s, activity.moving_time_s,
-                    activity.distance_m, activity.elevation_gain_m,
-                    activity.avg_hr_bpm, activity.max_hr_bpm,
-                    activity.avg_pace_s_per_km, activity.calories_kcal,
-                    activity.perceived_exertion,
-                    json.dumps(activity.extras),
-                    activity.raw_ref_id, _now_iso(),
-                ),
-            )
-            conn.commit()
+        conn.execute(
+            """
+            INSERT INTO fitness_activities (
+                user_id, source, source_id, activity_type, source_subtype,
+                start_time, local_date, duration_s, moving_time_s, distance_m,
+                elevation_gain_m, avg_hr_bpm, max_hr_bpm, avg_pace_s_per_km,
+                calories_kcal, perceived_exertion, extras_json, raw_ref_id,
+                normalized_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, source, source_id) DO UPDATE SET
+                activity_type = excluded.activity_type,
+                source_subtype = excluded.source_subtype,
+                start_time = excluded.start_time,
+                local_date = excluded.local_date,
+                duration_s = excluded.duration_s,
+                moving_time_s = excluded.moving_time_s,
+                distance_m = excluded.distance_m,
+                elevation_gain_m = excluded.elevation_gain_m,
+                avg_hr_bpm = excluded.avg_hr_bpm,
+                max_hr_bpm = excluded.max_hr_bpm,
+                avg_pace_s_per_km = excluded.avg_pace_s_per_km,
+                calories_kcal = excluded.calories_kcal,
+                perceived_exertion = excluded.perceived_exertion,
+                extras_json = excluded.extras_json,
+                raw_ref_id = excluded.raw_ref_id,
+                normalized_at = excluded.normalized_at
+            """,
+            (
+                activity.user_id, activity.source, activity.source_id,
+                activity.activity_type, activity.source_subtype,
+                activity.start_time, activity.local_date,
+                activity.duration_s, activity.moving_time_s,
+                activity.distance_m, activity.elevation_gain_m,
+                activity.avg_hr_bpm, activity.max_hr_bpm,
+                activity.avg_pace_s_per_km, activity.calories_kcal,
+                activity.perceived_exertion,
+                json.dumps(activity.extras),
+                activity.raw_ref_id, _now_iso(),
+            ),
+        )
+        conn.commit()
 
     def upsert_daily(self, daily: FitnessDaily) -> None:
         conn = self._conn()
-        with self._lock:
-            conn.execute(
-                """
-                INSERT INTO fitness_daily (
-                    user_id, source, local_date, sleep_score, sleep_duration_s,
-                    sleep_efficiency_pct, hrv_overnight_ms, resting_hr_bpm,
-                    body_battery_high, body_battery_low, stress_avg,
-                    training_load_acute, training_load_chronic, training_readiness,
-                    extras_json, raw_ref_ids_json, normalized_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(user_id, source, local_date) DO UPDATE SET
-                    sleep_score = excluded.sleep_score,
-                    sleep_duration_s = excluded.sleep_duration_s,
-                    sleep_efficiency_pct = excluded.sleep_efficiency_pct,
-                    hrv_overnight_ms = excluded.hrv_overnight_ms,
-                    resting_hr_bpm = excluded.resting_hr_bpm,
-                    body_battery_high = excluded.body_battery_high,
-                    body_battery_low = excluded.body_battery_low,
-                    stress_avg = excluded.stress_avg,
-                    training_load_acute = excluded.training_load_acute,
-                    training_load_chronic = excluded.training_load_chronic,
-                    training_readiness = excluded.training_readiness,
-                    extras_json = excluded.extras_json,
-                    raw_ref_ids_json = excluded.raw_ref_ids_json,
-                    normalized_at = excluded.normalized_at
-                """,
-                (
-                    daily.user_id, daily.source, daily.local_date,
-                    daily.sleep_score, daily.sleep_duration_s,
-                    daily.sleep_efficiency_pct, daily.hrv_overnight_ms,
-                    daily.resting_hr_bpm, daily.body_battery_high,
-                    daily.body_battery_low, daily.stress_avg,
-                    daily.training_load_acute, daily.training_load_chronic,
-                    daily.training_readiness,
-                    json.dumps(daily.extras),
-                    json.dumps(daily.raw_ref_ids),
-                    _now_iso(),
-                ),
-            )
-            conn.commit()
+        conn.execute(
+            """
+            INSERT INTO fitness_daily (
+                user_id, source, local_date, sleep_score, sleep_duration_s,
+                sleep_efficiency_pct, hrv_overnight_ms, resting_hr_bpm,
+                body_battery_high, body_battery_low, stress_avg,
+                training_load_acute, training_load_chronic, training_readiness,
+                extras_json, raw_ref_ids_json, normalized_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, source, local_date) DO UPDATE SET
+                sleep_score = excluded.sleep_score,
+                sleep_duration_s = excluded.sleep_duration_s,
+                sleep_efficiency_pct = excluded.sleep_efficiency_pct,
+                hrv_overnight_ms = excluded.hrv_overnight_ms,
+                resting_hr_bpm = excluded.resting_hr_bpm,
+                body_battery_high = excluded.body_battery_high,
+                body_battery_low = excluded.body_battery_low,
+                stress_avg = excluded.stress_avg,
+                training_load_acute = excluded.training_load_acute,
+                training_load_chronic = excluded.training_load_chronic,
+                training_readiness = excluded.training_readiness,
+                extras_json = excluded.extras_json,
+                raw_ref_ids_json = excluded.raw_ref_ids_json,
+                normalized_at = excluded.normalized_at
+            """,
+            (
+                daily.user_id, daily.source, daily.local_date,
+                daily.sleep_score, daily.sleep_duration_s,
+                daily.sleep_efficiency_pct, daily.hrv_overnight_ms,
+                daily.resting_hr_bpm, daily.body_battery_high,
+                daily.body_battery_low, daily.stress_avg,
+                daily.training_load_acute, daily.training_load_chronic,
+                daily.training_readiness,
+                json.dumps(daily.extras),
+                json.dumps(daily.raw_ref_ids),
+                _now_iso(),
+            ),
+        )
+        conn.commit()
 
     def list_activities(
         self,
@@ -713,41 +663,39 @@ class FitnessRepository:
     ) -> list[FitnessActivity]:
         """Inclusive on both sides of the date range."""
         conn = self._conn()
-        with self._lock:
-            if activity_type is None:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM fitness_activities
-                    WHERE user_id = ? AND local_date BETWEEN ? AND ?
-                    ORDER BY start_time
-                    """,
-                    (user_id, start, end),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM fitness_activities
-                    WHERE user_id = ? AND local_date BETWEEN ? AND ?
-                      AND activity_type = ?
-                    ORDER BY start_time
-                    """,
-                    (user_id, start, end, activity_type),
-                ).fetchall()
+        if activity_type is None:
+            rows = conn.execute(
+                """
+                SELECT * FROM fitness_activities
+                WHERE user_id = ? AND local_date BETWEEN ? AND ?
+                ORDER BY start_time
+                """,
+                (user_id, start, end),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM fitness_activities
+                WHERE user_id = ? AND local_date BETWEEN ? AND ?
+                  AND activity_type = ?
+                ORDER BY start_time
+                """,
+                (user_id, start, end, activity_type),
+            ).fetchall()
         return [_row_to_activity(r) for r in rows]
 
     def list_daily(
         self, *, user_id: int, start: str, end: str,
     ) -> list[FitnessDaily]:
         conn = self._conn()
-        with self._lock:
-            rows = conn.execute(
-                """
-                SELECT * FROM fitness_daily
-                WHERE user_id = ? AND local_date BETWEEN ? AND ?
-                ORDER BY local_date
-                """,
-                (user_id, start, end),
-            ).fetchall()
+        rows = conn.execute(
+            """
+            SELECT * FROM fitness_daily
+            WHERE user_id = ? AND local_date BETWEEN ? AND ?
+            ORDER BY local_date
+            """,
+            (user_id, start, end),
+        ).fetchall()
         return [_row_to_daily(r) for r in rows]
 
     def max_normalized_local_date(
@@ -771,14 +719,13 @@ class FitnessRepository:
         # Closed allowlist — table is never callee-supplied.
         table = "fitness_activities" if kind == "activities" else "fitness_daily"
         conn = self._conn()
-        with self._lock:
-            row = conn.execute(
-                f"""
-                SELECT MAX(local_date) AS d FROM {table}
-                WHERE user_id = ? AND source = ?
-                """,  # noqa: S608 — table from closed allowlist above
-                (user_id, source),
-            ).fetchone()
+        row = conn.execute(
+            f"""
+            SELECT MAX(local_date) AS d FROM {table}
+            WHERE user_id = ? AND source = ?
+            """,  # noqa: S608 — table from closed allowlist above
+            (user_id, source),
+        ).fetchone()
         return row["d"] if row and row["d"] else None
 
     def max_normalized_fetched_at(
@@ -803,25 +750,24 @@ class FitnessRepository:
         """
         raw_table = _raw_table_for(source)
         conn = self._conn()
-        with self._lock:
-            if kind == "activities":
-                row = conn.execute(
-                    f"""
-                    SELECT MAX(r.fetched_at) AS at
-                    FROM fitness_activities fa
-                    JOIN {raw_table} r ON r.id = fa.raw_ref_id
-                    WHERE fa.user_id = ? AND fa.source = ?
-                    """,  # noqa: S608
-                    (user_id, source),
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    f"""
-                    SELECT MAX(r.fetched_at) AS at
-                    FROM fitness_daily fd, json_each(fd.raw_ref_ids_json) j
-                    JOIN {raw_table} r ON r.id = j.value
-                    WHERE fd.user_id = ? AND fd.source = ?
-                    """,  # noqa: S608
-                    (user_id, source),
-                ).fetchone()
+        if kind == "activities":
+            row = conn.execute(
+                f"""
+                SELECT MAX(r.fetched_at) AS at
+                FROM fitness_activities fa
+                JOIN {raw_table} r ON r.id = fa.raw_ref_id
+                WHERE fa.user_id = ? AND fa.source = ?
+                """,  # noqa: S608
+                (user_id, source),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                f"""
+                SELECT MAX(r.fetched_at) AS at
+                FROM fitness_daily fd, json_each(fd.raw_ref_ids_json) j
+                JOIN {raw_table} r ON r.id = j.value
+                WHERE fd.user_id = ? AND fd.source = ?
+                """,  # noqa: S608
+                (user_id, source),
+            ).fetchone()
         return row["at"] if row and row["at"] else None

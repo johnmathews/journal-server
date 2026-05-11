@@ -1,6 +1,5 @@
 """Tests for user preferences — repository layer and API endpoints."""
 
-import sqlite3
 from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -9,7 +8,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from journal.auth import AuthenticatedUser, _current_user_id
-from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
@@ -25,8 +24,8 @@ _TEST_USER_ID = 1
 
 
 @pytest.fixture
-def user_repo(db_conn: sqlite3.Connection) -> SQLiteUserRepository:
-    return SQLiteUserRepository(db_conn)
+def user_repo(factory: ConnectionFactory) -> SQLiteUserRepository:
+    return SQLiteUserRepository(factory)
 
 
 class _FakeAuthMiddleware:
@@ -55,27 +54,27 @@ class _FakeAuthMiddleware:
 
 
 @pytest.fixture
-def api_db_conn(tmp_path: Path) -> Generator[sqlite3.Connection]:
-    """Migrated SQLite connection that works across threads (for TestClient)."""
+def api_factory(tmp_path: Path) -> ConnectionFactory:
+    """Migrated ``ConnectionFactory`` for API tests (TestClient uses threads)."""
     db_path = tmp_path / "test_prefs_api.db"
-    conn = get_connection(db_path, check_same_thread=False)
-    run_migrations(conn)
-    yield conn
-    conn.close()
+    f = ConnectionFactory(db_path)
+    run_migrations(f.get())
+    return f
 
 
 @pytest.fixture
-def api_user_repo(api_db_conn: sqlite3.Connection) -> SQLiteUserRepository:
-    return SQLiteUserRepository(api_db_conn)
+def api_user_repo(api_factory: ConnectionFactory) -> SQLiteUserRepository:
+    return SQLiteUserRepository(api_factory)
 
 
 @pytest.fixture
-def api_repo(api_db_conn: sqlite3.Connection) -> SQLiteEntryRepository:
-    return SQLiteEntryRepository(api_db_conn)
+def api_repo(api_factory: ConnectionFactory) -> SQLiteEntryRepository:
+    return SQLiteEntryRepository(api_factory)
 
 
 @pytest.fixture
 def services(
+    api_factory: ConnectionFactory,
     api_repo: SQLiteEntryRepository,
     api_user_repo: SQLiteUserRepository,
 ) -> dict:
@@ -104,14 +103,14 @@ def services(
         vector_store=mock_vector_store,
         embeddings_provider=mock_embeddings,
     )
-    entity_store = SQLiteEntityStore(api_repo.connection)
-    job_repository = SQLiteJobRepository(api_repo.connection)
+    entity_store = SQLiteEntityStore(api_factory)
+    job_repository = SQLiteJobRepository(api_factory)
 
     from journal.config import Config
     from journal.services.runtime_settings import RuntimeSettings
 
     config = Config()
-    runtime = RuntimeSettings(api_repo.connection, config)
+    runtime = RuntimeSettings(api_factory, config)
 
     return {
         "ingestion": ingestion,

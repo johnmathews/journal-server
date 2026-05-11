@@ -1,6 +1,11 @@
 # SQLite Threading and Connection Safety
 
-**Status:** active. **Last updated:** 2026-05-09. **Supersedes:** none.
+**Status:** superseded by
+[`sqlite-per-thread-connections-plan.md`](./sqlite-per-thread-connections-plan.md)
+(2026-05-11). The structural fix is the per-thread
+``ConnectionFactory`` shipped in W1–W4; this document is retained
+as the diagnosis of *why* the shared-connection model was unsafe.
+**Last updated:** 2026-05-09.
 
 This document records a production-grade threading bug found in the job repository, how it was diagnosed, and the
 patterns that prevent it. It applies to any code that shares a `sqlite3.Connection` across threads.

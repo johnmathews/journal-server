@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING
 
-from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
 
@@ -59,9 +59,9 @@ def cmd_backfill_mood(args: argparse.Namespace, config: Config) -> None:
         )
         sys.exit(1)
 
-    conn = get_connection(config.db_path)
-    run_migrations(conn)
-    repo = SQLiteEntryRepository(conn)
+    db_factory = ConnectionFactory(config.db_path)
+    run_migrations(db_factory.get())
+    repo = SQLiteEntryRepository(db_factory)
 
     scorer = AnthropicMoodScorer(
         api_key=config.anthropic_api_key,

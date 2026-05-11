@@ -16,11 +16,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from journal.db.factory import ConnectionFactory
-
 if TYPE_CHECKING:
     import sqlite3
     from collections.abc import Callable
+
+    from journal.db.factory import ConnectionFactory
 
 log = logging.getLogger(__name__)
 
@@ -132,47 +132,28 @@ def _deserialize(raw: str, sdef: SettingDef) -> Any:
 class RuntimeSettings:
     """In-memory + SQLite-backed runtime settings with change callbacks.
 
-    Construction accepts either a :class:`ConnectionFactory` (preferred,
-    used by production via ``mcp_server/bootstrap.py``) or a bare
-    ``sqlite3.Connection`` (legacy, retained for tests that haven't been
-    migrated to the factory model yet — see
-    ``docs/sqlite-per-thread-connections-plan.md`` W3).
-
-    ``set()`` is called from API request threads (admin toggles in the
-    webapp) and writes to the DB on every call, so the factory path
-    is genuinely needed here: each request thread gets its own
-    ``sqlite3.Connection`` so cross-thread implicit-transaction
-    collisions are structurally impossible.
+    Construction takes a :class:`ConnectionFactory` (used by production
+    via ``mcp_server/bootstrap.py``). ``set()`` is called from API
+    request threads (admin toggles in the webapp) and writes to the DB
+    on every call; each request thread gets its own
+    ``sqlite3.Connection`` from the factory so cross-thread
+    implicit-transaction collisions are structurally impossible.
     """
 
     def __init__(
         self,
-        factory_or_conn: ConnectionFactory | sqlite3.Connection,
+        factory: ConnectionFactory,
         config: Any,
         on_change: Callable[[str, Any], None] | None = None,
     ) -> None:
-        if isinstance(factory_or_conn, ConnectionFactory):
-            self._factory: ConnectionFactory | None = factory_or_conn
-            self._direct_conn: sqlite3.Connection | None = None
-        else:
-            self._factory = None
-            self._direct_conn = factory_or_conn
+        self._factory = factory
         self._config = config
         self._on_change = on_change
         self._cache: dict[str, Any] = {}
         self._load()
 
     def _conn(self) -> sqlite3.Connection:
-        """Return the connection for the current call.
-
-        Factory path: returns this thread's connection (lazily opened
-        on first use). Legacy path: returns the single shared
-        connection passed at construction.
-        """
-        if self._factory is not None:
-            return self._factory.get()
-        assert self._direct_conn is not None
-        return self._direct_conn
+        return self._factory.get()
 
     def _load(self) -> None:
         """Populate cache from DB, seeding from Config for missing keys."""

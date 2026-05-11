@@ -25,8 +25,8 @@ def mock_mood_scoring():
 
 
 @pytest.fixture
-def ingestion_service(db_conn, mock_embeddings):
-    repo = SQLiteEntryRepository(db_conn)
+def ingestion_service(factory, mock_embeddings):
+    repo = SQLiteEntryRepository(factory)
     vector_store = InMemoryVectorStore()
     return IngestionService(
         repository=repo,
@@ -40,8 +40,8 @@ def ingestion_service(db_conn, mock_embeddings):
 
 
 @pytest.fixture
-def ingestion_with_mood(db_conn, mock_embeddings, mock_mood_scoring):
-    repo = SQLiteEntryRepository(db_conn)
+def ingestion_with_mood(factory, mock_embeddings, mock_mood_scoring):
+    repo = SQLiteEntryRepository(factory)
     vector_store = InMemoryVectorStore()
     return IngestionService(
         repository=repo,

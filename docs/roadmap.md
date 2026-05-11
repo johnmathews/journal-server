@@ -55,10 +55,11 @@ the top of the linked doc tells you whether it's active, closed, or superseded.
   remaining tooltip-implementation gap the user flagged. Not yet started.
 - [`code-quality-principles.md`](./code-quality-principles.md) — standing rules referenced
   by the refactor docs.
-- [`sqlite-per-thread-connections-plan.md`](./sqlite-per-thread-connections-plan.md) — proper
-  structural fix for the shared-`sqlite3.Connection` races diagnosed in
-  [`sqlite-threading.md`](./sqlite-threading.md). The 2026-05-11 mood-scoring crash is
-  papered over by a `SQLiteJobRepository._commit()` workaround until this plan ships.
+- **SQLite threading refactor — closed 2026-05-11.** All repos use a
+  per-thread `ConnectionFactory`; the shared-Connection commit race is
+  structurally impossible. Plan and diagnosis are archived at
+  [`archive/sqlite-per-thread-connections-plan.md`](./archive/sqlite-per-thread-connections-plan.md)
+  and [`archive/sqlite-threading.md`](./archive/sqlite-threading.md).
 - [`mood-scoring.md`](./mood-scoring.md) — pipeline reference. Note: mood scoring is now
   **on by default** (opt-out via `JOURNAL_ENABLE_MOOD_SCORING=false`). Toggleable at runtime
   from the webapp's Settings page.

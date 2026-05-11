@@ -27,8 +27,8 @@ def mock_config():
 
 
 @pytest.fixture
-def settings(db_conn, mock_config):
-    return RuntimeSettings(db_conn, mock_config)
+def settings(factory, mock_config):
+    return RuntimeSettings(factory, mock_config)
 
 
 @pytest.fixture
@@ -58,14 +58,14 @@ class TestLoad:
         assert "preprocess_images" in keys
         assert "ocr_dual_pass" in keys
 
-    def test_loads_existing_db_values_over_config(self, db_conn, mock_config):
+    def test_loads_existing_db_values_over_config(self, factory, db_conn, mock_config):
         """If DB already has a value, it takes precedence over Config."""
         db_conn.execute(
             "INSERT INTO runtime_settings (key, value, updated_at) "
             "VALUES ('ocr_dual_pass', 'true', '2026-01-01T00:00:00Z')"
         )
         db_conn.commit()
-        s = RuntimeSettings(db_conn, mock_config)
+        s = RuntimeSettings(factory, mock_config)
         assert s.get("ocr_dual_pass") is True  # DB says true, Config says false
 
 
@@ -107,20 +107,20 @@ class TestGetSet:
 
 
 class TestOnChange:
-    def test_callback_fires_on_change(self, db_conn, mock_config):
+    def test_callback_fires_on_change(self, factory, mock_config):
         callback = MagicMock()
-        s = RuntimeSettings(db_conn, mock_config, on_change=callback)
+        s = RuntimeSettings(factory, mock_config, on_change=callback)
         s.set("ocr_dual_pass", True)
         callback.assert_called_once_with("ocr_dual_pass", True)
 
-    def test_callback_not_fired_when_value_unchanged(self, db_conn, mock_config):
+    def test_callback_not_fired_when_value_unchanged(self, factory, mock_config):
         callback = MagicMock()
-        s = RuntimeSettings(db_conn, mock_config, on_change=callback)
+        s = RuntimeSettings(factory, mock_config, on_change=callback)
         s.set("preprocess_images", True)  # same as default
         callback.assert_not_called()
 
-    def test_no_callback_no_error(self, db_conn, mock_config):
-        s = RuntimeSettings(db_conn, mock_config, on_change=None)
+    def test_no_callback_no_error(self, factory, mock_config):
+        s = RuntimeSettings(factory, mock_config, on_change=None)
         s.set("ocr_dual_pass", True)  # should not raise
 
 

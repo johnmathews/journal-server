@@ -18,10 +18,12 @@ from journal.entitystore.store import SQLiteEntityStore
 if TYPE_CHECKING:
     import sqlite3
 
+    from journal.db.factory import ConnectionFactory
+
 
 @pytest.fixture
-def store(db_conn: sqlite3.Connection) -> SQLiteEntityStore:
-    return SQLiteEntityStore(db_conn)
+def store(factory: ConnectionFactory) -> SQLiteEntityStore:
+    return SQLiteEntityStore(factory)
 
 
 def _make_pair(

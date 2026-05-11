@@ -344,7 +344,7 @@ def register_fitness_routes(
         # users' raw rows in their report, even via the existence of orphan
         # references.
         user = get_authenticated_user(request)
-        conn: sqlite3.Connection = services["db_conn"]
+        conn: sqlite3.Connection = services["db_factory"].get()
 
         report = check_fitness_integrity(conn, user_id=user.user_id)
         body = {

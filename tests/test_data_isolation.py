@@ -8,7 +8,7 @@ import sqlite3
 
 import pytest
 
-from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
@@ -21,34 +21,38 @@ USER_2 = 2  # second user, inserted in fixture
 
 
 @pytest.fixture
-def conn(tmp_path: pytest.TempPathFactory) -> sqlite3.Connection:
+def isolation_factory(tmp_path: pytest.TempPathFactory) -> ConnectionFactory:
     """Migrated DB with two users."""
     db_path = tmp_path / "isolation.db"  # type: ignore[operator]
-    connection = get_connection(db_path)
-    run_migrations(connection)
-    # Migration seeds user 1 (admin). Insert a second user.
-    connection.execute(
+    f = ConnectionFactory(db_path)
+    conn = f.get()
+    run_migrations(conn)
+    conn.execute(
         "INSERT INTO users (email, display_name, is_admin, email_verified) "
         "VALUES ('user2@test.com', 'User Two', 0, 1)"
     )
-    connection.commit()
-    yield connection
-    connection.close()
+    conn.commit()
+    return f
 
 
 @pytest.fixture
-def repo(conn: sqlite3.Connection) -> SQLiteEntryRepository:
-    return SQLiteEntryRepository(conn)
+def conn(isolation_factory: ConnectionFactory) -> sqlite3.Connection:
+    return isolation_factory.get()
 
 
 @pytest.fixture
-def entity_store(conn: sqlite3.Connection) -> SQLiteEntityStore:
-    return SQLiteEntityStore(conn)
+def repo(isolation_factory: ConnectionFactory) -> SQLiteEntryRepository:
+    return SQLiteEntryRepository(isolation_factory)
 
 
 @pytest.fixture
-def jobs_repo(conn: sqlite3.Connection) -> SQLiteJobRepository:
-    return SQLiteJobRepository(conn)
+def entity_store(isolation_factory: ConnectionFactory) -> SQLiteEntityStore:
+    return SQLiteEntityStore(isolation_factory)
+
+
+@pytest.fixture
+def jobs_repo(isolation_factory: ConnectionFactory) -> SQLiteJobRepository:
+    return SQLiteJobRepository(isolation_factory)
 
 
 # ---- Entry Repository Isolation ---------------------------------------------

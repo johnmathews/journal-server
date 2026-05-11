@@ -24,6 +24,7 @@ from journal.services.liveness import (
 
 if TYPE_CHECKING:
     import sqlite3
+    from collections.abc import Callable
 
     from journal.services.notifications import PushoverNotificationService
 
@@ -80,13 +81,18 @@ class HealthPoller:
 
     def __init__(
         self,
-        conn: sqlite3.Connection,
+        connection_provider: Callable[[], sqlite3.Connection],
         vector_store: Any,
         db_path: Path,
         notification_service: PushoverNotificationService,
         poll_interval: int = _DEFAULT_POLL_INTERVAL,
     ) -> None:
-        self._conn = conn
+        # ``connection_provider`` is called once per poll cycle and must
+        # return a connection usable from the calling thread. Production
+        # passes ``ConnectionFactory.get`` so the daemon poll thread
+        # opens its own per-thread connection on first call; tests pass
+        # a no-arg lambda returning a mock connection.
+        self._connection_provider = connection_provider
         self._vector_store = vector_store
         self._db_path = db_path
         self._notifications = notification_service
@@ -123,7 +129,7 @@ class HealthPoller:
     def poll_once(self) -> None:
         """Run a single poll cycle. Exposed for testing."""
         checks = [
-            check_sqlite(self._conn),
+            check_sqlite(self._connection_provider()),
             check_chromadb(self._vector_store),
             check_disk(self._db_path),
         ]

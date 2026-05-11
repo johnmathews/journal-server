@@ -33,7 +33,7 @@ from typing import Any
 import pytest
 
 from journal.auth import _current_user_id
-from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.fitness_repository import FitnessRepository
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
@@ -57,21 +57,26 @@ def _set_test_user() -> Generator[None]:
 
 
 @pytest.fixture
-def db(tmp_path: Path) -> Generator[sqlite3.Connection]:
-    conn = get_connection(tmp_path / "fitness-mcp.db", check_same_thread=False)
-    run_migrations(conn)
-    yield conn
-    conn.close()
+def fitness_factory(tmp_path: Path) -> ConnectionFactory:
+    f = ConnectionFactory(tmp_path / "fitness-mcp.db")
+    run_migrations(f.get())
+    return f
 
 
 @pytest.fixture
-def fitness_repo(db: sqlite3.Connection) -> FitnessRepository:
-    return FitnessRepository(db)
+def db(fitness_factory: ConnectionFactory) -> sqlite3.Connection:
+    """Calling-thread connection — for raw SQL seeding only."""
+    return fitness_factory.get()
 
 
 @pytest.fixture
-def jobs_repository(db: sqlite3.Connection) -> SQLiteJobRepository:
-    return SQLiteJobRepository(db)
+def fitness_repo(fitness_factory: ConnectionFactory) -> FitnessRepository:
+    return FitnessRepository(fitness_factory)
+
+
+@pytest.fixture
+def jobs_repository(fitness_factory: ConnectionFactory) -> SQLiteJobRepository:
+    return SQLiteJobRepository(fitness_factory)
 
 
 @pytest.fixture
@@ -144,7 +149,7 @@ def _make_ctx(
     fitness_repo: FitnessRepository,
     jobs_repository: SQLiteJobRepository,
     job_runner: JobRunner,
-    db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
 ) -> SimpleNamespace:
     """Build a fake MCP Context whose ``request_context.lifespan_context``
     carries the keys the tools expect. SimpleNamespace is enough — the
@@ -153,7 +158,7 @@ def _make_ctx(
         "fitness_repo": fitness_repo,
         "job_repository": jobs_repository,
         "job_runner": job_runner,
-        "db_conn": db,
+        "db_factory": fitness_factory,
     }
     return SimpleNamespace(
         request_context=SimpleNamespace(lifespan_context=services),
@@ -165,13 +170,13 @@ def ctx(
     fitness_repo: FitnessRepository,
     jobs_repository: SQLiteJobRepository,
     job_runner: JobRunner,
-    db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
 ) -> SimpleNamespace:
     return _make_ctx(
         fitness_repo=fitness_repo,
         jobs_repository=jobs_repository,
         job_runner=job_runner,
-        db=db,
+        fitness_factory=fitness_factory,
     )
 
 
@@ -180,13 +185,13 @@ def configured_ctx(
     fitness_repo: FitnessRepository,
     jobs_repository: SQLiteJobRepository,
     configured_runner: JobRunner,
-    db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
 ) -> SimpleNamespace:
     return _make_ctx(
         fitness_repo=fitness_repo,
         jobs_repository=jobs_repository,
         job_runner=configured_runner,
-        db=db,
+        fitness_factory=fitness_factory,
     )
 
 

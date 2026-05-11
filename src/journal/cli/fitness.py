@@ -32,7 +32,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.fitness_repository import FitnessRepository
 from journal.db.migrations import run_migrations
 from journal.models import FitnessAuthState
@@ -197,9 +197,9 @@ def cmd_fitness_reauth_strava(args: argparse.Namespace, config: Config) -> None:
     )
 
     user_id = args.user_id
-    conn = get_connection(config.db_path)
-    run_migrations(conn)
-    repo = FitnessRepository(conn)
+    db_factory = ConnectionFactory(config.db_path)
+    run_migrations(db_factory.get())
+    repo = FitnessRepository(db_factory)
     existing = repo.get_auth_state(user_id=user_id, source="strava")
     extra = dict(existing.extra_state) if existing else {}
     # Capture the upstream athlete id (D8) so a later reconnect with a
@@ -259,9 +259,9 @@ def cmd_fitness_reauth_garmin(args: argparse.Namespace, config: Config) -> None:
         sys.exit(1)
 
     user_id = args.user_id
-    conn = get_connection(config.db_path)
-    run_migrations(conn)
-    repo = FitnessRepository(conn)
+    db_factory = ConnectionFactory(config.db_path)
+    run_migrations(db_factory.get())
+    repo = FitnessRepository(db_factory)
 
     persisted: list[str] = []
 
@@ -511,9 +511,9 @@ def cmd_fitness_sync(args: argparse.Namespace, config: Config) -> None:
             )
             sys.exit(1)
 
-    conn = get_connection(config.db_path)
-    run_migrations(conn)
-    fitness_repo = FitnessRepository(conn)
+    db_factory = ConnectionFactory(config.db_path)
+    run_migrations(db_factory.get())
+    fitness_repo = FitnessRepository(db_factory)
 
     any_failed = False
     for source in sources:
@@ -606,9 +606,9 @@ def cmd_fitness_backfill(args: argparse.Namespace, config: Config) -> None:
 
     user_id = args.user_id
 
-    conn = get_connection(config.db_path)
-    run_migrations(conn)
-    fitness_repo = FitnessRepository(conn)
+    db_factory = ConnectionFactory(config.db_path)
+    run_migrations(db_factory.get())
+    fitness_repo = FitnessRepository(db_factory)
 
     any_failed = False
     for source in sources:
@@ -665,7 +665,8 @@ def cmd_fitness_audit(args: argparse.Namespace, config: Config) -> None:
     ``docs/fitness-multiuser-plan.md``) and as the W14 verification gate
     after user 2 starts populating their own rows.
     """
-    conn = get_connection(config.db_path)
+    db_factory = ConnectionFactory(config.db_path)
+    conn = db_factory.get()
     run_migrations(conn)
 
     print(f"fitness data audit (db: {config.db_path})")
@@ -734,9 +735,9 @@ def cmd_fitness_status(args: argparse.Namespace, config: Config) -> None:
     unconfigured, prints a helpful message and exits 0.
     """
     user_id = args.user_id
-    conn = get_connection(config.db_path)
-    run_migrations(conn)
-    repo = FitnessRepository(conn)
+    db_factory = ConnectionFactory(config.db_path)
+    run_migrations(db_factory.get())
+    repo = FitnessRepository(db_factory)
 
     rows: list[dict[str, Any]] = []
     for source in ("strava", "garmin"):

@@ -20,14 +20,16 @@ from journal.services.auth import AuthService
 if TYPE_CHECKING:
     import sqlite3
 
+    from journal.db.factory import ConnectionFactory
+
 # The seeded admin user created by migration 0011.
 _ADMIN_USER_ID = 1
 _ADMIN_EMAIL = "admin@journal.local"
 
 
 @pytest.fixture
-def user_repo(db_conn: sqlite3.Connection) -> SQLiteUserRepository:
-    return SQLiteUserRepository(db_conn)
+def user_repo(factory: ConnectionFactory) -> SQLiteUserRepository:
+    return SQLiteUserRepository(factory)
 
 
 @pytest.fixture

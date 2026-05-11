@@ -65,17 +65,17 @@ async def test_reconcile_stuck_jobs_runs_at_startup(
     failed at boot. The wiring in `_init_services` must invoke
     `reconcile_stuck_jobs` before the runner starts accepting new
     submissions."""
-    from journal.db.connection import get_connection
+    from journal.db.factory import ConnectionFactory
     from journal.db.jobs_repository import SQLiteJobRepository
     from journal.db.migrations import run_migrations
 
     # Seed a stuck job in the same database the lifespan will open.
-    seed_conn = get_connection(config.db_path, check_same_thread=False)
-    run_migrations(seed_conn)
-    seed_repo = SQLiteJobRepository(seed_conn)
+    seed_factory = ConnectionFactory(config.db_path)
+    run_migrations(seed_factory.get())
+    seed_repo = SQLiteJobRepository(seed_factory)
     stuck = seed_repo.create("entity_extraction", {"entry_id": 1})
     seed_repo.mark_running(stuck.id)
-    seed_conn.close()
+    seed_factory.close_current()
 
     monkeypatch.setattr("journal.mcp_server.bootstrap.load_config", lambda: config)
 

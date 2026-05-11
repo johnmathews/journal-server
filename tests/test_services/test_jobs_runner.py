@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
 from journal.models import ExtractionResult
@@ -218,28 +218,25 @@ def _wait_terminal(
 
 
 @pytest.fixture
-def threadsafe_conn(tmp_path):
-    """Shared SQLite connection opened for cross-thread use.
+def threadsafe_factory(tmp_path):
+    """``ConnectionFactory`` for the JobRunner's worker thread.
 
-    The JobRunner's worker thread must be able to write to the
-    same connection the test thread created it with — the
-    production setup relies on `check_same_thread=False` plus the
-    single-worker executor for safety. Tests must mirror that.
+    The worker thread opens its own connection lazily via the
+    factory, which is how production runs after W4.
     """
     db_path = tmp_path / "jobs-runner.db"
-    conn = get_connection(db_path, check_same_thread=False)
-    run_migrations(conn)
-    yield conn
-    conn.close()
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    return factory
 
 
 @pytest.fixture
-def jobs_repo(threadsafe_conn) -> SQLiteJobRepository:
-    return SQLiteJobRepository(threadsafe_conn)
+def jobs_repo(threadsafe_factory) -> SQLiteJobRepository:
+    return SQLiteJobRepository(threadsafe_factory)
 
 
 @pytest.fixture
-def runner_factory(jobs_repo, threadsafe_conn):
+def runner_factory(jobs_repo, threadsafe_factory):
     """Build a JobRunner with swappable fakes.
 
     Returns a factory so tests that need bespoke fake behaviour

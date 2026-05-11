@@ -23,7 +23,6 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from journal.config import load_config
-from journal.db.connection import get_connection
 from journal.db.factory import ConnectionFactory
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
@@ -257,32 +256,16 @@ def _init_services() -> dict:
     log.info("  ChromaDB: %s:%d", config.chromadb_host, config.chromadb_port)
     log.info("  MCP: %s:%d", config.mcp_host, config.mcp_port)
 
-    # Database
-    #
-    # `check_same_thread=False` lets the background JobRunner worker
-    # thread share this process-wide connection with the REST/MCP
-    # request handlers. Safety rests on one invariant: the JobRunner
-    # uses a single-worker ThreadPoolExecutor, so at most one
-    # background thread ever writes through this connection. Combined
-    # with WAL + NORMAL synchronous, that is the documented safe
-    # configuration for cross-thread SQLite use.
-    #
-    # See `journal.services.jobs.JobRunner` docstring and
-    # `journal.db.connection.get_connection` docstring before changing
-    # this — bumping `max_workers` above 1 is a serious change that
-    # requires redesigning the threading model first.
-    conn = get_connection(config.db_path, check_same_thread=False)
-    run_migrations(conn)
-
-    # One process-wide ``ConnectionFactory`` — each thread that calls
-    # into a migrated repo opens its own ``sqlite3.Connection``, so
-    # the shared-state commit race documented in
-    # ``docs/sqlite-threading.md`` cannot happen. Repos migrated so
-    # far (W2, W3): ``SQLiteJobRepository``, ``SQLiteEntryRepository``.
-    # The remaining repos (``FitnessRepository``, ``SQLiteEntityStore``,
-    # ``SQLiteUserRepository``, ``RuntimeSettings``) still share
-    # ``conn`` until the rest of W3 lands.
+    # Database — one process-wide ``ConnectionFactory``. Each thread
+    # that touches a repo opens its own ``sqlite3.Connection`` via
+    # ``threading.local`` inside the factory, so the shared-state
+    # commit race documented in ``docs/archive/sqlite-threading.md`` cannot
+    # happen. ``check_same_thread=True`` (the factory's default) is
+    # the tripwire: if a connection ever leaks across threads, Python
+    # raises ``ProgrammingError`` immediately rather than silently
+    # corrupting transaction state.
     db_factory = ConnectionFactory(config.db_path)
+    run_migrations(db_factory.get())
 
     repo = SQLiteEntryRepository(db_factory)
     log.info("  SQLite connected and migrated")
@@ -565,7 +548,7 @@ def _init_services() -> dict:
     # request handler, JobRunner worker, lifespan hooks) opens its
     # own ``sqlite3.Connection``. That eliminates the shared-state
     # commit race that bit prod on 2026-04-XX and 2026-05-11 — see
-    # ``docs/sqlite-per-thread-connections-plan.md``.
+    # ``docs/archive/sqlite-per-thread-connections-plan.md``.
     job_repository = SQLiteJobRepository(db_factory)
     reconciled = job_repository.reconcile_stuck_jobs()
     log.info(
@@ -607,7 +590,7 @@ def _init_services() -> dict:
     from journal.services.health_poll import HealthPoller
 
     health_poller = HealthPoller(
-        conn=conn,
+        connection_provider=db_factory.get,
         vector_store=vector_store,
         db_path=config.db_path,
         notification_service=notification_service,
@@ -690,8 +673,10 @@ def _init_services() -> dict:
         "notification_service": notification_service,
         # Fitness — repo for read APIs (W9) and the integrity check.
         "fitness_repo": fitness_repo,
-        # Raw DB connection — used by lightweight config readers (e.g. pricing).
-        "db_conn": conn,
+        # SQLite connection factory — used by API helpers that run
+        # hand-written SQL (pricing reads/writes, fitness integrity)
+        # without going through a repository.
+        "db_factory": db_factory,
     }
 
     entry_count = repo.count_entries()

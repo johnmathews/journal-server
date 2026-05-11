@@ -50,8 +50,8 @@ def register_settings_routes(
         from journal.providers.ocr import _DEFAULT_MODELS
 
         ocr_model = config.ocr_model or _DEFAULT_MODELS.get(config.ocr_provider, "")
-        conn = services.get("db_conn")
-        pricing_entries = get_all_pricing(conn) if conn else []
+        db_factory = services.get("db_factory")
+        pricing_entries = get_all_pricing(db_factory.get()) if db_factory else []
         return JSONResponse(
             {
                 "ocr": {
@@ -186,10 +186,10 @@ def register_settings_routes(
         services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
-        conn = services.get("db_conn")
-        if conn is None:
+        db_factory = services.get("db_factory")
+        if db_factory is None:
             return JSONResponse({"error": "Database not available"}, status_code=503)
-        entries = get_all_pricing(conn)
+        entries = get_all_pricing(db_factory.get())
         return JSONResponse({"pricing": [_pricing_to_dict(e) for e in entries]})
 
     @mcp.custom_route(
@@ -203,9 +203,10 @@ def register_settings_routes(
         services = services_getter()
         if services is None:
             return JSONResponse({"error": "Server not initialized"}, status_code=503)
-        conn = services.get("db_conn")
-        if conn is None:
+        db_factory = services.get("db_factory")
+        if db_factory is None:
             return JSONResponse({"error": "Database not available"}, status_code=503)
+        conn = db_factory.get()
 
         try:
             body = await request.json()

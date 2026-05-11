@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
 from journal.entitystore.store import SQLiteEntityStore
@@ -34,14 +34,13 @@ def build_services(
 
     Returns ``(ingestion, query, entity_extraction)``. Every CLI
     command that needs to talk to the storage / LLM stack calls this
-    so the wiring stays in one place. The single SQLite connection
-    feeding both ``SQLiteEntryRepository`` and ``SQLiteEntityStore``
-    is opened with the default ``check_same_thread=True``: CLI
-    commands are single-threaded.
+    so the wiring stays in one place. The factory hands out per-thread
+    connections; CLI commands are single-threaded so they all see the
+    same connection across the call.
     """
-    conn = get_connection(config.db_path)
-    run_migrations(conn)
-    repo = SQLiteEntryRepository(conn)
+    db_factory = ConnectionFactory(config.db_path)
+    run_migrations(db_factory.get())
+    repo = SQLiteEntryRepository(db_factory)
 
     vector_store = ChromaVectorStore(
         host=config.chromadb_host,
@@ -75,7 +74,7 @@ def build_services(
         embeddings_provider=embeddings,
     )
 
-    entity_store = SQLiteEntityStore(conn)
+    entity_store = SQLiteEntityStore(db_factory)
     extraction_provider = AnthropicExtractionProvider(
         api_key=config.anthropic_api_key,
         model=config.entity_extraction_model,

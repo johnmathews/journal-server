@@ -51,8 +51,14 @@ def _get_fitness_repo(ctx: Context) -> FitnessRepository:
 def _get_db_conn(ctx: Context) -> sqlite3.Connection:
     """Raw SQLite connection — used by tools that run hand-written SQL
     (correlation queries, integrity checks) where wrapping every join
-    in a repository method would just add ceremony."""
-    return ctx.request_context.lifespan_context["db_conn"]
+    in a repository method would just add ceremony.
+
+    Returns the calling thread's connection via the process-wide
+    ``ConnectionFactory``: tools called from different request threads
+    each get their own ``sqlite3.Connection`` with WAL coordinating
+    cross-connection reads/writes at the file level.
+    """
+    return ctx.request_context.lifespan_context["db_factory"].get()
 
 
 def _user_id(ctx: Context) -> int:

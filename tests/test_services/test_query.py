@@ -11,8 +11,8 @@ from journal.vectorstore.store import InMemoryVectorStore
 
 
 @pytest.fixture
-def repo(db_conn):
-    return SQLiteEntryRepository(db_conn)
+def repo(factory):
+    return SQLiteEntryRepository(factory)
 
 
 @pytest.fixture

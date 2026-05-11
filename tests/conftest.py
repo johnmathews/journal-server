@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from journal.config import Config
-from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.migrations import run_migrations
 
 
@@ -17,12 +17,28 @@ def tmp_db_path(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def db_conn(tmp_db_path: Path) -> Generator[sqlite3.Connection]:
-    """Provide a migrated SQLite connection for testing."""
-    conn = get_connection(tmp_db_path)
-    run_migrations(conn)
-    yield conn
-    conn.close()
+def factory(tmp_db_path: Path) -> Generator[ConnectionFactory]:
+    """Provide a migrated ``ConnectionFactory`` for testing.
+
+    Tests that construct repositories should depend on this fixture
+    and pass the factory to repo constructors. Tests that read raw
+    SQL can depend on :func:`db_conn`, which returns the calling
+    thread's connection from the same factory.
+    """
+    f = ConnectionFactory(tmp_db_path)
+    run_migrations(f.get())
+    yield f
+    f.close_current()
+
+
+@pytest.fixture
+def db_conn(factory: ConnectionFactory) -> sqlite3.Connection:
+    """Return the calling thread's connection from :func:`factory`.
+
+    Kept so the many tests that do raw SQL via ``db_conn.execute(...)``
+    keep working unchanged. New tests should prefer ``factory``.
+    """
+    return factory.get()
 
 
 @pytest.fixture

@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
 from journal.services.fitness.backfill import BackfillBlocked, BackfillResult
@@ -28,23 +28,21 @@ from journal.services.jobs.workers.fitness_backfill_strava import (
 )
 
 if TYPE_CHECKING:
-    import sqlite3
-    from collections.abc import Callable, Generator
+    from collections.abc import Callable
     from pathlib import Path
 
 
 @pytest.fixture
-def jobs_conn(tmp_path: Path) -> Generator[sqlite3.Connection]:
+def jobs_factory(tmp_path: Path) -> ConnectionFactory:
     db_path = tmp_path / "jobs.db"
-    conn = get_connection(db_path, check_same_thread=False)
-    run_migrations(conn)
-    yield conn
-    conn.close()
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    return factory
 
 
 @pytest.fixture
-def jobs_repo(jobs_conn: sqlite3.Connection) -> SQLiteJobRepository:
-    return SQLiteJobRepository(jobs_conn)
+def jobs_repo(jobs_factory: ConnectionFactory) -> SQLiteJobRepository:
+    return SQLiteJobRepository(jobs_factory)
 
 
 def _make_ctx(

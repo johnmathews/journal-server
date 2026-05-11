@@ -17,7 +17,6 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from journal.db.factory import ConnectionFactory
 from journal.entitystore.mentions import _MentionsMixin
 from journal.entitystore.merge import _MergeMixin
 from journal.entitystore.protocol import (
@@ -31,6 +30,7 @@ if TYPE_CHECKING:
     import sqlite3
     from collections.abc import Mapping
 
+    from journal.db.factory import ConnectionFactory
     from journal.models import Entity
 
 __all__ = ["EntityStore", "SQLiteEntityStore"]
@@ -45,33 +45,25 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
     relationships / merge / quarantine / merge-candidate operations
     are pulled in from ``mentions.py`` and ``merge.py`` mixins.
 
-    Construction accepts either a :class:`ConnectionFactory` (preferred,
-    used by production via ``mcp_server/bootstrap.py``) or a bare
-    ``sqlite3.Connection`` (legacy, retained for tests that haven't
-    been migrated to the factory model yet — see
-    ``docs/sqlite-per-thread-connections-plan.md`` W3).
+    Construction takes a :class:`ConnectionFactory` (used by production
+    via ``mcp_server/bootstrap.py``).
 
     Mixin and own methods call ``conn = self._conn()`` at the top and
     operate on that local variable, so each thread gets its own
-    connection on the factory path and the shared-state commit race
-    documented in ``docs/sqlite-threading.md`` is structurally
+    connection and the shared-state commit race documented in
+    ``docs/archive/sqlite-per-thread-connections-plan.md`` is structurally
     impossible. ``merge_entities`` is the only multi-statement
     implicit-transaction method here; under per-thread connections it
     runs entirely on the calling thread's connection so transaction
-    boundaries are unaffected by the migration.
+    boundaries are owned by exactly one thread.
     """
 
     def __init__(
         self,
-        factory_or_conn: ConnectionFactory | sqlite3.Connection,
+        factory: ConnectionFactory,
         casing_exceptions: Mapping[str, str] | None = None,
     ) -> None:
-        if isinstance(factory_or_conn, ConnectionFactory):
-            self._factory: ConnectionFactory | None = factory_or_conn
-            self._direct_conn: sqlite3.Connection | None = None
-        else:
-            self._factory = None
-            self._direct_conn = factory_or_conn
+        self._factory = factory
         # Stored as a dict so the reload helper can rebind it in place by
         # calling `store.set_casing_exceptions(...)`. A None value at construction
         # time means "no exceptions" — the algorithm degrades to plain smart-title-case.
@@ -80,26 +72,12 @@ class SQLiteEntityStore(_MentionsMixin, _MergeMixin):
         )
 
     def _conn(self) -> sqlite3.Connection:
-        """Return the connection for the current call.
-
-        Factory path: returns this thread's connection (lazily opened
-        on first use). Legacy path: returns the single shared
-        connection passed at construction.
-        """
-        if self._factory is not None:
-            return self._factory.get()
-        assert self._direct_conn is not None
-        return self._direct_conn
+        return self._factory.get()
 
     @property
     def connection(self) -> sqlite3.Connection:
-        """Underlying SQLite connection for the current thread.
-
-        On the factory path this returns the *calling* thread's
-        connection (committed rows are visible via WAL). On the
-        legacy path this returns the single shared connection.
-        """
-        return self._conn()
+        """Underlying SQLite connection for the calling thread."""
+        return self._factory.get()
 
     def set_casing_exceptions(self, exceptions: Mapping[str, str]) -> None:
         """Swap in a fresh exceptions table. Called by the reload helper.
