@@ -1,4 +1,6 @@
-**Status:** active. **Last updated:** 2026-05-11. **Supersedes:** none — picks up after
+**Status:** active. **Last updated:** 2026-05-11 (T2–T4 closed; T5 superseded — same
+arrow-button reorder model adopted on `/fitness` rather than HTML5 drag-drop, which
+the dashboard never shipped). **Supersedes:** none — picks up after
 [`archive/fitness-followup-plan.md`](./archive/fitness-followup-plan.md) (F1–F8) closed.
 
 # Fitness tile-layout plan — bring dashboard tile customization to /fitness
@@ -174,7 +176,19 @@ don't clobber each other. Original work-unit body kept below as a record.
 - **Acceptance:** A PUT to `/api/preferences` with `{"fitness_layout": {...}}` round-trips and a
   subsequent GET returns it.
 
-### T2. Extract `TileGrid.vue` from DashboardView `[webapp]`
+### T2. Extract `TileGrid.vue` from DashboardView `[webapp]` — closed 2026-05-11
+
+Shipped. `TileGrid<TId>` is generic over the page's tile-id union; the
+consumer provides `tiles`, `tileOrder`, `hiddenTiles`, `editing`,
+`gridClass`, `getSpan`, optional `getWidthTitle`, and `testIdPrefix`,
+and gets events for `move` / `hide` / `show` / `cycle-width` / `reset`.
+`sectionEls` is exposed via `defineExpose` so the dashboard's calendar
+heatmap can still size against the tile's `<section>`. Dashboard
+adopted first; all 59 existing tile-editing tests pass unchanged.
+
+Original work-unit body kept below as a record.
+
+
 
 - **Priority:** Medium.
 - **Risk:** Medium. Touching the dashboard's tile rendering is exactly the kind of refactor that
@@ -201,7 +215,23 @@ don't clobber each other. Original work-unit body kept below as a record.
 - **Acceptance:** Dashboard renders, drags, hides, and resizes tiles identically to today. No
   visible diff in screenshot review.
 
-### T3. Add fitness tile inventory and adopt `TileGrid` on `/fitness` `[webapp]`
+### T3. Add fitness tile inventory and adopt `TileGrid` on `/fitness` `[webapp]` — closed 2026-05-11
+
+Shipped. `FITNESS_TILES` ships five tiles (weekly-distinct, sleep, hrv,
+rhr, recent-workouts) on a 6-column grid. Default widths per D5:
+weekly-distinct + recent-workouts = `full`, sleep/hrv/rhr = `third` —
+three thirds in a row matches the prior side-by-side daily-wellness
+layout. Fitness store gained the mirror surface: `tileOrder`,
+`hiddenTiles`, `tileWidths` (named widths `'third' | 'half' | 'full'`),
+`editingLayout`, `moveTile`, `hideTile`, `showTile`, `resetLayout`,
+`cycleTileWidth`, `setTileWidth`, `getTileWidth`, `applyLayout`.
+FitnessView wraps each chart in a `<TileGrid>` named slot; page chrome
+(header / Manage-sync link / RangeBinControls / error banners) stays
+outside the grid.
+
+Original work-unit body kept below as a record.
+
+
 
 - **Priority:** Medium.
 - **Risk:** Low–Medium. The fitness charts already exist as standalone canvas renders; the
@@ -227,7 +257,24 @@ don't clobber each other. Original work-unit body kept below as a record.
   2. Edit-layout mode toggles handles + width controls visible.
   3. Drag-drop reorders tiles in-page.
 
-### T4. Persist fitness layout via preferences `[webapp]`
+### T4. Persist fitness layout via preferences `[webapp]` — closed 2026-05-11
+
+Shipped. Round-trip wired through the existing
+`fetchPreferences` / `updatePreferences` API. Mutations debounce to a
+single PUT 500ms after the last edit; `loadLayout` fires on
+FitnessView mount. `layoutLoaded` ref gates persistence so mutations
+*before* the initial GET settles don't race with the inbound layout
+and overwrite it with defaults. Fetch / update errors are swallowed
+silently — the in-memory layout is the session source of truth and
+the next mutation retries the save.
+
+Acceptance check for deploy: hide a chart, reload the page, confirm
+it stays hidden. Confirmed in test coverage (`stores/__tests__/
+fitness.test.ts` — "tile layout persistence (T4)" describe block).
+
+Original work-unit body kept below as a record.
+
+
 
 - **Priority:** Medium.
 - **Risk:** Low.
@@ -245,7 +292,22 @@ don't clobber each other. Original work-unit body kept below as a record.
 - **Acceptance:** Reload the page; layout persists. Edit on one browser, see it on another
   (preferences are server-side).
 
-### T5. Drag-and-drop on fitness tiles `[webapp]`
+### T5. Drag-and-drop on fitness tiles `[webapp]` — closed 2026-05-11 (model substitution)
+
+The dashboard never shipped native HTML5 drag-drop — reorder is via
+the per-tile up/down arrow buttons in edit mode. T2's extraction
+preserved that model, and T3 inherited it. So `/fitness` users can
+reorder tiles via the same arrow controls dashboard users have. No
+drag-drop code shipped.
+
+If the user later asks for *literal* drag (release-to-drop), that's a
+new unit (`@dragstart` / `@dragover` / `@drop` handlers on `TileGrid`'s
+section, with the parent store's `setTileOrder` action receiving the
+final array). Not done because nothing in the user feedback that
+motivated this plan specifically asked for native drag over the arrow
+controls.
+
+
 
 - **Priority:** Medium.
 - **Risk:** Low (TileGrid owns the handlers; this is just wiring).
