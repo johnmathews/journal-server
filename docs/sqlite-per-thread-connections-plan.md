@@ -30,7 +30,11 @@
     they migrate. Factory-path `TestFactoryPathSemantics` added in
     `tests/test_db/test_repository.py` (4 tests incl. a 6-thread x
     10-entry concurrent-write stress test).
-  - `FitnessRepository`: pending.
+  - `FitnessRepository`: **shipped 2026-05-11**. Same hybrid-
+    constructor pattern. Lock retained as a no-op on the factory path
+    / protective on the legacy path. Bootstrap passes the shared
+    `db_factory`. Factory-path `TestFactoryPathSemantics` added (4
+    tests incl. a 6-thread x 10-run concurrent-write stress test).
   - `SQLiteEntityStore` (+ `_MentionsMixin`, `_MergeMixin`): pending.
   - `SQLiteUserRepository`: pending.
   - `RuntimeSettings`: pending. Confirmed it does write at runtime via

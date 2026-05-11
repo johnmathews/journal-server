@@ -574,7 +574,7 @@ def _init_services() -> dict:
     )
     from journal.db.fitness_repository import FitnessRepository
 
-    fitness_repo = FitnessRepository(conn)
+    fitness_repo = FitnessRepository(db_factory)
     fitness_callables = _build_fitness_callables(
         fitness_repo=fitness_repo,
         config=config,
