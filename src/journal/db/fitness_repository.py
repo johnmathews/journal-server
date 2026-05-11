@@ -399,6 +399,29 @@ class FitnessRepository:
             )
             self._conn.commit()
 
+    def record_normalized_rows(
+        self, run_id: int, rows_normalized: int,
+    ) -> None:
+        """Amend ``rows_normalized`` on an already-finished sync run.
+
+        Fetch finalises a ``fitness_sync_runs`` row with ``rows_fetched``
+        before normalize has run; normalize then calls this method to
+        update the same row's ``rows_normalized`` without disturbing the
+        terminal ``status`` or ``rows_fetched`` already recorded. Without
+        this amend the UI's ``Norm.`` column shows 0 on every successful
+        run — see ``docs/fitness-followup-plan.md`` F1.
+        """
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE fitness_sync_runs
+                SET rows_normalized = ?
+                WHERE id = ?
+                """,
+                (rows_normalized, run_id),
+            )
+            self._conn.commit()
+
     def find_running_sync_run(
         self, *, user_id: int, source: str,
     ) -> int | None:

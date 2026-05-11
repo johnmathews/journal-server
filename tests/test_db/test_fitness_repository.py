@@ -291,6 +291,26 @@ def test_find_running_sync_run_returns_in_flight(
     assert repo.find_running_sync_run(user_id=1, source="strava") is None
 
 
+def test_record_normalized_rows_amends_existing_run(
+    repo: FitnessRepository,
+) -> None:
+    """Normalize must update rows_normalized without clobbering rows_fetched
+    or status — the fetch service finalises the row first and normalize amends
+    it after. Regression for the F1 bug where Norm. was always 0."""
+    run_id = repo.start_sync_run(user_id=1, source="garmin")
+    repo.finish_sync_run(
+        run_id, status="success", rows_fetched=15, rows_normalized=0,
+    )
+
+    repo.record_normalized_rows(run_id, 12)
+
+    runs = repo.list_recent_sync_runs(user_id=1, source="garmin")
+    assert len(runs) == 1
+    assert runs[0].status == "success"
+    assert runs[0].rows_fetched == 15
+    assert runs[0].rows_normalized == 12
+
+
 # ── Raw archive ─────────────────────────────────────────────────────
 
 

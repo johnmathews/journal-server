@@ -205,6 +205,65 @@ def test_strava_normalize_maps_each_coarse_type(
 # 2. Garmin daily fan-in ---------------------------------------------
 
 
+def test_normalize_strava_amends_sync_run_rows_normalized(
+    repo: FitnessRepository,
+) -> None:
+    """F1 regression: when normalize is wired to a fetch's sync_run_id, the
+    existing sync_runs row's rows_normalized is updated. Without this fix the
+    UI's `Norm.` column was always 0 on success."""
+    _insert_strava(repo, 11000000001, "Run")
+    run_id = repo.start_sync_run(user_id=1, source="strava")
+    repo.finish_sync_run(
+        run_id, status="success", rows_fetched=1, rows_normalized=0,
+    )
+
+    result = normalize_strava(repo, user_id=1, sync_run_id=run_id)
+
+    assert result.rows_normalized == 1
+    runs = repo.list_recent_sync_runs(user_id=1, source="strava")
+    assert len(runs) == 1
+    assert runs[0].status == "success"
+    assert runs[0].rows_fetched == 1
+    assert runs[0].rows_normalized == 1
+
+
+def test_normalize_garmin_amends_sync_run_rows_normalized(
+    repo: FitnessRepository,
+) -> None:
+    """F1 regression for Garmin. See Strava counterpart."""
+    _insert_garmin_daily(repo, "2026-04-15")
+    run_id = repo.start_sync_run(user_id=1, source="garmin")
+    repo.finish_sync_run(
+        run_id, status="success", rows_fetched=6, rows_normalized=0,
+    )
+
+    result = normalize_garmin(repo, user_id=1, sync_run_id=run_id)
+
+    assert result.rows_normalized == 1
+    runs = repo.list_recent_sync_runs(user_id=1, source="garmin")
+    assert len(runs) == 1
+    assert runs[0].rows_normalized == 1
+    assert runs[0].rows_fetched == 6  # untouched by the amend
+
+
+def test_normalize_without_sync_run_id_leaves_runs_unchanged(
+    repo: FitnessRepository,
+) -> None:
+    """When called outside a fetch context (CLI manual normalize, backfill),
+    normalize must not invent a sync_run row to update."""
+    _insert_strava(repo, 11000000001, "Run")
+    run_id = repo.start_sync_run(user_id=1, source="strava")
+    repo.finish_sync_run(
+        run_id, status="success", rows_fetched=42, rows_normalized=99,
+    )
+
+    result = normalize_strava(repo, user_id=1)  # no sync_run_id
+
+    assert result.rows_normalized == 1
+    runs = repo.list_recent_sync_runs(user_id=1, source="strava")
+    assert runs[0].rows_normalized == 99  # untouched
+
+
 def test_garmin_daily_fan_in_six_endpoints_to_one_row(
     repo: FitnessRepository, db_conn: sqlite3.Connection,
 ) -> None:

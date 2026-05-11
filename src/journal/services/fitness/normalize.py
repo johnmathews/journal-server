@@ -97,6 +97,7 @@ def normalize_strava(
     user_id: int,
     since: str | None = None,
     notifier: NormalizeDriftNotifier | None = None,
+    sync_run_id: int | None = None,
 ) -> NormalizeResult:
     """Normalize Strava activity raw rows into ``fitness_activities``.
 
@@ -114,6 +115,12 @@ def normalize_strava(
         Optional admin-only Pushover service for drift alerts. If
         ``None`` and drift occurs, the drift is still recorded in
         ``fitness_sync_runs`` but no Pushover fires.
+    sync_run_id
+        Id of the fetch's ``fitness_sync_runs`` row. When provided,
+        normalize amends that row's ``rows_normalized`` count so the
+        webapp's last-runs panel reflects what was actually persisted.
+        ``None`` for code paths that don't tie a normalize pass to a
+        specific fetch run (CLI manual normalize, backfill batches).
     """
     watermark = since if since is not None else repo.max_normalized_fetched_at(
         source="strava", user_id=user_id, kind="activities",
@@ -137,6 +144,8 @@ def normalize_strava(
         repo.upsert_activity(activity)
         rows_normalized += 1
 
+    if sync_run_id is not None:
+        repo.record_normalized_rows(sync_run_id, rows_normalized)
     _record_drift_if_any(
         repo=repo, source="strava", user_id=user_id,
         drift_count=drift_count, notifier=notifier,
@@ -228,6 +237,7 @@ def normalize_garmin(
     user_id: int,
     since: str | None = None,
     notifier: NormalizeDriftNotifier | None = None,
+    sync_run_id: int | None = None,
 ) -> NormalizeResult:
     """Normalize Garmin raw rows into ``fitness_daily`` and ``fitness_activities``.
 
@@ -236,6 +246,8 @@ def normalize_garmin(
     activities. Watermarks are computed separately for each kind
     because ``max_normalized_fetched_at`` joins differently against
     ``raw_ref_ids_json`` (daily) vs ``raw_ref_id`` (activity).
+
+    ``sync_run_id`` — see :func:`normalize_strava`.
     """
     daily_watermark = since if since is not None else repo.max_normalized_fetched_at(
         source="garmin", user_id=user_id, kind="daily",
@@ -290,6 +302,8 @@ def normalize_garmin(
         repo.upsert_activity(activity)
         rows_normalized += 1
 
+    if sync_run_id is not None:
+        repo.record_normalized_rows(sync_run_id, rows_normalized)
     _record_drift_if_any(
         repo=repo, source="garmin", user_id=user_id,
         drift_count=drift_count, notifier=notifier,
