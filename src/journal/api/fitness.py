@@ -124,6 +124,13 @@ def _sync_run_to_dict(run: FitnessSyncRun) -> dict[str, Any]:
         "status": run.status,
         "rows_fetched": run.rows_fetched,
         "rows_normalized": run.rows_normalized,
+        # T7 (2026-05-11): per-bucket counts for the webapp's split display.
+        # Pre-T7 rows have 0 for both buckets (default column value), which
+        # the webapp UI presents as "—" rather than a misleading "0".
+        "workouts_fetched": run.workouts_fetched,
+        "wellness_fetched": run.wellness_fetched,
+        "workouts_normalized": run.workouts_normalized,
+        "wellness_normalized": run.wellness_normalized,
         "error_class": run.error_class,
         "error_message": run.error_message,
     }

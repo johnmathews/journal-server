@@ -79,6 +79,10 @@ def _row_to_sync_run(row: sqlite3.Row) -> FitnessSyncRun:
         error_message=row["error_message"],
         rows_fetched=row["rows_fetched"],
         rows_normalized=row["rows_normalized"],
+        workouts_fetched=row["workouts_fetched"] or 0,
+        wellness_fetched=row["wellness_fetched"] or 0,
+        workouts_normalized=row["workouts_normalized"] or 0,
+        wellness_normalized=row["wellness_normalized"] or 0,
         notes=json.loads(row["notes_json"]) if row["notes_json"] else {},
     )
 
@@ -389,19 +393,32 @@ class FitnessRepository:
         error_message: str | None = None,
         rows_fetched: int = 0,
         rows_normalized: int = 0,
+        workouts_fetched: int = 0,
+        wellness_fetched: int = 0,
         notes: dict[str, Any] | None = None,
     ) -> None:
+        """Finalise a sync_runs row with terminal status and counters.
+
+        ``rows_fetched`` is the legacy total (workouts + wellness); the
+        ``workouts_fetched`` / ``wellness_fetched`` pair (T7, 2026-05-11)
+        is the source of truth for the UI's split display. Callers pass
+        both — the legacy total stays in sync. Strava callers pass 0 for
+        ``wellness_fetched`` because Strava is workouts-only.
+        """
         conn = self._conn()
         conn.execute(
             """
             UPDATE fitness_sync_runs
             SET status = ?, finished_at = ?, error_class = ?, error_message = ?,
-                rows_fetched = ?, rows_normalized = ?, notes_json = ?
+                rows_fetched = ?, rows_normalized = ?,
+                workouts_fetched = ?, wellness_fetched = ?,
+                notes_json = ?
             WHERE id = ?
             """,
             (
                 status, _now_iso(), error_class, error_message,
                 rows_fetched, rows_normalized,
+                workouts_fetched, wellness_fetched,
                 json.dumps(notes or {}),
                 run_id,
             ),
@@ -409,25 +426,38 @@ class FitnessRepository:
         conn.commit()
 
     def record_normalized_rows(
-        self, run_id: int, rows_normalized: int,
+        self,
+        run_id: int,
+        rows_normalized: int,
+        *,
+        workouts_normalized: int = 0,
+        wellness_normalized: int = 0,
     ) -> None:
-        """Amend ``rows_normalized`` on an already-finished sync run.
+        """Amend the normalized counters on an already-finished sync run.
 
         Fetch finalises a ``fitness_sync_runs`` row with ``rows_fetched``
         before normalize has run; normalize then calls this method to
-        update the same row's ``rows_normalized`` without disturbing the
-        terminal ``status`` or ``rows_fetched`` already recorded. Without
-        this amend the UI's ``Norm.`` column shows 0 on every successful
-        run — see ``docs/fitness-followup-plan.md`` F1.
+        update the same row's ``rows_normalized`` (the legacy total) and
+        the per-bucket ``workouts_normalized`` / ``wellness_normalized``
+        without disturbing the terminal ``status`` or ``rows_fetched``
+        already recorded. Without this amend the UI's ``Norm.`` column
+        shows 0 on every successful run — see F1 and T7 in the fitness
+        plans for the full story.
         """
         conn = self._conn()
         conn.execute(
             """
             UPDATE fitness_sync_runs
-            SET rows_normalized = ?
+            SET rows_normalized = ?,
+                workouts_normalized = ?,
+                wellness_normalized = ?
             WHERE id = ?
             """,
-            (rows_normalized, run_id),
+            (
+                rows_normalized,
+                workouts_normalized, wellness_normalized,
+                run_id,
+            ),
         )
         conn.commit()
 

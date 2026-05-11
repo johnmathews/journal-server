@@ -467,7 +467,14 @@ class FitnessAuthState:
 
 @dataclass
 class FitnessSyncRun:
-    """One scheduled fetch invocation for one source."""
+    """One scheduled fetch invocation for one source.
+
+    ``rows_fetched`` / ``rows_normalized`` are the totals the legacy UI read.
+    The ``*_workouts`` / ``*_wellness`` pairs (added 2026-05-11, T7) split
+    those totals by bucket so the UI can distinguish workouts from wellness
+    rows on Garmin syncs. Strava is workouts-only so its ``*_wellness``
+    fields are always 0.
+    """
 
     user_id: int
     source: str
@@ -479,6 +486,10 @@ class FitnessSyncRun:
     error_message: str | None = None
     rows_fetched: int = 0
     rows_normalized: int = 0
+    workouts_fetched: int = 0
+    wellness_fetched: int = 0
+    workouts_normalized: int = 0
+    wellness_normalized: int = 0
     notes: dict[str, Any] = field(default_factory=dict)
 
 

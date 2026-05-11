@@ -210,7 +210,11 @@ def test_normalize_strava_amends_sync_run_rows_normalized(
 ) -> None:
     """F1 regression: when normalize is wired to a fetch's sync_run_id, the
     existing sync_runs row's rows_normalized is updated. Without this fix the
-    UI's `Norm.` column was always 0 on success."""
+    UI's `Norm.` column was always 0 on success.
+
+    Extended by T7: Strava is workouts-only so workouts_normalized = the
+    full count and wellness_normalized = 0.
+    """
     _insert_strava(repo, 11000000001, "Run")
     run_id = repo.start_sync_run(user_id=1, source="strava")
     repo.finish_sync_run(
@@ -225,12 +229,20 @@ def test_normalize_strava_amends_sync_run_rows_normalized(
     assert runs[0].status == "success"
     assert runs[0].rows_fetched == 1
     assert runs[0].rows_normalized == 1
+    # T7: every Strava normalized row is a workout.
+    assert runs[0].workouts_normalized == 1
+    assert runs[0].wellness_normalized == 0
 
 
 def test_normalize_garmin_amends_sync_run_rows_normalized(
     repo: FitnessRepository,
 ) -> None:
-    """F1 regression for Garmin. See Strava counterpart."""
+    """F1 regression for Garmin. See Strava counterpart.
+
+    Extended by T7: the Garmin daily fan-in is wellness; the activity
+    loop is workouts. This fixture only inserts daily rows, so the
+    expected split is wellness=1, workouts=0.
+    """
     _insert_garmin_daily(repo, "2026-04-15")
     run_id = repo.start_sync_run(user_id=1, source="garmin")
     repo.finish_sync_run(
@@ -244,6 +256,9 @@ def test_normalize_garmin_amends_sync_run_rows_normalized(
     assert len(runs) == 1
     assert runs[0].rows_normalized == 1
     assert runs[0].rows_fetched == 6  # untouched by the amend
+    # T7: this fixture is wellness-only.
+    assert runs[0].workouts_normalized == 0
+    assert runs[0].wellness_normalized == 1
 
 
 def test_normalize_without_sync_run_id_leaves_runs_unchanged(

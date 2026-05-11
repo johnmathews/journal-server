@@ -250,11 +250,15 @@ def test_strava_happy_path_writes_raw_rows_and_finishes_success(
 
     # one success run row
     runs = db_conn.execute(
-        "SELECT status, rows_fetched FROM fitness_sync_runs WHERE user_id=1",
+        "SELECT status, rows_fetched, workouts_fetched, wellness_fetched"
+        " FROM fitness_sync_runs WHERE user_id=1",
     ).fetchall()
     assert len(runs) == 1
     assert runs[0]["status"] == "success"
     assert runs[0]["rows_fetched"] == 3
+    # T7: Strava is workouts-only.
+    assert runs[0]["workouts_fetched"] == 3
+    assert runs[0]["wellness_fetched"] == 0
 
     # auth_status flipped to ok (was already ok — still ok, no new rows)
     auth = repo.get_auth_state(user_id=1, source="strava")
@@ -316,6 +320,78 @@ def test_garmin_happy_path_writes_six_raw_rows_per_day(
     }
     # Garmin raw uses local_date as source_id
     assert all(r["source_id"] == "2026-04-15" for r in rows)
+
+    # T7: this fixture has zero activities, so the sync_runs row's split
+    # counters report 6 wellness / 0 workouts.
+    sync_runs = repo.list_recent_sync_runs(user_id=1, source="garmin")
+    assert sync_runs[0].workouts_fetched == 0
+    assert sync_runs[0].wellness_fetched == 6
+
+
+# 2b. T7 — Garmin mixed (workouts + wellness) ------------------------
+
+
+def test_garmin_mixed_workouts_and_wellness_recorded_separately(
+    repo: FitnessRepository, config: Any,
+) -> None:
+    """T7: a Garmin sync that pulls both wellness rows AND activities
+    records the per-bucket counts on the sync_runs row."""
+    _seed_auth(repo, "garmin")
+    fake = _FakeGarminProvider()
+    fake.daily_by_date = {
+        "2026-04-15": GarminDailyMetrics(
+            local_date="2026-04-15",
+            sleep_score=80, sleep_duration_s=27000, sleep_efficiency_pct=90.0,
+            hrv_overnight_ms=50.0, resting_hr_bpm=55,
+            body_battery_high=70, body_battery_low=20, stress_avg=30,
+            training_load_acute=400.0, training_load_chronic=380.0,
+            training_readiness=70,
+            extras={},
+            raw_payloads_per_endpoint={
+                "sleep": {"score": 80},
+                "hrv": {"avg": 50},
+                "body_battery": [{"charged": 70}],
+                "stress": {"avg": 30},
+                "training_load": {"acute": 400},
+                "training_readiness": [{"score": 70}],
+            },
+        ),
+    }
+    fake.activities = [
+        GarminActivitySummary(
+            source_id="999000001", activity_type_str="running",
+            start_time="2026-04-15T08:00:00Z", local_date="2026-04-15",
+            duration_s=2400, moving_time_s=2380,
+            distance_m=6000.0, elevation_gain_m=20.0,
+            avg_hr_bpm=150, max_hr_bpm=170, calories_kcal=420,
+            extras={},
+            raw_payload={"activityId": 999000001},
+        ),
+        GarminActivitySummary(
+            source_id="999000002", activity_type_str="cycling",
+            start_time="2026-04-15T18:00:00Z", local_date="2026-04-15",
+            duration_s=3600, moving_time_s=3590,
+            distance_m=20000.0, elevation_gain_m=120.0,
+            avg_hr_bpm=130, max_hr_bpm=160, calories_kcal=600,
+            extras={},
+            raw_payload={"activityId": 999000002},
+        ),
+    ]
+    notifier = _FakeNotifier()
+    svc = _make_garmin(repo=repo, config=config, fake=fake, notifier=notifier)
+
+    result = svc.run_sync(
+        user_id=1,
+        since=datetime(2026, 4, 15, tzinfo=UTC),
+        until=datetime(2026, 4, 15, 23, 59, tzinfo=UTC),
+    )
+
+    assert result.status == "success"
+    # Legacy total stays in sync: 6 wellness endpoints + 2 activities = 8.
+    assert result.rows_fetched == 8
+    sync_runs = repo.list_recent_sync_runs(user_id=1, source="garmin")
+    assert sync_runs[0].workouts_fetched == 2
+    assert sync_runs[0].wellness_fetched == 6
 
 
 # 3. Auth-broken fire-once -------------------------------------------

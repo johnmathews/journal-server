@@ -48,6 +48,10 @@ from journal.db.migrations import (
                 "id", "user_id", "source", "started_at", "finished_at",
                 "status", "error_class", "error_message", "rows_fetched",
                 "rows_normalized", "notes_json",
+                # T7 (migration 0026): per-bucket counters for the
+                # workouts-vs-wellness split.
+                "workouts_fetched", "wellness_fetched",
+                "workouts_normalized", "wellness_normalized",
             },
         ),
         (
