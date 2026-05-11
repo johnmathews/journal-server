@@ -1,6 +1,25 @@
 # SQLite Per-Thread Connections Refactor
 
-**Status:** active. **Last updated:** 2026-05-11. **Supersedes:** none.
+**Status:** active. **Last updated:** 2026-05-11 (W1 + W2 shipped).
+**Supersedes:** none.
+
+## Progress
+
+- **W1 — `ConnectionFactory`:** shipped 2026-05-11 (`src/journal/db/factory.py`
+  + 13 tests in `tests/test_db/test_factory.py`).
+- **W2 — `SQLiteJobRepository` migration:** shipped 2026-05-11. Constructor
+  now accepts `ConnectionFactory | sqlite3.Connection`; production path
+  (`mcp_server/bootstrap.py:552`) uses the factory. Plan spec originally
+  called for a hard break and a test-file fan-out, but scoping showed ~14
+  test files would have been touched (many derive a Connection from a
+  sibling repo's `.connection` property); the hybrid constructor lets W2
+  land the production win cleanly and defers the fan-out to W3. The
+  `_lock` and `_commit` workaround stay live for the legacy path — they
+  are no-ops on the factory path. `TestSharedConnectionCommitRace` also
+  stays (legacy path is still reachable from tests); both get removed
+  when W3 retires the bare-Connection branch of the constructor.
+- **W3 — remaining repos:** next up.
+- **W4, W5:** pending.
 
 This plan moves the server from one shared `sqlite3.Connection` (used across the
 ASGI request threads and the `JobRunner` worker thread) to per-thread connections

@@ -2,16 +2,36 @@
 
 import json
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import pytest
 
+from journal.db.factory import ConnectionFactory
 from journal.db.jobs_repository import SQLiteJobRepository
+from journal.db.migrations import run_migrations
 from journal.models import Job
 
 
 @pytest.fixture
 def jobs_repo(db_conn):
+    """Legacy bare-Connection fixture, kept until W3 retires that path."""
     return SQLiteJobRepository(db_conn)
+
+
+@pytest.fixture
+def jobs_factory(tmp_path: Path) -> ConnectionFactory:
+    """ConnectionFactory pointing at a migrated temp DB."""
+    factory = ConnectionFactory(tmp_path / "jobs.db")
+    run_migrations(factory.get())
+    return factory
+
+
+@pytest.fixture
+def jobs_repo_factory(jobs_factory: ConnectionFactory) -> SQLiteJobRepository:
+    """Factory-backed repo — production-equivalent path."""
+    return SQLiteJobRepository(jobs_factory)
 
 
 class TestCreate:
@@ -474,3 +494,110 @@ class TestSharedConnectionCommitRace:
             sqlite3.OperationalError, match="database is locked",
         ):
             racy.mark_running(job.id)
+
+
+class TestFactoryPathSemantics:
+    """Production-path coverage for the ``ConnectionFactory`` model.
+
+    The legacy ``TestSharedConnectionCommitRace`` class above exercises
+    the bare-``Connection`` fallback (kept until W3 of
+    ``docs/sqlite-per-thread-connections-plan.md`` migrates the
+    remaining repos). These tests cover the factory path that
+    production now uses, which is what eliminates the race
+    structurally — each thread holds its own connection so the
+    cross-thread implicit-transaction collision becomes impossible.
+    """
+
+    def test_lifecycle_round_trip(self, jobs_repo_factory):
+        job = jobs_repo_factory.create(
+            "mood_score_entry", {"entry_id": 42},
+        )
+        jobs_repo_factory.mark_running(job.id)
+        jobs_repo_factory.update_progress(job.id, 0, 1)
+        jobs_repo_factory.mark_succeeded(job.id, {"scores_written": 3})
+        final = jobs_repo_factory.get(job.id)
+        assert final is not None
+        assert final.status == "succeeded"
+        assert final.result == {"scores_written": 3}
+        assert final.progress_current == 0
+        assert final.progress_total == 1
+
+    def test_each_thread_gets_distinct_connection(self, jobs_repo_factory):
+        """The factory hands each thread its own connection; this is
+        the structural property that makes the prod commit race
+        impossible. The repo's ``connection`` property must reflect
+        the *calling* thread's connection."""
+        main_conn_id = id(jobs_repo_factory.connection)
+        captured: list[int] = []
+
+        def worker() -> None:
+            captured.append(id(jobs_repo_factory.connection))
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        assert len(captured) == 1
+        assert captured[0] != main_conn_id
+
+    def test_concurrent_lifecycle_under_load(self, jobs_repo_factory):
+        """Reproduce the prod scenario at scale: many threads each
+        running create → mark_running → update_progress → mark_succeeded
+        on the shared factory. With the old shared-Connection model
+        this would surface ``no transaction is active`` from a
+        concurrent commit. Under the factory model it must complete
+        cleanly with all rows in terminal state.
+        """
+        thread_count = 6
+        jobs_per_thread = 20
+        errors: list[BaseException] = []
+
+        def worker(prefix: str) -> None:
+            try:
+                for i in range(jobs_per_thread):
+                    job = jobs_repo_factory.create(
+                        "entity_extraction", {"k": f"{prefix}-{i}"},
+                    )
+                    jobs_repo_factory.mark_running(job.id)
+                    jobs_repo_factory.update_progress(job.id, 1, 1)
+                    jobs_repo_factory.mark_succeeded(
+                        job.id, {"k": f"{prefix}-{i}"},
+                    )
+            except BaseException as exc:  # noqa: BLE001 — test-only
+                errors.append(exc)
+
+        with ThreadPoolExecutor(max_workers=thread_count) as ex:
+            futures = [
+                ex.submit(worker, f"t{i}") for i in range(thread_count)
+            ]
+            for f in as_completed(futures):
+                f.result()
+
+        assert errors == []
+        jobs, total = jobs_repo_factory.list_jobs(
+            limit=thread_count * jobs_per_thread,
+        )
+        assert total == thread_count * jobs_per_thread
+        assert all(j.status == "succeeded" for j in jobs)
+
+    def test_listing_from_a_thread_other_than_writer(
+        self, jobs_repo_factory,
+    ):
+        """A worker thread writes; the test thread reads. WAL +
+        per-thread connections must make the writer's committed rows
+        visible to the reader without any explicit cross-connection
+        coordination."""
+        from threading import Event
+
+        written = Event()
+
+        def writer() -> None:
+            jobs_repo_factory.create("entity_extraction", {"x": 1})
+            jobs_repo_factory.create("entity_extraction", {"x": 2})
+            written.set()
+
+        t = threading.Thread(target=writer)
+        t.start()
+        written.wait(timeout=5.0)
+        t.join()
+        _, total = jobs_repo_factory.list_jobs()
+        assert total == 2
