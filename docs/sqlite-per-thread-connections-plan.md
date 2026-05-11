@@ -47,7 +47,12 @@
     the shared `db_factory`. Factory-path `TestFactoryPathSemantics`
     added (4 tests incl. concurrent-writes stress + a merge-under-
     factory test that exercises the multi-statement transaction).
-  - `SQLiteUserRepository`: pending.
+  - `SQLiteUserRepository`: **shipped 2026-05-11**. Single-file
+    auth/sessions/API-keys repo. Same hybrid-constructor pattern;
+    lock retained as no-op on factory path. Bootstrap passes the
+    shared `db_factory`. Factory-path `TestFactoryPathSemantics`
+    added (4 tests incl. a 6-thread x 5-user concurrent-write
+    stress test).
   - `RuntimeSettings`: pending. Confirmed it does write at runtime via
     `set()` (admin toggles from the API), so it needs the factory —
     no read-only carve-out.

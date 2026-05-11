@@ -2,10 +2,15 @@
 
 import hashlib
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
+from journal.db.factory import ConnectionFactory
+from journal.db.migrations import run_migrations
 from journal.db.user_repository import SQLiteUserRepository
 from journal.models import ApiKeyInfo, User
 
@@ -13,6 +18,19 @@ from journal.models import ApiKeyInfo, User
 @pytest.fixture
 def user_repo(db_conn: sqlite3.Connection) -> SQLiteUserRepository:
     return SQLiteUserRepository(db_conn)
+
+
+@pytest.fixture
+def user_factory(tmp_path: Path) -> ConnectionFactory:
+    """ConnectionFactory pointing at a migrated temp DB."""
+    factory = ConnectionFactory(tmp_path / "users.db")
+    run_migrations(factory.get())
+    return factory
+
+
+@pytest.fixture
+def user_repo_via_factory(user_factory: ConnectionFactory) -> SQLiteUserRepository:
+    return SQLiteUserRepository(user_factory)
 
 
 # ── Users ───────────────────────────────────────────────────────────
@@ -384,3 +402,100 @@ class TestUserStats:
         assert "entry_count" in admin_stat
         assert "total_words" in admin_stat
         assert "job_count" in admin_stat
+
+
+class TestFactoryPathSemantics:
+    """Production-path coverage for the ``ConnectionFactory`` model.
+
+    The classes above exercise the bare-``Connection`` legacy path
+    (kept until W4 of ``docs/sqlite-per-thread-connections-plan.md``
+    retires the dual-constructor). These tests cover the factory path
+    that production now uses: each thread owns its own connection,
+    so the cross-thread implicit-transaction collision documented in
+    ``docs/sqlite-threading.md`` becomes structurally impossible.
+    """
+
+    def test_lifecycle_round_trip(
+        self, user_repo_via_factory: SQLiteUserRepository,
+    ) -> None:
+        user = user_repo_via_factory.create_user(
+            "factory@example.com", "Factory", password_hash="hash",
+        )
+        fetched = user_repo_via_factory.get_user_by_email("factory@example.com")
+        assert fetched is not None
+        assert fetched.id == user.id
+        assert fetched.display_name == "Factory"
+
+    def test_each_thread_gets_distinct_connection(
+        self, user_repo_via_factory: SQLiteUserRepository,
+    ) -> None:
+        main_conn_id = id(user_repo_via_factory.connection)
+        captured: list[int] = []
+
+        def worker() -> None:
+            captured.append(id(user_repo_via_factory.connection))
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        assert len(captured) == 1
+        assert captured[0] != main_conn_id
+
+    def test_concurrent_user_writes_under_load(
+        self, user_repo_via_factory: SQLiteUserRepository,
+    ) -> None:
+        """Many threads each creating users + updates. Under the old
+        shared-``Connection`` model this would surface
+        ``no transaction is active`` from a concurrent commit; under
+        the factory model it must complete cleanly.
+        """
+        thread_count = 6
+        users_per_thread = 5
+        errors: list[BaseException] = []
+
+        def worker(prefix: str) -> None:
+            try:
+                for i in range(users_per_thread):
+                    user = user_repo_via_factory.create_user(
+                        f"{prefix}-{i}@ex.com", f"{prefix}-{i}",
+                    )
+                    user_repo_via_factory.update_user(
+                        user.id, display_name=f"{prefix}-{i}-renamed",
+                    )
+            except BaseException as exc:  # noqa: BLE001 — test-only
+                errors.append(exc)
+
+        with ThreadPoolExecutor(max_workers=thread_count) as ex:
+            futures = [
+                ex.submit(worker, f"t{i}") for i in range(thread_count)
+            ]
+            for f in as_completed(futures):
+                f.result()
+
+        assert errors == []
+        # Don't assume zero seeded users — only assert *our* writes succeeded.
+        users = user_repo_via_factory.list_users()
+        ours = [u for u in users if "@ex.com" in u.email]
+        assert len(ours) == thread_count * users_per_thread
+        assert all("-renamed" in u.display_name for u in ours)
+
+    def test_cross_thread_visibility_via_wal(
+        self, user_repo_via_factory: SQLiteUserRepository,
+    ) -> None:
+        from threading import Event
+
+        written = Event()
+
+        def writer() -> None:
+            user_repo_via_factory.create_user("a@x.com", "A")
+            user_repo_via_factory.create_user("b@x.com", "B")
+            written.set()
+
+        t = threading.Thread(target=writer)
+        t.start()
+        written.wait(timeout=5.0)
+        t.join()
+        users = user_repo_via_factory.list_users()
+        emails = {u.email for u in users}
+        assert "a@x.com" in emails
+        assert "b@x.com" in emails

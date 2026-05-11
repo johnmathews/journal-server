@@ -395,7 +395,7 @@ def _init_services() -> dict:
     # per-user display names for the LLM author prompt.
     from journal.db.user_repository import SQLiteUserRepository
 
-    user_repo = SQLiteUserRepository(conn)
+    user_repo = SQLiteUserRepository(db_factory)
 
     entity_extraction_service = EntityExtractionService(
         repository=repo,
