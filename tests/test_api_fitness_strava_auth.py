@@ -29,7 +29,6 @@ from starlette.testclient import TestClient
 from stravalib.exc import AccessUnauthorized
 
 from journal.auth import AuthenticatedUser, _current_user_id
-from journal.db.connection import get_connection
 from journal.db.factory import ConnectionFactory
 from journal.db.fitness_repository import FitnessRepository
 from journal.db.migrations import run_migrations
@@ -38,8 +37,6 @@ from journal.providers.strava import Tokens
 from journal.services.fitness.strava_pending import StravaPendingStore
 
 if TYPE_CHECKING:
-    import sqlite3
-    from collections.abc import Generator
     from pathlib import Path
 
 
@@ -127,13 +124,6 @@ def fitness_factory(tmp_path: Path) -> ConnectionFactory:
 
 
 @pytest.fixture
-def fitness_db(fitness_factory: ConnectionFactory) -> Generator[sqlite3.Connection]:
-    conn = get_connection(fitness_factory.db_path, check_same_thread=False)
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
 def fitness_repo(fitness_factory: ConnectionFactory) -> FitnessRepository:
     return FitnessRepository(fitness_factory)
 
@@ -145,7 +135,7 @@ def pending_store() -> StravaPendingStore:
 
 def _build_services(
     *,
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: StravaPendingStore,
     exchange: Any,
@@ -163,7 +153,7 @@ def _build_services(
 
     return {
         "fitness_repo": fitness_repo,
-        "db_conn": fitness_db,
+        "db_factory": fitness_factory,
         "strava_pending": pending_store,
         "strava_exchange_code": exchange,
         "config": cfg,
@@ -185,12 +175,12 @@ def _build_client(services: dict, *, user_id: int = 1) -> TestClient:
 
 
 def test_authorize_url_returns_url_state_and_expiry(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: StravaPendingStore,
 ) -> None:
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, exchange=FakeExchangeCode(),
     )
     with _build_client(services, user_id=1) as client:
@@ -223,12 +213,12 @@ def test_authorize_url_returns_url_state_and_expiry(
 
 
 def test_authorize_url_missing_client_id_returns_500(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: StravaPendingStore,
 ) -> None:
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, exchange=FakeExchangeCode(),
         strava_client_id="",
     )
@@ -242,13 +232,13 @@ def test_authorize_url_missing_client_id_returns_500(
 
 
 def test_exchange_happy_path_persists_tokens_and_athlete_id(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: StravaPendingStore,
 ) -> None:
     fake = FakeExchangeCode(athlete_id="98765432")
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, exchange=fake,
     )
     with _build_client(services, user_id=1) as client:
@@ -284,12 +274,12 @@ def test_exchange_happy_path_persists_tokens_and_athlete_id(
 
 
 def test_exchange_missing_body_fields_returns_400(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: StravaPendingStore,
 ) -> None:
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, exchange=FakeExchangeCode(),
     )
     with _build_client(services) as client:
@@ -303,12 +293,12 @@ def test_exchange_missing_body_fields_returns_400(
 
 
 def test_exchange_unknown_state_returns_410(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: StravaPendingStore,
 ) -> None:
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, exchange=FakeExchangeCode(),
     )
     with _build_client(services) as client:
@@ -321,7 +311,7 @@ def test_exchange_unknown_state_returns_410(
 
 
 def test_exchange_expired_state_returns_410(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
 ) -> None:
     """Roll the pending store's clock past TTL between issue and exchange."""
@@ -335,7 +325,7 @@ def test_exchange_expired_state_returns_410(
     clock = _Clock()
     pending = StravaPendingStore(time_func=clock)
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending, exchange=FakeExchangeCode(),
     )
     with _build_client(services) as client:
@@ -350,7 +340,7 @@ def test_exchange_expired_state_returns_410(
 
 
 def test_exchange_cross_user_state_rejected_403(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: StravaPendingStore,
 ) -> None:
@@ -361,7 +351,7 @@ def test_exchange_cross_user_state_rejected_403(
     attacker's Strava account to the victim's journal account (D4).
     """
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, exchange=FakeExchangeCode(),
     )
 
@@ -402,7 +392,7 @@ def _seed_existing_strava_auth(
 
 
 def test_reconnect_with_same_athlete_id_is_allowed(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: StravaPendingStore,
 ) -> None:
@@ -410,7 +400,7 @@ def test_reconnect_with_same_athlete_id_is_allowed(
         fitness_repo, user_id=1, upstream_user_id="98765432",
     )
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store,
         exchange=FakeExchangeCode(athlete_id="98765432"),
     )
@@ -429,7 +419,7 @@ def test_reconnect_with_same_athlete_id_is_allowed(
 
 
 def test_reconnect_with_different_athlete_id_is_rejected_409(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: StravaPendingStore,
 ) -> None:
@@ -437,7 +427,7 @@ def test_reconnect_with_different_athlete_id_is_rejected_409(
         fitness_repo, user_id=1, upstream_user_id="98765432",
     )
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store,
         exchange=FakeExchangeCode(athlete_id="11111111"),
     )
@@ -461,7 +451,7 @@ def test_reconnect_with_different_athlete_id_is_rejected_409(
 
 
 def test_exchange_returns_502_when_athlete_id_missing(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: StravaPendingStore,
 ) -> None:
@@ -470,7 +460,7 @@ def test_exchange_returns_502_when_athlete_id_missing(
     written) is safer than persisting tokens without an upstream id we
     can verify on later reconnects (D8 retrofit is impossible)."""
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store,
         exchange=FakeExchangeCode(athlete_id=None),
     )
@@ -490,12 +480,12 @@ def test_exchange_returns_502_when_athlete_id_missing(
 
 
 def test_exchange_strava_rejected_returns_502(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: StravaPendingStore,
 ) -> None:
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store,
         exchange=FakeExchangeCode(
             raises=AccessUnauthorized("Strava rejected the code"),
@@ -519,12 +509,12 @@ def test_exchange_strava_rejected_returns_502(
 
 
 def test_disconnect_when_not_connected_returns_disconnected_false(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: StravaPendingStore,
 ) -> None:
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, exchange=FakeExchangeCode(),
     )
     with _build_client(services) as client:
@@ -534,7 +524,7 @@ def test_disconnect_when_not_connected_returns_disconnected_false(
 
 
 def test_disconnect_after_connect_deletes_row(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: StravaPendingStore,
 ) -> None:
@@ -544,7 +534,7 @@ def test_disconnect_after_connect_deletes_row(
     assert fitness_repo.get_auth_state(user_id=1, source="strava") is not None
 
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, exchange=FakeExchangeCode(),
     )
     with _build_client(services) as client:
@@ -555,17 +545,18 @@ def test_disconnect_after_connect_deletes_row(
 
 
 def test_disconnect_only_affects_calling_user(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: StravaPendingStore,
 ) -> None:
     """User 1 disconnects; user 2's row is untouched."""
-    fitness_db.execute(
+    conn = fitness_factory.get()
+    conn.execute(
         "INSERT OR IGNORE INTO users (id, email, display_name, "
         "password_hash, created_at) VALUES "
         "(2, 'u2@example.com', 'User 2', 'x', '2026-01-01T00:00:00Z')",
     )
-    fitness_db.commit()
+    conn.commit()
     _seed_existing_strava_auth(
         fitness_repo, user_id=1, upstream_user_id="98765432",
     )
@@ -574,7 +565,7 @@ def test_disconnect_only_affects_calling_user(
     )
 
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, exchange=FakeExchangeCode(),
     )
     with _build_client(services, user_id=1) as client_a:

@@ -28,7 +28,6 @@ from garminconnect import (
 from starlette.testclient import TestClient
 
 from journal.auth import AuthenticatedUser, _current_user_id
-from journal.db.connection import get_connection
 from journal.db.factory import ConnectionFactory
 from journal.db.fitness_repository import FitnessRepository
 from journal.db.migrations import run_migrations
@@ -40,8 +39,6 @@ from journal.services.fitness.garmin_pending import (
 )
 
 if TYPE_CHECKING:
-    import sqlite3
-    from collections.abc import Generator
     from pathlib import Path
 
 
@@ -177,14 +174,6 @@ def fitness_factory(tmp_path: Path) -> ConnectionFactory:
 
 
 @pytest.fixture
-def fitness_db(fitness_factory: ConnectionFactory) -> Generator[sqlite3.Connection]:
-    """Cross-thread connection for the legacy ``"db_conn"`` services slot."""
-    conn = get_connection(fitness_factory.db_path, check_same_thread=False)
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
 def fitness_repo(fitness_factory: ConnectionFactory) -> FitnessRepository:
     return FitnessRepository(fitness_factory)
 
@@ -201,7 +190,7 @@ def cooldown_tracker() -> GarminCooldownTracker:
 
 def _build_services(
     *,
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
@@ -209,7 +198,7 @@ def _build_services(
 ) -> dict:
     return {
         "fitness_repo": fitness_repo,
-        "db_conn": fitness_db,
+        "db_factory": fitness_factory,
         "garmin_pending": pending_store,
         "garmin_cooldown": cooldown_tracker,
         "garmin_client_factory": garmin_factory,
@@ -231,7 +220,7 @@ def _build_client(services: dict, *, user_id: int = 1) -> TestClient:
 
 
 def test_connect_no_mfa_persists_tokens_and_upstream_id(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
@@ -241,7 +230,7 @@ def test_connect_no_mfa_persists_tokens_and_upstream_id(
         profile={"displayName": "alice.j", "fullName": "Alice J"},
     )
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )
@@ -266,14 +255,14 @@ def test_connect_no_mfa_persists_tokens_and_upstream_id(
 
 
 def test_connect_missing_body_fields_returns_400(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
 ) -> None:
     factory = FakeGarminFactory()
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )
@@ -285,7 +274,7 @@ def test_connect_missing_body_fields_returns_400(
 
 
 def test_connect_invalid_credentials_returns_401_and_records_failure(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
@@ -294,7 +283,7 @@ def test_connect_invalid_credentials_returns_401_and_records_failure(
         login_raises=GarminConnectAuthenticationError("Authentication failed"),
     )
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )
@@ -312,7 +301,7 @@ def test_connect_invalid_credentials_returns_401_and_records_failure(
 
 
 def test_connect_upstream_429_surfaces_distinctly(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
@@ -321,7 +310,7 @@ def test_connect_upstream_429_surfaces_distinctly(
         login_raises=GarminConnectTooManyRequestsError("Too many login attempts"),
     )
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )
@@ -336,7 +325,7 @@ def test_connect_upstream_429_surfaces_distinctly(
 
 
 def test_connect_per_email_cooldown_blocks_after_threshold(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
@@ -345,7 +334,7 @@ def test_connect_per_email_cooldown_blocks_after_threshold(
         login_raises=GarminConnectAuthenticationError("Authentication failed"),
     )
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )
@@ -374,14 +363,14 @@ def test_connect_per_email_cooldown_blocks_after_threshold(
 
 
 def test_connect_with_mfa_required_returns_pending_session(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
 ) -> None:
     factory = FakeGarminFactory(mfa_required=True)
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )
@@ -401,14 +390,14 @@ def test_connect_with_mfa_required_returns_pending_session(
 
 
 def test_mfa_completes_login_and_persists_tokens(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
 ) -> None:
     factory = FakeGarminFactory(mfa_required=True)
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )
@@ -433,7 +422,7 @@ def test_mfa_completes_login_and_persists_tokens(
 
 
 def test_mfa_wrong_code_returns_401_and_preserves_pending_session(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
@@ -443,7 +432,7 @@ def test_mfa_wrong_code_returns_401_and_preserves_pending_session(
         resume_raises=GarminConnectAuthenticationError("Bad MFA"),
     )
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )
@@ -465,7 +454,7 @@ def test_mfa_wrong_code_returns_401_and_preserves_pending_session(
 
 
 def test_mfa_post_login_profile_failure_returns_502(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
@@ -475,7 +464,7 @@ def test_mfa_post_login_profile_failure_returns_502(
         profile_after_mfa_raises=RuntimeError("Failed to retrieve social profile"),
     )
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )
@@ -498,14 +487,14 @@ def test_mfa_post_login_profile_failure_returns_502(
 
 
 def test_mfa_unknown_pending_session_returns_410(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
 ) -> None:
     factory = FakeGarminFactory()
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )
@@ -519,7 +508,7 @@ def test_mfa_unknown_pending_session_returns_410(
 
 
 def test_mfa_expired_pending_session_returns_410(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     cooldown_tracker: GarminCooldownTracker,
 ) -> None:
@@ -536,7 +525,7 @@ def test_mfa_expired_pending_session_returns_410(
     pending = GarminPendingStore(time_func=clock)
     factory = FakeGarminFactory(mfa_required=True)
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )
@@ -555,7 +544,7 @@ def test_mfa_expired_pending_session_returns_410(
 
 
 def test_mfa_cross_user_pending_session_rejected_403(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
@@ -568,7 +557,7 @@ def test_mfa_cross_user_pending_session_rejected_403(
     """
     factory = FakeGarminFactory(mfa_required=True)
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )
@@ -595,14 +584,14 @@ def test_mfa_cross_user_pending_session_rejected_403(
 
 
 def test_mfa_missing_body_fields_returns_400(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
 ) -> None:
     factory = FakeGarminFactory()
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )
@@ -634,7 +623,7 @@ def _seed_existing_garmin_auth(
 
 
 def test_reconnect_with_same_upstream_id_is_allowed(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
@@ -642,7 +631,7 @@ def test_reconnect_with_same_upstream_id_is_allowed(
     _seed_existing_garmin_auth(fitness_repo, user_id=1, upstream_user_id="alice.j")
     factory = FakeGarminFactory(profile={"displayName": "alice.j"})
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )
@@ -661,7 +650,7 @@ def test_reconnect_with_same_upstream_id_is_allowed(
 
 
 def test_reconnect_with_different_upstream_id_is_rejected(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
@@ -669,7 +658,7 @@ def test_reconnect_with_different_upstream_id_is_rejected(
     _seed_existing_garmin_auth(fitness_repo, user_id=1, upstream_user_id="alice.j")
     factory = FakeGarminFactory(profile={"displayName": "bob.k"})
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )
@@ -694,14 +683,14 @@ def test_reconnect_with_different_upstream_id_is_rejected(
 
 
 def test_disconnect_when_not_connected_returns_disconnected_false(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
 ) -> None:
     factory = FakeGarminFactory()
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )
@@ -712,7 +701,7 @@ def test_disconnect_when_not_connected_returns_disconnected_false(
 
 
 def test_disconnect_after_connect_deletes_row(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
@@ -722,7 +711,7 @@ def test_disconnect_after_connect_deletes_row(
 
     factory = FakeGarminFactory()
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )
@@ -734,7 +723,7 @@ def test_disconnect_after_connect_deletes_row(
 
 
 def test_disconnect_only_affects_calling_user(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
@@ -745,17 +734,18 @@ def test_disconnect_only_affects_calling_user(
     # need actual users rows for user_id=2 to exist as an auth_state row.)
     # Migration 0011 seeds user_id=1; we just need user_id=2 to exist
     # so the FitnessAuthState upsert for user 2 doesn't trip the FK.
-    fitness_db.execute(
+    conn = fitness_factory.get()
+    conn.execute(
         "INSERT OR IGNORE INTO users (id, email, display_name, password_hash, created_at) "
         "VALUES (2, 'u2@example.com', 'User 2', 'x', '2026-01-01T00:00:00Z')",
     )
-    fitness_db.commit()
+    conn.commit()
     _seed_existing_garmin_auth(fitness_repo, user_id=1, upstream_user_id="alice.j")
     _seed_existing_garmin_auth(fitness_repo, user_id=2, upstream_user_id="bob.k")
 
     factory = FakeGarminFactory()
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )
@@ -773,7 +763,7 @@ def test_disconnect_only_affects_calling_user(
 
 
 def test_factory_kwargs_reach_fake_client(
-    fitness_db: sqlite3.Connection,
+    fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
@@ -783,7 +773,7 @@ def test_factory_kwargs_reach_fake_client(
     factory with positional args or forgetting ``return_on_mfa``."""
     factory = FakeGarminFactory()
     services = _build_services(
-        fitness_db=fitness_db, fitness_repo=fitness_repo,
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
         pending_store=pending_store, cooldown_tracker=cooldown_tracker,
         garmin_factory=factory,
     )

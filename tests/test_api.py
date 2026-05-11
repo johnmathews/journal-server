@@ -9,7 +9,6 @@ import pytest
 from starlette.testclient import TestClient
 
 from journal.auth import AuthenticatedUser, _current_user_id
-from journal.db.connection import get_connection
 from journal.db.factory import ConnectionFactory
 from journal.db.fitness_repository import FitnessRepository
 from journal.db.jobs_repository import SQLiteJobRepository
@@ -117,11 +116,6 @@ def services(
     config = Config()
     runtime = RuntimeSettings(api_factory, config)
 
-    # Legacy slot — read by api/settings.py and api/fitness.py until C2
-    # migrates those readers to ``db_factory``. The route runs on a
-    # TestClient worker thread, so this connection has to be openable
-    # cross-thread; it points at the same DB the factory uses.
-    legacy_conn = get_connection(api_factory.db_path, check_same_thread=False)
     return {
         "ingestion": ingestion,
         "query": query,
@@ -130,7 +124,6 @@ def services(
         "config": config,
         "runtime_settings": runtime,
         "db_factory": api_factory,
-        "db_conn": legacy_conn,
     }
 
 
