@@ -1,5 +1,12 @@
-**Status:** active. **Last updated:** 2026-05-11. **Supersedes:** none — this is a follow-on plan picked up after
-[`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md) reaches its W14 staging gate.
+**Status:** closed 2026-05-11. All eight work units (F1–F8) shipped same-day and verified post-deploy:
+Strava sync 11 May 22:20 showed Fetched 1 / Norm. 1, Garmin sync at the same wall-clock showed
+Fetched 6 / Norm. 2 (confirming F1 in production); the 2026-05-09 cross-source case collapses to
+one Recent-workouts row labelled "Strava + 1 mirror" (F2). Pre-deploy historical rows still read
+`Norm. = 0` — that's deliberate, no backfill needed. Follow-on work captured in
+[`fitness-tile-layout-plan.md`](./fitness-tile-layout-plan.md) (dashboard-style tile customization
+on /fitness, plus tooltip parity).
+**Last updated:** 2026-05-11. **Supersedes:** none — this was a follow-on plan picked up after
+[`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md) reached its W14 staging gate.
 
 # Fitness follow-up plan — UI consistency, dedup correctness, and sync-run accounting
 
