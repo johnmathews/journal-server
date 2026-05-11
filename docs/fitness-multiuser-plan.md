@@ -7,10 +7,10 @@
   W3 (Strava OAuth exchange, `5dca0cc`), W4 (per-user integrity, `fed3775`),
   W5 (backfill workers + endpoint, `be6ab80`), W6 (drop Garmin env vars,
   `6064145`), W7 (CLI `--user-id` required, `14ddb6b`), W11 (worker-level
-  auth_status flip test, `18d66b0`).
+  auth_status flip test, `18d66b0`), W12 (docs sweep, `46ba985`).
 - **Shipped (webapp):** W8 (API client, `4de33c4`), W9 (settings panel, `6df8d7e`),
   W10 (Strava callback view, `d53f3a7`), W11 (banner Reconnect button, `c5968c3`).
-- **Remaining:** W12 (docs sweep), W13 (Strava callback URL — operator step),
+- **Remaining:** W13 (Strava callback URL — operator step),
   W14 (end-to-end verification with user 2).
 
 This plan moves the fitness pipeline from its current single-user posture (operator-managed
