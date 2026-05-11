@@ -68,6 +68,44 @@ class SQLiteJobRepository:
         self._conn = conn
         self._lock = threading.Lock()
 
+    def _commit(self, op: str) -> None:
+        """Commit the shared connection, tolerating the documented
+        shared-``Connection`` commit race.
+
+        Background: ``db/connection.py`` shares one ``sqlite3.Connection``
+        across the API thread and the ``JobRunner`` worker thread.
+        Python's ``sqlite3`` driver tracks the implicit-transaction
+        state on the connection object itself, so a write on one
+        thread can have its transaction committed by another thread
+        in the gap between ``execute()`` and ``commit()``. When that
+        happens, the second ``commit()`` reaches SQLite with no open
+        transaction and raises
+        ``OperationalError: cannot commit - no transaction is active``.
+
+        Crucially, this is **not** lost-write: the concurrent commit
+        captured our pending ``UPDATE``/``INSERT`` as part of its own
+        transaction, so the row is already persisted. The defensive
+        thing to do is log a warning (so the race remains observable
+        in prod) and continue.
+
+        Other ``OperationalError`` codes (``database is locked``,
+        ``no such table``, etc.) still propagate — only the specific
+        no-transaction race is tolerated.
+
+        This is a workaround. The proper fix is per-thread connections;
+        see ``docs/sqlite-per-thread-connections-plan.md``.
+        """
+        try:
+            self._conn.commit()
+        except sqlite3.OperationalError as exc:
+            if "no transaction is active" not in str(exc):
+                raise
+            log.warning(
+                "Shared-Connection commit race tolerated during %s "
+                "(concurrent writer already committed) — see "
+                "docs/sqlite-per-thread-connections-plan.md", op,
+            )
+
     @property
     def connection(self) -> sqlite3.Connection:
         """Underlying SQLite connection. Same rationale as
@@ -95,7 +133,7 @@ class SQLiteJobRepository:
                 ") VALUES (?, ?, 'queued', ?, 0, 0, NULL, NULL, NULL, ?, NULL, NULL, ?)",
                 (job_id, job_type, params_json, created_at, user_id),
             )
-            self._conn.commit()
+            self._commit("create")
         log.info("Created job %s of type %s", job_id, job_type)
         job = self.get(job_id)
         assert job is not None  # row was just inserted
@@ -108,7 +146,7 @@ class SQLiteJobRepository:
                 "UPDATE jobs SET status = 'running', started_at = ? WHERE id = ?",
                 (started_at, job_id),
             )
-            self._conn.commit()
+            self._commit("mark_running")
         log.info("Job %s -> running", job_id)
 
     def update_progress(self, job_id: str, current: int, total: int) -> None:
@@ -117,7 +155,7 @@ class SQLiteJobRepository:
                 "UPDATE jobs SET progress_current = ?, progress_total = ? WHERE id = ?",
                 (current, total, job_id),
             )
-            self._conn.commit()
+            self._commit("update_progress")
 
     def update_status_detail(self, job_id: str, detail: str | None) -> None:
         with self._lock:
@@ -125,7 +163,7 @@ class SQLiteJobRepository:
                 "UPDATE jobs SET status_detail = ? WHERE id = ?",
                 (detail, job_id),
             )
-            self._conn.commit()
+            self._commit("update_status_detail")
 
     def mark_succeeded(self, job_id: str, result: dict[str, Any]) -> None:
         finished_at = _now_iso()
@@ -136,7 +174,7 @@ class SQLiteJobRepository:
                 "status_detail = NULL, finished_at = ? WHERE id = ?",
                 (result_json, finished_at, job_id),
             )
-            self._conn.commit()
+            self._commit("mark_succeeded")
         log.info("Job %s -> succeeded", job_id)
 
     def mark_failed(self, job_id: str, error_message: str) -> None:
@@ -147,7 +185,7 @@ class SQLiteJobRepository:
                 "status_detail = NULL, finished_at = ? WHERE id = ?",
                 (error_message, finished_at, job_id),
             )
-            self._conn.commit()
+            self._commit("mark_failed")
         log.warning("Job %s -> failed: %s", job_id, error_message)
 
     def get(self, job_id: str, user_id: int | None = None) -> Job | None:
@@ -224,7 +262,7 @@ class SQLiteJobRepository:
                 "AND json_extract(result_json, '$._notification_sent') IS NULL",
                 (parent_job_id,),
             )
-            self._conn.commit()
+            self._commit("try_acquire_notification_lock")
             return cursor.rowcount == 1
 
     def find_active_fitness_fetch_job(
@@ -290,7 +328,7 @@ class SQLiteJobRepository:
                 "WHERE status IN ('queued', 'running')",
                 (finished_at,),
             )
-            self._conn.commit()
+            self._commit("reconcile_stuck_jobs")
             count = cursor.rowcount
         if count:
             log.warning("Reconciled %d stuck job(s) to failed", count)

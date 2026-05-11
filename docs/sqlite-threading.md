@@ -8,6 +8,12 @@ patterns that prevent it. It applies to any code that shares a `sqlite3.Connecti
 The connection.py docstring referenced below also points at `docs/refactor-follow-ups.md` (now archived to
 `docs/archive/refactor-follow-ups.md`) for the item 1.1 reopen criteria.
 
+**Update 2026-05-11:** the same class of race surfaced again as
+`OperationalError: cannot commit - no transaction is active` (mood-scoring worker on
+prod). A narrow workaround landed in `SQLiteJobRepository._commit()` — see
+[`sqlite-per-thread-connections-plan.md`](./sqlite-per-thread-connections-plan.md) for the
+proper structural fix that retires the shared-connection model entirely.
+
 ## The bug
 
 `SQLiteJobRepository` methods were called from two threads simultaneously:
