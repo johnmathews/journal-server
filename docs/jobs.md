@@ -136,11 +136,13 @@ Response on success (**202 Accepted**):
 
 A single in-flight (`queued` or `running`) job per `(user_id, source)` is
 allowed; subsequent submits return the existing job id with `"already_running":
-true` instead of queueing a duplicate. **503** is returned when the source's
-credential vars (`STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET` for Strava,
-`GARMIN_USERNAME` / `GARMIN_PASSWORD` for Garmin) are unset — fail-loud at
-submit time per W8 decision #2 rather than queueing a row that's guaranteed to
-fail. The full route shape is documented in
+true` instead of queueing a duplicate. **503** is returned for Strava when
+`STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET` are unset — fail-loud at submit
+time rather than queueing a row that's guaranteed to fail. Garmin never 503s
+here post-multi-user-plan W6 (Garmin is always wired, with per-user
+credentials and no global env vars); a user without a `fitness_auth_state`
+row just produces a clean `auth_broken` sync run instead. The full route
+shape is documented in
 [`api.md` § Fitness endpoints](api.md#post-apifitnesssyncsource).
 
 ### `GET /api/jobs/{job_id}`
