@@ -11,7 +11,7 @@ from starlette.testclient import TestClient
 
 from journal.auth import AuthenticatedUser, _current_user_id
 from journal.config import Config
-from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
@@ -54,17 +54,21 @@ class _FakeAuthMiddleware:
 
 
 @pytest.fixture
-def api_db_conn(tmp_path: Path) -> Generator[sqlite3.Connection]:
+def api_factory(tmp_path: Path) -> ConnectionFactory:
     db_path = tmp_path / "test_api_ingest.db"
-    conn = get_connection(db_path, check_same_thread=False)
-    run_migrations(conn)
-    yield conn
-    conn.close()
+    f = ConnectionFactory(db_path)
+    run_migrations(f.get())
+    return f
 
 
 @pytest.fixture
-def repo(api_db_conn: sqlite3.Connection) -> SQLiteEntryRepository:
-    return SQLiteEntryRepository(api_db_conn)
+def api_db_conn(api_factory: ConnectionFactory) -> sqlite3.Connection:
+    return api_factory.get()
+
+
+@pytest.fixture
+def repo(api_factory: ConnectionFactory) -> SQLiteEntryRepository:
+    return SQLiteEntryRepository(api_factory)
 
 
 @pytest.fixture
@@ -88,7 +92,7 @@ def services(
     repo: SQLiteEntryRepository,
     mock_vector_store: MagicMock,
     mock_embeddings: MagicMock,
-    api_db_conn: sqlite3.Connection,
+    api_factory: ConnectionFactory,
 ) -> Generator[dict]:
     from journal.models import ExtractionResult
 
@@ -107,7 +111,7 @@ def services(
         embeddings_provider=mock_embeddings,
     )
     # Minimal job infrastructure for the image endpoint
-    job_repo = SQLiteJobRepository(api_db_conn)
+    job_repo = SQLiteJobRepository(api_factory)
     # Return a proper ExtractionResult so background jobs can JSON-serialize
     # their result dict. A bare MagicMock causes TypeError in json.dumps()
     # which triggers lock contention with subsequent job submissions.
@@ -523,7 +527,7 @@ class TestApiIngestWithFactory:
         repo: SQLiteEntryRepository,
         mock_vector_store: MagicMock,
         mock_embeddings: MagicMock,
-        api_db_conn: sqlite3.Connection,
+        api_factory: ConnectionFactory,
         factory_built_transcription: object,
     ) -> Generator[dict]:
         """Wire the IngestionService with the factory-built provider.
@@ -547,7 +551,7 @@ class TestApiIngestWithFactory:
             vector_store=mock_vector_store,
             embeddings_provider=mock_embeddings,
         )
-        job_repo = SQLiteJobRepository(api_db_conn)
+        job_repo = SQLiteJobRepository(api_factory)
         mock_extraction = MagicMock()
         mock_extraction.extract_from_entry = MagicMock(
             return_value=ExtractionResult(

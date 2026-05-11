@@ -5,14 +5,15 @@ import time
 
 import pytest
 
+from journal.db.factory import ConnectionFactory
 from journal.db.user_repository import SQLiteUserRepository
 from journal.models import ApiKeyInfo, User
 from journal.services.auth import AuthService
 
 
 @pytest.fixture
-def user_repo(db_conn: sqlite3.Connection) -> SQLiteUserRepository:
-    return SQLiteUserRepository(db_conn)
+def user_repo(factory: ConnectionFactory) -> SQLiteUserRepository:
+    return SQLiteUserRepository(factory)
 
 
 @pytest.fixture

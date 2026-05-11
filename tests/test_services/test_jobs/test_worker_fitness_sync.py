@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.fitness_repository import FitnessRepository
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
@@ -38,23 +38,21 @@ from journal.services.jobs.workers.fitness_sync_strava import (
 )
 
 if TYPE_CHECKING:
-    import sqlite3
-    from collections.abc import Callable, Generator, Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
 
 @pytest.fixture
-def jobs_conn(tmp_path: Path) -> Generator[sqlite3.Connection]:
+def jobs_factory(tmp_path: Path) -> ConnectionFactory:
     db_path = tmp_path / "jobs.db"
-    conn = get_connection(db_path, check_same_thread=False)
-    run_migrations(conn)
-    yield conn
-    conn.close()
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    return factory
 
 
 @pytest.fixture
-def jobs_repo(jobs_conn: sqlite3.Connection) -> SQLiteJobRepository:
-    return SQLiteJobRepository(jobs_conn)
+def jobs_repo(jobs_factory: ConnectionFactory) -> SQLiteJobRepository:
+    return SQLiteJobRepository(jobs_factory)
 
 
 def _make_ctx(
@@ -496,7 +494,7 @@ class _RecordingNotifier:
 
 
 def _seed_user_and_auth(
-    db_conn: sqlite3.Connection, *, source: str,
+    factory: ConnectionFactory, *, source: str,
 ) -> FitnessRepository:
     """Seed a user + an ``auth_status='ok'`` row for the given source.
 
@@ -504,14 +502,15 @@ def _seed_user_and_auth(
     state. Strava persists the OAuth triple; Garmin persists the token
     blob via ``extra_state``.
     """
-    db_conn.execute(
+    conn = factory.get()
+    conn.execute(
         """
         INSERT OR IGNORE INTO users (id, email, password_hash, display_name,
                                      email_verified, is_admin)
         VALUES (1, 'test@example.com', 'x', 'test', 1, 1)
         """,
     )
-    repo = FitnessRepository(db_conn)
+    repo = FitnessRepository(factory)
     if source == "strava":
         repo.upsert_auth_state(
             FitnessAuthState(
@@ -549,10 +548,10 @@ class TestWorkerFlipsAuthStatusOn401:
     def test_strava_worker_flips_auth_status_to_broken_on_provider_401(
         self,
         jobs_repo: SQLiteJobRepository,
-        db_conn: sqlite3.Connection,
+        factory: ConnectionFactory,
         config: Any,
     ) -> None:
-        repo = _seed_user_and_auth(db_conn, source="strava")
+        repo = _seed_user_and_auth(factory, source="strava")
         fake_provider = _FakeStravaProviderRaisingAuthError()
         notifier = _RecordingNotifier()
         svc = StravaFetchService(
@@ -585,10 +584,10 @@ class TestWorkerFlipsAuthStatusOn401:
     def test_garmin_worker_flips_auth_status_to_broken_on_provider_401(
         self,
         jobs_repo: SQLiteJobRepository,
-        db_conn: sqlite3.Connection,
+        factory: ConnectionFactory,
         config: Any,
     ) -> None:
-        repo = _seed_user_and_auth(db_conn, source="garmin")
+        repo = _seed_user_and_auth(factory, source="garmin")
         fake_provider = _FakeGarminProviderRaisingAuthError()
         notifier = _RecordingNotifier()
         svc = GarminFetchService(

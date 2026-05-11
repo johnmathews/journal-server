@@ -21,15 +21,17 @@ from journal.services.entity_extraction import (
 if TYPE_CHECKING:
     import sqlite3
 
-
-@pytest.fixture
-def repo(db_conn: sqlite3.Connection) -> SQLiteEntryRepository:
-    return SQLiteEntryRepository(db_conn)
+    from journal.db.factory import ConnectionFactory
 
 
 @pytest.fixture
-def entity_store(db_conn: sqlite3.Connection) -> SQLiteEntityStore:
-    return SQLiteEntityStore(db_conn)
+def repo(factory: ConnectionFactory) -> SQLiteEntryRepository:
+    return SQLiteEntryRepository(factory)
+
+
+@pytest.fixture
+def entity_store(factory: ConnectionFactory) -> SQLiteEntityStore:
+    return SQLiteEntityStore(factory)
 
 
 def _raw(
@@ -536,8 +538,8 @@ class TestMultiUserAuthorName:
     the global default, when resolving first-person pronouns."""
 
     @pytest.fixture
-    def user_repo(self, db_conn: sqlite3.Connection) -> SQLiteUserRepository:
-        return SQLiteUserRepository(db_conn)
+    def user_repo(self, factory: ConnectionFactory) -> SQLiteUserRepository:
+        return SQLiteUserRepository(factory)
 
     def test_extraction_uses_owner_display_name(
         self,

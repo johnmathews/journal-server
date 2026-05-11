@@ -15,9 +15,8 @@ from journal.models import Job
 
 
 @pytest.fixture
-def jobs_repo(db_conn):
-    """Legacy bare-Connection fixture, kept until W3 retires that path."""
-    return SQLiteJobRepository(db_conn)
+def jobs_repo(factory):
+    return SQLiteJobRepository(factory)
 
 
 @pytest.fixture

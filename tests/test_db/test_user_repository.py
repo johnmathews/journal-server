@@ -16,8 +16,8 @@ from journal.models import ApiKeyInfo, User
 
 
 @pytest.fixture
-def user_repo(db_conn: sqlite3.Connection) -> SQLiteUserRepository:
-    return SQLiteUserRepository(db_conn)
+def user_repo(factory: ConnectionFactory) -> SQLiteUserRepository:
+    return SQLiteUserRepository(factory)
 
 
 @pytest.fixture

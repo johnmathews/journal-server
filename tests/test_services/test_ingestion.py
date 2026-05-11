@@ -1,13 +1,13 @@
 """Tests for ingestion service."""
 
 import logging
-import sqlite3
 from unittest.mock import MagicMock, patch
 
 import httpx
 import openai
 import pytest
 
+from journal.db.factory import ConnectionFactory
 from journal.db.repository import SQLiteEntryRepository
 from journal.models import TranscriptionResult
 from journal.providers.ocr import OCRResult
@@ -53,13 +53,13 @@ def mock_embeddings():
 
 
 @pytest.fixture
-def repo(db_conn):
+def repo(factory):
     """Shared EntryRepository for tests that need to peek at repo state
     after an ingestion call (e.g. to assert chunks/spans/pages were
     written). Keeping this as its own fixture avoids the ``ingestion_service._repo``
     reach-in pattern that earlier tests used.
     """
-    return SQLiteEntryRepository(db_conn)
+    return SQLiteEntryRepository(factory)
 
 
 @pytest.fixture
@@ -692,8 +692,8 @@ class TestMetadataPrefix:
     """WU-E: chunks are embedded with a date prefix but stored as plain text."""
 
     @pytest.fixture
-    def service_with_prefix(self, db_conn, mock_ocr, mock_transcription, mock_embeddings):
-        repo = SQLiteEntryRepository(db_conn)
+    def service_with_prefix(self, factory, mock_ocr, mock_transcription, mock_embeddings):
+        repo = SQLiteEntryRepository(factory)
         vector_store = InMemoryVectorStore()
         return IngestionService(
             repository=repo,
@@ -707,8 +707,8 @@ class TestMetadataPrefix:
         )
 
     @pytest.fixture
-    def service_without_prefix(self, db_conn, mock_ocr, mock_transcription, mock_embeddings):
-        repo = SQLiteEntryRepository(db_conn)
+    def service_without_prefix(self, factory, mock_ocr, mock_transcription, mock_embeddings):
+        repo = SQLiteEntryRepository(factory)
         vector_store = InMemoryVectorStore()
         return IngestionService(
             repository=repo,
@@ -851,14 +851,14 @@ class TestPreprocessingIntegration:
     """Verify preprocessing is called/skipped based on the flag."""
 
     def test_preprocessing_called_when_enabled(
-        self, db_conn, mock_ocr, mock_transcription, mock_embeddings, monkeypatch,
+        self, factory, mock_ocr, mock_transcription, mock_embeddings, monkeypatch,
     ):
         from journal.services import preprocessing
 
         spy = MagicMock(return_value=(b"processed", "image/jpeg"))
         monkeypatch.setattr(preprocessing, "preprocess_image", spy)
 
-        repo = SQLiteEntryRepository(db_conn)
+        repo = SQLiteEntryRepository(factory)
         svc = IngestionService(
             repository=repo,
             vector_store=InMemoryVectorStore(),
@@ -874,14 +874,14 @@ class TestPreprocessingIntegration:
         mock_ocr.extract.assert_called_once_with(b"processed", "image/jpeg")
 
     def test_preprocessing_skipped_when_disabled(
-        self, db_conn, mock_ocr, mock_transcription, mock_embeddings, monkeypatch,
+        self, factory, mock_ocr, mock_transcription, mock_embeddings, monkeypatch,
     ):
         from journal.services import preprocessing
 
         spy = MagicMock()
         monkeypatch.setattr(preprocessing, "preprocess_image", spy)
 
-        repo = SQLiteEntryRepository(db_conn)
+        repo = SQLiteEntryRepository(factory)
         svc = IngestionService(
             repository=repo,
             vector_store=InMemoryVectorStore(),
@@ -897,7 +897,7 @@ class TestPreprocessingIntegration:
         mock_ocr.extract.assert_called_once_with(b"raw image", "image/jpeg")
 
     def test_multi_page_preprocessing_per_page(
-        self, db_conn, mock_ocr, mock_transcription, mock_embeddings, monkeypatch,
+        self, factory, mock_ocr, mock_transcription, mock_embeddings, monkeypatch,
     ):
         from journal.services import preprocessing
 
@@ -912,7 +912,7 @@ class TestPreprocessingIntegration:
             _ocr_result("Page two text."),
         ]
 
-        repo = SQLiteEntryRepository(db_conn)
+        repo = SQLiteEntryRepository(factory)
         svc = IngestionService(
             repository=repo,
             vector_store=InMemoryVectorStore(),
@@ -944,9 +944,9 @@ class TestTranscriptFormatting:
 
     @pytest.fixture
     def formatting_service(
-        self, db_conn, mock_ocr, mock_transcription, mock_embeddings, mock_formatter,
+        self, factory, mock_ocr, mock_transcription, mock_embeddings, mock_formatter,
     ):
-        repo = SQLiteEntryRepository(db_conn)
+        repo = SQLiteEntryRepository(factory)
         vector_store = InMemoryVectorStore()
         return IngestionService(
             repository=repo,
@@ -1044,9 +1044,9 @@ class TestHeadingDetection:
 
     @pytest.fixture
     def detection_service(
-        self, db_conn, mock_ocr, mock_transcription, mock_embeddings, mock_detector,
+        self, factory, mock_ocr, mock_transcription, mock_embeddings, mock_detector,
     ):
-        repo = SQLiteEntryRepository(db_conn)
+        repo = SQLiteEntryRepository(factory)
         vector_store = InMemoryVectorStore()
         return IngestionService(
             repository=repo,
@@ -1318,7 +1318,7 @@ class TestHeadingDetection:
         assert entry.entry_date == "2026-05-03"
 
     def test_detector_combines_with_formatter_on_body_only(
-        self, db_conn, mock_ocr, mock_transcription, mock_embeddings,
+        self, factory, mock_ocr, mock_transcription, mock_embeddings,
     ):
         """When BOTH detector and formatter are wired, formatter must only see the body."""
         from journal.services.heading_detector import HeadingDetectionResult
@@ -1333,7 +1333,7 @@ class TestHeadingDetection:
             ". ", ".\n\n"
         )
 
-        repo = SQLiteEntryRepository(db_conn)
+        repo = SQLiteEntryRepository(factory)
         service = IngestionService(
             repository=repo,
             vector_store=InMemoryVectorStore(),
@@ -1416,7 +1416,7 @@ class TestIngestionWithProviderStack:
 
     def _build_service(
         self,
-        db_conn: sqlite3.Connection,
+        factory: ConnectionFactory,
         transcription: TranscriptionProvider,
         mock_embeddings: MagicMock,
     ) -> IngestionService:
@@ -1426,7 +1426,7 @@ class TestIngestionWithProviderStack:
         of the test file's fixtures.
         """
         return IngestionService(
-            repository=SQLiteEntryRepository(db_conn),
+            repository=SQLiteEntryRepository(factory),
             vector_store=InMemoryVectorStore(),
             ocr_provider=MagicMock(),
             transcription_provider=transcription,
@@ -1440,7 +1440,7 @@ class TestIngestionWithProviderStack:
     # ------------------------------------------------------------------
     def test_ingest_voice_with_retrying_wrapper(
         self,
-        db_conn: sqlite3.Connection,
+        factory: ConnectionFactory,
         mock_embeddings: MagicMock,
         primary_provider: MagicMock,
     ) -> None:
@@ -1453,7 +1453,7 @@ class TestIngestionWithProviderStack:
         wrapper = RetryingTranscriptionProvider(
             primary=primary_provider, max_attempts=3,
         )
-        service = self._build_service(db_conn, wrapper, mock_embeddings)
+        service = self._build_service(factory, wrapper, mock_embeddings)
 
         with patch("journal.providers.transcription.time.sleep") as mock_sleep:
             entry = service.ingest_voice(
@@ -1474,7 +1474,7 @@ class TestIngestionWithProviderStack:
     # ------------------------------------------------------------------
     def test_ingest_voice_falls_back_to_whisper(
         self,
-        db_conn: sqlite3.Connection,
+        factory: ConnectionFactory,
         mock_embeddings: MagicMock,
         primary_provider: MagicMock,
         fallback_provider: MagicMock,
@@ -1488,7 +1488,7 @@ class TestIngestionWithProviderStack:
             fallback=fallback_provider,
             max_attempts=3,
         )
-        service = self._build_service(db_conn, wrapper, mock_embeddings)
+        service = self._build_service(factory, wrapper, mock_embeddings)
 
         with patch("journal.providers.transcription.time.sleep"):
             entry = service.ingest_voice(
@@ -1507,7 +1507,7 @@ class TestIngestionWithProviderStack:
     # ------------------------------------------------------------------
     def test_ingest_voice_with_shadow_returns_primary(
         self,
-        db_conn: sqlite3.Connection,
+        factory: ConnectionFactory,
         mock_embeddings: MagicMock,
         primary_provider: MagicMock,
         shadow_provider: MagicMock,
@@ -1521,7 +1521,7 @@ class TestIngestionWithProviderStack:
         wrapper = ShadowTranscriptionProvider(
             primary=primary_provider, shadow=shadow_provider,
         )
-        service = self._build_service(db_conn, wrapper, mock_embeddings)
+        service = self._build_service(factory, wrapper, mock_embeddings)
 
         entry = service.ingest_voice(
             audio_data=b"fake audio",
@@ -1541,7 +1541,7 @@ class TestIngestionWithProviderStack:
     # ------------------------------------------------------------------
     def test_ingest_voice_shadow_failure_does_not_break_ingestion(
         self,
-        db_conn: sqlite3.Connection,
+        factory: ConnectionFactory,
         mock_embeddings: MagicMock,
         primary_provider: MagicMock,
         shadow_provider: MagicMock,
@@ -1558,7 +1558,7 @@ class TestIngestionWithProviderStack:
             shadow=shadow_provider,
             shadow_label="gemini/gemini-2.5-pro",
         )
-        service = self._build_service(db_conn, wrapper, mock_embeddings)
+        service = self._build_service(factory, wrapper, mock_embeddings)
 
         with caplog.at_level(
             logging.WARNING, logger="journal.providers.transcription",
@@ -1582,7 +1582,7 @@ class TestIngestionWithProviderStack:
     # ------------------------------------------------------------------
     def test_ingest_voice_shadow_logs_diff(
         self,
-        db_conn: sqlite3.Connection,
+        factory: ConnectionFactory,
         mock_embeddings: MagicMock,
         primary_provider: MagicMock,
         shadow_provider: MagicMock,
@@ -1597,7 +1597,7 @@ class TestIngestionWithProviderStack:
         wrapper = ShadowTranscriptionProvider(
             primary=primary_provider, shadow=shadow_provider,
         )
-        service = self._build_service(db_conn, wrapper, mock_embeddings)
+        service = self._build_service(factory, wrapper, mock_embeddings)
 
         with caplog.at_level(
             logging.INFO, logger="journal.providers.transcription",
@@ -1629,7 +1629,7 @@ class TestIngestionWithProviderStack:
     # ------------------------------------------------------------------
     def test_ingest_voice_uncertain_spans_persist_through_stack(
         self,
-        db_conn: sqlite3.Connection,
+        factory: ConnectionFactory,
         mock_embeddings: MagicMock,
         primary_provider: MagicMock,
         shadow_provider: MagicMock,
@@ -1647,7 +1647,7 @@ class TestIngestionWithProviderStack:
         full_stack = ShadowTranscriptionProvider(
             primary=retry_wrapper, shadow=shadow_provider,
         )
-        service = self._build_service(db_conn, full_stack, mock_embeddings)
+        service = self._build_service(factory, full_stack, mock_embeddings)
 
         with patch("journal.providers.transcription.time.sleep"):
             entry = service.ingest_voice(

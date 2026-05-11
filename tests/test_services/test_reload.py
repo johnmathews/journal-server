@@ -347,17 +347,17 @@ class TestReloadEntityCasingExceptions:
         self, casing_path: Path, db_path: Path
     ) -> dict[str, Any]:
         """Construct an isolated services dict with a real SQLite-backed store."""
-        from journal.db.connection import get_connection
+        from journal.db.factory import ConnectionFactory
         from journal.db.migrations import run_migrations
         from journal.entitystore.store import SQLiteEntityStore
         from journal.services.entity_naming import (
             load_entity_casing_exceptions,
         )
 
-        conn = get_connection(db_path)
-        run_migrations(conn)
+        factory = ConnectionFactory(db_path)
+        run_migrations(factory.get())
         exceptions = load_entity_casing_exceptions(casing_path)
-        store = SQLiteEntityStore(conn, casing_exceptions=exceptions)
+        store = SQLiteEntityStore(factory, casing_exceptions=exceptions)
         return {
             "entity_store": store,
             "entity_casing_exceptions": exceptions,

@@ -14,8 +14,8 @@ from journal.entitystore.store import SQLiteEntityStore
 
 
 @pytest.fixture
-def store(db_conn: sqlite3.Connection) -> SQLiteEntityStore:
-    return SQLiteEntityStore(db_conn)
+def store(factory: ConnectionFactory) -> SQLiteEntityStore:
+    return SQLiteEntityStore(factory)
 
 
 @pytest.fixture
@@ -37,11 +37,11 @@ def repo_via_factory(entity_factory: ConnectionFactory) -> SQLiteEntryRepository
 
 
 @pytest.fixture
-def store_with_exceptions(db_conn: sqlite3.Connection) -> SQLiteEntityStore:
+def store_with_exceptions(factory: ConnectionFactory) -> SQLiteEntityStore:
     """Store with a small casing-exceptions table loaded, for testing that
     smart_title_case + exceptions runs on both create and update."""
     return SQLiteEntityStore(
-        db_conn,
+        factory,
         casing_exceptions={
             "github": "GitHub",
             "ios": "iOS",
@@ -51,8 +51,8 @@ def store_with_exceptions(db_conn: sqlite3.Connection) -> SQLiteEntityStore:
 
 
 @pytest.fixture
-def repo(db_conn: sqlite3.Connection) -> SQLiteEntryRepository:
-    return SQLiteEntryRepository(db_conn)
+def repo(factory: ConnectionFactory) -> SQLiteEntryRepository:
+    return SQLiteEntryRepository(factory)
 
 
 @pytest.fixture
@@ -916,23 +916,23 @@ class TestSmartTitleCaseAtWriteTime:
         e = store.create_entity("activity", "running", "", "2026-01-01")
         assert e.canonical_name == "Running"
 
-    def test_midword_uppercase_preserved(self, db_conn) -> None:
+    def test_midword_uppercase_preserved(self, factory) -> None:
         # Even without exceptions, mixed-case input must pass through.
-        store = SQLiteEntityStore(db_conn)
+        store = SQLiteEntityStore(factory)
         e = store.create_entity("topic", "iOS", "", "2026-01-01")
         assert e.canonical_name == "iOS"
 
-    def test_exception_table_is_applied(self, db_conn) -> None:
+    def test_exception_table_is_applied(self, factory) -> None:
         store = SQLiteEntityStore(
-            db_conn, casing_exceptions={"ios": "iOS", "nasa": "NASA"}
+            factory, casing_exceptions={"ios": "iOS", "nasa": "NASA"}
         )
         e1 = store.create_entity("topic", "ios", "", "2026-01-01")
         e2 = store.create_entity("topic", "nasa", "", "2026-01-01")
         assert e1.canonical_name == "iOS"
         assert e2.canonical_name == "NASA"
 
-    def test_set_casing_exceptions_swaps_table(self, db_conn) -> None:
-        store = SQLiteEntityStore(db_conn)
+    def test_set_casing_exceptions_swaps_table(self, factory) -> None:
+        store = SQLiteEntityStore(factory)
         # First write — no exceptions, plain title case.
         e1 = store.create_entity("organization", "ikea", "", "2026-01-01")
         assert e1.canonical_name == "Ikea"

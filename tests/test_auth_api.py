@@ -10,7 +10,7 @@ from starlette.testclient import TestClient
 
 from journal.auth import build_auth_middleware_stack
 from journal.config import Config
-from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.migrations import run_migrations
 from journal.db.user_repository import SQLiteUserRepository
 from journal.services.auth import AuthService
@@ -26,22 +26,27 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
-def auth_db_conn(tmp_path: Path) -> Generator[sqlite3.Connection]:
-    """Migrated SQLite connection for auth API tests.
+def auth_factory(tmp_path: Path) -> ConnectionFactory:
+    """``ConnectionFactory`` for auth API tests.
 
-    Uses ``check_same_thread=False`` because the Starlette TestClient
-    runs the ASGI app in a separate thread.
+    The Starlette TestClient runs the ASGI app on a worker thread;
+    each request opens its own connection via the factory.
     """
     db_path = tmp_path / "test_auth_api.db"
-    conn = get_connection(db_path, check_same_thread=False)
-    run_migrations(conn)
-    yield conn
-    conn.close()
+    f = ConnectionFactory(db_path)
+    run_migrations(f.get())
+    return f
 
 
 @pytest.fixture
-def user_repo(auth_db_conn: sqlite3.Connection) -> SQLiteUserRepository:
-    return SQLiteUserRepository(auth_db_conn)
+def auth_db_conn(auth_factory: ConnectionFactory) -> sqlite3.Connection:
+    """Calling-thread connection — for raw SQL only."""
+    return auth_factory.get()
+
+
+@pytest.fixture
+def user_repo(auth_factory: ConnectionFactory) -> SQLiteUserRepository:
+    return SQLiteUserRepository(auth_factory)
 
 
 @pytest.fixture

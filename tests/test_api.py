@@ -10,6 +10,7 @@ from starlette.testclient import TestClient
 
 from journal.auth import AuthenticatedUser, _current_user_id
 from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.fitness_repository import FitnessRepository
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
@@ -47,23 +48,23 @@ class _FakeAuthMiddleware:
 
 
 @pytest.fixture
-def api_db_conn(tmp_path: Path) -> Generator[sqlite3.Connection]:
-    """Provide a migrated SQLite connection that works across threads.
-
-    The Starlette TestClient runs the ASGI app in a separate thread,
-    so we need check_same_thread=False. Uses get_connection() to
-    mirror production PRAGMAs (especially busy_timeout).
-    """
+def api_factory(tmp_path: Path) -> ConnectionFactory:
+    """``ConnectionFactory`` for API tests (TestClient runs handlers on threads)."""
     db_path = tmp_path / "test_api.db"
-    conn = get_connection(db_path, check_same_thread=False)
-    run_migrations(conn)
-    yield conn
-    conn.close()
+    f = ConnectionFactory(db_path)
+    run_migrations(f.get())
+    return f
 
 
 @pytest.fixture
-def repo(api_db_conn: sqlite3.Connection) -> SQLiteEntryRepository:
-    return SQLiteEntryRepository(api_db_conn)
+def api_db_conn(api_factory: ConnectionFactory) -> sqlite3.Connection:
+    """Calling-thread connection from the API factory, for tests that read raw SQL."""
+    return api_factory.get()
+
+
+@pytest.fixture
+def repo(api_factory: ConnectionFactory) -> SQLiteEntryRepository:
+    return SQLiteEntryRepository(api_factory)
 
 
 @pytest.fixture
@@ -84,6 +85,7 @@ def mock_embeddings() -> MagicMock:
 
 @pytest.fixture
 def services(
+    api_factory: ConnectionFactory,
     repo: SQLiteEntryRepository,
     mock_vector_store: MagicMock,
     mock_embeddings: MagicMock,
@@ -106,15 +108,20 @@ def services(
         vector_store=mock_vector_store,
         embeddings_provider=mock_embeddings,
     )
-    entity_store = SQLiteEntityStore(repo.connection)
-    job_repository = SQLiteJobRepository(repo.connection)
+    entity_store = SQLiteEntityStore(api_factory)
+    job_repository = SQLiteJobRepository(api_factory)
 
     from journal.config import Config
     from journal.services.runtime_settings import RuntimeSettings
 
     config = Config()
-    runtime = RuntimeSettings(repo.connection, config)
+    runtime = RuntimeSettings(api_factory, config)
 
+    # Legacy slot — read by api/settings.py and api/fitness.py until C2
+    # migrates those readers to ``db_factory``. The route runs on a
+    # TestClient worker thread, so this connection has to be openable
+    # cross-thread; it points at the same DB the factory uses.
+    legacy_conn = get_connection(api_factory.db_path, check_same_thread=False)
     return {
         "ingestion": ingestion,
         "query": query,
@@ -122,7 +129,8 @@ def services(
         "job_repository": job_repository,
         "config": config,
         "runtime_settings": runtime,
-        "db_conn": repo.connection,
+        "db_factory": api_factory,
+        "db_conn": legacy_conn,
     }
 
 
@@ -1542,6 +1550,7 @@ class TestApiHealthFitness:
     @pytest.fixture
     def fitness_health_client(
         self,
+        api_factory: ConnectionFactory,
         api_db_conn: sqlite3.Connection,
         repo: SQLiteEntryRepository,
         mock_embeddings: MagicMock,
@@ -1577,7 +1586,7 @@ class TestApiHealthFitness:
             embeddings_provider=mock_embeddings, stats=stats,
         )
         config = Config(anthropic_api_key="a" * 40, openai_api_key="o" * 40)
-        fitness_repo = FitnessRepository(api_db_conn)
+        fitness_repo = FitnessRepository(api_factory)
         services = {
             "ingestion": ingestion,
             "query": query,
@@ -1719,6 +1728,7 @@ class TestApiHealthFitness:
 
     def test_api_health_custom_threshold_via_config(
         self,
+        api_factory: ConnectionFactory,
         api_db_conn: sqlite3.Connection,
         repo: SQLiteEntryRepository,
         mock_embeddings: MagicMock,
@@ -1762,7 +1772,7 @@ class TestApiHealthFitness:
             anthropic_api_key="a" * 40, openai_api_key="o" * 40,
             fitness_health_broken_degraded_hours=1,
         )
-        fitness_repo = FitnessRepository(api_db_conn)
+        fitness_repo = FitnessRepository(api_factory)
         recent = (datetime.now(UTC) - timedelta(hours=2)).strftime(
             "%Y-%m-%dT%H:%M:%SZ",
         )

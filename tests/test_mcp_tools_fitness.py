@@ -34,6 +34,7 @@ import pytest
 
 from journal.auth import _current_user_id
 from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.fitness_repository import FitnessRepository
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
@@ -57,21 +58,28 @@ def _set_test_user() -> Generator[None]:
 
 
 @pytest.fixture
-def db(tmp_path: Path) -> Generator[sqlite3.Connection]:
-    conn = get_connection(tmp_path / "fitness-mcp.db", check_same_thread=False)
-    run_migrations(conn)
+def fitness_factory(tmp_path: Path) -> ConnectionFactory:
+    f = ConnectionFactory(tmp_path / "fitness-mcp.db")
+    run_migrations(f.get())
+    return f
+
+
+@pytest.fixture
+def db(fitness_factory: ConnectionFactory) -> Generator[sqlite3.Connection]:
+    """Cross-thread connection for the legacy ``"db_conn"`` MCP-context slot."""
+    conn = get_connection(fitness_factory.db_path, check_same_thread=False)
     yield conn
     conn.close()
 
 
 @pytest.fixture
-def fitness_repo(db: sqlite3.Connection) -> FitnessRepository:
-    return FitnessRepository(db)
+def fitness_repo(fitness_factory: ConnectionFactory) -> FitnessRepository:
+    return FitnessRepository(fitness_factory)
 
 
 @pytest.fixture
-def jobs_repository(db: sqlite3.Connection) -> SQLiteJobRepository:
-    return SQLiteJobRepository(db)
+def jobs_repository(fitness_factory: ConnectionFactory) -> SQLiteJobRepository:
+    return SQLiteJobRepository(fitness_factory)
 
 
 @pytest.fixture

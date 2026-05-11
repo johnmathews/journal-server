@@ -22,8 +22,8 @@ def _set_test_user():
 
 
 @pytest.fixture
-def repo(db_conn):
-    return SQLiteEntryRepository(db_conn)
+def repo(factory):
+    return SQLiteEntryRepository(factory)
 
 
 @pytest.fixture
@@ -197,7 +197,7 @@ class TestBatchJobTools:
 
     @pytest.fixture
     def job_context(self, tmp_path):
-        from journal.db.connection import get_connection
+        from journal.db.factory import ConnectionFactory
         from journal.db.jobs_repository import SQLiteJobRepository
         from journal.db.migrations import run_migrations
         from journal.models import ExtractionResult
@@ -209,9 +209,9 @@ class TestBatchJobTools:
         )
 
         db_path = tmp_path / "mcp-jobs.db"
-        conn = get_connection(db_path, check_same_thread=False)
-        run_migrations(conn)
-        repo = SQLiteJobRepository(conn)
+        factory = ConnectionFactory(db_path)
+        run_migrations(factory.get())
+        repo = SQLiteJobRepository(factory)
 
         extraction_result = ExtractionResult(
             entry_id=1,
@@ -250,7 +250,7 @@ class TestBatchJobTools:
         yield ctx, repo, runner, extraction, mood
 
         runner.shutdown(wait=True)
-        conn.close()
+        factory.close_current()
 
     def test_extract_entities_batch_happy_path(self, job_context):
         from journal.mcp_server import journal_extract_entities_batch
@@ -354,7 +354,7 @@ class TestIngestTextTool:
     """Integration tests for the journal_ingest_text MCP tool."""
 
     @pytest.fixture
-    def ingest_ctx(self, db_conn):
+    def ingest_ctx(self, factory):
         from journal.db.repository import SQLiteEntryRepository
         from journal.services.chunking import FixedTokenChunker
         from journal.services.ingestion import IngestionService
@@ -364,7 +364,7 @@ class TestIngestTextTool:
         mock_emb.embed_texts.return_value = [[0.1, 0.2, 0.3]]
 
         service = IngestionService(
-            repository=SQLiteEntryRepository(db_conn),
+            repository=SQLiteEntryRepository(factory),
             vector_store=InMemoryVectorStore(),
             ocr_provider=MagicMock(),
             transcription_provider=MagicMock(),

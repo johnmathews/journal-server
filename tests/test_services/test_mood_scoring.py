@@ -33,8 +33,8 @@ def dims() -> tuple[MoodDimension, ...]:
 
 
 @pytest.fixture
-def repo(db_conn) -> SQLiteEntryRepository:
-    return SQLiteEntryRepository(db_conn)
+def repo(factory) -> SQLiteEntryRepository:
+    return SQLiteEntryRepository(factory)
 
 
 class TestScoreEntry:

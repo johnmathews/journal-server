@@ -58,8 +58,8 @@ def mock_embeddings():
 
 
 @pytest.fixture
-def ingestion_service(db_conn, mock_ocr, mock_transcription, mock_embeddings):
-    repo = SQLiteEntryRepository(db_conn)
+def ingestion_service(factory, mock_ocr, mock_transcription, mock_embeddings):
+    repo = SQLiteEntryRepository(factory)
     vector_store = InMemoryVectorStore()
     return IngestionService(
         repository=repo,
@@ -74,9 +74,9 @@ def ingestion_service(db_conn, mock_ocr, mock_transcription, mock_embeddings):
 
 @pytest.fixture
 def ingestion_service_with_slack(
-    db_conn, mock_ocr, mock_transcription, mock_embeddings,
+    factory, mock_ocr, mock_transcription, mock_embeddings,
 ):
-    repo = SQLiteEntryRepository(db_conn)
+    repo = SQLiteEntryRepository(factory)
     vector_store = InMemoryVectorStore()
     return IngestionService(
         repository=repo,

@@ -30,6 +30,7 @@ from stravalib.exc import AccessUnauthorized
 
 from journal.auth import AuthenticatedUser, _current_user_id
 from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.fitness_repository import FitnessRepository
 from journal.db.migrations import run_migrations
 from journal.models import FitnessAuthState
@@ -118,17 +119,23 @@ class _UserAuthMiddleware:
 
 
 @pytest.fixture
-def fitness_db(tmp_path: Path) -> Generator[sqlite3.Connection]:
+def fitness_factory(tmp_path: Path) -> ConnectionFactory:
     db_path = tmp_path / "strava-auth.db"
-    conn = get_connection(db_path, check_same_thread=False)
-    run_migrations(conn)
+    f = ConnectionFactory(db_path)
+    run_migrations(f.get())
+    return f
+
+
+@pytest.fixture
+def fitness_db(fitness_factory: ConnectionFactory) -> Generator[sqlite3.Connection]:
+    conn = get_connection(fitness_factory.db_path, check_same_thread=False)
     yield conn
     conn.close()
 
 
 @pytest.fixture
-def fitness_repo(fitness_db: sqlite3.Connection) -> FitnessRepository:
-    return FitnessRepository(fitness_db)
+def fitness_repo(fitness_factory: ConnectionFactory) -> FitnessRepository:
+    return FitnessRepository(fitness_factory)
 
 
 @pytest.fixture

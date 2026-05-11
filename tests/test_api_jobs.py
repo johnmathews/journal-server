@@ -17,7 +17,6 @@ flush the executor before asserting terminal state — the brief's
 "never assert immediately after submit" discipline.
 """
 
-import sqlite3
 import time
 from collections.abc import Callable, Generator
 from pathlib import Path
@@ -27,7 +26,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from journal.auth import AuthenticatedUser, _current_user_id
-from journal.db.connection import get_connection
+from journal.db.factory import ConnectionFactory
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
 from journal.models import ExtractionResult
@@ -141,22 +140,18 @@ class FakeMoodBackfill:
 
 
 @pytest.fixture
-def api_jobs_db(tmp_path: Path) -> Generator[sqlite3.Connection]:
+def api_jobs_factory(tmp_path: Path) -> ConnectionFactory:
     db_path = tmp_path / "jobs-api.db"
-    # The Starlette TestClient runs in a worker thread; the JobRunner
-    # runs in its own worker thread. Both must share this connection,
-    # so `check_same_thread=False` matches production wiring.
-    conn = get_connection(db_path, check_same_thread=False)
-    run_migrations(conn)
-    yield conn
-    conn.close()
+    f = ConnectionFactory(db_path)
+    run_migrations(f.get())
+    return f
 
 
 @pytest.fixture
 def jobs_repository(
-    api_jobs_db: sqlite3.Connection,
+    api_jobs_factory: ConnectionFactory,
 ) -> SQLiteJobRepository:
-    return SQLiteJobRepository(api_jobs_db)
+    return SQLiteJobRepository(api_jobs_factory)
 
 
 @pytest.fixture
