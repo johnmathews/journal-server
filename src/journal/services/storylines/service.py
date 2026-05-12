@@ -328,8 +328,11 @@ def _build_curation_segments(
         return segments
 
     segments.append(text_segment(_first_excerpt_lede(excerpts[0])))
+    first_date = str(excerpts[0].entry_date)
     for quote in excerpts[0].quotes or [excerpts[0].final_text[:240]]:
-        segments.append(citation_segment(excerpts[0].entry_id, quote))
+        segments.append(
+            citation_segment(excerpts[0].entry_id, quote, entry_date=first_date)
+        )
 
     for idx, excerpt in enumerate(excerpts[1:]):
         transition = (
@@ -338,8 +341,11 @@ def _build_curation_segments(
             else "Some time later:"
         )
         segments.append(text_segment(transition))
+        ex_date = str(excerpt.entry_date)
         for quote in excerpt.quotes or [excerpt.final_text[:240]]:
-            segments.append(citation_segment(excerpt.entry_id, quote))
+            segments.append(
+                citation_segment(excerpt.entry_id, quote, entry_date=ex_date)
+            )
     return segments
 
 

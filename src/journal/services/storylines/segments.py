@@ -27,16 +27,26 @@ def text_segment(text: str) -> dict[str, Any]:
     return {"kind": SEGMENT_KIND_TEXT, "text": text}
 
 
-def citation_segment(entry_id: int, quote: str) -> dict[str, Any]:
+def citation_segment(
+    entry_id: int, quote: str, entry_date: str | None = None
+) -> dict[str, Any]:
     """Build a citation segment. ``entry_id`` is the integer id of the
     source journal entry; the webapp renders this as a router link to
     ``/entries/{entry_id}``. ``quote`` is the verbatim excerpt from
-    that entry that the citation refers to."""
-    return {
+    that entry that the citation refers to. ``entry_date`` is the
+    ISO ``YYYY-MM-DD`` date of the cited entry — when present the
+    webapp uses it for the absolute-date toggle on the curation
+    panel and for the date eyebrows in the narrative panel. Optional
+    so historical panels stored before the field existed still
+    deserialise."""
+    seg: dict[str, Any] = {
         "kind": SEGMENT_KIND_CITATION,
         "entry_id": int(entry_id),
         "quote": quote,
     }
+    if entry_date is not None:
+        seg["entry_date"] = str(entry_date)
+    return seg
 
 
 def collect_source_entry_ids(segments: list[dict[str, Any]]) -> list[int]:
@@ -76,8 +86,11 @@ def is_valid_segment(value: Any) -> bool:
     if kind == SEGMENT_KIND_TEXT:
         return isinstance(value.get("text"), str)
     if kind == SEGMENT_KIND_CITATION:
-        return (
+        if not (
             isinstance(value.get("entry_id"), int)
             and isinstance(value.get("quote"), str)
-        )
+        ):
+            return False
+        entry_date = value.get("entry_date")
+        return entry_date is None or isinstance(entry_date, str)
     return False

@@ -158,6 +158,13 @@ class AnthropicStorylineNarrator:
         document_to_entry: dict[int, int] = {
             i: ex.entry_id for i, ex in enumerate(excerpts)
         }
+        # Parallel map so each emitted citation segment carries the
+        # source entry's ISO date — the webapp uses this for the
+        # absolute-date toggle on curation and date eyebrows on
+        # narrative paragraphs.
+        document_to_date: dict[int, str] = {
+            i: str(ex.entry_date) for i, ex in enumerate(excerpts)
+        }
         user_query = _build_user_query(
             storyline_name=storyline_name,
             storyline_description=storyline_description,
@@ -189,7 +196,9 @@ class AnthropicStorylineNarrator:
             log.exception("Storyline narrator API call failed")
             return NarrativeResult(model_used=self._model)
 
-        segments = _parse_narrative_response(response, document_to_entry)
+        segments = _parse_narrative_response(
+            response, document_to_entry, document_to_date
+        )
         source_entry_ids: list[int] = []
         seen: set[int] = set()
         citation_count = 0
@@ -265,6 +274,7 @@ def _build_user_query(
 def _parse_narrative_response(
     response: Any,  # noqa: ANN401
     document_to_entry: dict[int, int],
+    document_to_date: dict[int, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Walk the Anthropic response content, emitting text + citation segments.
 
@@ -318,7 +328,14 @@ def _parse_narrative_response(
                     doc_idx, sorted(document_to_entry.keys()),
                 )
                 continue
-            segments.append(citation_segment(entry_id, cited_text))
+            entry_date = (
+                document_to_date.get(doc_idx)
+                if document_to_date is not None
+                else None
+            )
+            segments.append(
+                citation_segment(entry_id, cited_text, entry_date=entry_date)
+            )
     return segments
 
 
