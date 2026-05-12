@@ -1,8 +1,10 @@
 """Tests for the storyline generation layer (W4).
 
 * Narrator response parser: turns Anthropic's content+citations blocks
-  into our `Segment` shape, using the block-index map to recover
-  entry IDs.
+  into our `Segment` shape, using the per-request document index to
+  recover entry IDs. (Each entry is its own ``source="text"`` document,
+  so ``document_index`` maps to entry_id; ``cited_text`` is a short
+  sentence-level excerpt rather than the whole wrapped entry.)
 * Glue response parser: tolerant JSON-array decoder + deterministic
   fallback when the LLM call fails or the response is malformed.
 * `StorylineGenerationService` end-to-end with fakes injected for
@@ -82,7 +84,7 @@ class TestNarratorParser:
         response = _FakeResponse(content=[
             {"type": "text", "text": "Atlas is the author's son.", "citations": []},
         ])
-        segments = _parse_narrative_response(response, block_to_entry={})
+        segments = _parse_narrative_response(response, document_to_entry={})
         assert segments == [{"kind": "text", "text": "Atlas is the author's son."}]
 
     def test_text_block_with_citations_emits_text_then_citations(self) -> None:
@@ -92,23 +94,25 @@ class TestNarratorParser:
                 "text": "Atlas ran with his father.",
                 "citations": [
                     {
-                        "type": "content_block_location",
+                        "type": "char_location",
                         "cited_text": "Atlas ran with me",
-                        "start_block_index": 0,
-                        "end_block_index": 1,
+                        "document_index": 0,
+                        "document_title": "Entry 42 (2026-02-15)",
+                        "start_char_index": 0,
+                        "end_char_index": 17,
                     }
                 ],
             }
         ])
         segments = _parse_narrative_response(
-            response, block_to_entry={0: 42, 1: 43},
+            response, document_to_entry={0: 42, 1: 43},
         )
         assert segments == [
             {"kind": "text", "text": "Atlas ran with his father."},
             {"kind": "citation", "entry_id": 42, "quote": "Atlas ran with me"},
         ]
 
-    def test_unknown_block_index_is_skipped_with_warning(
+    def test_unknown_document_index_is_skipped_with_warning(
         self, caplog: pytest.LogCaptureFixture,
     ) -> None:
         response = _FakeResponse(content=[
@@ -117,27 +121,28 @@ class TestNarratorParser:
                 "text": "Some claim.",
                 "citations": [
                     {
-                        "type": "content_block_location",
+                        "type": "char_location",
                         "cited_text": "stuff",
-                        "start_block_index": 99,
-                        "end_block_index": 100,
+                        "document_index": 99,
+                        "start_char_index": 0,
+                        "end_char_index": 5,
                     }
                 ],
             }
         ])
         with caplog.at_level("WARNING"):
-            segments = _parse_narrative_response(response, block_to_entry={0: 1})
+            segments = _parse_narrative_response(response, document_to_entry={0: 1})
         # Text still rendered, citation dropped
         kinds = [s["kind"] for s in segments]
         assert kinds == ["text"]
-        assert any("not in block_to_entry" in m for m in caplog.messages)
+        assert any("not in document_to_entry" in m for m in caplog.messages)
 
     def test_non_text_blocks_are_ignored(self) -> None:
         response = _FakeResponse(content=[
             {"type": "tool_use", "name": "foo"},  # not text — ignore
             {"type": "text", "text": "ok", "citations": []},
         ])
-        segments = _parse_narrative_response(response, block_to_entry={})
+        segments = _parse_narrative_response(response, document_to_entry={})
         assert segments == [{"kind": "text", "text": "ok"}]
 
     def test_empty_excerpts_short_circuits(self) -> None:
@@ -151,7 +156,7 @@ class TestNarratorParser:
         assert result.citation_count == 0
 
     def test_end_to_end_round_trip(self) -> None:
-        # Two excerpts → two document blocks → response cites both
+        # Two excerpts → two source="text" documents → response cites both
         excerpts = [
             DatedEntryExcerpt(
                 entry_id=42, entry_date="2026-02-15",
@@ -168,18 +173,24 @@ class TestNarratorParser:
                 "type": "text",
                 "text": "Atlas ran at school",
                 "citations": [{
-                    "type": "content_block_location",
-                    "cited_text": "Atlas ran at school today",
-                    "start_block_index": 0, "end_block_index": 1,
+                    "type": "char_location",
+                    "cited_text": "Atlas ran at school today.",
+                    "document_index": 0,
+                    "document_title": "Entry 42 (2026-02-15)",
+                    "start_char_index": 0,
+                    "end_char_index": 26,
                 }],
             },
             {
                 "type": "text",
                 "text": " and read his first chapter book.",
                 "citations": [{
-                    "type": "content_block_location",
-                    "cited_text": "Atlas read his first chapter book",
-                    "start_block_index": 1, "end_block_index": 2,
+                    "type": "char_location",
+                    "cited_text": "Atlas read his first chapter book.",
+                    "document_index": 1,
+                    "document_title": "Entry 43 (2026-02-22)",
+                    "start_char_index": 0,
+                    "end_char_index": 34,
                 }],
             },
         ])
@@ -198,15 +209,40 @@ class TestNarratorParser:
         assert result.source_entry_ids == [42, 43]
         assert result.citation_count == 2
         assert result.model_used == "claude-opus-4-7"
-        # Request shape: cache_control on system + on document
+        # Citation quotes are the short cited_text from the API, not bloated.
+        citations = [s for s in result.segments if s["kind"] == "citation"]
+        assert citations[0]["quote"] == "Atlas ran at school today."
+        assert citations[1]["quote"] == "Atlas read his first chapter book."
+        for citation in citations:
+            assert len(citation["quote"]) < 200  # sentence-length, not entry-length
+        # Request shape: cache_control on system; N source="text" documents;
+        # cache_control on the LAST document only (caches the whole corpus
+        # up to and including the newest entry — single breakpoint).
         assert client.last_kwargs is not None
         system_block = client.last_kwargs["system"][0]
         assert system_block["cache_control"] == {"type": "ephemeral"}
-        document_block = client.last_kwargs["messages"][0]["content"][0]
-        assert document_block["type"] == "document"
-        assert document_block["citations"] == {"enabled": True}
-        assert document_block["cache_control"] == {"type": "ephemeral"}
-        assert len(document_block["source"]["content"]) == 2
+        content_blocks = client.last_kwargs["messages"][0]["content"]
+        # Two documents + the user_query text block
+        document_blocks = [b for b in content_blocks if b.get("type") == "document"]
+        assert len(document_blocks) == 2
+        # All documents are source="text" with citations enabled
+        for doc in document_blocks:
+            assert doc["type"] == "document"
+            assert doc["source"]["type"] == "text"
+            assert doc["source"]["media_type"] == "text/plain"
+            assert doc["citations"] == {"enabled": True}
+        # Per-entry payload: source.data is the entry's final_text; title
+        # carries entry_id/date so the model can reason about which entry
+        # it's reading without that metadata showing up inside cited_text.
+        assert document_blocks[0]["source"]["data"] == "Atlas ran at school today."
+        assert document_blocks[0]["title"] == "Entry 42 (2026-02-15)"
+        assert document_blocks[1]["source"]["data"] == (
+            "Atlas read his first chapter book."
+        )
+        assert document_blocks[1]["title"] == "Entry 43 (2026-02-22)"
+        # Cache breakpoint: only the LAST document gets cache_control.
+        assert "cache_control" not in document_blocks[0]
+        assert document_blocks[-1]["cache_control"] == {"type": "ephemeral"}
 
     def test_api_failure_returns_empty_result(
         self, caplog: pytest.LogCaptureFixture,
@@ -510,11 +546,11 @@ class TestGenerationService:
         seeded_storyline: tuple[Any, Any, int, int, int],
     ) -> None:
         """Regression for production bug: embedder was passed prose
-        plus every citation's `quote`. For Citations API responses
-        whose source is content blocks, `quote` is the whole wrapped
-        entry, so the join exceeded 8192 tokens and OpenAI returned
-        400. After the fix, only text segments contribute and the
-        result is character-capped.
+        plus every citation's `quote`. With source="content" documents,
+        `quote` was the whole wrapped entry; the narrator now uses
+        source="text" so quotes are sentence-length — but text-only-
+        plus-cap remains defence-in-depth against a future provider
+        change or a corpus where a single sentence is unusually long.
         """
         repo, store, _user, _entity, storyline_id = seeded_storyline
         huge_quote = "X" * 60_000  # would blow the 8192-token limit

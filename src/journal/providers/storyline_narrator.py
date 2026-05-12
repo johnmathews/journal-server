@@ -10,14 +10,19 @@ Citations API response.
 The provider does three things differently from `formatter.py` /
 `mood_scorer.py`:
 
-1. **Citations API.** Each entry becomes a content block inside a
-   single custom-content document. The block index in the response
-   maps directly back to the entry id (we keep the mapping in the
-   order we pass the blocks). Pointers are *parsed*, not generated,
-   so the model cannot fabricate an entry id that wasn't supplied.
-2. **Three-breakpoint prompt caching.** 1h TTL on the system framing,
-   5m TTL on the stable entry corpus, 5m TTL on the most recent
-   entry — the "growing prompt" pattern from the Anthropic docs.
+1. **Citations API with one ``source="text"`` document per entry.**
+   Each entry's ``final_text`` becomes its own plain-text document;
+   the entry id and date ride along in the document's ``title``
+   field (which is passed to the model but is not citable, per the
+   Citations docs). The Anthropic API auto-chunks the document at
+   sentence boundaries and returns short ``cited_text`` excerpts
+   alongside the per-request ``document_index``. The index maps
+   back to ``entry_id`` via the order in which we pass documents.
+   Pointers are *parsed*, not generated, so the model cannot
+   fabricate an entry id that wasn't supplied.
+2. **Two-breakpoint prompt caching.** 1h TTL on the system framing,
+   5m TTL on the entry corpus (cache_control on the final document
+   marks the breakpoint covering every preceding document).
 3. **Quote-first prompt structure.** The system prompt instructs
    Opus to plan citations before composing prose. Combined with
    "external knowledge restriction" and "you may say I don't know"
@@ -145,10 +150,12 @@ class AnthropicStorylineNarrator:
             log.info("Narrator called with empty corpus — returning empty result")
             return NarrativeResult(model_used=self._model)
 
-        document_blocks = _build_document_blocks(excerpts)
-        # Index → entry_id map so we can resolve start_block_index in
-        # the response back to a real entry id.
-        block_to_entry: dict[int, int] = {
+        document_blocks = _build_documents(excerpts)
+        # document_index → entry_id map so we can resolve the
+        # per-request document_index on each citation back to an
+        # entry id. Documents are passed in the same order as
+        # ``excerpts``, so index i ↔ excerpts[i].entry_id.
+        document_to_entry: dict[int, int] = {
             i: ex.entry_id for i, ex in enumerate(excerpts)
         }
         user_query = _build_user_query(
@@ -172,15 +179,7 @@ class AnthropicStorylineNarrator:
                     {
                         "role": "user",
                         "content": [
-                            {
-                                "type": "document",
-                                "source": {
-                                    "type": "content",
-                                    "content": document_blocks,
-                                },
-                                "citations": {"enabled": True},
-                                "cache_control": {"type": "ephemeral"},
-                            },
+                            *document_blocks,
                             {"type": "text", "text": user_query},
                         ],
                     }
@@ -190,7 +189,7 @@ class AnthropicStorylineNarrator:
             log.exception("Storyline narrator API call failed")
             return NarrativeResult(model_used=self._model)
 
-        segments = _parse_narrative_response(response, block_to_entry)
+        segments = _parse_narrative_response(response, document_to_entry)
         source_entry_ids: list[int] = []
         seen: set[int] = set()
         citation_count = 0
@@ -213,25 +212,38 @@ class AnthropicStorylineNarrator:
         )
 
 
-def _build_document_blocks(
+def _build_documents(
     excerpts: list[DatedEntryExcerpt],
 ) -> list[dict[str, Any]]:
-    """Render one custom-content text block per excerpt.
+    """Render one ``source="text"`` document per excerpt.
 
-    The ``<entry id=N date=YYYY-MM-DD>`` wrapper gives the model a
-    durable identifier alongside the block-index citation. The block
-    index is the load-bearing one (Anthropic parses it), but the
-    wrapper helps the model reason about which entry it's quoting.
+    The entry id and date live in the document's ``title`` field so
+    the model can reason about which entry it's reading without that
+    metadata showing up inside ``cited_text`` (titles are passed to
+    the model but not citable, per the Citations API docs).
+
+    ``cache_control`` attaches only to the LAST document — a single
+    breakpoint that covers the whole corpus up to and including the
+    newest entry. With N documents and one breakpoint at the end we
+    stay well under the four-breakpoint request limit.
     """
-    blocks: list[dict[str, Any]] = []
-    for ex in excerpts:
-        wrapped = (
-            f"<entry id={ex.entry_id} date={ex.entry_date}>\n"
-            f"{ex.final_text}\n"
-            "</entry>"
-        )
-        blocks.append({"type": "text", "text": wrapped})
-    return blocks
+    docs: list[dict[str, Any]] = []
+    last_index = len(excerpts) - 1
+    for i, ex in enumerate(excerpts):
+        doc: dict[str, Any] = {
+            "type": "document",
+            "source": {
+                "type": "text",
+                "media_type": "text/plain",
+                "data": ex.final_text,
+            },
+            "title": f"Entry {ex.entry_id} ({ex.entry_date})",
+            "citations": {"enabled": True},
+        }
+        if i == last_index:
+            doc["cache_control"] = {"type": "ephemeral"}
+        docs.append(doc)
+    return docs
 
 
 def _build_user_query(
@@ -252,17 +264,25 @@ def _build_user_query(
 
 def _parse_narrative_response(
     response: Any,  # noqa: ANN401
-    block_to_entry: dict[int, int],
+    document_to_entry: dict[int, int],
 ) -> list[dict[str, Any]]:
     """Walk the Anthropic response content, emitting text + citation segments.
 
     Anthropic returns ``response.content`` as a list of blocks. Each
     block is either a plain ``TextBlock`` or one with a ``citations``
-    field listing ``ContentBlockLocationCitation`` entries. When a
-    text block has citations, we emit one ``citation`` segment per
-    citation (using ``cited_text``) plus a ``text`` segment for the
-    block's narrative prose. The order in the list mirrors the order
-    in which the model produced them — which is the read order.
+    field. With ``source="text"`` documents, each citation carries a
+    ``char_location`` shape: ``document_index`` identifies which of
+    the documents we sent, and ``cited_text`` is a short sentence-
+    level excerpt. We map ``document_index`` back to ``entry_id``
+    via the index → entry id map built from the order documents
+    were sent. (``document_index`` is also present on the other
+    citation shapes — page_location, content_block_location — so
+    this parser is robust to a future provider swap.)
+
+    When a text block has citations, we emit one ``citation`` segment
+    per citation plus a ``text`` segment for the block's narrative
+    prose. The order in the list mirrors the order in which the model
+    produced them — which is the read order.
     """
     segments: list[dict[str, Any]] = []
     content = getattr(response, "content", None) or []
@@ -285,17 +305,17 @@ def _parse_narrative_response(
         if text:
             segments.append(text_segment(text))
         for citation in citations:
-            start_idx_raw = _attr_or_key(citation, "start_block_index")
+            doc_idx_raw = _attr_or_key(citation, "document_index")
             cited_text = _attr_or_key(citation, "cited_text") or ""
-            if start_idx_raw is None:
+            if doc_idx_raw is None:
                 continue
-            start_idx = int(start_idx_raw)
-            entry_id = block_to_entry.get(start_idx)
+            doc_idx = int(doc_idx_raw)
+            entry_id = document_to_entry.get(doc_idx)
             if entry_id is None:
                 log.warning(
-                    "Citation block index %d not in block_to_entry map "
+                    "Citation document_index %d not in document_to_entry map "
                     "(known keys: %s) — skipping",
-                    start_idx, sorted(block_to_entry.keys()),
+                    doc_idx, sorted(document_to_entry.keys()),
                 )
                 continue
             segments.append(citation_segment(entry_id, cited_text))

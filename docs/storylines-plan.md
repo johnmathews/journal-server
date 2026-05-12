@@ -204,9 +204,9 @@ Server side is done. Webapp UI is a separate worktree on the `webapp/` repo. Sco
 4. **API client** at `src/api/storylines.ts` typed against the server's response shapes
 5. **Segment renderer** — a small Vue component that renders `{kind: "text"}` runs and `<RouterLink :to="/entries/${entry_id}">` for `{kind: "citation"}` segments. No markdown library needed.
 
-Two follow-ups to consider during the webapp cycle (not blockers):
+Webapp-cycle follow-ups:
 
-1. **Citation granularity.** Today the narrator uses `source: "content"` documents, so each citation's `cited_text` is the whole wrapped entry. The webapp can collapse / hide the bloated quote (entry id is sufficient for the link). Future cleanup is switching to `source: "text"` documents per entry, which auto-chunks at sentence boundaries and gives short `cited_text` excerpts.
+1. ~~**Citation granularity.**~~ **Closed 2026-05-12.** The narrator now builds one `source="text"` document per entry; citations carry the `char_location` shape and `cited_text` is a sentence-level excerpt. The webapp `<details>` disclosure that hid bloated quotes can be simplified or removed in a webapp-side cleanup. See `journal/260512-storylines-cite-text.md`.
 2. **Entity backfill.** Storyline 3 (Running) and 4 (Atlas) on prod used entity IDs 513 and 511 (new entities, not the 59/3 from the original recon — the entity layer reshuffled). With fewer than 3 entity mentions each in window, FTS fallback fired and pulled most of the corpus. A `journal extract-entities --stale-only` pass might reduce dependence on FTS but isn't required for the feature to work.
 
 ## Related docs

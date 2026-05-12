@@ -36,9 +36,9 @@ The webapp renders text runs as plain text and citations as `<RouterLink :to="/e
 1. Resolve the storyline; resolve the (start_date, end_date) window (storyline-specific bounds or the default 90-day window).
 2. Fetch dated entity excerpts via `SQLiteEntityStore.get_dated_entity_excerpts(entity_id, user_id, start_date, end_date)`. This joins `entity_mentions` + `entries`, sorts by `entries.entry_date ASC`, and aggregates the verbatim quotes per entry.
 3. If fewer than `STORYLINE_FTS_FALLBACK_THRESHOLD` excerpts are returned, run **FTS5 fallback**: search journal entries for the entity's canonical name in the same date window, deduplicate against the entity-mention set, attach a context snippet (±120 chars around the surface form) as the "quote". The fallback catches pronominal mentions ("my son" → Atlas) and gaps from entries ingested before auto-reextraction shipped.
-4. Build the narrator's input: one custom-content document with `len(excerpts)` blocks. Each block is `<entry id=N date=YYYY-MM-DD>...</entry>`. Citations enabled.
-5. Call the narrator (`providers/storyline_narrator.AnthropicStorylineNarrator`). System prompt restricts to provided documents, forbids invention, permits "I don't know". Cache control breakpoints: 1h TTL on the system prompt, 5m TTL on the document array.
-6. Parse the response. Each text block with attached citations becomes a `text` segment followed by one `citation` segment per cited source. The citation's `start_block_index` resolves back to an `entry_id` via the index → entry map we built in step 4.
+4. Build the narrator's input: one `source="text"` document per excerpt. Each document's `data` is the entry's `final_text`; the entry id and date live in the document's `title` (`Entry N (YYYY-MM-DD)`), which the model can see but cannot cite from. Citations enabled. The Anthropic API auto-chunks each document at sentence boundaries.
+5. Call the narrator (`providers/storyline_narrator.AnthropicStorylineNarrator`). System prompt restricts to provided documents, forbids invention, permits "I don't know". Cache control breakpoints: 1h TTL on the system prompt, 5m TTL on the document corpus (`cache_control` attaches to the last document only — a single breakpoint covering every preceding document, well under the four-breakpoint request limit).
+6. Parse the response. Each text block with attached citations becomes a `text` segment followed by one `citation` segment per cited source. Citations carry the `char_location` shape; we map `document_index` back to `entry_id` via the index → entry map we built in step 4, and use `cited_text` (a sentence-level excerpt) as the citation's `quote`.
 7. Call the glue (`providers/storyline_glue.AnthropicStorylineGlue`). One batched request returns N-1 transition phrases as a JSON array. On API failure or malformed response, fall back to deterministic gap-bucketed phrases (`"Two weeks later:"`).
 8. Build the curation panel by interleaving verbatim quotes (or FTS snippets) with transitions.
 9. Persist both panels via `SQLiteStorylineRepository.upsert_panel`.
@@ -108,7 +108,7 @@ All env vars are optional; defaults make the feature work out of the box once `A
 
 ## Providers
 
-* `AnthropicStorylineNarrator` — Citations API + three-breakpoint caching (1h system, 5m document corpus). Tested via canned response fakes; the parser handles missing block indices, plain text blocks without citations, and tool_use blocks (ignored).
+* `AnthropicStorylineNarrator` — Citations API with one `source="text"` document per entry; two-breakpoint caching (1h system, 5m corpus). Tested via canned response fakes; the parser handles missing or unknown `document_index`, plain text blocks without citations, and tool_use blocks (ignored).
 * `AnthropicStorylineGlue` — Haiku batched call; the response parser accepts plain JSON, fenced-code-block JSON, and JSON embedded in prose. Deterministic fallback on failure.
 * `AnthropicStorylineExtensionDecider` — Haiku tool-use (`record_decision` tool). `maybe` fallback on any non-happy path.
 
