@@ -204,15 +204,16 @@ def journal_regenerate_storyline(
     except RuntimeError as exc:
         return f"Cannot regenerate: {exc}"
     finished = _poll_job_until_terminal(
-        _get_job_repository(ctx), job.id, timeout_seconds=timeout_seconds,
+        _get_job_repository(ctx), job.id, timeout=timeout_seconds,
     )
-    if finished is None:
+    status = finished["status"]
+    if status == "timeout":
         return (
             f"Job {job.id} did not finish within {timeout_seconds}s. "
-            "Use journal_get_job(...) to check status later."
+            "Use journal_get_job_status(...) to check status later."
         )
-    if finished.status == "succeeded":
-        r = finished.result or {}
+    if status == "succeeded":
+        r = finished.get("result") or {}
         return (
             f"Regeneration succeeded.\n"
             f"  entries: {r.get('entry_count', 0)} "
@@ -225,5 +226,6 @@ def journal_regenerate_storyline(
             f"  Use journal_get_storyline({storyline_id}) to read the result."
         )
     return (
-        f"Regeneration failed: {finished.error_message or 'unknown error'}"
+        f"Regeneration failed: "
+        f"{finished.get('error_message') or 'unknown error'}"
     )
