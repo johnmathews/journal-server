@@ -25,6 +25,21 @@ ranked by vector similarity. A query like "times I felt grateful" will match ent
 because those phrases produce similar vectors, even though they share no keywords — but there is no comprehension
 happening, just geometric proximity.
 
+**Two features sit outside this rule** and bake LLM comprehension into stored service data:
+
+1. **Mood scoring** (see [`mood-scoring.md`](./mood-scoring.md)) — a Haiku tool-use call produces a small set of
+   `(dimension, score, rationale)` tuples per entry, stored on `entry_mood_scores`. The service exposes a scalar plus
+   short reasoning, not generated prose.
+2. **Storylines** (see [`storylines.md`](./storylines.md)) — a per-storyline Opus + Haiku call produces a multi-paragraph
+   third-person narrative + a curated excerpt list, both stored on `storyline_panels`. This is the first feature to
+   produce LLM-generated *prose* served back to the user. It is grounded via the Anthropic Citations API (custom-content
+   documents; pointers are parsed not generated, so they cannot be fabricated) and is restricted by system-prompt
+   discipline to the corpus of source entries only.
+
+Both features stay aligned with the brief's "adapter-swappable" mandate — the narrator and glue are concrete classes
+behind `StorylineNarratorProtocol` / `StorylineGlueProtocol`, and providers can be swapped without touching the
+service layer.
+
 The distinction matters because of how the two interfaces work:
 
 - **Via MCP** — an LLM client (e.g. Claude via Nanoclaw) decides what to search for, calls the search tool, and
