@@ -464,6 +464,232 @@ class TestMergeCandidatesPairUniqueMigration:
         db_conn.rollback()
 
 
+class TestStorylineEntitiesMigration:
+    """Migration 0028 introduces the storyline_entities join table and
+    drops the legacy ``storylines.entity_id`` column."""
+
+    @staticmethod
+    def _run_migrations_up_to(conn, max_version: int) -> None:
+        from journal.db.migrations import (
+            get_current_version,
+            get_migration_files,
+        )
+        current = get_current_version(conn)
+        for path in get_migration_files():
+            file_version = int(path.stem.split("_")[0])
+            if file_version <= current:
+                continue
+            if file_version > max_version:
+                break
+            conn.executescript(path.read_text())
+            conn.execute(f"PRAGMA user_version = {file_version}")
+            current = file_version
+
+    @staticmethod
+    def _run_migration_file(conn, version: int) -> None:
+        from journal.db.migrations import get_migration_files
+        for path in get_migration_files():
+            if int(path.stem.split("_")[0]) == version:
+                conn.executescript(path.read_text())
+                conn.execute(f"PRAGMA user_version = {version}")
+                return
+        raise AssertionError(f"Migration {version} not found")
+
+    def test_fresh_db_join_table_and_entity_id_gone(self, db_conn):
+        """After all migrations, the join table exists with the expected
+        shape and ``storylines.entity_id`` has been dropped."""
+        # Join table present.
+        row = db_conn.execute(
+            "SELECT name FROM sqlite_master"
+            " WHERE type='table' AND name='storyline_entities'"
+        ).fetchone()
+        assert row is not None
+
+        cols = {
+            c["name"] for c in db_conn.execute(
+                "PRAGMA table_info(storyline_entities)"
+            ).fetchall()
+        }
+        assert {"storyline_id", "entity_id"} == cols
+
+        # storylines no longer carries entity_id.
+        storyline_cols = {
+            c["name"] for c in db_conn.execute(
+                "PRAGMA table_info(storylines)"
+            ).fetchall()
+        }
+        assert "entity_id" not in storyline_cols
+
+        # Helper index on the reverse direction (entity → storyline)
+        # exists for the classifier lookup.
+        row = db_conn.execute(
+            "SELECT name FROM sqlite_master"
+            " WHERE type='index' AND name='idx_storyline_entities_entity'"
+        ).fetchone()
+        assert row is not None
+
+    def test_prod_shaped_backfill(self, tmp_db_path):
+        """Migration must copy every (storyline.id, storyline.entity_id)
+        pair into the join table when there is real single-anchor data
+        sitting at the 0027 schema (the prod situation: 3 storylines
+        with valid entity_ids)."""
+        from journal.db.connection import get_connection
+
+        conn = get_connection(tmp_db_path)
+        self._run_migrations_up_to(conn, 27)
+
+        # Seed two users, three entities, and three storylines that look
+        # like the prod state at the 0027 schema.
+        conn.execute(
+            "INSERT INTO entities (id, user_id, entity_type, canonical_name)"
+            " VALUES (10, 1, 'person', 'Atlas'),"
+            "        (11, 1, 'person', 'Sara'),"
+            "        (12, 1, 'place',  'Vienna')"
+        )
+        conn.execute(
+            "INSERT INTO storylines (id, user_id, entity_id, name)"
+            " VALUES (100, 1, 10, 'Atlas adventures'),"
+            "        (101, 1, 11, 'Sara visits'),"
+            "        (102, 1, 12, 'Vienna trips')"
+        )
+        conn.commit()
+
+        self._run_migration_file(conn, 28)
+
+        # Each storyline has exactly one matching join row.
+        rows = conn.execute(
+            "SELECT storyline_id, entity_id FROM storyline_entities"
+            " ORDER BY storyline_id"
+        ).fetchall()
+        assert [(r["storyline_id"], r["entity_id"]) for r in rows] == [
+            (100, 10), (101, 11), (102, 12),
+        ]
+
+        # storylines table preserved (count, names) and has no entity_id.
+        n = conn.execute("SELECT COUNT(*) FROM storylines").fetchone()[0]
+        assert n == 3
+        names = {
+            r["name"] for r in conn.execute("SELECT name FROM storylines").fetchall()
+        }
+        assert names == {"Atlas adventures", "Sara visits", "Vienna trips"}
+        cols = {
+            c["name"] for c in conn.execute(
+                "PRAGMA table_info(storylines)"
+            ).fetchall()
+        }
+        assert "entity_id" not in cols
+        conn.close()
+
+    def test_idempotent_against_prebackfilled_join_rows(self, tmp_db_path):
+        """If a prior aborted run already inserted some join rows, the
+        retry's ``INSERT OR IGNORE`` must produce no duplicates and the
+        migration must still succeed end-to-end."""
+        from journal.db.connection import get_connection
+
+        conn = get_connection(tmp_db_path)
+        self._run_migrations_up_to(conn, 27)
+
+        conn.execute(
+            "INSERT INTO entities (id, user_id, entity_type, canonical_name)"
+            " VALUES (20, 1, 'person', 'Pre-existing')"
+        )
+        conn.execute(
+            "INSERT INTO storylines (id, user_id, entity_id, name)"
+            " VALUES (200, 1, 20, 'Pre-existing storyline')"
+        )
+        conn.commit()
+
+        # Simulate a partial-failure leftover: the join table exists and
+        # the would-be backfill row is already present, but
+        # storylines.entity_id has not yet been dropped.
+        conn.executescript(
+            "CREATE TABLE IF NOT EXISTS storyline_entities ("
+            "  storyline_id INTEGER NOT NULL REFERENCES storylines(id) ON DELETE CASCADE,"
+            "  entity_id    INTEGER NOT NULL REFERENCES entities(id),"
+            "  PRIMARY KEY (storyline_id, entity_id)"
+            ");"
+            "INSERT OR IGNORE INTO storyline_entities (storyline_id, entity_id)"
+            " VALUES (200, 20);"
+        )
+        conn.commit()
+
+        # Migration must run cleanly and leave exactly one join row.
+        self._run_migration_file(conn, 28)
+        rows = conn.execute(
+            "SELECT storyline_id, entity_id FROM storyline_entities"
+        ).fetchall()
+        assert len(rows) == 1
+        assert (rows[0]["storyline_id"], rows[0]["entity_id"]) == (200, 20)
+        cols = {
+            c["name"] for c in conn.execute(
+                "PRAGMA table_info(storylines)"
+            ).fetchall()
+        }
+        assert "entity_id" not in cols
+        conn.close()
+
+    def test_cascade_delete_clears_join_rows(self, db_conn):
+        """Deleting a storyline should cascade-delete its join rows."""
+        db_conn.execute(
+            "INSERT INTO entities (user_id, entity_type, canonical_name)"
+            " VALUES (1, 'person', 'CascadeTest')"
+        )
+        eid = db_conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        db_conn.execute(
+            "INSERT INTO storylines (user_id, name) VALUES (1, 'Cascade-target')"
+        )
+        sid = db_conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        db_conn.execute(
+            "INSERT INTO storyline_entities (storyline_id, entity_id)"
+            " VALUES (?, ?)",
+            (sid, eid),
+        )
+        db_conn.commit()
+
+        db_conn.execute("DELETE FROM storylines WHERE id = ?", (sid,))
+        db_conn.commit()
+
+        n = db_conn.execute(
+            "SELECT COUNT(*) FROM storyline_entities WHERE storyline_id = ?",
+            (sid,),
+        ).fetchone()[0]
+        assert n == 0
+
+    def test_primary_key_rejects_duplicate_pairs(self, db_conn):
+        """The (storyline_id, entity_id) primary key prevents inserting
+        the same pair twice."""
+        import sqlite3 as _sqlite3
+
+        db_conn.execute(
+            "INSERT INTO entities (user_id, entity_type, canonical_name)"
+            " VALUES (1, 'person', 'PkTest')"
+        )
+        eid = db_conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        db_conn.execute(
+            "INSERT INTO storylines (user_id, name) VALUES (1, 'pk-target')"
+        )
+        sid = db_conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        db_conn.execute(
+            "INSERT INTO storyline_entities (storyline_id, entity_id)"
+            " VALUES (?, ?)",
+            (sid, eid),
+        )
+        db_conn.commit()
+
+        with pytest.raises(_sqlite3.IntegrityError):
+            db_conn.execute(
+                "INSERT INTO storyline_entities (storyline_id, entity_id)"
+                " VALUES (?, ?)",
+                (sid, eid),
+            )
+            db_conn.commit()
+        db_conn.rollback()
+
+    def test_migration_version_at_least_28(self, db_conn):
+        from journal.db.migrations import get_current_version
+        assert get_current_version(db_conn) >= 28
+
+
 def test_entry_uncertain_spans_check_constraints(db_conn):
     db_conn.execute(
         "INSERT INTO entries (user_id, entry_date, source_type, raw_text, word_count)"

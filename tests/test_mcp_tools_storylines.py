@@ -64,13 +64,11 @@ def _make_job(
 def _make_storyline(
     storyline_id: int = 1,
     name: str = "Running",
-    entity_id: int = 59,
     last_generated_at: str | None = None,
 ) -> MagicMock:
     s = MagicMock()
     s.id = storyline_id
     s.name = name
-    s.entity_id = entity_id
     s.status = "active"
     s.last_generated_at = last_generated_at
     return s
@@ -301,16 +299,29 @@ class TestListStorylines:
 
         storyline_repo = _storyline_repo_mock()
         storyline_repo.list_storylines.return_value = [
-            _make_storyline(1, "Running", 59, "2026-05-12T09:55:17Z"),
-            _make_storyline(2, "Atlas", 3, None),
+            _make_storyline(1, "Running", "2026-05-12T09:55:17Z"),
+            _make_storyline(2, "Atlas", None),
         ]
-        ctx = _make_ctx(storyline_repository=storyline_repo)
+        # list output renders anchors via list_anchors + entity_store.
+        storyline_repo.list_anchors.side_effect = lambda sid: (
+            [59] if sid == 1 else [3]
+        )
+        entity_store = MagicMock()
+        entity_store.get_entity.side_effect = (
+            lambda eid: MagicMock(canonical_name=f"E{eid}")
+        )
+        ctx = _make_ctx(
+            storyline_repository=storyline_repo,
+            entity_store=entity_store,
+        )
 
         out = journal_list_storylines(ctx=ctx)
 
         assert "Running" in out
         assert "Atlas" in out
-        assert "entity_id=59" in out
+        # Anchor entity ids appear in formatted output.
+        assert "id=59" in out
+        assert "id=3" in out
         assert "last_generated=2026-05-12T09:55:17Z" in out
         assert "last_generated=never" in out
         storyline_repo.list_storylines.assert_called_once_with(
@@ -376,8 +387,8 @@ class TestCreateStoryline:
         from journal.mcp_server import journal_create_storyline
 
         storyline_repo = _storyline_repo_mock()
-        storyline_repo.find_by_entity.return_value = None
-        created = _make_storyline(storyline_id=17, name="Running", entity_id=59)
+        storyline_repo.find_by_anchor_set.return_value = None
+        created = _make_storyline(storyline_id=17, name="Running")
         storyline_repo.create_storyline.return_value = created
 
         entity_store = MagicMock()
@@ -404,7 +415,7 @@ class TestCreateStoryline:
         )
 
         out = journal_create_storyline(
-            entity_id=59, name="Running", ctx=ctx,
+            entity_ids=[59], name="Running", ctx=ctx,
         )
 
         assert "Created storyline 17" in out
@@ -423,8 +434,8 @@ class TestCreateStoryline:
         from journal.mcp_server import journal_create_storyline
 
         storyline_repo = _storyline_repo_mock()
-        existing = _make_storyline(storyline_id=42, name="Running", entity_id=59)
-        storyline_repo.find_by_entity.return_value = existing
+        existing = _make_storyline(storyline_id=42, name="Running")
+        storyline_repo.find_by_anchor_set.return_value = existing
 
         entity_store = MagicMock()
         entity_store.get_entity.return_value = self._make_entity()
@@ -438,7 +449,7 @@ class TestCreateStoryline:
         )
 
         out = journal_create_storyline(
-            entity_id=59, name="Running", ctx=ctx,
+            entity_ids=[59], name="Running", ctx=ctx,
         )
 
         assert "already exists" in out.lower()
@@ -464,10 +475,11 @@ class TestCreateStoryline:
         )
 
         out = journal_create_storyline(
-            entity_id=999, name="Running", ctx=ctx,
+            entity_ids=[999], name="Running", ctx=ctx,
         )
 
-        assert "Entity 999 not found for this user" in out
+        assert "[999]" in out
+        assert "not found for this user" in out
         assert "journal_list_entities" in out
         job_runner.submit_storyline_generation.assert_not_called()
         storyline_repo.create_storyline.assert_not_called()
@@ -479,7 +491,7 @@ class TestCreateStoryline:
 
         ctx = _make_ctx()  # no storyline_repository in lifespan
         out = journal_create_storyline(
-            entity_id=1, name="X", ctx=ctx,
+            entity_ids=[1], name="X", ctx=ctx,
         )
         assert "not configured" in out.lower()
 
@@ -492,7 +504,7 @@ class TestCreateStoryline:
         from journal.mcp_server import journal_create_storyline
 
         storyline_repo = _storyline_repo_mock()
-        storyline_repo.find_by_entity.return_value = None
+        storyline_repo.find_by_anchor_set.return_value = None
         created = _make_storyline(storyline_id=23, name="Running")
         storyline_repo.create_storyline.return_value = created
 
@@ -518,7 +530,7 @@ class TestCreateStoryline:
         )
 
         out = journal_create_storyline(
-            entity_id=59, name="Running", timeout_seconds=0, ctx=ctx,
+            entity_ids=[59], name="Running", timeout_seconds=0, ctx=ctx,
         )
 
         assert "Created storyline 23" in out
@@ -534,7 +546,7 @@ class TestCreateStoryline:
         from journal.mcp_server import journal_create_storyline
 
         storyline_repo = _storyline_repo_mock()
-        storyline_repo.find_by_entity.return_value = None
+        storyline_repo.find_by_anchor_set.return_value = None
         created = _make_storyline(storyline_id=31, name="Running")
         storyline_repo.create_storyline.return_value = created
 
@@ -560,7 +572,7 @@ class TestCreateStoryline:
         )
 
         out = journal_create_storyline(
-            entity_id=59, name="Running", ctx=ctx,
+            entity_ids=[59], name="Running", ctx=ctx,
         )
 
         assert "Created storyline 31" in out
@@ -576,7 +588,7 @@ class TestCreateStoryline:
         from journal.mcp_server import journal_create_storyline
 
         storyline_repo = _storyline_repo_mock()
-        storyline_repo.find_by_entity.return_value = None
+        storyline_repo.find_by_anchor_set.return_value = None
         created = _make_storyline(storyline_id=44, name="Running")
         storyline_repo.create_storyline.return_value = created
 
@@ -596,12 +608,125 @@ class TestCreateStoryline:
         )
 
         out = journal_create_storyline(
-            entity_id=59, name="Running", ctx=ctx,
+            entity_ids=[59], name="Running", ctx=ctx,
         )
 
         assert "Created storyline 44" in out
         assert "could not be queued" in out
         assert "journal_regenerate_storyline(44)" in out
+
+
+# ── journal_set_storyline_anchors ───────────────────────────────
+
+
+class TestSetStorylineAnchors:
+    @staticmethod
+    def _make_entity(eid: int, name: str) -> MagicMock:
+        entity = MagicMock()
+        entity.id = eid
+        entity.canonical_name = name
+        return entity
+
+    def test_not_configured(self, patched_user_id: int) -> None:  # noqa: ARG002
+        from journal.mcp_server import journal_set_storyline_anchors
+
+        ctx = _make_ctx()
+        out = journal_set_storyline_anchors(
+            storyline_id=1, entity_ids=[2], ctx=ctx,
+        )
+        assert "not configured" in out.lower()
+
+    def test_storyline_not_found(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        from journal.mcp_server import journal_set_storyline_anchors
+
+        storyline_repo = _storyline_repo_mock()
+        storyline_repo.get_storyline.return_value = None
+        ctx = _make_ctx(storyline_repository=storyline_repo)
+        out = journal_set_storyline_anchors(
+            storyline_id=999, entity_ids=[1], ctx=ctx,
+        )
+        assert "not found" in out.lower()
+
+    def test_empty_entity_ids_rejected(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        from journal.mcp_server import journal_set_storyline_anchors
+
+        storyline_repo = _storyline_repo_mock()
+        storyline_repo.get_storyline.return_value = _make_storyline()
+        ctx = _make_ctx(storyline_repository=storyline_repo)
+        out = journal_set_storyline_anchors(
+            storyline_id=1, entity_ids=[], ctx=ctx,
+        )
+        assert "at least one" in out.lower()
+        storyline_repo.set_anchors.assert_not_called()
+
+    def test_above_cap_rejected(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        from journal.mcp_server import journal_set_storyline_anchors
+
+        storyline_repo = _storyline_repo_mock()
+        storyline_repo.get_storyline.return_value = _make_storyline()
+        ctx = _make_ctx(storyline_repository=storyline_repo)
+        out = journal_set_storyline_anchors(
+            storyline_id=1,
+            entity_ids=list(range(1, 17)),  # 16 anchors
+            ctx=ctx,
+        )
+        assert "cap" in out.lower()
+        storyline_repo.set_anchors.assert_not_called()
+
+    def test_missing_entity_reported_and_no_write(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        from journal.mcp_server import journal_set_storyline_anchors
+
+        storyline_repo = _storyline_repo_mock()
+        storyline_repo.get_storyline.return_value = _make_storyline()
+        entity_store = MagicMock()
+        entity_store.get_entity.return_value = None
+        ctx = _make_ctx(
+            storyline_repository=storyline_repo,
+            entity_store=entity_store,
+        )
+        out = journal_set_storyline_anchors(
+            storyline_id=1, entity_ids=[42, 99], ctx=ctx,
+        )
+        assert "[42, 99]" in out
+        storyline_repo.set_anchors.assert_not_called()
+
+    def test_happy_path_updates_anchors_and_returns_summary(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        from journal.mcp_server import journal_set_storyline_anchors
+
+        storyline_repo = _storyline_repo_mock()
+        storyline_repo.get_storyline.return_value = _make_storyline(
+            storyline_id=7,
+        )
+        # After set_anchors, list_anchors reflects the new set.
+        storyline_repo.list_anchors.return_value = [42, 99]
+        entity_store = MagicMock()
+        entity_store.get_entity.side_effect = lambda eid, **_: (
+            self._make_entity(eid, f"Name{eid}")
+        )
+        ctx = _make_ctx(
+            storyline_repository=storyline_repo,
+            entity_store=entity_store,
+        )
+
+        out = journal_set_storyline_anchors(
+            storyline_id=7, entity_ids=[99, 42], ctx=ctx,
+        )
+
+        storyline_repo.set_anchors.assert_called_once_with(7, [42, 99])
+        assert "Updated anchors for storyline 7" in out
+        assert "Name42" in out
+        assert "Name99" in out
+        assert "journal_regenerate_storyline(7)" in out
 
 
 # ── journal_storylines_guide ────────────────────────────────────

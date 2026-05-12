@@ -438,11 +438,17 @@ StorylinePanelKind = Literal["curation", "narrative"]
 
 @dataclass
 class Storyline:
-    """One named, entity-anchored synthesized narrative."""
+    """One named, entity-anchored synthesized narrative.
+
+    A storyline is anchored on 1..N entities. The anchor set lives in
+    ``storyline_entities`` and is loaded by the repository's
+    ``list_anchors`` / ``with_anchors`` helpers; this dataclass keeps
+    only the ``storylines`` row fields. Callers that need the anchors
+    fetch them explicitly to avoid surprise queries.
+    """
 
     id: int
     user_id: int
-    entity_id: int
     name: str
     description: str = ""
     start_date: str | None = None

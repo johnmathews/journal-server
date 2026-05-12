@@ -16,6 +16,7 @@ This catch is deliberately narrow. Any other ``OperationalError`` propagates
 so genuine migration breakage stays loud.
 """
 
+import contextlib
 import logging
 import sqlite3
 from pathlib import Path
@@ -56,6 +57,13 @@ def _executescript_idempotent(
                 migration_name, msg,
             )
             return
+        # A migration that wraps itself in BEGIN/COMMIT can leave a
+        # half-applied transaction behind when an inner statement
+        # fails — executescript does not auto-rollback. Roll back here
+        # so the next attempt starts from the pre-migration state.
+        if conn.in_transaction:
+            with contextlib.suppress(sqlite3.Error):
+                conn.rollback()
         raise
 
 

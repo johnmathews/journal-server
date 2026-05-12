@@ -227,7 +227,7 @@ def classifier_world(
     )
     storyline_repo = SQLiteStorylineRepository(factory)
     storyline = storyline_repo.create_storyline(
-        user_id=user_id, entity_id=entity.id, name="Running",
+        user_id=user_id, entity_ids=[entity.id], name="Running",
     )
 
     # An entry that mentions Running via entity_mentions (stage 1)

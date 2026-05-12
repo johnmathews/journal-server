@@ -114,6 +114,7 @@ def app_with_storylines(
 
     services_dict: dict[str, Any] = {
         "storyline_repository": storyline_repo,
+        "entity_store": entity_store,
         "job_runner": runner,
     }
 
@@ -129,6 +130,7 @@ def app_with_storylines(
         yield client, {
             "factory": factory,
             "repo": storyline_repo,
+            "entity_store": entity_store,
             "entity_id": entity.id,
             "gen_service": gen_service,
             "runner": runner,
@@ -157,7 +159,7 @@ class TestStorylinesAPI:
         # Create
         resp = client.post(
             "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         )
         assert resp.status_code == 201
         created = resp.json()
@@ -193,14 +195,140 @@ class TestStorylinesAPI:
         client, ctx = app_with_storylines
         client.post(
             "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         )
         resp = client.post(
             "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         )
         assert resp.status_code == 409
         assert "storyline_id" in resp.json()
+
+    def test_create_with_multiple_anchors_returns_anchors_list(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        store = ctx["entity_store"]
+        ent_b = store.create_entity(
+            entity_type="person", canonical_name="Sara",
+            description="", first_seen="2026-02-15",
+            user_id=_TEST_USER_ID,
+        )
+        ent_c = store.create_entity(
+            entity_type="place", canonical_name="Vienna",
+            description="", first_seen="2026-02-15",
+            user_id=_TEST_USER_ID,
+        )
+        resp = client.post(
+            "/api/storylines",
+            json={
+                "entity_ids": [ent_c.id, ctx["entity_id"], ent_b.id],
+                "name": "Trio",
+            },
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        ids = sorted(a["id"] for a in body["anchors"])
+        assert ids == sorted([ent_c.id, ctx["entity_id"], ent_b.id])
+        names = {a["canonical_name"] for a in body["anchors"]}
+        assert names == {"Running", "Sara", "Vienna"}
+
+    def test_create_rejects_empty_entity_ids(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, _ = app_with_storylines
+        resp = client.post(
+            "/api/storylines",
+            json={"entity_ids": [], "name": "Empty"},
+        )
+        assert resp.status_code == 400
+
+    def test_create_rejects_above_cap(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        store = ctx["entity_store"]
+        ids = [
+            store.create_entity(
+                entity_type="person", canonical_name=f"P{i}",
+                description="", first_seen="2026-02-15",
+                user_id=_TEST_USER_ID,
+            ).id
+            for i in range(20)
+        ]
+        resp = client.post(
+            "/api/storylines",
+            json={"entity_ids": ids, "name": "Too many"},
+        )
+        assert resp.status_code == 422
+        assert "cap" in resp.json()["error"]
+
+    def test_set_anchors_replaces_anchor_set(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        store = ctx["entity_store"]
+        ent_b = store.create_entity(
+            entity_type="person", canonical_name="Bob",
+            description="", first_seen="2026-02-15",
+            user_id=_TEST_USER_ID,
+        )
+        ent_c = store.create_entity(
+            entity_type="person", canonical_name="Carol",
+            description="", first_seen="2026-02-15",
+            user_id=_TEST_USER_ID,
+        )
+        created = client.post(
+            "/api/storylines",
+            json={"entity_ids": [ctx["entity_id"]], "name": "Set-test"},
+        ).json()
+        sid = created["id"]
+
+        resp = client.put(
+            f"/api/storylines/{sid}/anchors",
+            json={"entity_ids": [ent_b.id, ent_c.id]},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert sorted(a["id"] for a in body["anchors"]) == sorted(
+            [ent_b.id, ent_c.id]
+        )
+
+        # Subsequent GET reflects the new anchors.
+        detail = client.get(f"/api/storylines/{sid}").json()
+        assert sorted(a["id"] for a in detail["anchors"]) == sorted(
+            [ent_b.id, ent_c.id]
+        )
+
+    def test_set_anchors_404_for_unknown_storyline(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        resp = client.put(
+            "/api/storylines/99999/anchors",
+            json={"entity_ids": [ctx["entity_id"]]},
+        )
+        assert resp.status_code == 404
+
+    def test_set_anchors_rejects_empty(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        created = client.post(
+            "/api/storylines",
+            json={"entity_ids": [ctx["entity_id"]], "name": "X"},
+        ).json()
+        resp = client.put(
+            f"/api/storylines/{created['id']}/anchors",
+            json={"entity_ids": []},
+        )
+        assert resp.status_code == 400
 
     def test_regenerate_queues_job(
         self,
@@ -209,7 +337,7 @@ class TestStorylinesAPI:
         client, ctx = app_with_storylines
         created = client.post(
             "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         ).json()
         sid = created["id"]
 
@@ -243,7 +371,7 @@ class TestStorylinesAPI:
         client, ctx = app_with_storylines
         created = client.post(
             "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         ).json()
         sid = created["id"]
         # Inject a curation panel with entry_date stamped on its
@@ -293,7 +421,7 @@ class TestStorylinesAPI:
         client, ctx = app_with_storylines
         created = client.post(
             "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         ).json()
         sid = created["id"]
         ctx["repo"].upsert_panel(
@@ -323,7 +451,7 @@ class TestStorylinesAPI:
         client, ctx = app_with_storylines
         created = client.post(
             "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         ).json()
         sid = created["id"]
         resp = client.delete(f"/api/storylines/{sid}")

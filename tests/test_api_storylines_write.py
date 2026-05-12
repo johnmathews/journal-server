@@ -154,7 +154,7 @@ class TestCreateAutoKick:
         client, ctx = app_with_storylines
         resp = client.post(
             "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         )
         assert resp.status_code == 201
         body = resp.json()
@@ -163,7 +163,7 @@ class TestCreateAutoKick:
         assert body["generation_job_id"]
         # Standard storyline fields preserved.
         assert body["name"] == "Running"
-        assert body["entity_id"] == ctx["entity_id"]
+        assert [a["id"] for a in body["anchors"]] == [ctx["entity_id"]]
         # The job row exists in the repository.
         job = ctx["job_repo"].get(body["generation_job_id"])
         assert job is not None
@@ -176,7 +176,7 @@ class TestCreateAutoKick:
         client, ctx = app_with_storylines
         resp = client.post(
             "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         )
         sid = resp.json()["id"]
         ctx["runner"].shutdown(wait=True)
@@ -191,7 +191,7 @@ class TestCreateAutoKick:
         client, ctx = app_with_storylines
         client.post(
             "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         )
         # Reset the recorder to see whether the second call submits.
         ctx["runner"].shutdown(wait=True)
@@ -199,7 +199,7 @@ class TestCreateAutoKick:
 
         resp = client.post(
             "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         )
         assert resp.status_code == 409
         # No new job submitted by the duplicate request. The runner
@@ -222,7 +222,7 @@ class TestRegenerateBodyParams:
         client, ctx = app_with_storylines
         created = client.post(
             "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         ).json()
         sid = created["id"]
 
@@ -246,7 +246,7 @@ class TestRegenerateBodyParams:
         client, ctx = app_with_storylines
         created = client.post(
             "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         ).json()
         sid = created["id"]
 
@@ -273,7 +273,7 @@ class TestRegenerateBodyParams:
         client, ctx = app_with_storylines
         created = client.post(
             "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         ).json()
         sid = created["id"]
 
@@ -294,7 +294,7 @@ class TestRegenerateBodyParams:
         client, ctx = app_with_storylines
         created = client.post(
             "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         ).json()
         sid = created["id"]
 
@@ -311,7 +311,7 @@ class TestRegenerateBodyParams:
         client, ctx = app_with_storylines
         created = client.post(
             "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         ).json()
         sid = created["id"]
 
@@ -328,7 +328,7 @@ class TestRegenerateBodyParams:
         client, ctx = app_with_storylines
         created = client.post(
             "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         ).json()
         sid = created["id"]
 

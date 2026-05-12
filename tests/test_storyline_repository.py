@@ -84,18 +84,67 @@ class TestStorylineCRUD:
     ) -> None:
         s = storyline_repo.create_storyline(
             user_id=seed_user,
-            entity_id=seed_entity,
+            entity_ids=[seed_entity],
             name="Running",
             description="My running thread",
         )
         assert s.id > 0
         assert s.user_id == seed_user
-        assert s.entity_id == seed_entity
         assert s.name == "Running"
         assert s.description == "My running thread"
         assert s.status == "active"
         assert s.created_at != ""
         assert s.last_generated_at is None
+        # Single-anchor create populates storyline_entities.
+        assert storyline_repo.list_anchors(s.id) == [seed_entity]
+
+    def test_create_with_multiple_anchors(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        factory: ConnectionFactory,
+    ) -> None:
+        store = SQLiteEntityStore(factory)
+        ents = [
+            store.create_entity(
+                entity_type="person",
+                canonical_name=f"Person-{i}",
+                description="",
+                first_seen="2026-01-01",
+                user_id=seed_user,
+            )
+            for i in range(3)
+        ]
+        s = storyline_repo.create_storyline(
+            user_id=seed_user,
+            entity_ids=[ents[2].id, ents[0].id, ents[1].id],  # unsorted input
+            name="Trio",
+        )
+        # Anchors stored, returned sorted ASC.
+        assert storyline_repo.list_anchors(s.id) == sorted(e.id for e in ents)
+
+    def test_create_dedupes_repeated_entity_ids(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        s = storyline_repo.create_storyline(
+            user_id=seed_user,
+            entity_ids=[seed_entity, seed_entity, seed_entity],
+            name="Solo",
+        )
+        assert storyline_repo.list_anchors(s.id) == [seed_entity]
+
+    def test_create_rejects_empty_entity_ids(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+    ) -> None:
+        with pytest.raises(ValueError):
+            storyline_repo.create_storyline(
+                user_id=seed_user, entity_ids=[], name="Empty",
+            )
 
     def test_get_storyline_with_user_filter(
         self,
@@ -104,7 +153,7 @@ class TestStorylineCRUD:
         seed_entity: int,
     ) -> None:
         s = storyline_repo.create_storyline(
-            user_id=seed_user, entity_id=seed_entity, name="A",
+            user_id=seed_user, entity_ids=[seed_entity], name="A",
         )
         # Found for the right user
         fetched = storyline_repo.get_storyline(s.id, user_id=seed_user)
@@ -115,33 +164,48 @@ class TestStorylineCRUD:
         # Found without user filter
         assert storyline_repo.get_storyline(s.id, user_id=None) is not None
 
-    def test_unique_constraint_on_user_entity_name(
+    def test_find_by_anchor_set_exact_match_only(
         self,
         storyline_repo: SQLiteStorylineRepository,
         seed_user: int,
-        seed_entity: int,
+        factory: ConnectionFactory,
     ) -> None:
-        import sqlite3
-        storyline_repo.create_storyline(
-            user_id=seed_user, entity_id=seed_entity, name="Running",
+        store = SQLiteEntityStore(factory)
+        a = store.create_entity(
+            entity_type="person", canonical_name="A",
+            description="", first_seen="2026-01-01", user_id=seed_user,
         )
-        with pytest.raises(sqlite3.IntegrityError):
-            storyline_repo.create_storyline(
-                user_id=seed_user, entity_id=seed_entity, name="Running",
-            )
-
-    def test_find_by_entity_returns_match_or_none(
-        self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        seed_entity: int,
-    ) -> None:
-        assert storyline_repo.find_by_entity(seed_user, seed_entity) is None
-        s = storyline_repo.create_storyline(
-            user_id=seed_user, entity_id=seed_entity, name="A",
+        b = store.create_entity(
+            entity_type="person", canonical_name="B",
+            description="", first_seen="2026-01-01", user_id=seed_user,
         )
-        found = storyline_repo.find_by_entity(seed_user, seed_entity)
-        assert found is not None and found.id == s.id
+        c = store.create_entity(
+            entity_type="person", canonical_name="C",
+            description="", first_seen="2026-01-01", user_id=seed_user,
+        )
+        s_ab = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[a.id, b.id], name="Pair",
+        )
+        # Exact match — order-insensitive.
+        assert storyline_repo.find_by_anchor_set(
+            seed_user, [b.id, a.id], "Pair",
+        ).id == s_ab.id
+        # Subset = no match.
+        assert storyline_repo.find_by_anchor_set(
+            seed_user, [a.id], "Pair",
+        ) is None
+        # Superset = no match.
+        assert storyline_repo.find_by_anchor_set(
+            seed_user, [a.id, b.id, c.id], "Pair",
+        ) is None
+        # Different name = no match.
+        assert storyline_repo.find_by_anchor_set(
+            seed_user, [a.id, b.id], "Different",
+        ) is None
+        # Different user = no match.
+        assert storyline_repo.find_by_anchor_set(
+            seed_user + 999, [a.id, b.id], "Pair",
+        ) is None
 
     def test_list_filters_and_pagination(
         self,
@@ -150,8 +214,6 @@ class TestStorylineCRUD:
         factory: ConnectionFactory,
     ) -> None:
         store = SQLiteEntityStore(factory)
-        # Three storylines on three different entities so the UNIQUE
-        # constraint doesn't fight us.
         ids: list[int] = []
         for i in range(3):
             ent = store.create_entity(
@@ -163,7 +225,7 @@ class TestStorylineCRUD:
             )
             s = storyline_repo.create_storyline(
                 user_id=seed_user,
-                entity_id=ent.id,
+                entity_ids=[ent.id],
                 name=f"Storyline-{i}",
             )
             ids.append(s.id)
@@ -193,7 +255,7 @@ class TestStorylineCRUD:
         seed_entity: int,
     ) -> None:
         s = storyline_repo.create_storyline(
-            user_id=seed_user, entity_id=seed_entity, name="A",
+            user_id=seed_user, entity_ids=[seed_entity], name="A",
         )
         # Wrong user cannot delete
         assert storyline_repo.delete_storyline(s.id, user_id=seed_user + 999) is False
@@ -209,7 +271,7 @@ class TestStorylineCRUD:
         seed_entity: int,
     ) -> None:
         s = storyline_repo.create_storyline(
-            user_id=seed_user, entity_id=seed_entity, name="A",
+            user_id=seed_user, entity_ids=[seed_entity], name="A",
         )
         assert s.last_generated_at is None
         storyline_repo.record_generation_complete(s.id)
@@ -225,7 +287,7 @@ class TestStorylineCRUD:
         seed_entity: int,
     ) -> None:
         s = storyline_repo.create_storyline(
-            user_id=seed_user, entity_id=seed_entity, name="A",
+            user_id=seed_user, entity_ids=[seed_entity], name="A",
         )
         assert s.summary_embedding is None
         storyline_repo.update_summary_embedding(s.id, [0.1, 0.2, 0.3])
@@ -239,6 +301,147 @@ class TestStorylineCRUD:
         assert cleared.summary_embedding is None
 
 
+# ── Anchors ──────────────────────────────────────────────────────
+
+
+class TestAnchors:
+    @pytest.fixture
+    def three_entities(
+        self, factory: ConnectionFactory, seed_user: int,
+    ) -> list[int]:
+        store = SQLiteEntityStore(factory)
+        return [
+            store.create_entity(
+                entity_type="person",
+                canonical_name=f"P{i}",
+                description="",
+                first_seen="2026-01-01",
+                user_id=seed_user,
+            ).id
+            for i in range(3)
+        ]
+
+    def test_set_anchors_replaces_atomically(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        three_entities: list[int],
+    ) -> None:
+        a, b, c = three_entities
+        s = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[a, b], name="AB",
+        )
+        result = storyline_repo.set_anchors(s.id, [b, c])
+        assert result == sorted([b, c])
+        assert storyline_repo.list_anchors(s.id) == sorted([b, c])
+        # No leftover join rows for the dropped anchor.
+        assert a not in storyline_repo.list_anchors(s.id)
+
+    def test_set_anchors_rejects_empty(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        s = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[seed_entity], name="A",
+        )
+        with pytest.raises(ValueError):
+            storyline_repo.set_anchors(s.id, [])
+
+    def test_add_anchor_is_idempotent(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        three_entities: list[int],
+    ) -> None:
+        a, b, c = three_entities
+        s = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[a], name="A",
+        )
+        storyline_repo.add_anchor(s.id, b)
+        storyline_repo.add_anchor(s.id, b)  # re-add, no duplicate
+        assert storyline_repo.list_anchors(s.id) == sorted([a, b])
+
+    def test_remove_anchor_returns_deletion_flag(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        three_entities: list[int],
+    ) -> None:
+        a, b, _ = three_entities
+        s = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[a, b], name="AB",
+        )
+        assert storyline_repo.remove_anchor(s.id, a) is True
+        # Re-removing returns False — already gone.
+        assert storyline_repo.remove_anchor(s.id, a) is False
+        assert storyline_repo.list_anchors(s.id) == [b]
+
+    def test_list_storylines_with_anchor_returns_all_relevant(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        three_entities: list[int],
+    ) -> None:
+        a, b, c = three_entities
+        s_ab = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[a, b], name="AB",
+        )
+        s_bc = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[b, c], name="BC",
+        )
+        s_a = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[a], name="A-only",
+        )
+        # b is in both s_ab and s_bc, not in s_a.
+        rows = storyline_repo.list_storylines_with_anchor(seed_user, b)
+        assert {r.id for r in rows} == {s_ab.id, s_bc.id}
+        # a is in s_ab and s_a, not s_bc.
+        rows = storyline_repo.list_storylines_with_anchor(seed_user, a)
+        assert {r.id for r in rows} == {s_ab.id, s_a.id}
+
+    def test_list_storylines_with_anchor_filters_by_status(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        three_entities: list[int],
+    ) -> None:
+        a, b, _ = three_entities
+        s_active = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[a, b], name="active",
+        )
+        s_arch = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[a, b], name="archived",
+        )
+        storyline_repo.update_storyline_status(s_arch.id, "archived", seed_user)
+
+        active_only = storyline_repo.list_storylines_with_anchor(
+            seed_user, a, status="active",
+        )
+        assert [r.id for r in active_only] == [s_active.id]
+
+    def test_delete_storyline_cascades_to_anchors(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        three_entities: list[int],
+        factory: ConnectionFactory,
+    ) -> None:
+        a, b, _ = three_entities
+        s = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[a, b], name="AB",
+        )
+        factory.get().execute("PRAGMA foreign_keys=ON")
+        storyline_repo.delete_storyline(s.id, user_id=seed_user)
+        row = factory.get().execute(
+            "SELECT COUNT(*) AS cnt FROM storyline_entities"
+            " WHERE storyline_id = ?",
+            (s.id,),
+        ).fetchone()
+        assert int(row["cnt"]) == 0
+
+
 # ── Panels ───────────────────────────────────────────────────────
 
 
@@ -250,7 +453,7 @@ class TestStorylinePanels:
         seed_entity: int,
     ) -> None:
         s = storyline_repo.create_storyline(
-            user_id=seed_user, entity_id=seed_entity, name="A",
+            user_id=seed_user, entity_ids=[seed_entity], name="A",
         )
         segs = [
             text_segment("On the 1st:"),
@@ -280,7 +483,7 @@ class TestStorylinePanels:
         seed_entity: int,
     ) -> None:
         s = storyline_repo.create_storyline(
-            user_id=seed_user, entity_id=seed_entity, name="A",
+            user_id=seed_user, entity_ids=[seed_entity], name="A",
         )
         v1 = [text_segment("First version")]
         v2 = [text_segment("Second version")]
@@ -301,7 +504,7 @@ class TestStorylinePanels:
         seed_entity: int,
     ) -> None:
         s = storyline_repo.create_storyline(
-            user_id=seed_user, entity_id=seed_entity, name="A",
+            user_id=seed_user, entity_ids=[seed_entity], name="A",
         )
         storyline_repo.upsert_panel(s.id, "curation", [], [], 0, "haiku")
         storyline_repo.upsert_panel(s.id, "narrative", [], [], 0, "opus")
@@ -317,7 +520,7 @@ class TestStorylinePanels:
         factory: ConnectionFactory,
     ) -> None:
         s = storyline_repo.create_storyline(
-            user_id=seed_user, entity_id=seed_entity, name="A",
+            user_id=seed_user, entity_ids=[seed_entity], name="A",
         )
         storyline_repo.upsert_panel(s.id, "curation", [], [], 0, "haiku")
         # FK cascade requires PRAGMA foreign_keys=ON for SQLite. Ensure it.

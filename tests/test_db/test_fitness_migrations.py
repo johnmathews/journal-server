@@ -340,16 +340,27 @@ def test_fitness_raw_strava_unique_includes_sha(db_conn: sqlite3.Connection) -> 
 
 
 def test_idempotent_rerun_from_pre_fitness_baseline(tmp_db_path: Path) -> None:
-    """Set user_version to 22 (pre-fitness baseline), run migrations,
-    confirm advance to 25. Roll back the version to 22 and re-run; the
-    IF NOT EXISTS clauses must let it succeed without raising on the
-    pre-existing tables."""
+    """Set user_version to 22 (pre-fitness baseline), apply migrations,
+    confirm advance through the fitness range. Roll back the version to
+    22 and re-apply only the fitness migrations (23-25); the
+    IF NOT EXISTS clauses must let them succeed on the pre-existing
+    tables.
+
+    Scoped to the fitness migrations because their idempotency on
+    rollback is the property we want to pin down. Later destructive
+    migrations (e.g. 0028's storylines rebuild) have their own
+    re-runnability tests in ``test_migrations.py``."""
     conn = get_connection(tmp_db_path)
     run_migrations(conn)
     assert get_current_version(conn) >= 25
 
     conn.execute("PRAGMA user_version = 22")
-    run_migrations(conn)  # must not raise on existing tables
+    for migration_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        version = int(migration_file.stem.split("_")[0])
+        if version <= 22 or version > 25:
+            continue
+        conn.executescript(migration_file.read_text())
+        conn.execute(f"PRAGMA user_version = {version}")
     assert get_current_version(conn) >= 25
     conn.close()
 

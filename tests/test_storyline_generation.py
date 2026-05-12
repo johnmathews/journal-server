@@ -586,7 +586,7 @@ def seeded_storyline(
     conn.commit()
     repo = SQLiteStorylineRepository(factory)
     storyline = repo.create_storyline(
-        user_id=user_id, entity_id=entity.id, name="Atlas",
+        user_id=user_id, entity_ids=[entity.id], name="Atlas",
         start_date="2026-01-01", end_date="2026-12-31",
     )
     return repo, store, user_id, entity.id, storyline.id
@@ -866,7 +866,7 @@ class TestGenerationService:
         )
         repo = SQLiteStorylineRepository(factory)
         storyline = repo.create_storyline(
-            user_id=user_id, entity_id=entity.id, name="Atlas",
+            user_id=user_id, entity_ids=[entity.id], name="Atlas",
             start_date="2030-01-01", end_date="2030-12-31",
         )
         narrator = _FakeNarrator(segments=[])
@@ -940,7 +940,7 @@ class TestGenerationService:
 
         repo = SQLiteStorylineRepository(factory)
         storyline = repo.create_storyline(
-            user_id=user_id, entity_id=entity.id, name="Atlas",
+            user_id=user_id, entity_ids=[entity.id], name="Atlas",
             start_date="2026-01-01", end_date="2026-12-31",
         )
         narrator = _FakeNarrator(segments=[
@@ -1022,7 +1022,7 @@ class TestGenerationService:
 
         repo = SQLiteStorylineRepository(factory)
         storyline = repo.create_storyline(
-            user_id=user_id, entity_id=entity.id, name="Atlas",
+            user_id=user_id, entity_ids=[entity.id], name="Atlas",
             start_date="2026-01-01", end_date="2026-12-31",
         )
         narrator = _FakeNarrator(segments=[
@@ -1125,7 +1125,7 @@ def _seed_storyline_with_history(
     conn.commit()
     repo = SQLiteStorylineRepository(factory)
     storyline = repo.create_storyline(
-        user_id=user_id, entity_id=entity.id, name="Atlas",
+        user_id=user_id, entity_ids=[entity.id], name="Atlas",
         start_date="2099-01-01", end_date="2099-01-31",
     )
     return repo, store, user_id, entity.id, storyline.id

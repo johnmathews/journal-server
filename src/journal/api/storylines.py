@@ -69,8 +69,12 @@ def register_storylines_routes(
             limit=limit, offset=offset,
         )
         total = repo.count_storylines(user_id=user.user_id, status=status)
+        entity_store = services.get("entity_store")
         return JSONResponse({
-            "items": [_storyline_to_dict(s) for s in rows],
+            "items": [
+                _storyline_to_dict(s, _build_anchors(repo, entity_store, s.id))
+                for s in rows
+            ],
             "total": total,
             "limit": limit,
             "offset": offset,
@@ -100,19 +104,40 @@ def register_storylines_routes(
         if storyline is None:
             return JSONResponse({"error": "Storyline not found"}, status_code=404)
         panels = repo.list_panels(storyline.id)
+        entity_store = services.get("entity_store")
+        anchors = _build_anchors(repo, entity_store, storyline.id)
         return JSONResponse({
-            **_storyline_to_dict(storyline),
+            **_storyline_to_dict(storyline, anchors),
             "panels": {
                 p.panel_kind: _panel_to_dict(p) for p in panels
             },
         })
 
 
-def _storyline_to_dict(s: Storyline) -> dict[str, Any]:
+def _build_anchors(
+    repo: SQLiteStorylineRepository,
+    entity_store: Any,
+    storyline_id: int,
+) -> list[dict[str, Any]]:
+    anchor_ids = repo.list_anchors(storyline_id)
+    out: list[dict[str, Any]] = []
+    for entity_id in anchor_ids:
+        if entity_store is not None:
+            entity = entity_store.get_entity(entity_id)
+            canonical_name = entity.canonical_name if entity else ""
+        else:
+            canonical_name = ""
+        out.append({"id": entity_id, "canonical_name": canonical_name})
+    return out
+
+
+def _storyline_to_dict(
+    s: Storyline, anchors: list[dict[str, Any]],
+) -> dict[str, Any]:
     return {
         "id": s.id,
         "user_id": s.user_id,
-        "entity_id": s.entity_id,
+        "anchors": anchors,
         "name": s.name,
         "description": s.description,
         "start_date": s.start_date,

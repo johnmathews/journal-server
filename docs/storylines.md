@@ -1,8 +1,12 @@
 # Storylines
 
-**Status:** active reference.
+**Status:** active reference. Last updated 2026-05-12.
 
-A storyline is a synthesized cross-entry narrative anchored on a single entity. Two parallel panels are rendered for each storyline:
+A storyline is a synthesized cross-entry narrative anchored on one or
+more entities. Multi-entity anchors are an equal-weight set: an entry
+that mentions any anchor contributes once; the narrator sees a single
+unioned corpus, not per-anchor sub-narratives. Two parallel panels are
+rendered for each storyline:
 
 * **Curation panel** — chronologically-ordered verbatim excerpts from journal entries that mention the storyline's anchor entity, separated by minimal Haiku-generated transition prose ("Three days later:").
 * **Narrative panel** — a flowing third-person prose narrative grounded via the Anthropic Citations API. Pointers from narrative text back to source entries are parsed by Anthropic from custom-content documents, so they cannot be fabricated.
@@ -11,13 +15,24 @@ This document describes how the feature works in code. The design plan and trade
 
 ## Data model
 
-Migration `0027_storylines.sql`. Two tables:
+Migrations `0027_storylines.sql` (initial schema) and
+`0028_storyline_entities.sql` (multi-entity anchors). Three tables:
 
 * `storylines` — one row per storyline. Key columns:
-  * `(user_id, entity_id, name)` is UNIQUE (a user can't have two storylines about the same entity with the same name).
+  * No `entity_id` column — anchors live in `storyline_entities`.
+  * No DB-level UNIQUE on `(user, name)`. Two storylines can share a
+    name if they have different anchor sets; application-level dedup
+    (see `SQLiteStorylineRepository.find_by_anchor_set`) prevents
+    exact-set + same-name collisions and returns 409.
   * `start_date` / `end_date` — optional ISO date bounds; when null, the service uses the last `STORYLINE_DEFAULT_WINDOW_DAYS` days.
   * `summary_embedding_json` — JSON-encoded embedding of the narrative panel text, cached for the future extension classifier embedding-similarity stage.
   * `last_generated_at`, `last_extension_check_at` — observability timestamps.
+* `storyline_entities` — join table for multi-entity anchors. PK is
+  `(storyline_id, entity_id)` (no duplicate anchors). FK to
+  `storylines(id) ON DELETE CASCADE`, FK to `entities(id)`. A reverse
+  index on `entity_id` powers the extension classifier's
+  `list_storylines_with_anchor` lookup. Soft cap of 15 anchors per
+  storyline is enforced in service code (`MAX_ANCHORS`).
 * `storyline_panels` — one row per `(storyline_id, panel_kind)`. Panels are split so the curation pass doesn't rewrite the narrative when only the glue is iterated.
 
 The `segments_json` column on `storyline_panels` is a list of dicts in one of two shapes (see `services/storylines/segments.py`):
@@ -34,8 +49,8 @@ The webapp renders text runs as plain text and citations as `<RouterLink :to="/e
 `services/storylines/service.StorylineGenerationService.regenerate(storyline_id)`:
 
 1. Resolve the storyline; resolve the (start_date, end_date) window (storyline-specific bounds or the default 90-day window).
-2. Fetch dated entity excerpts via `SQLiteEntityStore.get_dated_entity_excerpts(entity_id, user_id, start_date, end_date)`. This joins `entity_mentions` + `entries`, sorts by `entries.entry_date ASC`, and aggregates the verbatim quotes per entry.
-3. If fewer than `STORYLINE_FTS_FALLBACK_THRESHOLD` excerpts are returned, run **FTS5 fallback**: search journal entries for the entity's canonical name in the same date window, deduplicate against the entity-mention set, attach a context snippet (±120 chars around the surface form) as the "quote". The fallback catches pronominal mentions ("my son" → Atlas) and gaps from entries ingested before auto-reextraction shipped.
+2. Resolve the anchor set via `SQLiteStorylineRepository.list_anchors(storyline_id)` (sorted by `entity_id` ASC for determinism). Fetch dated entity excerpts per anchor via `SQLiteEntityStore.get_dated_entity_excerpts`. Union across anchors, deduplicate on `entry_id` (an entry that mentions multiple anchors contributes one excerpt, not N), sort by `entry_date` ASC.
+3. If fewer than `STORYLINE_FTS_FALLBACK_THRESHOLD` mention-driven excerpts are returned, run **FTS5 fallback** per anchor: search journal entries for each anchor's canonical name in the date window, union across anchors, deduplicate against the entity-mention set, attach a context snippet (±120 chars around the surface form) as the "quote". The fallback catches pronominal mentions ("my son" → Atlas) and gaps from entries ingested before auto-reextraction shipped.
 4. Build the narrator's input: one `source="text"` document per excerpt. Each document's `data` is the entry's `final_text`; the entry id and date live in the document's `title` (`Entry N (YYYY-MM-DD)`), which the model can see but cannot cite from. Citations enabled. The Anthropic API auto-chunks each document at sentence boundaries.
 5. Call the narrator (`providers/storyline_narrator.AnthropicStorylineNarrator`). System prompt restricts to provided documents, forbids invention, permits "I don't know". Cache control breakpoints: 1h TTL on the system prompt, 5m TTL on the document corpus (`cache_control` attaches to the last document only — a single breakpoint covering every preceding document, well under the four-breakpoint request limit).
 6. Parse the response. Each text block with attached citations becomes a `text` segment followed by one `citation` segment per cited source. Citations carry the `char_location` shape; we map `document_index` back to `entry_id` via the index → entry map we built in step 4, and use `cited_text` (a sentence-level excerpt) as the citation's `quote`.
@@ -49,8 +64,8 @@ The webapp renders text runs as plain text and citations as `<RouterLink :to="/e
 
 `services/storylines/extension.StorylineExtensionClassifier.classify_for_entry(entry_id, user_id)` iterates the user's active storylines and returns one `ExtensionResult` per storyline. Pipeline per storyline:
 
-1. **Entity overlap** (deterministic). If the storyline's anchor `entity_id` appears in the entry's extracted mentions, return `yes` immediately. Zero LLM calls.
-2. **Surface form + LLM decider**. If the storyline's anchor entity's `canonical_name` is in the entry text (case-insensitive), call Haiku via `providers/storyline_extension_decider.AnthropicStorylineExtensionDecider` with a `record_decision` tool. Returns `yes`/`no`/`maybe` with one-sentence reasoning. On API failure or malformed response, the decider returns `maybe` so the entry surfaces for manual review.
+1. **Entity overlap** (deterministic). If *any* of the storyline's anchor entity ids appears in the entry's extracted mentions, return `yes` immediately. Zero LLM calls.
+2. **Surface form + LLM decider**. If *any* anchor entity's `canonical_name` is in the entry text (case-insensitive), call Haiku via `providers/storyline_extension_decider.AnthropicStorylineExtensionDecider` with a `record_decision` tool. Returns `yes`/`no`/`maybe` with one-sentence reasoning. On API failure or malformed response, the decider returns `maybe` so the entry surfaces for manual review.
 3. **No match**. Neither signal fires — definite `no`, no LLM call.
 
 The classifier records `last_extension_check_at` on every storyline it inspects, not just the matches.

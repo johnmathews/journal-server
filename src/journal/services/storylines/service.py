@@ -61,6 +61,12 @@ DEFAULT_WINDOW_DAYS = 90
 # trigger on sparse threads.
 DEFAULT_FTS_FALLBACK_THRESHOLD = 3
 
+# Soft cap on anchors per storyline. Enforced at the service boundary
+# (``create_storyline`` / ``set_anchors`` go through validation that
+# raises ``ValueError`` when this is exceeded). Routes / MCP tools
+# surface the error as 422 / ToolError. Bump when prompt budgets allow.
+MAX_ANCHORS = 15
+
 # How many characters of context to grab around the FTS-matched
 # surface form when building a synthetic excerpt for the curation
 # panel. The full entry text still goes to the narrator (via
@@ -544,36 +550,57 @@ class StorylineGenerationService:
         start_date: str | None,
         end_date: str | None,
     ) -> tuple[list[DatedEntryExcerpt], int]:
-        """Return (excerpts, fts_fallback_count).
+        """Return (excerpts, fts_fallback_count) across all anchors.
 
-        The combined list is sorted by entry_date ASC. FTS fallback
-        rows are excluded from the entity-mention count returned in
-        the result.
+        Excerpts are unioned across anchor entities and deduplicated
+        on ``entry_id`` (an entry that mentions multiple anchors
+        contributes one excerpt, not N). The combined list is sorted
+        by ``entry_date`` ASC. FTS fallback rows are counted
+        separately and only fire when the anchor entity-mention set
+        is below ``fts_fallback_threshold``; the fallback runs
+        per-anchor and the results are unioned.
         """
-        entity_excerpts = self._entity_store.get_dated_entity_excerpts(
-            entity_id=storyline.entity_id,
-            user_id=storyline.user_id,
-            start_date=start_date,
-            end_date=end_date,
-        )
-        entry_ids = {ex.entry_id for ex in entity_excerpts}
+        anchor_ids = self._storyline_repository.list_anchors(storyline.id)
+
+        # Mention-driven excerpts, dedup'd across anchors by entry_id.
+        entry_id_to_excerpt: dict[int, DatedEntryExcerpt] = {}
+        for entity_id in anchor_ids:
+            for ex in self._entity_store.get_dated_entity_excerpts(
+                entity_id=entity_id,
+                user_id=storyline.user_id,
+                start_date=start_date,
+                end_date=end_date,
+            ):
+                # First excerpt for each entry_id wins. Anchor order is
+                # stable (ASC), so this is deterministic.
+                entry_id_to_excerpt.setdefault(ex.entry_id, ex)
+
+        entity_excerpts = list(entry_id_to_excerpt.values())
 
         if len(entity_excerpts) >= self._fts_fallback_threshold:
+            entity_excerpts.sort(key=lambda ex: (ex.entry_date, ex.entry_id))
             return entity_excerpts, 0
 
-        # FTS fallback: query for the entity's canonical_name as a
-        # plain string match.
-        entity = self._entity_store.get_entity(storyline.entity_id)
-        if entity is None:
-            return entity_excerpts, 0
-
-        fts_excerpts = self._fts_fallback_excerpts(
-            user_id=storyline.user_id,
-            surface_form=entity.canonical_name,
-            start_date=start_date,
-            end_date=end_date,
-            exclude_entry_ids=entry_ids,
-        )
+        # FTS fallback: per-anchor canonical-name match, unioned in,
+        # dedup'd against already-known entry ids and across anchors.
+        excluded = set(entry_id_to_excerpt.keys())
+        fts_excerpts: list[DatedEntryExcerpt] = []
+        seen_fts_eids: set[int] = set()
+        for entity_id in anchor_ids:
+            entity = self._entity_store.get_entity(entity_id)
+            if entity is None:
+                continue
+            for ex in self._fts_fallback_excerpts(
+                user_id=storyline.user_id,
+                surface_form=entity.canonical_name,
+                start_date=start_date,
+                end_date=end_date,
+                exclude_entry_ids=excluded,
+            ):
+                if ex.entry_id in seen_fts_eids:
+                    continue
+                seen_fts_eids.add(ex.entry_id)
+                fts_excerpts.append(ex)
 
         combined = sorted(
             entity_excerpts + fts_excerpts,

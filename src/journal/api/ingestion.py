@@ -56,6 +56,25 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def _anchors_for(repo, entity_store, storyline_id: int) -> list[dict[str, Any]]:
+    """Build the ``anchors`` field for an API response.
+
+    Returns ``[{id, canonical_name}, ...]`` sorted by anchor id ASC.
+    Missing entities (deleted out from under the storyline) render as
+    an empty canonical_name so the response shape stays stable.
+    """
+    anchor_ids = repo.list_anchors(storyline_id)
+    out: list[dict[str, Any]] = []
+    for entity_id in anchor_ids:
+        if entity_store is not None:
+            entity = entity_store.get_entity(entity_id)
+            canonical_name = entity.canonical_name if entity else ""
+        else:
+            canonical_name = ""
+        out.append({"id": entity_id, "canonical_name": canonical_name})
+    return out
+
+
 def register_ingestion_routes(
     mcp: FastMCP,
     services_getter: Callable[[], dict | None],
@@ -563,15 +582,19 @@ def register_ingestion_routes(
     async def create_storyline(request: Request) -> JSONResponse:
         """Create a new storyline.
 
-        Body: ``{entity_id: int, name: str, description?: str,
-        start_date?: ISO, end_date?: ISO}``. Returns 201 with the
-        new storyline dict (plus ``generation_job_id`` if a generation
-        job was kicked off), 409 if (user, entity, name) already
-        exists, 400 on bad input, 503 if storylines are not wired.
+        Body: ``{entity_ids: list[int], name: str, description?: str,
+        start_date?: ISO, end_date?: ISO}``. ``entity_ids`` must have
+        1..MAX_ANCHORS entries (current cap = 15). Returns 201 with
+        the new storyline dict including an ``anchors`` list (one
+        entry per anchor with ``id`` + ``canonical_name``), plus
+        ``generation_job_id`` if a generation job was kicked off.
+        409 if a storyline with the same name and the same exact
+        anchor set already exists. 400 on bad input. 503 if
+        storylines are not wired.
 
         On successful create, immediately queues a
         ``storyline_generation`` job so the new storyline's panels
-        start populating without a separate regenerate call (W7).
+        start populating without a separate regenerate call.
         """
         services = services_getter()
         if services is None:
@@ -584,6 +607,7 @@ def register_ingestion_routes(
                 {"error": "Storylines feature not configured"},
                 status_code=503,
             )
+        entity_store = services.get("entity_store")
         user = get_authenticated_user(request)
 
         try:
@@ -595,21 +619,46 @@ def register_ingestion_routes(
                 {"error": "Request body must be a JSON object"},
                 status_code=400,
             )
-        entity_id = body.get("entity_id")
+        entity_ids = body.get("entity_ids")
         name = (body.get("name") or "").strip()
-        if not isinstance(entity_id, int) or not name:
+        if (
+            not isinstance(entity_ids, list)
+            or not entity_ids
+            or not all(isinstance(e, int) for e in entity_ids)
+            or not name
+        ):
             return JSONResponse(
-                {"error": "entity_id (int) and name (str) are required"},
+                {
+                    "error": (
+                        "entity_ids (non-empty list[int]) and name (str) "
+                        "are required"
+                    ),
+                },
                 status_code=400,
+            )
+        from journal.services.storylines.service import MAX_ANCHORS
+        unique_entity_ids = sorted(set(entity_ids))
+        if len(unique_entity_ids) > MAX_ANCHORS:
+            return JSONResponse(
+                {
+                    "error": (
+                        f"entity_ids has {len(unique_entity_ids)} unique "
+                        f"anchors; the cap is {MAX_ANCHORS}"
+                    ),
+                },
+                status_code=422,
             )
         description = body.get("description", "") or ""
         start_date = body.get("start_date")
         end_date = body.get("end_date")
 
-        # Refuse if (user, entity, name) already exists — caller can
-        # GET the existing one or regenerate.
-        existing = repo.find_by_entity(
-            user_id=user.user_id, entity_id=entity_id, name=name,
+        # Refuse if a storyline with this exact name + anchor set
+        # already exists for this user — caller can GET the existing
+        # one or regenerate.
+        existing = repo.find_by_anchor_set(
+            user_id=user.user_id,
+            entity_ids=unique_entity_ids,
+            name=name,
         )
         if existing is not None:
             return JSONResponse(
@@ -621,20 +670,13 @@ def register_ingestion_routes(
             )
         storyline = repo.create_storyline(
             user_id=user.user_id,
-            entity_id=entity_id,
+            entity_ids=unique_entity_ids,
             name=name,
             description=description,
             start_date=start_date,
             end_date=end_date,
         )
 
-        # Auto-kick the generation job (W7). The job runner refuses
-        # to queue when the StorylineGenerationService isn't wired —
-        # we treat that as a soft failure and still return the
-        # created storyline, just without a job_id. This lets a
-        # server with the storylines write-path enabled but no
-        # ANTHROPIC_API_KEY still expose the create endpoint to
-        # admins seeding state by hand.
         generation_job_id: str | None = None
         job_runner: JobRunner | None = services.get("job_runner")
         if job_runner is not None:
@@ -652,13 +694,14 @@ def register_ingestion_routes(
 
         log.info(
             "POST /api/storylines — created storyline %d "
-            "(entity_id=%d, generation_job_id=%s)",
-            storyline.id, entity_id, generation_job_id,
+            "(anchors=%s, generation_job_id=%s)",
+            storyline.id, unique_entity_ids, generation_job_id,
         )
+        anchors = _anchors_for(repo, entity_store, storyline.id)
         response_body: dict[str, Any] = {
             "id": storyline.id,
             "user_id": storyline.user_id,
-            "entity_id": storyline.entity_id,
+            "anchors": anchors,
             "name": storyline.name,
             "description": storyline.description,
             "status": storyline.status,
@@ -788,6 +831,84 @@ def register_ingestion_routes(
             "DELETE /api/storylines/%d — removed", sid,
         )
         return JSONResponse({"deleted": True}, status_code=200)
+
+    @mcp.custom_route(
+        "/api/storylines/{storyline_id:int}/anchors",
+        methods=["PUT"],
+        name="api_set_storyline_anchors",
+    )
+    async def set_storyline_anchors(request: Request) -> JSONResponse:
+        """Replace the anchor set on an existing storyline.
+
+        Body: ``{entity_ids: list[int]}`` — 1..MAX_ANCHORS entries.
+        Returns 200 with the updated ``anchors`` list. 404 if the
+        storyline is not found for this user, 400 on malformed body,
+        422 if the cap is exceeded, 503 if storylines are not wired.
+
+        Anchor *editing* on the webapp is deferred to a follow-up;
+        this endpoint is available via REST + MCP so Claude and
+        scripted clients can manage anchors today.
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503,
+            )
+        repo = services.get("storyline_repository")
+        if repo is None:
+            return JSONResponse(
+                {"error": "Storylines feature not configured"},
+                status_code=503,
+            )
+        entity_store = services.get("entity_store")
+        user = get_authenticated_user(request)
+        sid = int(request.path_params["storyline_id"])
+        storyline = repo.get_storyline(sid, user_id=user.user_id)
+        if storyline is None:
+            return JSONResponse(
+                {"error": "Storyline not found"}, status_code=404,
+            )
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "Request body must be a JSON object"},
+                status_code=400,
+            )
+        entity_ids = body.get("entity_ids")
+        if (
+            not isinstance(entity_ids, list)
+            or not entity_ids
+            or not all(isinstance(e, int) for e in entity_ids)
+        ):
+            return JSONResponse(
+                {"error": "entity_ids must be a non-empty list of integers"},
+                status_code=400,
+            )
+        from journal.services.storylines.service import MAX_ANCHORS
+        unique_entity_ids = sorted(set(entity_ids))
+        if len(unique_entity_ids) > MAX_ANCHORS:
+            return JSONResponse(
+                {
+                    "error": (
+                        f"entity_ids has {len(unique_entity_ids)} unique "
+                        f"anchors; the cap is {MAX_ANCHORS}"
+                    ),
+                },
+                status_code=422,
+            )
+        repo.set_anchors(sid, unique_entity_ids)
+        anchors = _anchors_for(repo, entity_store, sid)
+        log.info(
+            "PUT /api/storylines/%d/anchors — anchors=%s",
+            sid, unique_entity_ids,
+        )
+        return JSONResponse(
+            {"id": sid, "anchors": anchors},
+            status_code=200,
+        )
 
     @mcp.custom_route(
         "/api/mood/backfill",

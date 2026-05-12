@@ -5,8 +5,10 @@ storylines are a fresh resource: they don't read or write to the
 ``entries``/``entity_mentions`` tables, only reference them by id.
 Mirrors the pattern of :mod:`journal.db.jobs_repository`.
 
-Schema lives in ``db/migrations/0027_storylines.sql``. Design notes
-in ``docs/storylines-plan.md``.
+Schema lives in ``db/migrations/0027_storylines.sql`` and
+``db/migrations/0028_storyline_entities.sql``. Multi-entity anchors
+live in the ``storyline_entities`` join table; storylines have 1..N
+anchors. Design notes in ``docs/storylines-plan.md``.
 """
 
 from __future__ import annotations
@@ -31,7 +33,6 @@ def _row_to_storyline(row: sqlite3.Row) -> Storyline:
     return Storyline(
         id=row["id"],
         user_id=row["user_id"],
-        entity_id=row["entity_id"],
         name=row["name"],
         description=row["description"] or "",
         start_date=row["start_date"],
@@ -61,7 +62,7 @@ def _row_to_panel(row: sqlite3.Row) -> StorylinePanel:
 
 
 class SQLiteStorylineRepository:
-    """SQLite-backed CRUD for storylines and their panels.
+    """SQLite-backed CRUD for storylines, anchors, and panels.
 
     Constructed with a :class:`ConnectionFactory`; every method
     routes through ``self._factory.get()`` so each thread gets its
@@ -79,25 +80,44 @@ class SQLiteStorylineRepository:
     def create_storyline(
         self,
         user_id: int,
-        entity_id: int,
+        entity_ids: list[int],
         name: str,
         description: str = "",
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> Storyline:
+        """Create a storyline anchored on one or more entities.
+
+        ``entity_ids`` must be non-empty; the cap is enforced at the
+        service layer (``MAX_ANCHORS``). Anchor rows are written in
+        the same transaction as the parent ``storylines`` row.
+        """
+        if not entity_ids:
+            raise ValueError("create_storyline requires at least one entity_id")
+        unique_ids = sorted(set(entity_ids))
+
         conn = self._conn()
-        cursor = conn.execute(
-            "INSERT INTO storylines"
-            " (user_id, entity_id, name, description, start_date, end_date)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, entity_id, name.strip(), description, start_date, end_date),
-        )
-        conn.commit()
-        storyline_id = cursor.lastrowid
-        assert storyline_id is not None
+        try:
+            cursor = conn.execute(
+                "INSERT INTO storylines"
+                " (user_id, name, description, start_date, end_date)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (user_id, name.strip(), description, start_date, end_date),
+            )
+            storyline_id = cursor.lastrowid
+            assert storyline_id is not None
+            conn.executemany(
+                "INSERT INTO storyline_entities (storyline_id, entity_id)"
+                " VALUES (?, ?)",
+                [(storyline_id, eid) for eid in unique_ids],
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         log.info(
-            "Created storyline %d: %s (entity_id=%d, user_id=%d)",
-            storyline_id, name, entity_id, user_id,
+            "Created storyline %d: %s (anchors=%s, user_id=%d)",
+            storyline_id, name, unique_ids, user_id,
         )
         storyline = self.get_storyline(storyline_id, user_id=user_id)
         assert storyline is not None
@@ -111,26 +131,6 @@ class SQLiteStorylineRepository:
         if user_id is not None:
             sql += " AND user_id = ?"
             params.append(user_id)
-        row = self._conn().execute(sql, params).fetchone()
-        return _row_to_storyline(row) if row else None
-
-    def find_by_entity(
-        self,
-        user_id: int,
-        entity_id: int,
-        name: str | None = None,
-    ) -> Storyline | None:
-        """Return the first storyline matching (user, entity[, name]).
-
-        Used by `POST /api/storylines` to detect "already exists" and
-        return 409 instead of letting the UNIQUE constraint trip.
-        """
-        sql = "SELECT * FROM storylines WHERE user_id = ? AND entity_id = ?"
-        params: list[object] = [user_id, entity_id]
-        if name is not None:
-            sql += " AND name = ?"
-            params.append(name.strip())
-        sql += " ORDER BY id LIMIT 1"
         row = self._conn().execute(sql, params).fetchone()
         return _row_to_storyline(row) if row else None
 
@@ -217,6 +217,123 @@ class SQLiteStorylineRepository:
             (json.dumps(embedding) if embedding is not None else None, storyline_id),
         )
         conn.commit()
+
+    # ── anchors (storyline_entities) ────────────────────────────
+
+    def list_anchors(self, storyline_id: int) -> list[int]:
+        """Return the entity_ids anchored on this storyline, sorted ASC."""
+        rows = self._conn().execute(
+            "SELECT entity_id FROM storyline_entities"
+            " WHERE storyline_id = ? ORDER BY entity_id ASC",
+            (storyline_id,),
+        ).fetchall()
+        return [int(r["entity_id"]) for r in rows]
+
+    def set_anchors(
+        self, storyline_id: int, entity_ids: list[int],
+    ) -> list[int]:
+        """Replace the anchor set atomically. Returns the new anchor list."""
+        if not entity_ids:
+            raise ValueError("set_anchors requires at least one entity_id")
+        unique_ids = sorted(set(entity_ids))
+        conn = self._conn()
+        try:
+            conn.execute(
+                "DELETE FROM storyline_entities WHERE storyline_id = ?",
+                (storyline_id,),
+            )
+            conn.executemany(
+                "INSERT INTO storyline_entities (storyline_id, entity_id)"
+                " VALUES (?, ?)",
+                [(storyline_id, eid) for eid in unique_ids],
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return unique_ids
+
+    def add_anchor(self, storyline_id: int, entity_id: int) -> None:
+        """Add a single anchor. Idempotent (no-op if pair already exists)."""
+        conn = self._conn()
+        conn.execute(
+            "INSERT OR IGNORE INTO storyline_entities (storyline_id, entity_id)"
+            " VALUES (?, ?)",
+            (storyline_id, entity_id),
+        )
+        conn.commit()
+
+    def remove_anchor(self, storyline_id: int, entity_id: int) -> bool:
+        """Remove a single anchor. Returns True if a row was deleted."""
+        conn = self._conn()
+        cursor = conn.execute(
+            "DELETE FROM storyline_entities"
+            " WHERE storyline_id = ? AND entity_id = ?",
+            (storyline_id, entity_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def find_by_anchor_set(
+        self,
+        user_id: int,
+        entity_ids: list[int],
+        name: str,
+    ) -> Storyline | None:
+        """Return the first storyline matching (user, name, exact anchor set).
+
+        Used by ``POST /api/storylines`` to detect "already exists" and
+        return 409 instead of creating a duplicate. Order of
+        ``entity_ids`` does not matter (set comparison).
+        """
+        if not entity_ids:
+            return None
+        unique_ids = sorted(set(entity_ids))
+        target_count = len(unique_ids)
+        placeholders = ", ".join("?" for _ in unique_ids)
+        # Match storylines that:
+        #   - belong to this user with the given name,
+        #   - have AT LEAST these entity_ids in storyline_entities,
+        #   - have EXACTLY this many anchors total (no extras).
+        sql = (
+            "SELECT s.* FROM storylines s"
+            " WHERE s.user_id = ? AND s.name = ?"
+            "   AND (SELECT COUNT(*) FROM storyline_entities se"
+            "        WHERE se.storyline_id = s.id) = ?"
+            "   AND (SELECT COUNT(*) FROM storyline_entities se"
+            f"        WHERE se.storyline_id = s.id AND se.entity_id IN ({placeholders})) = ?"
+            " ORDER BY s.id LIMIT 1"
+        )
+        params: list[object] = [user_id, name.strip(), target_count]
+        params.extend(unique_ids)
+        params.append(target_count)
+        row = self._conn().execute(sql, params).fetchone()
+        return _row_to_storyline(row) if row else None
+
+    def list_storylines_with_anchor(
+        self,
+        user_id: int,
+        entity_id: int,
+        status: str | None = None,
+    ) -> list[Storyline]:
+        """Return all storylines for this user that have the given entity
+        as one of their anchors.
+
+        Used by the extension classifier to enumerate candidate
+        storylines when a new entry mentions an entity.
+        """
+        sql = (
+            "SELECT s.* FROM storylines s"
+            " JOIN storyline_entities se ON se.storyline_id = s.id"
+            " WHERE s.user_id = ? AND se.entity_id = ?"
+        )
+        params: list[object] = [user_id, entity_id]
+        if status is not None:
+            sql += " AND s.status = ?"
+            params.append(status)
+        sql += " ORDER BY s.id ASC"
+        rows = self._conn().execute(sql, params).fetchall()
+        return [_row_to_storyline(r) for r in rows]
 
     # ── panels ──────────────────────────────────────────────────
 

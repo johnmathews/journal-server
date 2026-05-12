@@ -2,14 +2,14 @@
 
 Hybrid pipeline, applied per-(entry, storyline) pair:
 
-1. **Entity overlap (deterministic).** If the storyline's anchor
-   entity_id appears in the entry's extracted entity mentions,
-   return ``yes`` immediately. Zero cost, zero LLM calls.
-2. **Surface form (deterministic).** If the storyline's anchor
-   entity's ``canonical_name`` appears in the entry text
-   (case-insensitive), fall through to the LLM decider — the
-   surface form is present but the entity wasn't extracted, so
-   pronominal references or extractor gaps are possible.
+1. **Entity overlap (deterministic).** If *any* of the storyline's
+   anchor entity_ids appears in the entry's extracted entity
+   mentions, return ``yes`` immediately. Zero cost, zero LLM calls.
+2. **Surface form (deterministic).** If *any* anchor entity's
+   ``canonical_name`` appears in the entry text (case-insensitive),
+   fall through to the LLM decider — the surface form is present
+   but the entity wasn't extracted, so pronominal references or
+   extractor gaps are possible.
 3. **Haiku decider.** Ask the model whether the entry meaningfully
    extends the storyline. Returns yes/no/maybe with one-sentence
    reasoning that the UI surfaces.
@@ -126,22 +126,31 @@ class StorylineExtensionClassifier:
         entry_text_lower: str,
         extracted_entity_ids: set[int],
     ) -> ExtensionResult:
-        # Stage 1: entity overlap
-        if storyline.entity_id in extracted_entity_ids:
+        anchor_ids = self._storyline_repository.list_anchors(storyline.id)
+        anchor_set = set(anchor_ids)
+
+        # Stage 1: entity overlap on any anchor
+        if anchor_set & extracted_entity_ids:
             return ExtensionResult(
                 storyline_id=storyline.id,
                 decision="yes",
                 reasoning=(
-                    "Entity overlap: the storyline's anchor entity "
+                    "Entity overlap: an anchor entity of the storyline "
                     "appears in this entry's extracted mentions."
                 ),
                 stage="entity_overlap",
             )
 
-        # Stage 2: surface-form match → Haiku decider
-        entity = self._entity_store.get_entity(storyline.entity_id)
-        surface_form = (entity.canonical_name if entity else "").lower()
-        if surface_form and surface_form in entry_text_lower:
+        # Stage 2: surface-form match on any anchor → Haiku decider
+        surface_form_hits = False
+        for entity_id in anchor_ids:
+            entity = self._entity_store.get_entity(entity_id)
+            if entity is None:
+                continue
+            if entity.canonical_name.lower() in entry_text_lower:
+                surface_form_hits = True
+                break
+        if surface_form_hits:
             decision = self._decider.decide(
                 storyline_name=storyline.name,
                 storyline_description=storyline.description,

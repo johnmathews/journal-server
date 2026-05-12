@@ -79,6 +79,7 @@ from journal.mcp_server.tools.storylines import (
     journal_get_storyline,
     journal_list_storylines,
     journal_regenerate_storyline,
+    journal_set_storyline_anchors,
     journal_storylines_guide,
 )
 
@@ -127,6 +128,7 @@ __all__ = [
     "journal_list_storylines",
     "journal_regenerate_storyline",
     "journal_search_entries",
+    "journal_set_storyline_anchors",
     "journal_storylines_guide",
     "journal_update_entry_text",
     "lifespan",
