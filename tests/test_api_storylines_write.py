@@ -1,11 +1,10 @@
-"""REST API tests for the storylines endpoints (W8).
+"""REST API tests for the storylines write endpoints (W6 + W7).
 
-Covers GET list/detail and the POST create/regenerate/delete routes
-on a real Starlette test client wired to a real SQLite db. The
-JobRunner is built with a stub StorylineGenerationService whose
-``regenerate`` returns a recorded call, so we can assert that
-``POST /regenerate`` queued the job rather than running it
-synchronously.
+Covers the new optional regenerate body (start_date/end_date/mode) and
+the create-auto-kicks-generation behavior. Builds on the same in-
+process TestClient pattern as ``tests/test_api_storylines.py`` but
+focuses on the W6/W7 behaviors specifically — duplicate-shape and
+panel-serialisation cases stay in the older file.
 """
 
 from __future__ import annotations
@@ -58,6 +57,8 @@ class _FakeAuthMiddleware:
 
 
 class _FakeGenerationService:
+    """Captures call kwargs so we can assert what the worker received."""
+
     def __init__(self) -> None:
         self.calls: list[int] = []
         self.kwargs: list[dict[str, Any]] = []
@@ -76,12 +77,15 @@ class _FakeGenerationService:
 def app_with_storylines(
     tmp_path: Path,
 ) -> Generator[tuple[TestClient, dict[str, Any]]]:
+    """Wire a Starlette TestClient against a real SQLite db + fake
+    generation service. ``runner.shutdown(wait=True)`` runs in
+    teardown so the ThreadPoolExecutor is flushed before the process
+    exits — missed shutdown causes CI segfaults (per memory)."""
     db_path = tmp_path / "api.db"
     factory = ConnectionFactory(db_path)
     from journal.db.migrations import run_migrations
     run_migrations(factory.get())
 
-    # Migration 0011 seeds an admin user with id=1, which matches _TEST_USER_ID.
     entity_store = SQLiteEntityStore(factory)
     entity = entity_store.create_entity(
         entity_type="activity", canonical_name="Running",
@@ -117,7 +121,7 @@ def app_with_storylines(
         "job_runner": runner,
     }
 
-    mcp = FastMCP("test-storylines")
+    mcp = FastMCP("test-storylines-write")
     register_storylines_routes(mcp, lambda: services_dict)
     register_ingestion_routes(mcp, lambda: services_dict)
 
@@ -129,6 +133,7 @@ def app_with_storylines(
         yield client, {
             "factory": factory,
             "repo": storyline_repo,
+            "job_repo": job_repo,
             "entity_id": entity.id,
             "gen_service": gen_service,
             "runner": runner,
@@ -138,74 +143,82 @@ def app_with_storylines(
         factory.close_current()
 
 
-class TestStorylinesAPI:
-    def test_list_returns_empty_envelope(
-        self,
-        app_with_storylines: tuple[TestClient, dict[str, Any]],
-    ) -> None:
-        client, _ = app_with_storylines
-        resp = client.get("/api/storylines")
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body == {"items": [], "total": 0, "limit": 50, "offset": 0}
+# ── W7: create auto-kicks generation ────────────────────────────
 
-    def test_create_then_list_then_detail(
+
+class TestCreateAutoKick:
+    def test_create_returns_generation_job_id(
         self,
         app_with_storylines: tuple[TestClient, dict[str, Any]],
     ) -> None:
         client, ctx = app_with_storylines
-        # Create
         resp = client.post(
             "/api/storylines",
             json={"entity_id": ctx["entity_id"], "name": "Running"},
         )
         assert resp.status_code == 201
-        created = resp.json()
-        sid = created["id"]
-        assert created["name"] == "Running"
-
-        # List
-        resp = client.get("/api/storylines")
         body = resp.json()
-        assert body["total"] == 1
-        assert body["items"][0]["id"] == sid
+        assert "generation_job_id" in body
+        assert isinstance(body["generation_job_id"], str)
+        assert body["generation_job_id"]
+        # Standard storyline fields preserved.
+        assert body["name"] == "Running"
+        assert body["entity_id"] == ctx["entity_id"]
+        # The job row exists in the repository.
+        job = ctx["job_repo"].get(body["generation_job_id"])
+        assert job is not None
+        assert job.type == "storyline_generation"
 
-        # Detail
-        resp = client.get(f"/api/storylines/{sid}")
-        assert resp.status_code == 200
-        detail = resp.json()
-        assert detail["id"] == sid
-        # No panels yet (haven't regenerated)
-        assert detail["panels"] == {}
-
-    def test_create_rejects_missing_fields(
+    def test_create_kicks_one_job_against_the_fake_service(
         self,
         app_with_storylines: tuple[TestClient, dict[str, Any]],
     ) -> None:
-        client, _ = app_with_storylines
-        resp = client.post("/api/storylines", json={})
-        assert resp.status_code == 400
+        client, ctx = app_with_storylines
+        resp = client.post(
+            "/api/storylines",
+            json={"entity_id": ctx["entity_id"], "name": "Running"},
+        )
+        sid = resp.json()["id"]
+        ctx["runner"].shutdown(wait=True)
+        assert ctx["gen_service"].calls == [sid]
 
-    def test_create_returns_409_on_duplicate(
+    def test_create_duplicate_does_not_kick_job(
         self,
         app_with_storylines: tuple[TestClient, dict[str, Any]],
     ) -> None:
+        """409 on duplicate must NOT kick a generation job — the
+        existing storyline already has (or will have) panels."""
         client, ctx = app_with_storylines
         client.post(
             "/api/storylines",
             json={"entity_id": ctx["entity_id"], "name": "Running"},
         )
+        # Reset the recorder to see whether the second call submits.
+        ctx["runner"].shutdown(wait=True)
+        first_calls = list(ctx["gen_service"].calls)
+
         resp = client.post(
             "/api/storylines",
             json={"entity_id": ctx["entity_id"], "name": "Running"},
         )
         assert resp.status_code == 409
-        assert "storyline_id" in resp.json()
+        # No new job submitted by the duplicate request. The runner
+        # has been shutdown so a new submit would raise; observing
+        # the calls list unchanged is the cleaner assertion.
+        assert ctx["gen_service"].calls == first_calls
 
-    def test_regenerate_queues_job(
+
+# ── W6: regenerate body params ──────────────────────────────────
+
+
+class TestRegenerateBodyParams:
+    def test_empty_body_preserves_legacy_behavior(
         self,
         app_with_storylines: tuple[TestClient, dict[str, Any]],
     ) -> None:
+        """No body → replace, no date overrides, no mode. Backward
+        compatible with the W5 contract — clients that don't send any
+        JSON still get a 202 + job_id."""
         client, ctx = app_with_storylines
         created = client.post(
             "/api/storylines",
@@ -213,110 +226,20 @@ class TestStorylinesAPI:
         ).json()
         sid = created["id"]
 
+        # Regenerate with no body at all.
         resp = client.post(f"/api/storylines/{sid}/regenerate")
         assert resp.status_code == 202
         body = resp.json()
         assert "job_id" in body
 
-        # Flush the executor and check the fake was called for both
-        # the auto-kicked create job (W7) and the explicit regen.
         ctx["runner"].shutdown(wait=True)
-        assert ctx["gen_service"].calls == [sid, sid]
+        # The explicit regen recorded an entry with NO override kwargs.
+        last = ctx["gen_service"].kwargs[-1]
+        assert "start_date" not in last
+        assert "end_date" not in last
+        assert "mode" not in last
 
-    def test_regenerate_404_on_unknown(
-        self,
-        app_with_storylines: tuple[TestClient, dict[str, Any]],
-    ) -> None:
-        client, _ = app_with_storylines
-        resp = client.post("/api/storylines/99999/regenerate")
-        assert resp.status_code == 404
-
-    def test_detail_panel_segments_carry_entry_date_through_serialization(
-        self,
-        app_with_storylines: tuple[TestClient, dict[str, Any]],
-    ) -> None:
-        """End-to-end through the DB and the API: a citation segment
-        stored with entry_date must come back through GET
-        /api/storylines/{id} with the entry_date field intact. The
-        webapp's curation date toggle and narrative date eyebrows
-        depend on this contract."""
-        client, ctx = app_with_storylines
-        created = client.post(
-            "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
-        ).json()
-        sid = created["id"]
-        # Inject a curation panel with entry_date stamped on its
-        # citations — emulating what _build_curation_segments now
-        # produces.
-        ctx["repo"].upsert_panel(
-            storyline_id=sid,
-            panel_kind="curation",
-            segments=[
-                {"kind": "text", "text": "It begins on 2026-02-15:"},
-                {
-                    "kind": "citation",
-                    "entry_id": 1,
-                    "quote": "q1",
-                    "entry_date": "2026-02-15",
-                },
-                {"kind": "text", "text": "Two weeks later:"},
-                {
-                    "kind": "citation",
-                    "entry_id": 2,
-                    "quote": "q2",
-                    "entry_date": "2026-03-01",
-                },
-            ],
-            source_entry_ids=[1, 2],
-            citation_count=2,
-            model_used="test",
-        )
-        resp = client.get(f"/api/storylines/{sid}")
-        assert resp.status_code == 200
-        panels = resp.json()["panels"]
-        assert "curation" in panels
-        citations = [
-            s for s in panels["curation"]["segments"] if s["kind"] == "citation"
-        ]
-        assert len(citations) == 2
-        assert citations[0]["entry_date"] == "2026-02-15"
-        assert citations[1]["entry_date"] == "2026-03-01"
-
-    def test_detail_handles_legacy_panels_without_entry_date(
-        self,
-        app_with_storylines: tuple[TestClient, dict[str, Any]],
-    ) -> None:
-        """Storylines generated before the server added entry_date
-        must still serve cleanly. The webapp's fallback hides the
-        absolute-date toggle for those panels."""
-        client, ctx = app_with_storylines
-        created = client.post(
-            "/api/storylines",
-            json={"entity_id": ctx["entity_id"], "name": "Running"},
-        ).json()
-        sid = created["id"]
-        ctx["repo"].upsert_panel(
-            storyline_id=sid,
-            panel_kind="curation",
-            segments=[
-                {"kind": "text", "text": "It begins:"},
-                {"kind": "citation", "entry_id": 1, "quote": "q"},
-            ],
-            source_entry_ids=[1],
-            citation_count=1,
-            model_used="test",
-        )
-        resp = client.get(f"/api/storylines/{sid}")
-        assert resp.status_code == 200
-        citation = next(
-            s
-            for s in resp.json()["panels"]["curation"]["segments"]
-            if s["kind"] == "citation"
-        )
-        assert "entry_date" not in citation
-
-    def test_delete_removes_storyline(
+    def test_replace_mode_with_date_range(
         self,
         app_with_storylines: tuple[TestClient, dict[str, Any]],
     ) -> None:
@@ -326,8 +249,92 @@ class TestStorylinesAPI:
             json={"entity_id": ctx["entity_id"], "name": "Running"},
         ).json()
         sid = created["id"]
-        resp = client.delete(f"/api/storylines/{sid}")
-        assert resp.status_code == 200
-        # Now 404
-        resp = client.get(f"/api/storylines/{sid}")
-        assert resp.status_code == 404
+
+        resp = client.post(
+            f"/api/storylines/{sid}/regenerate",
+            json={
+                "mode": "replace",
+                "start_date": "2026-01-01",
+                "end_date": "2026-03-31",
+            },
+        )
+        assert resp.status_code == 202
+        ctx["runner"].shutdown(wait=True)
+        # The fake recorded kwargs — last call is the explicit regen.
+        last = ctx["gen_service"].kwargs[-1]
+        assert last.get("mode") == "replace"
+        assert last.get("start_date") == "2026-01-01"
+        assert last.get("end_date") == "2026-03-31"
+
+    def test_append_mode_passed_through(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        created = client.post(
+            "/api/storylines",
+            json={"entity_id": ctx["entity_id"], "name": "Running"},
+        ).json()
+        sid = created["id"]
+
+        resp = client.post(
+            f"/api/storylines/{sid}/regenerate",
+            json={"mode": "append", "start_date": "2099-04-01"},
+        )
+        assert resp.status_code == 202
+        ctx["runner"].shutdown(wait=True)
+        last = ctx["gen_service"].kwargs[-1]
+        assert last.get("mode") == "append"
+        assert last.get("start_date") == "2099-04-01"
+
+    def test_invalid_mode_returns_400(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        created = client.post(
+            "/api/storylines",
+            json={"entity_id": ctx["entity_id"], "name": "Running"},
+        ).json()
+        sid = created["id"]
+
+        resp = client.post(
+            f"/api/storylines/{sid}/regenerate",
+            json={"mode": "rewrite-from-scratch"},
+        )
+        assert resp.status_code == 400
+
+    def test_non_string_field_returns_400(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        created = client.post(
+            "/api/storylines",
+            json={"entity_id": ctx["entity_id"], "name": "Running"},
+        ).json()
+        sid = created["id"]
+
+        resp = client.post(
+            f"/api/storylines/{sid}/regenerate",
+            json={"start_date": 42},
+        )
+        assert resp.status_code == 400
+
+    def test_non_object_body_returns_400(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        created = client.post(
+            "/api/storylines",
+            json={"entity_id": ctx["entity_id"], "name": "Running"},
+        ).json()
+        sid = created["id"]
+
+        # A bare list isn't a valid request body shape.
+        resp = client.post(
+            f"/api/storylines/{sid}/regenerate",
+            json=["nope"],
+        )
+        assert resp.status_code == 400

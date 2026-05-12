@@ -86,7 +86,14 @@ STORYLINE_GENERATION_KEYS: dict[str, type | tuple[type, ...]] = {
     "storyline_id": int,
     "user_id": int,
     "parent_job_id": str,
+    # Optional date-window overrides + mode ("replace" | "append").
+    # Stored as ISO strings; the service layer parses them.
+    "start_date": str,
+    "end_date": str,
+    "mode": str,
 }
+
+STORYLINE_GENERATION_MODES = frozenset({"replace", "append"})
 
 STORYLINE_EXTENSION_CHECK_KEYS: dict[str, type | tuple[type, ...]] = {
     "entry_id": int,

@@ -219,6 +219,10 @@ class TestRegenerateStoryline:
         # Useful follow-up — no stack trace, no opaque error
         assert "job-slow" in out
         assert "journal_get_job" in out or "check status later" in out
+        # The job id must be rendered literally so the caller can paste
+        # the suggested follow-up call verbatim — not a placeholder.
+        assert "journal_get_job_status('job-slow')" in out
+        assert "(...)" not in out
         # And specifically NOT the success or failure phrasing
         assert "succeeded" not in out.lower()
         assert "Regeneration failed" not in out
@@ -348,3 +352,397 @@ class TestGetStoryline:
         ctx = _make_ctx(storyline_repository=storyline_repo)
         out = journal_get_storyline(storyline_id=999, ctx=ctx)
         assert "not found" in out.lower()
+
+
+# ── journal_create_storyline (W7: auto-kicks generation) ───────
+
+
+class TestCreateStoryline:
+    @staticmethod
+    def _make_entity(
+        entity_id: int = 59, canonical_name: str = "Running",
+    ) -> MagicMock:
+        entity = MagicMock()
+        entity.id = entity_id
+        entity.canonical_name = canonical_name
+        return entity
+
+    def test_create_success_returns_panels_generated_message(
+        self, patched_user_id: int,
+    ) -> None:
+        """Happy path: tool creates the storyline, kicks the
+        generation job, polls until succeeded, returns a message
+        pointing at journal_get_storyline."""
+        from journal.mcp_server import journal_create_storyline
+
+        storyline_repo = _storyline_repo_mock()
+        storyline_repo.find_by_entity.return_value = None
+        created = _make_storyline(storyline_id=17, name="Running", entity_id=59)
+        storyline_repo.create_storyline.return_value = created
+
+        entity_store = MagicMock()
+        entity_store.get_entity.return_value = self._make_entity(
+            entity_id=59, canonical_name="Running",
+        )
+
+        job_runner = MagicMock()
+        job_runner.submit_storyline_generation.return_value = _make_job(
+            status="pending", job_id="job-create-7",
+        )
+        job_repository = MagicMock()
+        job_repository.get.return_value = _make_job(
+            status="succeeded",
+            job_id="job-create-7",
+            result={"entry_count": 5},
+        )
+
+        ctx = _make_ctx(
+            storyline_repository=storyline_repo,
+            entity_store=entity_store,
+            job_runner=job_runner,
+            job_repository=job_repository,
+        )
+
+        out = journal_create_storyline(
+            entity_id=59, name="Running", ctx=ctx,
+        )
+
+        assert "Created storyline 17" in out
+        assert "Panels generated" in out
+        assert "journal_get_storyline(17)" in out
+        storyline_repo.create_storyline.assert_called_once()
+        job_runner.submit_storyline_generation.assert_called_once_with(
+            17, user_id=patched_user_id,
+        )
+
+    def test_already_exists_does_not_kick_job(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        """Duplicate (user, entity, name) returns the existing-id
+        message and does NOT submit any generation job."""
+        from journal.mcp_server import journal_create_storyline
+
+        storyline_repo = _storyline_repo_mock()
+        existing = _make_storyline(storyline_id=42, name="Running", entity_id=59)
+        storyline_repo.find_by_entity.return_value = existing
+
+        entity_store = MagicMock()
+        entity_store.get_entity.return_value = self._make_entity()
+
+        job_runner = MagicMock()
+        ctx = _make_ctx(
+            storyline_repository=storyline_repo,
+            entity_store=entity_store,
+            job_runner=job_runner,
+            job_repository=MagicMock(),
+        )
+
+        out = journal_create_storyline(
+            entity_id=59, name="Running", ctx=ctx,
+        )
+
+        assert "already exists" in out.lower()
+        assert "id=42" in out
+        job_runner.submit_storyline_generation.assert_not_called()
+        storyline_repo.create_storyline.assert_not_called()
+
+    def test_entity_not_found_does_not_create_or_kick(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        from journal.mcp_server import journal_create_storyline
+
+        storyline_repo = _storyline_repo_mock()
+        entity_store = MagicMock()
+        entity_store.get_entity.return_value = None
+        job_runner = MagicMock()
+
+        ctx = _make_ctx(
+            storyline_repository=storyline_repo,
+            entity_store=entity_store,
+            job_runner=job_runner,
+            job_repository=MagicMock(),
+        )
+
+        out = journal_create_storyline(
+            entity_id=999, name="Running", ctx=ctx,
+        )
+
+        assert "Entity 999 not found for this user" in out
+        assert "journal_list_entities" in out
+        job_runner.submit_storyline_generation.assert_not_called()
+        storyline_repo.create_storyline.assert_not_called()
+
+    def test_not_configured_short_circuits(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        from journal.mcp_server import journal_create_storyline
+
+        ctx = _make_ctx()  # no storyline_repository in lifespan
+        out = journal_create_storyline(
+            entity_id=1, name="X", ctx=ctx,
+        )
+        assert "not configured" in out.lower()
+
+    def test_generation_timeout_returns_actionable_message(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        """Storyline IS created, but the generation job stays running
+        past the timeout — the message tells the caller how to follow
+        up via journal_get_job_status."""
+        from journal.mcp_server import journal_create_storyline
+
+        storyline_repo = _storyline_repo_mock()
+        storyline_repo.find_by_entity.return_value = None
+        created = _make_storyline(storyline_id=23, name="Running")
+        storyline_repo.create_storyline.return_value = created
+
+        entity_store = MagicMock()
+        entity_store.get_entity.return_value = self._make_entity()
+
+        job_runner = MagicMock()
+        job_runner.submit_storyline_generation.return_value = _make_job(
+            status="pending", job_id="job-slow-23",
+        )
+        job_repository = MagicMock()
+        # Stays running indefinitely; timeout_seconds=0 exits poll
+        # loop on first check.
+        job_repository.get.return_value = _make_job(
+            status="running", job_id="job-slow-23",
+        )
+
+        ctx = _make_ctx(
+            storyline_repository=storyline_repo,
+            entity_store=entity_store,
+            job_runner=job_runner,
+            job_repository=job_repository,
+        )
+
+        out = journal_create_storyline(
+            entity_id=59, name="Running", timeout_seconds=0, ctx=ctx,
+        )
+
+        assert "Created storyline 23" in out
+        assert "job-slow-23" in out
+        assert "journal_get_job_status('job-slow-23')" in out
+        assert "journal_get_storyline(23)" in out
+
+    def test_generation_failure_surfaces_error_message(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        """Storyline IS created, but the worker fails — message must
+        surface the error and point at the retry tool."""
+        from journal.mcp_server import journal_create_storyline
+
+        storyline_repo = _storyline_repo_mock()
+        storyline_repo.find_by_entity.return_value = None
+        created = _make_storyline(storyline_id=31, name="Running")
+        storyline_repo.create_storyline.return_value = created
+
+        entity_store = MagicMock()
+        entity_store.get_entity.return_value = self._make_entity()
+
+        job_runner = MagicMock()
+        job_runner.submit_storyline_generation.return_value = _make_job(
+            status="pending", job_id="job-fail-31",
+        )
+        job_repository = MagicMock()
+        job_repository.get.return_value = _make_job(
+            status="failed",
+            job_id="job-fail-31",
+            error_message="Anthropic returned 529 overloaded",
+        )
+
+        ctx = _make_ctx(
+            storyline_repository=storyline_repo,
+            entity_store=entity_store,
+            job_runner=job_runner,
+            job_repository=job_repository,
+        )
+
+        out = journal_create_storyline(
+            entity_id=59, name="Running", ctx=ctx,
+        )
+
+        assert "Created storyline 31" in out
+        assert "Anthropic returned 529 overloaded" in out
+        assert "journal_regenerate_storyline(31)" in out
+
+    def test_runner_runtime_error_keeps_storyline_pointers(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        """If submit_storyline_generation raises (feature disabled),
+        the storyline is still created and the message points at
+        journal_regenerate_storyline for a manual retry."""
+        from journal.mcp_server import journal_create_storyline
+
+        storyline_repo = _storyline_repo_mock()
+        storyline_repo.find_by_entity.return_value = None
+        created = _make_storyline(storyline_id=44, name="Running")
+        storyline_repo.create_storyline.return_value = created
+
+        entity_store = MagicMock()
+        entity_store.get_entity.return_value = self._make_entity()
+
+        job_runner = MagicMock()
+        job_runner.submit_storyline_generation.side_effect = RuntimeError(
+            "StorylineGenerationService not configured",
+        )
+
+        ctx = _make_ctx(
+            storyline_repository=storyline_repo,
+            entity_store=entity_store,
+            job_runner=job_runner,
+            job_repository=MagicMock(),
+        )
+
+        out = journal_create_storyline(
+            entity_id=59, name="Running", ctx=ctx,
+        )
+
+        assert "Created storyline 44" in out
+        assert "could not be queued" in out
+        assert "journal_regenerate_storyline(44)" in out
+
+
+# ── journal_storylines_guide ────────────────────────────────────
+
+
+class TestStorylinesGuide:
+    def test_returns_non_empty_guide(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        from journal.mcp_server import journal_storylines_guide
+
+        out = journal_storylines_guide(ctx=_make_ctx())
+
+        assert isinstance(out, str)
+        assert len(out) > 200
+
+    def test_mentions_all_other_tool_names(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        """A guide that doesn't reference its peers can't be a guide."""
+        from journal.mcp_server import journal_storylines_guide
+
+        out = journal_storylines_guide(ctx=_make_ctx())
+
+        assert "journal_list_storylines" in out
+        assert "journal_get_storyline" in out
+        assert "journal_create_storyline" in out
+        assert "journal_regenerate_storyline" in out
+        assert "journal_delete_storyline" in out
+
+    def test_mentions_both_panel_kinds(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        from journal.mcp_server import journal_storylines_guide
+
+        out = journal_storylines_guide(ctx=_make_ctx())
+
+        assert "curation" in out.lower()
+        assert "narrative" in out.lower()
+
+    def test_returns_guide_when_not_configured(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        """The guide must be discoverable even when the feature isn't
+        wired — a client with no ANTHROPIC_API_KEY still needs to learn
+        what storylines are and why the other tools error."""
+        from journal.mcp_server import journal_storylines_guide
+
+        # Empty lifespan — no storyline_repository, mirrors the
+        # not-configured short-circuit used by the other tools.
+        ctx = _make_ctx()
+
+        out = journal_storylines_guide(ctx=ctx)
+
+        assert isinstance(out, str)
+        assert len(out) > 200
+        assert "journal_list_storylines" in out
+        # The guide itself should explain the configuration gating
+        assert "ANTHROPIC_API_KEY" in out
+
+
+# ── journal_delete_storyline ────────────────────────────────────
+
+
+class TestDeleteStoryline:
+    def test_successful_delete_reports_id(
+        self, patched_user_id: int,
+    ) -> None:
+        from journal.mcp_server import journal_delete_storyline
+
+        storyline_repo = _storyline_repo_mock()
+        storyline_repo.delete_storyline.return_value = True
+        ctx = _make_ctx(storyline_repository=storyline_repo)
+
+        out = journal_delete_storyline(storyline_id=17, ctx=ctx)
+
+        assert out == "Deleted storyline 17."
+        storyline_repo.delete_storyline.assert_called_once_with(
+            17, user_id=patched_user_id,
+        )
+
+    def test_not_found_returns_friendly_message(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        from journal.mcp_server import journal_delete_storyline
+
+        storyline_repo = _storyline_repo_mock()
+        storyline_repo.delete_storyline.return_value = False
+        ctx = _make_ctx(storyline_repository=storyline_repo)
+
+        out = journal_delete_storyline(storyline_id=999, ctx=ctx)
+
+        assert out == "Storyline 999 not found for this user."
+
+    def test_not_configured_short_circuits(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        from journal.mcp_server import journal_delete_storyline
+
+        ctx = _make_ctx()  # no storyline_repository in lifespan
+
+        out = journal_delete_storyline(storyline_id=1, ctx=ctx)
+
+        assert "not configured" in out.lower()
+
+
+# ── annotations sanity check ────────────────────────────────────
+
+
+class TestStorylineToolAnnotations:
+    """The four storylines tools advertise MCP behavior hints
+    (readOnlyHint / idempotentHint / destructiveHint) so clients can
+    reason about side effects. Lock the wiring in."""
+
+    def test_annotations_match_plan(self) -> None:
+        from journal.mcp_server import mcp
+
+        tools = mcp._tool_manager._tools
+        expected: dict[str, dict[str, bool]] = {
+            "journal_list_storylines": {"readOnlyHint": True},
+            "journal_get_storyline": {"readOnlyHint": True},
+            "journal_create_storyline": {},
+            "journal_regenerate_storyline": {"idempotentHint": True},
+            "journal_storylines_guide": {"readOnlyHint": True},
+            "journal_delete_storyline": {"destructiveHint": True},
+        }
+
+        for name, hints in expected.items():
+            assert name in tools, f"{name} not registered with FastMCP"
+            ann = tools[name].annotations
+            for hint_name, hint_value in hints.items():
+                assert ann is not None, (
+                    f"{name} has no annotations but expected {hint_name}"
+                )
+                assert getattr(ann, hint_name) is hint_value, (
+                    f"{name}.{hint_name} should be {hint_value}, got "
+                    f"{getattr(ann, hint_name)}"
+                )
+            # Tools with no expected hints should not advertise any of
+            # the three behavior hints (title-only annotations are OK).
+            if not hints and ann is not None:
+                assert ann.readOnlyHint is None
+                assert ann.idempotentHint is None
+                assert ann.destructiveHint is None

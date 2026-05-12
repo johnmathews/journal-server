@@ -21,7 +21,10 @@ def run_storyline_generation(
     `params` carries `storyline_id` (required) and optionally
     `user_id` for notification routing + `parent_job_id` for the
     pipeline-notification consolidation pattern used by the
-    extension-check hook.
+    extension-check hook. Optional `start_date`/`end_date` (ISO
+    YYYY-MM-DD) override the storyline row's date window for this
+    run; `mode` is ``"replace"`` (default) or ``"append"``. Date
+    strings are parsed at the service boundary, not here.
     """
     user_id = params.get("user_id")
     parent_job_id = params.get("parent_job_id")
@@ -44,7 +47,16 @@ def run_storyline_generation(
             return
 
         storyline_id = params["storyline_id"]
-        result = ctx.storyline_generation.regenerate(storyline_id)
+        regenerate_kwargs: dict[str, Any] = {}
+        if "start_date" in params:
+            regenerate_kwargs["start_date"] = params["start_date"]
+        if "end_date" in params:
+            regenerate_kwargs["end_date"] = params["end_date"]
+        if "mode" in params:
+            regenerate_kwargs["mode"] = params["mode"]
+        result = ctx.storyline_generation.regenerate(
+            storyline_id, **regenerate_kwargs,
+        )
         ctx.jobs.update_progress(job_id, 1, 1)
 
         summary: dict[str, Any] = {

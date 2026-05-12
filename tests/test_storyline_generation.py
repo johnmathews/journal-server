@@ -492,14 +492,24 @@ class _FakeNarrator:
         self._segments = segments
         self.model = "claude-opus-4-7-fake"
         self.calls: list[tuple[int, str]] = []
+        self.last_prior_narrative: str | None = None
+        self.last_kwargs: dict[str, Any] = {}
 
     def generate_narrative(
         self,
         excerpts: list[DatedEntryExcerpt],
         storyline_name: str,
         storyline_description: str = "",
+        prior_narrative: str | None = None,
     ) -> NarrativeResult:
         self.calls.append((len(excerpts), storyline_name))
+        self.last_prior_narrative = prior_narrative
+        self.last_kwargs = {
+            "excerpts": list(excerpts),
+            "storyline_name": storyline_name,
+            "storyline_description": storyline_description,
+            "prior_narrative": prior_narrative,
+        }
         source_ids: list[int] = []
         seen: set[int] = set()
         citation_count = 0
@@ -1032,3 +1042,394 @@ class TestGenerationService:
         # should now be in scope.
         assert result.entry_count >= 2
         assert result.fts_fallback_count >= 1
+
+
+# ── W6: append-mode regeneration ───────────────────────────────
+
+
+def _seed_storyline_with_history(
+    factory: ConnectionFactory,
+    *,
+    user_email: str = "append@x.test",
+) -> tuple[
+    SQLiteStorylineRepository,
+    SQLiteEntityStore,
+    int,
+    int,
+    int,
+]:
+    """Seed a storyline with three early entries + entity mentions
+    and run an initial replace generation so the storyline has
+    populated panels + last_generated_at set.
+
+    Date choice: we use far-future dates (2099-…) so that the
+    initial replace's ``last_generated_at`` (set to wall-clock NOW
+    at run time) is comfortably BEFORE the future entries. Append
+    mode requires the new run's start_date to be on or after
+    last_generated_at, which means the new entries must be in
+    the future relative to test execution time. 2099 gives us 70+
+    years of headroom — the test stays correct until the year 2099,
+    which is well past any reasonable codebase lifetime."""
+    conn = factory.get()
+    cur = conn.execute(
+        "INSERT INTO users (email, password_hash, display_name)"
+        " VALUES (?, ?, ?)",
+        (user_email, "x", "U"),
+    )
+    user_id = cur.lastrowid
+    conn.commit()
+    store = SQLiteEntityStore(factory)
+    entity = store.create_entity(
+        entity_type="person", canonical_name="Atlas",
+        description="", first_seen="2099-01-10", user_id=user_id,
+    )
+    # Three early-window entries (2099-01) — included by the initial run.
+    for entry_date, quote in [
+        ("2099-01-10", "Atlas read his first chapter book."),
+        ("2099-01-15", "Atlas asked about the stars."),
+        ("2099-01-20", "Atlas drew a map of the garden."),
+    ]:
+        cur = conn.execute(
+            "INSERT INTO entries"
+            " (entry_date, source_type, raw_text, final_text,"
+            "  word_count, user_id)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (entry_date, "text", quote, quote, len(quote.split()), user_id),
+        )
+        entry_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO entity_mentions"
+            " (entity_id, entry_id, quote, confidence, extraction_run_id)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (entity.id, entry_id, quote, 0.95, "run-1"),
+        )
+    # Two future-window entries (2099-03) — used for the append run.
+    for entry_date, quote in [
+        ("2099-03-05", "Atlas ran a kilometre with me."),
+        ("2099-03-12", "Atlas wrote a short story."),
+    ]:
+        cur = conn.execute(
+            "INSERT INTO entries"
+            " (entry_date, source_type, raw_text, final_text,"
+            "  word_count, user_id)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (entry_date, "text", quote, quote, len(quote.split()), user_id),
+        )
+        entry_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO entity_mentions"
+            " (entity_id, entry_id, quote, confidence, extraction_run_id)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (entity.id, entry_id, quote, 0.95, "run-2"),
+        )
+    conn.commit()
+    repo = SQLiteStorylineRepository(factory)
+    storyline = repo.create_storyline(
+        user_id=user_id, entity_id=entity.id, name="Atlas",
+        start_date="2099-01-01", end_date="2099-01-31",
+    )
+    return repo, store, user_id, entity.id, storyline.id
+
+
+class TestAppendMode:
+    def test_append_happy_path_extends_curation_and_narrative(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        repo, store, _u, _e, sid = _seed_storyline_with_history(factory)
+
+        # First do a replace run to populate the panels.
+        initial_narrator = _FakeNarrator(segments=[
+            {"kind": "text", "text": "Atlas's early month: "},
+            {"kind": "citation", "entry_id": 1, "quote": "Atlas read."},
+            {"kind": "citation", "entry_id": 2, "quote": "Atlas asked."},
+            {"kind": "citation", "entry_id": 3, "quote": "Atlas drew."},
+        ])
+        svc_initial = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=initial_narrator,
+            glue=_FakeGlue(),
+        )
+        svc_initial.regenerate(sid)
+        curation_before = repo.get_panel(sid, "curation")
+        narrative_before = repo.get_panel(sid, "narrative")
+        assert curation_before is not None
+        assert narrative_before is not None
+        assert curation_before.citation_count == 3
+        narrative_before_segments_count = len(narrative_before.segments)
+
+        # Now append-run for March.
+        append_narrator = _FakeNarrator(segments=[
+            {"kind": "text", "text": "Two months on, "},
+            {"kind": "citation", "entry_id": 4, "quote": "Atlas ran."},
+            {"kind": "citation", "entry_id": 5, "quote": "Atlas wrote."},
+        ])
+        svc_append = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=append_narrator,
+            glue=_FakeGlue(),
+        )
+        result = svc_append.regenerate(
+            sid,
+            start_date="2099-03-01",
+            end_date="2099-03-31",
+            mode="append",
+        )
+        # Counts reflect only the new run.
+        assert result.entry_count == 2
+        assert result.entity_mention_count == 2
+        assert result.narrative_citation_count == 2
+        assert result.curation_citation_count == 2
+
+        # Panels grew.
+        curation_after = repo.get_panel(sid, "curation")
+        narrative_after = repo.get_panel(sid, "narrative")
+        assert curation_after is not None
+        assert narrative_after is not None
+        assert curation_after.citation_count == 5  # 3 + 2
+        # New citations live at the END of the merged panel.
+        citation_ids = [
+            s["entry_id"]
+            for s in curation_after.segments
+            if s.get("kind") == "citation"
+        ]
+        assert citation_ids[-2:] == [4, 5]
+        # Narrative grew.
+        assert len(narrative_after.segments) > narrative_before_segments_count
+        # source_entry_ids merged, no dupes, originals preserved first.
+        assert narrative_after.source_entry_ids[:3] == narrative_before.source_entry_ids
+        assert 4 in narrative_after.source_entry_ids
+        assert 5 in narrative_after.source_entry_ids
+
+    def test_append_passes_prior_narrative_to_narrator(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        """The narrator receives the existing narrative prose as
+        ``prior_narrative`` so it can produce a continuation rather
+        than re-stating ground already covered."""
+        repo, store, _u, _e, sid = _seed_storyline_with_history(
+            factory, user_email="prior@x.test",
+        )
+        initial_narrator = _FakeNarrator(segments=[
+            {"kind": "text", "text": "The early chapter described his curiosity."},
+            {"kind": "citation", "entry_id": 1, "quote": "q"},
+        ])
+        StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=initial_narrator,
+            glue=_FakeGlue(),
+        ).regenerate(sid)
+
+        append_narrator = _FakeNarrator(segments=[
+            {"kind": "text", "text": "Later: "},
+            {"kind": "citation", "entry_id": 4, "quote": "q4"},
+        ])
+        svc = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=append_narrator,
+            glue=_FakeGlue(),
+        )
+        svc.regenerate(
+            sid, start_date="2099-03-01", end_date="2099-03-31",
+            mode="append",
+        )
+        assert append_narrator.last_prior_narrative is not None
+        assert "early chapter" in append_narrator.last_prior_narrative
+
+    def test_append_rejects_start_before_last_generated_at(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        repo, store, _u, _e, sid = _seed_storyline_with_history(
+            factory, user_email="early@x.test",
+        )
+        # Replace first to set last_generated_at.
+        StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=_FakeNarrator(segments=[
+                {"kind": "text", "text": "x"},
+                {"kind": "citation", "entry_id": 1, "quote": "q"},
+            ]),
+            glue=_FakeGlue(),
+        ).regenerate(sid)
+
+        svc = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=_FakeNarrator(segments=[]),
+            glue=_FakeGlue(),
+        )
+        # last_generated_at is "now" (set by the initial replace),
+        # so 2020-01-01 is well before it.
+        with pytest.raises(ValueError, match="on or after"):
+            svc.regenerate(
+                sid, start_date="2020-01-01", mode="append",
+            )
+
+    def test_append_rejects_when_never_generated(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        repo, store, _u, _e, sid = _seed_storyline_with_history(
+            factory, user_email="never@x.test",
+        )
+        svc = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=_FakeNarrator(segments=[]),
+            glue=_FakeGlue(),
+        )
+        # No initial regen → last_generated_at is None.
+        with pytest.raises(ValueError, match="previously-generated"):
+            svc.regenerate(
+                sid, start_date="2099-03-01", mode="append",
+            )
+
+    def test_append_rejects_without_start_date(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        repo, store, _u, _e, sid = _seed_storyline_with_history(
+            factory, user_email="nostart@x.test",
+        )
+        StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=_FakeNarrator(segments=[
+                {"kind": "text", "text": "x"},
+                {"kind": "citation", "entry_id": 1, "quote": "q"},
+            ]),
+            glue=_FakeGlue(),
+        ).regenerate(sid)
+
+        svc = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=_FakeNarrator(segments=[]),
+            glue=_FakeGlue(),
+        )
+        with pytest.raises(ValueError, match="explicit start_date"):
+            svc.regenerate(sid, mode="append")
+
+    def test_replace_mode_still_works(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        """The default mode must remain replace; passing ``mode=replace``
+        explicitly must produce identical behavior to omitting it."""
+        repo, store, _u, _e, sid = _seed_storyline_with_history(
+            factory, user_email="replace@x.test",
+        )
+        narrator = _FakeNarrator(segments=[
+            {"kind": "text", "text": "Replaced narrative."},
+            {"kind": "citation", "entry_id": 1, "quote": "q"},
+        ])
+        svc = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=narrator,
+            glue=_FakeGlue(),
+        )
+        result = svc.regenerate(sid, mode="replace")
+        assert result.entry_count == 3  # initial Jan window: 3 entries
+        # Append-only marker should NOT have been passed
+        assert narrator.last_prior_narrative is None
+
+    def test_date_range_override_on_replace_changes_window(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        """Passing start_date/end_date in replace mode overrides
+        whatever is on the storyline row (which here was Jan)."""
+        repo, store, _u, _e, sid = _seed_storyline_with_history(
+            factory, user_email="override@x.test",
+        )
+        narrator = _FakeNarrator(segments=[
+            {"kind": "text", "text": "Override window."},
+            {"kind": "citation", "entry_id": 4, "quote": "q"},
+        ])
+        svc = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=narrator,
+            glue=_FakeGlue(),
+        )
+        # Without override: 3 entries (Jan). With override: 2 (March).
+        result = svc.regenerate(
+            sid, start_date="2099-03-01", end_date="2099-03-31",
+        )
+        assert result.entry_count == 2
+
+    def test_invalid_mode_rejected(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        repo, store, _u, _e, sid = _seed_storyline_with_history(
+            factory, user_email="badmode@x.test",
+        )
+        svc = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=_FakeNarrator(segments=[]),
+            glue=_FakeGlue(),
+        )
+        with pytest.raises(ValueError, match="Invalid mode"):
+            svc.regenerate(sid, mode="bogus")  # type: ignore[arg-type]
+
+    def test_append_with_no_new_entries_preserves_panels(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        repo, store, _u, _e, sid = _seed_storyline_with_history(
+            factory, user_email="empty@x.test",
+        )
+        StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=_FakeNarrator(segments=[
+                {"kind": "text", "text": "x"},
+                {"kind": "citation", "entry_id": 1, "quote": "q"},
+            ]),
+            glue=_FakeGlue(),
+        ).regenerate(sid)
+        before = repo.get_panel(sid, "narrative")
+        assert before is not None
+
+        svc = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=_FakeNarrator(segments=[
+                {"kind": "text", "text": "should not be persisted"},
+            ]),
+            glue=_FakeGlue(),
+        )
+        # April has no entries.
+        result = svc.regenerate(
+            sid, start_date="2099-04-01", end_date="2099-04-30",
+            mode="append",
+        )
+        assert result.entry_count == 0
+        assert result.warnings
+        after = repo.get_panel(sid, "narrative")
+        assert after is not None
+        assert after.segments == before.segments

@@ -99,13 +99,20 @@ class NarrativeResult:
 
 @runtime_checkable
 class StorylineNarratorProtocol(Protocol):
-    """Narrative generation protocol (one method)."""
+    """Narrative generation protocol (one method).
+
+    ``prior_narrative`` is an optional string of previously-written
+    narrative prose. When non-empty, the narrator is asked to produce
+    a *continuation* (new segments to append after the prior text),
+    not a from-scratch retelling. Used by append-mode regeneration.
+    """
 
     def generate_narrative(
         self,
         excerpts: list[DatedEntryExcerpt],
         storyline_name: str,
         storyline_description: str = "",
+        prior_narrative: str | None = None,
     ) -> NarrativeResult: ...
 
 
@@ -136,6 +143,7 @@ class AnthropicStorylineNarrator:
         excerpts: list[DatedEntryExcerpt],
         storyline_name: str,
         storyline_description: str = "",
+        prior_narrative: str | None = None,
     ) -> NarrativeResult:
         """Generate a third-person narrative grounded in ``excerpts``.
 
@@ -145,6 +153,15 @@ class AnthropicStorylineNarrator:
         On empty input or hard API failure, returns an empty result —
         callers decide whether to retry or surface as "no narrative
         available".
+
+        When ``prior_narrative`` is non-empty, the user-query block is
+        prefixed with the prior text and the model is instructed to
+        produce a *continuation* — used by append-mode regeneration so
+        the new segments narrate only the newly-arrived excerpts
+        without re-summarising what has already been written. We chose
+        an extra kwarg (rather than a separate method) so the cache-
+        breakpointed system prompt + document layout stays identical
+        between modes; only the user-query text changes.
         """
         if not excerpts:
             log.info("Narrator called with empty corpus — returning empty result")
@@ -169,6 +186,7 @@ class AnthropicStorylineNarrator:
             storyline_name=storyline_name,
             storyline_description=storyline_description,
             entry_count=len(excerpts),
+            prior_narrative=prior_narrative,
         )
 
         try:
@@ -259,9 +277,10 @@ def _build_user_query(
     storyline_name: str,
     storyline_description: str,
     entry_count: int,
+    prior_narrative: str | None = None,
 ) -> str:
     desc = storyline_description.strip() or storyline_name
-    return (
+    base = (
         f"Compose a third-person narrative about: {storyline_name}.\n\n"
         f"Description: {desc}\n\n"
         f"You have {entry_count} journal entries to draw on, attached as a "
@@ -269,6 +288,23 @@ def _build_user_query(
         f"every claim. Write naturally and concisely — quality of grounding "
         f"matters more than length."
     )
+    if prior_narrative and prior_narrative.strip():
+        # Append-mode addendum: the model sees the existing narrative
+        # as "previous chapters" context. It should continue the
+        # storyline from that point — narrating only the new entries
+        # — rather than re-stating ground already covered.
+        return (
+            f"{base}\n\n"
+            "Here is what has been written about this storyline so far. "
+            "Continue the narrative from where it leaves off — narrate "
+            "ONLY the newly-attached entries and do not repeat content "
+            "already covered. The continuation will be concatenated "
+            "directly onto the prior text, so begin in the same "
+            "third-person voice and tense.\n\n"
+            "PREVIOUS CHAPTERS:\n"
+            f"{prior_narrative.strip()}"
+        )
+    return base
 
 
 def _parse_narrative_response(

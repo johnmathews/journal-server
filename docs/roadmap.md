@@ -61,6 +61,12 @@ the top of the linked doc tells you whether it's active, closed, or superseded.
   two production bugs fixed in-line (`2089531` FTS-fallback signature; embedder input cap).
   Webapp cycle pending as a separate worktree on `webapp/` — see "Webapp cycle handoff"
   at the bottom of the plan doc for scope.
+- [`storylines-2026-05-mcp-and-append.md`](./storylines-2026-05-mcp-and-append.md) —
+  active follow-up cycle (2026-05-12) covering MCP discoverability (new
+  `journal_storylines_guide` + `journal_delete_storyline` tools, rewritten docstrings),
+  append-update mode on regenerate, and auto-kick generation on create. Multi-entity
+  storylines deferred — see `.engineering-team/plan-storylines-ux.md` "Deferred /
+  out-of-scope".
 - [`code-quality-principles.md`](./code-quality-principles.md) — standing rules referenced
   by the refactor docs.
 - **SQLite threading refactor — closed 2026-05-11.** All repos use a

@@ -26,10 +26,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from datetime import date, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from journal.services.storylines.segments import (
+    SEGMENT_KIND_CITATION,
+    SEGMENT_KIND_TEXT,
     citation_segment,
     collect_source_entry_ids,
     count_citations,
@@ -81,9 +83,19 @@ class GenerationResult:
     warnings: list[str] = field(default_factory=list)
 
 
+GenerationMode = Literal["replace", "append"]
+
+
 @runtime_checkable
 class StorylineGenerationServiceProtocol(Protocol):
-    def regenerate(self, storyline_id: int) -> GenerationResult: ...
+    def regenerate(
+        self,
+        storyline_id: int,
+        *,
+        start_date: date | str | None = ...,
+        end_date: date | str | None = ...,
+        mode: GenerationMode = ...,
+    ) -> GenerationResult: ...
 
 
 class StorylineGenerationService:
@@ -116,14 +128,50 @@ class StorylineGenerationService:
         self._window_days = window_days
         self._fts_fallback_threshold = fts_fallback_threshold
 
-    def regenerate(self, storyline_id: int) -> GenerationResult:
+    def regenerate(
+        self,
+        storyline_id: int,
+        *,
+        start_date: date | str | None = None,
+        end_date: date | str | None = None,
+        mode: GenerationMode = "replace",
+    ) -> GenerationResult:
+        """Regenerate one storyline end-to-end.
+
+        ``mode="replace"`` (the default) rebuilds both panels from
+        scratch over the resolved date window.
+
+        ``mode="append"`` requires both ``start_date`` and a previously-
+        generated storyline (``last_generated_at`` non-null); the new
+        excerpts in [start_date, end_date] are appended to the
+        existing panels rather than replacing them.
+
+        ``start_date`` and ``end_date`` may be ``datetime.date`` or
+        ISO ``YYYY-MM-DD`` strings; they override whatever is on the
+        storyline row for this call. The append-mode boundary check
+        operates on parsed dates.
+        """
+        if mode not in ("replace", "append"):
+            raise ValueError(
+                f"Invalid mode {mode!r}; expected 'replace' or 'append'"
+            )
         storyline = self._storyline_repository.get_storyline(storyline_id)
         if storyline is None:
             raise ValueError(f"Storyline {storyline_id} not found")
 
-        start_date, end_date = self._resolve_date_window(storyline)
+        start_iso = _to_iso(start_date)
+        end_iso = _to_iso(end_date)
+
+        if mode == "append":
+            return self._regenerate_append(
+                storyline, start_iso=start_iso, end_iso=end_iso,
+            )
+
+        resolved_start, resolved_end = self._resolve_date_window(
+            storyline, start_override=start_iso, end_override=end_iso,
+        )
         excerpts, fts_count = self._fetch_excerpts(
-            storyline, start_date=start_date, end_date=end_date,
+            storyline, start_date=resolved_start, end_date=resolved_end,
         )
         result = GenerationResult(
             storyline_id=storyline_id,
@@ -139,7 +187,7 @@ class StorylineGenerationService:
             )
             log.info(
                 "Storyline %d: no excerpts in window %s..%s; persisting empty panels",
-                storyline_id, start_date, end_date,
+                storyline_id, resolved_start, resolved_end,
             )
             self._storyline_repository.upsert_panel(
                 storyline_id=storyline_id,
@@ -228,15 +276,261 @@ class StorylineGenerationService:
         )
         return result
 
+    # ── append mode ────────────────────────────────────────────
+
+    def _regenerate_append(
+        self,
+        storyline: Storyline,
+        *,
+        start_iso: str | None,
+        end_iso: str | None,
+    ) -> GenerationResult:
+        """Append-only-at-end regeneration (decision D2 in the plan).
+
+        Validates that we have an explicit ``start_iso`` AND the
+        storyline has been generated at least once AND
+        ``start_iso >= last_generated_at.date()``. Fetches the
+        new-range excerpts only, then:
+
+        * Narrative panel: invokes the narrator with the new
+          excerpts plus the existing narrative prose as
+          ``prior_narrative`` context. Appends the new segments to
+          the existing ones.
+        * Curation panel: appends new citation segments after the
+          existing ones. Regenerates transitions for the seam (last
+          existing → first new) plus the new internal transitions.
+          Existing transitions stay untouched.
+        * Summary embedding: re-runs the embedder on the merged
+          narrative text (text-only segments, capped at 32k chars).
+
+        Returns a ``GenerationResult`` whose counts reflect only the
+        excerpts pulled in this run (not the totals across the merged
+        panels) — call sites use ``entry_count`` to mean "what did
+        this run process".
+        """
+        storyline_id = storyline.id
+        if start_iso is None:
+            raise ValueError(
+                "Append mode requires explicit start_date "
+                "and a previously-generated storyline."
+            )
+        if storyline.last_generated_at is None:
+            raise ValueError(
+                "Append mode requires explicit start_date "
+                "and a previously-generated storyline."
+            )
+        # Compare dates only — last_generated_at is an ISO timestamp.
+        try:
+            start_date_obj = datetime.strptime(start_iso, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid start_date {start_iso!r}; expected YYYY-MM-DD"
+            ) from exc
+        last_gen_date = _last_generated_as_date(storyline.last_generated_at)
+        if last_gen_date is not None and start_date_obj < last_gen_date:
+            raise ValueError(
+                "Append mode requires start_date to be on or after "
+                f"the storyline's last generation date "
+                f"({last_gen_date.isoformat()}); got {start_iso}."
+            )
+
+        new_excerpts, fts_count = self._fetch_excerpts(
+            storyline, start_date=start_iso, end_date=end_iso,
+        )
+        result = GenerationResult(
+            storyline_id=storyline_id,
+            entry_count=len(new_excerpts),
+            entity_mention_count=len(new_excerpts) - fts_count,
+            fts_fallback_count=fts_count,
+        )
+        if not new_excerpts:
+            result.warnings.append(
+                "No new entries found in append window. Existing panels "
+                "preserved."
+            )
+            log.info(
+                "Storyline %d append-mode: no new excerpts in window %s..%s",
+                storyline_id, start_iso, end_iso,
+            )
+            # Still record that we attempted a generation — bumps
+            # last_generated_at so the next append can pick up where
+            # this one left off.
+            self._storyline_repository.record_generation_complete(storyline_id)
+            return result
+
+        existing_narrative = self._storyline_repository.get_panel(
+            storyline_id, "narrative",
+        )
+        existing_curation = self._storyline_repository.get_panel(
+            storyline_id, "curation",
+        )
+        prior_narrative_text = _join_narrative_text(
+            existing_narrative.segments if existing_narrative else []
+        )
+
+        # ── narrative continuation ─────────────────────────────
+        narrative = self._narrator.generate_narrative(
+            excerpts=new_excerpts,
+            storyline_name=storyline.name,
+            storyline_description=storyline.description,
+            prior_narrative=prior_narrative_text or None,
+        )
+        result.narrative_citation_count = narrative.citation_count
+        result.narrative_model = narrative.model_used
+
+        if not narrative.segments:
+            log.warning(
+                "Storyline %d append: narrator returned empty segments "
+                "for %d new excerpts — preserving existing narrative panel",
+                storyline_id, len(new_excerpts),
+            )
+            result.warnings.append(
+                "Narrative continuation produced no segments; "
+                "existing narrative was preserved."
+            )
+        else:
+            existing_segs = list(
+                existing_narrative.segments if existing_narrative else []
+            )
+            merged_narrative_segments = existing_segs + list(narrative.segments)
+            existing_source_ids = (
+                list(existing_narrative.source_entry_ids)
+                if existing_narrative
+                else []
+            )
+            seen_eids: set[int] = set(existing_source_ids)
+            merged_source_ids = list(existing_source_ids)
+            for eid in narrative.source_entry_ids:
+                if eid in seen_eids:
+                    continue
+                seen_eids.add(eid)
+                merged_source_ids.append(eid)
+            merged_citation_count = (
+                (existing_narrative.citation_count if existing_narrative else 0)
+                + narrative.citation_count
+            )
+            self._storyline_repository.upsert_panel(
+                storyline_id=storyline_id,
+                panel_kind="narrative",
+                segments=merged_narrative_segments,
+                source_entry_ids=merged_source_ids,
+                citation_count=merged_citation_count,
+                model_used=narrative.model_used,
+            )
+
+        # ── curation append ────────────────────────────────────
+        existing_segments = list(
+            existing_curation.segments if existing_curation else []
+        )
+        seam_excerpt = _seam_excerpt_from_curation(existing_segments)
+        # Build glue input: the last existing citation excerpt
+        # followed by the new excerpts. generate_transitions(N) ->
+        # N-1 transitions, which is exactly what we need: 1 seam
+        # transition + (len(new_excerpts) - 1) new internal ones.
+        if seam_excerpt is not None:
+            glue_input = [seam_excerpt, *new_excerpts]
+        else:
+            glue_input = list(new_excerpts)
+        glue = self._glue.generate_transitions(glue_input)
+        # Build new-only citation segments. If we have a seam, the
+        # first glue transition is the seam itself (text segment
+        # inserted between existing segments and the first new
+        # citation). If no seam, the new run becomes a fresh sub-
+        # panel starting with a lede.
+        if seam_excerpt is not None:
+            new_segments = _build_curation_append_segments(
+                new_excerpts=new_excerpts,
+                transitions=glue.transitions,
+            )
+        else:
+            new_segments = _build_curation_segments(
+                new_excerpts, glue.transitions,
+            )
+        merged_curation_segments = existing_segments + new_segments
+        result.curation_citation_count = count_citations(new_segments)
+        result.curation_model = glue.model_used
+        self._storyline_repository.upsert_panel(
+            storyline_id=storyline_id,
+            panel_kind="curation",
+            segments=merged_curation_segments,
+            source_entry_ids=collect_source_entry_ids(merged_curation_segments),
+            citation_count=count_citations(merged_curation_segments),
+            model_used=glue.model_used,
+        )
+
+        # ── summary embedding refresh ──────────────────────────
+        if self._embedder is not None:
+            # Re-embed the merged narrative text (text-only) so the
+            # extension classifier's nearest-neighbor query sees the
+            # continued storyline. _join_narrative_text already
+            # caps at 32k chars.
+            merged_for_embed = self._storyline_repository.get_panel(
+                storyline_id, "narrative",
+            )
+            narrative_text = _join_narrative_text(
+                merged_for_embed.segments if merged_for_embed else []
+            )
+            if narrative_text.strip():
+                try:
+                    embedding = self._embedder(narrative_text)
+                except Exception:  # noqa: BLE001 — embedding is best-effort
+                    log.exception(
+                        "Embedder failed for storyline %d (append); skipping",
+                        storyline_id,
+                    )
+                    result.warnings.append(
+                        "Embedder failed; summary embedding not updated."
+                    )
+                else:
+                    self._storyline_repository.update_summary_embedding(
+                        storyline_id, embedding,
+                    )
+
+        self._storyline_repository.record_generation_complete(storyline_id)
+        log.info(
+            "Storyline %d appended: %d new entries, %d new narrative citations, "
+            "%d new curation citations",
+            storyline_id, result.entry_count,
+            result.narrative_citation_count, result.curation_citation_count,
+        )
+        return result
+
     # ── internal ───────────────────────────────────────────────
 
     def _resolve_date_window(
-        self, storyline: Storyline,
+        self,
+        storyline: Storyline,
+        *,
+        start_override: str | None = None,
+        end_override: str | None = None,
     ) -> tuple[str | None, str | None]:
-        """Return (start_date, end_date) ISO strings, applying the
-        default 90-day window when neither bound is set on the
-        storyline. If only one bound is set, the other stays None
-        (open range)."""
+        """Return (start_date, end_date) ISO strings.
+
+        Resolution order:
+
+        1. Explicit ``start_override``/``end_override`` win whenever
+           supplied (caller already parsed them to ISO).
+        2. Otherwise the storyline row's stored bounds, if either
+           is set.
+        3. Otherwise the default 90-day rolling window.
+
+        Each bound is resolved independently — passing only
+        ``start_override`` leaves the end falling through to the next
+        rule, and vice versa. If only one storyline-row bound is set
+        the other stays None (open range)."""
+        # Either explicit param wins for that side. If both overrides
+        # are None we fall back to the storyline row + default.
+        if start_override is not None or end_override is not None:
+            row_start = storyline.start_date if start_override is None else start_override
+            row_end = storyline.end_date if end_override is None else end_override
+            # If after the per-side merge we still have nothing, fill
+            # in the default 90-day window so the downstream query has
+            # a bounded range.
+            if not row_start and not row_end:
+                end = datetime.utcnow().date()
+                start = end - timedelta(days=self._window_days)
+                return start.isoformat(), end.isoformat()
+            return row_start, row_end
         if storyline.start_date or storyline.end_date:
             return storyline.start_date, storyline.end_date
         end = datetime.utcnow().date()
@@ -414,6 +708,126 @@ def _join_narrative_text(segments: list[dict[str, Any]]) -> str:
 # chars sits comfortably below the limit with headroom for token-density
 # variation (code snippets, citation markers, etc.).
 _EMBED_MAX_CHARS = 32_000
+
+
+def _to_iso(value: date | str | None) -> str | None:
+    """Normalise a ``datetime.date`` or ISO string into an ISO string.
+
+    Returns ``None`` for ``None``; raises ``ValueError`` on a bare-
+    string that doesn't parse as YYYY-MM-DD so callers fail loudly
+    rather than silently passing garbage to the SQL query."""
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value.isoformat()
+    # Validate the string shape; we want a hard failure now, not a
+    # silent empty result later when SQLite compares lexically.
+    datetime.strptime(value, "%Y-%m-%d")
+    return value
+
+
+def _last_generated_as_date(value: str | None) -> date | None:
+    """Parse the ``last_generated_at`` ISO timestamp to a ``date``.
+
+    The repository stores ``YYYY-MM-DDTHH:MM:SSZ``; we just need the
+    date portion for the append-mode boundary check. Returns ``None``
+    if the value can't be parsed (defensive — should never happen on
+    server-generated timestamps)."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value[:10], "%Y-%m-%d").date()
+    except ValueError:
+        log.warning(
+            "last_generated_at %r did not parse as a date; "
+            "skipping append-mode boundary check",
+            value,
+        )
+        return None
+
+
+def _seam_excerpt_from_curation(
+    segments: list[dict[str, Any]],
+) -> DatedEntryExcerpt | None:
+    """Build a synthetic ``DatedEntryExcerpt`` from the last citation
+    segment in an existing curation panel.
+
+    The glue provider's ``generate_transitions`` only reads
+    ``entry_date`` off each excerpt; ``final_text`` and ``quotes``
+    are unused for the transition pairs. We fabricate just enough to
+    feed the seam transition (last existing → first new) into the
+    same code path."""
+    from journal.models import DatedEntryExcerpt as _Excerpt
+
+    last_citation = None
+    for seg in reversed(segments):
+        if seg.get("kind") == SEGMENT_KIND_CITATION:
+            last_citation = seg
+            break
+    if last_citation is None:
+        return None
+    entry_date = last_citation.get("entry_date")
+    if not entry_date:
+        return None
+    return _Excerpt(
+        entry_id=int(last_citation.get("entry_id", 0)),
+        entry_date=str(entry_date),
+        final_text=str(last_citation.get("quote", "")),
+        quotes=[],
+    )
+
+
+def _build_curation_append_segments(
+    new_excerpts: list[DatedEntryExcerpt],
+    transitions: list[str],
+) -> list[dict[str, Any]]:
+    """Build segments to append after an existing curation panel.
+
+    Layout (note: NO lede — the existing panel already has one):
+
+        [transition 0]            ← seam (last existing → first new)
+        [citation: new 0]
+        [transition 1]            ← new internal transition
+        [citation: new 1]
+        ...
+
+    ``transitions`` has length ``len(new_excerpts)`` (one seam + one
+    per internal new pair), produced by feeding the glue provider a
+    list of ``[seam_anchor, *new_excerpts]``."""
+    segments: list[dict[str, Any]] = []
+    if not new_excerpts:
+        return segments
+
+    seam = transitions[0] if transitions and transitions[0] else "Some time later:"
+    segments.append(text_segment(seam))
+    first_date = str(new_excerpts[0].entry_date)
+    for quote in new_excerpts[0].quotes or [new_excerpts[0].final_text[:240]]:
+        segments.append(
+            citation_segment(
+                new_excerpts[0].entry_id, quote, entry_date=first_date,
+            )
+        )
+
+    for idx, excerpt in enumerate(new_excerpts[1:]):
+        # transitions[0] is the seam; internal transitions start at 1.
+        transition_idx = idx + 1
+        transition = (
+            transitions[transition_idx]
+            if transition_idx < len(transitions) and transitions[transition_idx]
+            else "Some time later:"
+        )
+        segments.append(text_segment(transition))
+        ex_date = str(excerpt.entry_date)
+        for quote in excerpt.quotes or [excerpt.final_text[:240]]:
+            segments.append(
+                citation_segment(excerpt.entry_id, quote, entry_date=ex_date)
+            )
+    return segments
+
+
+# Defensive re-export so ruff doesn't strip the SEGMENT_KIND_TEXT
+# import (used in this module's docstring discussion of seam segments).
+_ = SEGMENT_KIND_TEXT
 
 
 def _extract_snippet(body: str, surface_form: str) -> str:

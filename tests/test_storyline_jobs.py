@@ -73,9 +73,15 @@ class _FakeGenerationService:
     def __init__(self, result: GenerationResult) -> None:
         self._result = result
         self.calls: list[int] = []
+        self.kwargs: list[dict[str, Any]] = []
 
-    def regenerate(self, storyline_id: int) -> GenerationResult:
+    def regenerate(
+        self,
+        storyline_id: int,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> GenerationResult:
         self.calls.append(storyline_id)
+        self.kwargs.append(kwargs)
         return self._result
 
 
@@ -132,6 +138,52 @@ class TestStorylineGenerationWorker:
         assert finished.result["narrative_citation_count"] == 5
         assert svc.calls == [42]
         assert notifier.successes  # success was notified
+
+    def test_passes_date_range_and_mode_through_to_service(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        """W6: when the job row carries start_date/end_date/mode the
+        worker must forward them to ``service.regenerate(...)`` as
+        kwargs. The validation layer already ensures only known keys
+        land here; this test pins the runtime forwarding."""
+        jobs, notifier = job_ctx
+        svc = _FakeGenerationService(GenerationResult(storyline_id=11))
+        ctx = _build_minimal_ctx(jobs, notifier, generation=svc)
+
+        params = {
+            "storyline_id": 11,
+            "user_id": 1,
+            "start_date": "2099-01-01",
+            "end_date": "2099-01-31",
+            "mode": "append",
+        }
+        job = jobs.create("storyline_generation", params, user_id=1)
+        run_storyline_generation(ctx, job.id, params)
+
+        finished = jobs.get(job.id)
+        assert finished is not None
+        assert finished.status == "succeeded"
+        assert svc.calls == [11]
+        assert svc.kwargs == [{
+            "start_date": "2099-01-01",
+            "end_date": "2099-01-31",
+            "mode": "append",
+        }]
+
+    def test_no_extra_kwargs_when_params_absent(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        """A bare params dict (no date/mode keys) calls regenerate
+        with no kwargs — preserving the legacy code path."""
+        jobs, notifier = job_ctx
+        svc = _FakeGenerationService(GenerationResult(storyline_id=12))
+        ctx = _build_minimal_ctx(jobs, notifier, generation=svc)
+        params = {"storyline_id": 12, "user_id": 1}
+        job = jobs.create("storyline_generation", params, user_id=1)
+        run_storyline_generation(ctx, job.id, params)
+        assert svc.kwargs == [{}]
 
     def test_missing_service_marks_failed(
         self,
@@ -509,6 +561,50 @@ class TestJobRunnerStorylineSubmit:
         finished = runner._jobs.get(job.id)  # type: ignore[attr-defined]
         assert finished is not None
         assert finished.status == "succeeded"
+
+    def test_submit_generation_with_date_range_and_mode_persists_params(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        """W6: submit_storyline_generation accepts start_date/end_date/
+        mode kwargs and persists them into the job params dict, which
+        the worker then forwards to the service."""
+        svc = _FakeGenerationService(GenerationResult(storyline_id=8))
+        runner = _build_minimal_runner(factory, generation=svc)
+        job = runner.submit_storyline_generation(
+            8,
+            user_id=1,
+            start_date="2099-04-01",
+            end_date="2099-04-30",
+            mode="append",
+        )
+        runner.shutdown(wait=True)
+
+        finished = runner._jobs.get(job.id)  # type: ignore[attr-defined]
+        assert finished is not None
+        assert finished.params["start_date"] == "2099-04-01"
+        assert finished.params["end_date"] == "2099-04-30"
+        assert finished.params["mode"] == "append"
+        assert svc.calls == [8]
+        assert svc.kwargs == [{
+            "start_date": "2099-04-01",
+            "end_date": "2099-04-30",
+            "mode": "append",
+        }]
+
+    def test_submit_generation_rejects_invalid_mode(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        svc = _FakeGenerationService(GenerationResult(storyline_id=9))
+        runner = _build_minimal_runner(factory, generation=svc)
+        try:
+            with pytest.raises(ValueError, match="Invalid mode"):
+                runner.submit_storyline_generation(
+                    9, user_id=1, mode="lolnope",
+                )
+        finally:
+            runner.shutdown(wait=True)
 
     def test_submit_extension_check_refuses_when_classifier_missing(
         self,

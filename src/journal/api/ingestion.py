@@ -37,7 +37,7 @@ import hashlib
 import json
 import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from starlette.responses import JSONResponse
 
@@ -565,8 +565,13 @@ def register_ingestion_routes(
 
         Body: ``{entity_id: int, name: str, description?: str,
         start_date?: ISO, end_date?: ISO}``. Returns 201 with the
-        new storyline dict, 409 if (user, entity, name) already
+        new storyline dict (plus ``generation_job_id`` if a generation
+        job was kicked off), 409 if (user, entity, name) already
         exists, 400 on bad input, 503 if storylines are not wired.
+
+        On successful create, immediately queues a
+        ``storyline_generation`` job so the new storyline's panels
+        start populating without a separate regenerate call (W7).
         """
         services = services_getter()
         if services is None:
@@ -622,22 +627,46 @@ def register_ingestion_routes(
             start_date=start_date,
             end_date=end_date,
         )
+
+        # Auto-kick the generation job (W7). The job runner refuses
+        # to queue when the StorylineGenerationService isn't wired —
+        # we treat that as a soft failure and still return the
+        # created storyline, just without a job_id. This lets a
+        # server with the storylines write-path enabled but no
+        # ANTHROPIC_API_KEY still expose the create endpoint to
+        # admins seeding state by hand.
+        generation_job_id: str | None = None
+        job_runner: JobRunner | None = services.get("job_runner")
+        if job_runner is not None:
+            try:
+                job = job_runner.submit_storyline_generation(
+                    storyline.id, user_id=user.user_id,
+                )
+                generation_job_id = job.id
+            except RuntimeError as exc:
+                log.warning(
+                    "POST /api/storylines — created storyline %d but "
+                    "could not queue generation: %s",
+                    storyline.id, exc,
+                )
+
         log.info(
-            "POST /api/storylines — created storyline %d (entity_id=%d)",
-            storyline.id, entity_id,
+            "POST /api/storylines — created storyline %d "
+            "(entity_id=%d, generation_job_id=%s)",
+            storyline.id, entity_id, generation_job_id,
         )
-        return JSONResponse(
-            {
-                "id": storyline.id,
-                "user_id": storyline.user_id,
-                "entity_id": storyline.entity_id,
-                "name": storyline.name,
-                "description": storyline.description,
-                "status": storyline.status,
-                "created_at": storyline.created_at,
-            },
-            status_code=201,
-        )
+        response_body: dict[str, Any] = {
+            "id": storyline.id,
+            "user_id": storyline.user_id,
+            "entity_id": storyline.entity_id,
+            "name": storyline.name,
+            "description": storyline.description,
+            "status": storyline.status,
+            "created_at": storyline.created_at,
+        }
+        if generation_job_id is not None:
+            response_body["generation_job_id"] = generation_job_id
+        return JSONResponse(response_body, status_code=201)
 
     @mcp.custom_route(
         "/api/storylines/{storyline_id:int}/regenerate",
@@ -647,10 +676,14 @@ def register_ingestion_routes(
     async def regenerate_storyline(request: Request) -> JSONResponse:
         """Queue a regeneration job for one storyline.
 
-        Returns 202 with ``{"job_id", "status"}``. Clients poll
-        ``GET /api/jobs/{job_id}`` to observe progress. 404 if the
-        storyline doesn't belong to the caller; 503 if the
-        StorylineGenerationService isn't wired on this server.
+        Optional JSON body: ``{start_date?: ISO, end_date?: ISO,
+        mode?: "replace" | "append"}``. Empty body (no JSON at all
+        or ``{}``) is allowed and preserves the original
+        replace-with-stored-window behavior. Returns 202 with
+        ``{"job_id", "status"}``. Clients poll ``GET /api/jobs/{job_id}``
+        to observe progress. 400 on a malformed body (wrong types or
+        invalid mode); 404 if the storyline doesn't belong to the
+        caller; 503 if the StorylineGenerationService isn't wired.
         """
         services = services_getter()
         if services is None:
@@ -671,16 +704,56 @@ def register_ingestion_routes(
             return JSONResponse(
                 {"error": "Storyline not found"}, status_code=404,
             )
+
+        # Parse and validate optional body. Missing body / empty
+        # body == replace mode with the storyline row's stored
+        # window — same shape as the original W6 contract.
         try:
-            job = job_runner.submit_storyline_generation(
-                sid, user_id=user.user_id,
+            raw_body = await request.body()
+            body: dict[str, Any]
+            if not raw_body:
+                body = {}
+            else:
+                parsed = json.loads(raw_body)
+                if not isinstance(parsed, dict):
+                    return JSONResponse(
+                        {"error": "Request body must be a JSON object"},
+                        status_code=400,
+                    )
+                body = parsed
+        except (json.JSONDecodeError, ValueError):
+            return JSONResponse(
+                {"error": "Request body must be valid JSON"},
+                status_code=400,
             )
+
+        submit_kwargs: dict[str, Any] = {"user_id": user.user_id}
+        for key in ("start_date", "end_date", "mode"):
+            if key not in body:
+                continue
+            value = body[key]
+            if not isinstance(value, str):
+                return JSONResponse(
+                    {"error": f"{key} must be a string"},
+                    status_code=400,
+                )
+            submit_kwargs[key] = value
+
+        try:
+            job = job_runner.submit_storyline_generation(sid, **submit_kwargs)
+        except ValueError as e:
+            log.warning("POST /api/storylines/%d/regenerate — %s", sid, e)
+            return JSONResponse({"error": str(e)}, status_code=400)
         except RuntimeError as e:
             log.warning("POST /api/storylines/%d/regenerate — %s", sid, e)
             return JSONResponse({"error": str(e)}, status_code=503)
         log.info(
-            "POST /api/storylines/%d/regenerate — queued job %s",
+            "POST /api/storylines/%d/regenerate — queued job %s "
+            "(start=%s, end=%s, mode=%s)",
             sid, job.id,
+            submit_kwargs.get("start_date"),
+            submit_kwargs.get("end_date"),
+            submit_kwargs.get("mode"),
         )
         return JSONResponse(
             {"job_id": job.id, "status": job.status},

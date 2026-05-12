@@ -83,6 +83,7 @@ from journal.services.jobs.validation import (
     REPROCESS_EMBEDDINGS_KEYS,
     STORYLINE_EXTENSION_CHECK_KEYS,
     STORYLINE_GENERATION_KEYS,
+    STORYLINE_GENERATION_MODES,
     validate_params,
 )
 from journal.services.jobs.workers import WorkerContext
@@ -387,6 +388,9 @@ class JobRunner:
         *,
         user_id: int | None = None,
         parent_job_id: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        mode: str | None = None,
     ) -> Job:
         """Queue a storyline regeneration job.
 
@@ -395,17 +399,34 @@ class JobRunner:
         ``user_id`` routes notifications; ``parent_job_id`` opts into
         the consolidated pipeline-notification pattern used by the
         extension-check hook.
+
+        ``start_date`` and ``end_date`` (ISO YYYY-MM-DD) override the
+        storyline row's stored date window for this run only. ``mode``
+        is ``"replace"`` (default) or ``"append"``; append requires
+        ``start_date`` to be on or after the storyline's last
+        generation date.
         """
         if self._ctx.storyline_generation is None:
             raise RuntimeError(
                 "StorylineGenerationService not configured; "
                 "cannot queue storyline_generation job."
             )
+        if mode is not None and mode not in STORYLINE_GENERATION_MODES:
+            raise ValueError(
+                f"Invalid mode {mode!r}; expected one of "
+                f"{sorted(STORYLINE_GENERATION_MODES)}"
+            )
         params: dict[str, Any] = {"storyline_id": storyline_id}
         if user_id is not None:
             params["user_id"] = user_id
         if parent_job_id is not None:
             params["parent_job_id"] = parent_job_id
+        if start_date is not None:
+            params["start_date"] = start_date
+        if end_date is not None:
+            params["end_date"] = end_date
+        if mode is not None:
+            params["mode"] = mode
         validate_params(
             params, STORYLINE_GENERATION_KEYS, job_type="storyline_generation",
         )
