@@ -224,6 +224,91 @@ class TestStorylinesAPI:
         resp = client.post("/api/storylines/99999/regenerate")
         assert resp.status_code == 404
 
+    def test_detail_panel_segments_carry_entry_date_through_serialization(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        """End-to-end through the DB and the API: a citation segment
+        stored with entry_date must come back through GET
+        /api/storylines/{id} with the entry_date field intact. The
+        webapp's curation date toggle and narrative date eyebrows
+        depend on this contract."""
+        client, ctx = app_with_storylines
+        created = client.post(
+            "/api/storylines",
+            json={"entity_id": ctx["entity_id"], "name": "Running"},
+        ).json()
+        sid = created["id"]
+        # Inject a curation panel with entry_date stamped on its
+        # citations — emulating what _build_curation_segments now
+        # produces.
+        ctx["repo"].upsert_panel(
+            storyline_id=sid,
+            panel_kind="curation",
+            segments=[
+                {"kind": "text", "text": "It begins on 2026-02-15:"},
+                {
+                    "kind": "citation",
+                    "entry_id": 1,
+                    "quote": "q1",
+                    "entry_date": "2026-02-15",
+                },
+                {"kind": "text", "text": "Two weeks later:"},
+                {
+                    "kind": "citation",
+                    "entry_id": 2,
+                    "quote": "q2",
+                    "entry_date": "2026-03-01",
+                },
+            ],
+            source_entry_ids=[1, 2],
+            citation_count=2,
+            model_used="test",
+        )
+        resp = client.get(f"/api/storylines/{sid}")
+        assert resp.status_code == 200
+        panels = resp.json()["panels"]
+        assert "curation" in panels
+        citations = [
+            s for s in panels["curation"]["segments"] if s["kind"] == "citation"
+        ]
+        assert len(citations) == 2
+        assert citations[0]["entry_date"] == "2026-02-15"
+        assert citations[1]["entry_date"] == "2026-03-01"
+
+    def test_detail_handles_legacy_panels_without_entry_date(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        """Storylines generated before the server added entry_date
+        must still serve cleanly. The webapp's fallback hides the
+        absolute-date toggle for those panels."""
+        client, ctx = app_with_storylines
+        created = client.post(
+            "/api/storylines",
+            json={"entity_id": ctx["entity_id"], "name": "Running"},
+        ).json()
+        sid = created["id"]
+        ctx["repo"].upsert_panel(
+            storyline_id=sid,
+            panel_kind="curation",
+            segments=[
+                {"kind": "text", "text": "It begins:"},
+                {"kind": "citation", "entry_id": 1, "quote": "q"},
+            ],
+            source_entry_ids=[1],
+            citation_count=1,
+            model_used="test",
+        )
+        resp = client.get(f"/api/storylines/{sid}")
+        assert resp.status_code == 200
+        citation = next(
+            s
+            for s in resp.json()["panels"]["curation"]["segments"]
+            if s["kind"] == "citation"
+        )
+        assert "entry_date" not in citation
+
     def test_delete_removes_storyline(
         self,
         app_with_storylines: tuple[TestClient, dict[str, Any]],

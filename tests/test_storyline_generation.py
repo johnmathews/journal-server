@@ -137,6 +137,112 @@ class TestNarratorParser:
         assert kinds == ["text"]
         assert any("not in document_to_entry" in m for m in caplog.messages)
 
+    def test_parser_stamps_entry_date_when_document_to_date_supplied(self) -> None:
+        """The narrator parser must thread the source entry's ISO date
+        onto each citation segment. Otherwise the webapp's
+        absolute-date eyebrow logic in StorylineNarrative.vue has
+        nothing to work with."""
+        response = _FakeResponse(content=[
+            {
+                "type": "text",
+                "text": "He ran.",
+                "citations": [
+                    {
+                        "type": "char_location",
+                        "cited_text": "I ran today",
+                        "document_index": 0,
+                        "start_char_index": 0,
+                        "end_char_index": 11,
+                    }
+                ],
+            }
+        ])
+        segments = _parse_narrative_response(
+            response,
+            document_to_entry={0: 42},
+            document_to_date={0: "2026-02-15"},
+        )
+        citations = [s for s in segments if s["kind"] == "citation"]
+        assert citations == [
+            {
+                "kind": "citation",
+                "entry_id": 42,
+                "quote": "I ran today",
+                "entry_date": "2026-02-15",
+            }
+        ]
+
+    def test_parser_omits_entry_date_when_no_date_map(self) -> None:
+        """Backward compat: callers that don't supply document_to_date
+        get citation segments without entry_date — webapp falls back
+        gracefully."""
+        response = _FakeResponse(content=[
+            {
+                "type": "text",
+                "text": "x",
+                "citations": [
+                    {
+                        "type": "char_location",
+                        "cited_text": "y",
+                        "document_index": 0,
+                        "start_char_index": 0,
+                        "end_char_index": 1,
+                    }
+                ],
+            }
+        ])
+        segments = _parse_narrative_response(response, document_to_entry={0: 1})
+        citation = next(s for s in segments if s["kind"] == "citation")
+        assert "entry_date" not in citation
+
+    def test_full_narrator_call_stamps_entry_dates_end_to_end(self) -> None:
+        """End-to-end through generate_narrative: confirm the parallel
+        document_to_date map is built from the excerpts and threaded
+        all the way through to the final NarrativeResult segments."""
+        excerpts = [
+            DatedEntryExcerpt(
+                entry_id=10, entry_date="2026-01-05",
+                final_text="text 1", quotes=[],
+            ),
+            DatedEntryExcerpt(
+                entry_id=20, entry_date="2026-02-22",
+                final_text="text 2", quotes=[],
+            ),
+        ]
+        canned = _FakeResponse(content=[
+            {
+                "type": "text",
+                "text": "claim A",
+                "citations": [{
+                    "type": "char_location",
+                    "cited_text": "cite A",
+                    "document_index": 0,
+                    "start_char_index": 0,
+                    "end_char_index": 6,
+                }],
+            },
+            {
+                "type": "text",
+                "text": "claim B",
+                "citations": [{
+                    "type": "char_location",
+                    "cited_text": "cite B",
+                    "document_index": 1,
+                    "start_char_index": 0,
+                    "end_char_index": 6,
+                }],
+            },
+        ])
+        narrator = AnthropicStorylineNarrator(
+            api_key="x", client=_FakeAnthropicClient(canned),
+        )
+        result = narrator.generate_narrative(
+            excerpts=excerpts, storyline_name="x",
+        )
+        citations = [s for s in result.segments if s["kind"] == "citation"]
+        assert citations[0]["entry_date"] == "2026-01-05"
+        assert citations[1]["entry_date"] == "2026-02-22"
+
     def test_non_text_blocks_are_ignored(self) -> None:
         response = _FakeResponse(content=[
             {"type": "tool_use", "name": "foo"},  # not text — ignore
@@ -540,6 +646,93 @@ class TestGenerationService:
         refreshed = repo.get_storyline(storyline_id)
         assert refreshed is not None
         assert refreshed.last_generated_at is not None
+
+    def test_empty_narrator_result_preserves_existing_narrative(
+        self,
+        seeded_storyline: tuple[Any, Any, int, int, int],
+    ) -> None:
+        """Regression: a transient narrator failure (Anthropic outage,
+        rate limit, etc.) used to wipe the previously good narrative
+        panel because the service unconditionally upserted whatever
+        the narrator returned. The narrator catches Exception
+        internally and returns an empty NarrativeResult, so the empty
+        segments would overwrite the persisted panel. The fix: when
+        the corpus is non-empty but the narrator came back empty,
+        leave the existing panel alone and surface the failure as a
+        warning.
+        """
+        repo, store, _user, _entity, storyline_id = seeded_storyline
+
+        # First regen — produces a real narrative.
+        good_narrator = _FakeNarrator(segments=[
+            {"kind": "text", "text": "The author writes about his son. "},
+            {"kind": "citation", "entry_id": 1, "quote": "Atlas read."},
+        ])
+        svc_good = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=good_narrator,
+            glue=_FakeGlue(),
+        )
+        svc_good.regenerate(storyline_id)
+        original_panel = repo.get_panel(storyline_id, "narrative")
+        assert original_panel is not None
+        assert len(original_panel.segments) == 2
+
+        # Second regen — narrator silently fails (returns no segments).
+        # The existing narrative panel must NOT be overwritten.
+        empty_narrator = _FakeNarrator(segments=[])
+        svc_empty = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=empty_narrator,
+            glue=_FakeGlue(),
+        )
+        result = svc_empty.regenerate(storyline_id)
+        assert result.warnings
+        assert any("preserved" in w.lower() for w in result.warnings)
+
+        preserved = repo.get_panel(storyline_id, "narrative")
+        assert preserved is not None
+        # Same segments as before — not wiped.
+        assert preserved.segments == original_panel.segments
+        assert preserved.citation_count == original_panel.citation_count
+
+    def test_citation_segments_include_entry_date(
+        self,
+        seeded_storyline: tuple[Any, Any, int, int, int],
+    ) -> None:
+        """Curation panel citations must carry the source entry's ISO
+        date so the webapp's absolute-date toggle has data to work
+        with. This is the field-level smoke test for the
+        relative/absolute toggle feature."""
+        repo, store, _user, _entity, storyline_id = seeded_storyline
+        svc = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=_FakeNarrator(segments=[
+                {"kind": "text", "text": "intro"},
+                {"kind": "citation", "entry_id": 1, "quote": "q"},
+            ]),
+            glue=_FakeGlue(),
+        )
+        svc.regenerate(storyline_id)
+
+        curation = repo.get_panel(storyline_id, "curation")
+        assert curation is not None
+        citation_segs = [s for s in curation.segments if s["kind"] == "citation"]
+        assert citation_segs, "curation panel should have citation segments"
+        for seg in citation_segs:
+            assert "entry_date" in seg, (
+                "every curation citation must carry entry_date"
+            )
+            assert isinstance(seg["entry_date"], str)
+            # ISO YYYY-MM-DD
+            assert len(seg["entry_date"]) == 10
+            assert seg["entry_date"][4] == "-" and seg["entry_date"][7] == "-"
 
     def test_embedder_receives_text_only_and_capped_input(
         self,

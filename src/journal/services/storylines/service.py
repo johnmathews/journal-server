@@ -161,14 +161,33 @@ class StorylineGenerationService:
         )
         result.narrative_citation_count = narrative.citation_count
         result.narrative_model = narrative.model_used
-        self._storyline_repository.upsert_panel(
-            storyline_id=storyline_id,
-            panel_kind="narrative",
-            segments=narrative.segments,
-            source_entry_ids=narrative.source_entry_ids,
-            citation_count=narrative.citation_count,
-            model_used=narrative.model_used,
-        )
+        # Guard against silently wiping a previously good narrative.
+        # The narrator catches API errors internally and returns an
+        # empty NarrativeResult, so a single transient Anthropic
+        # failure used to overwrite the persisted panel with zero
+        # segments. When the corpus is non-empty but the narrator came
+        # back empty, leave the existing panel alone and surface the
+        # failure as a warning + log line.
+        if not narrative.segments:
+            log.warning(
+                "Storyline %d: narrator returned empty segments for "
+                "non-empty corpus (%d excerpts) — preserving existing "
+                "narrative panel rather than overwriting",
+                storyline_id, len(excerpts),
+            )
+            result.warnings.append(
+                "Narrative generation produced no segments; "
+                "existing narrative was preserved."
+            )
+        else:
+            self._storyline_repository.upsert_panel(
+                storyline_id=storyline_id,
+                panel_kind="narrative",
+                segments=narrative.segments,
+                source_entry_ids=narrative.source_entry_ids,
+                citation_count=narrative.citation_count,
+                model_used=narrative.model_used,
+            )
 
         glue = self._glue.generate_transitions(excerpts)
         curation_segments = _build_curation_segments(excerpts, glue.transitions)
