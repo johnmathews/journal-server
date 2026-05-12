@@ -61,6 +61,12 @@ if TYPE_CHECKING:
     from journal.services.ingestion import IngestionService
     from journal.services.mood_scoring import MoodScoringService
     from journal.services.notifications import PushoverNotificationService
+    from journal.services.storylines.extension import (
+        StorylineExtensionClassifierProtocol,
+    )
+    from journal.services.storylines.service import (
+        StorylineGenerationServiceProtocol,
+    )
 
 from journal.services.jobs.notifier import JobNotifier
 from journal.services.jobs.save_pipeline import submit_save_entry_pipeline
@@ -75,6 +81,8 @@ from journal.services.jobs.validation import (
     MOOD_BACKFILL_MODES,
     MOOD_SCORE_ENTRY_KEYS,
     REPROCESS_EMBEDDINGS_KEYS,
+    STORYLINE_EXTENSION_CHECK_KEYS,
+    STORYLINE_GENERATION_KEYS,
     validate_params,
 )
 from journal.services.jobs.workers import WorkerContext
@@ -98,6 +106,12 @@ from journal.services.jobs.workers.mood_backfill import run_mood_backfill
 from journal.services.jobs.workers.mood_score_entry import run_mood_score_entry
 from journal.services.jobs.workers.reprocess_embeddings import (
     run_reprocess_embeddings,
+)
+from journal.services.jobs.workers.storyline_extension_check import (
+    run_storyline_extension_check,
+)
+from journal.services.jobs.workers.storyline_generation import (
+    run_storyline_generation,
 )
 
 log = logging.getLogger(__name__)
@@ -161,6 +175,12 @@ class JobRunner:
         normalize_garmin_callable: Callable[..., NormalizeResult] | None = None,
         backfill_strava_callable: Callable[..., BackfillResult] | None = None,
         backfill_garmin_callable: Callable[..., BackfillResult] | None = None,
+        storyline_generation_service: (
+            StorylineGenerationServiceProtocol | None
+        ) = None,
+        storyline_extension_classifier: (
+            StorylineExtensionClassifierProtocol | None
+        ) = None,
     ) -> None:
         self._jobs = job_repository
         # Default the reembedder to the extraction service: it implements
@@ -206,6 +226,8 @@ class JobRunner:
             normalize_garmin=normalize_garmin_callable,
             backfill_strava=backfill_strava_callable,
             backfill_garmin=backfill_garmin_callable,
+            storyline_generation=storyline_generation_service,
+            storyline_extension_classifier=storyline_extension_classifier,
         )
 
     # ------------------------------------------------------------------
@@ -358,6 +380,84 @@ class JobRunner:
             user_id=user_id,
             enable_mood_scoring=enable_mood_scoring,
         )
+
+    def submit_storyline_generation(
+        self,
+        storyline_id: int,
+        *,
+        user_id: int | None = None,
+        parent_job_id: str | None = None,
+    ) -> Job:
+        """Queue a storyline regeneration job.
+
+        Refuses to queue if the StorylineGenerationService isn't
+        wired on this server (opt-in at boot, like fitness sync).
+        ``user_id`` routes notifications; ``parent_job_id`` opts into
+        the consolidated pipeline-notification pattern used by the
+        extension-check hook.
+        """
+        if self._ctx.storyline_generation is None:
+            raise RuntimeError(
+                "StorylineGenerationService not configured; "
+                "cannot queue storyline_generation job."
+            )
+        params: dict[str, Any] = {"storyline_id": storyline_id}
+        if user_id is not None:
+            params["user_id"] = user_id
+        if parent_job_id is not None:
+            params["parent_job_id"] = parent_job_id
+        validate_params(
+            params, STORYLINE_GENERATION_KEYS, job_type="storyline_generation",
+        )
+        job = self._jobs.create(
+            "storyline_generation", params, user_id=user_id,
+        )
+        self._executor.submit(
+            run_storyline_generation, self._ctx, job.id, params,
+        )
+        return job
+
+    def submit_storyline_extension_check(
+        self,
+        entry_id: int,
+        *,
+        user_id: int,
+        parent_job_id: str | None = None,
+    ) -> Job:
+        """Queue an extension-check job for one entry.
+
+        Refuses to queue if the StorylineExtensionClassifier isn't
+        wired on this server. The worker iterates the user's active
+        storylines and queues a regeneration job for each ``yes``
+        classification via ``submit_storyline_generation``.
+        """
+        if self._ctx.storyline_extension_classifier is None:
+            raise RuntimeError(
+                "StorylineExtensionClassifier not configured; "
+                "cannot queue storyline_extension_check job."
+            )
+        params: dict[str, Any] = {
+            "entry_id": entry_id,
+            "user_id": user_id,
+        }
+        if parent_job_id is not None:
+            params["parent_job_id"] = parent_job_id
+        validate_params(
+            params, STORYLINE_EXTENSION_CHECK_KEYS,
+            job_type="storyline_extension_check",
+        )
+        job = self._jobs.create(
+            "storyline_extension_check", params, user_id=user_id,
+        )
+        # The worker calls back into submit_storyline_generation to
+        # queue regenerations. We pass the bound method explicitly so
+        # the worker is free of any runner-side reach-in.
+        self._executor.submit(
+            run_storyline_extension_check,
+            self._ctx, job.id, params,
+            self.submit_storyline_generation,
+        )
+        return job
 
     def submit_entity_reembed(
         self, entity_id: int, *, user_id: int,
@@ -566,8 +666,9 @@ class JobRunner:
         param-validation + executor.submit dance the workers' follow-
         up flow needs.
         """
-        follow_up_ids: dict[str, str] = {}
-        for label, key, submit in [
+        follow_up_jobs: list[
+            tuple[str, str, Callable[[], Job]]
+        ] = [
             ("mood scoring", "mood_scoring",
              lambda: self.submit_mood_score_entry(
                  entry_id, user_id=user_id, parent_job_id=parent_job_id,
@@ -577,7 +678,25 @@ class JobRunner:
                  {"entry_id": entry_id, "parent_job_id": parent_job_id},
                  user_id=user_id,
              )),
-        ]:
+        ]
+        # Storylines is opt-in at boot — only queue an extension check
+        # when both the classifier service is wired and a user_id is
+        # known (the classifier loops the user's active storylines).
+        if (
+            self._ctx.storyline_extension_classifier is not None
+            and user_id is not None
+        ):
+            follow_up_jobs.append(
+                ("storyline extension check", "storyline_extension_check",
+                 lambda: self.submit_storyline_extension_check(
+                     entry_id,
+                     user_id=user_id,
+                     parent_job_id=parent_job_id,
+                 )),
+            )
+
+        follow_up_ids: dict[str, str] = {}
+        for label, key, submit in follow_up_jobs:
             try:
                 fj = submit()
                 follow_up_ids[key] = fj.id

@@ -1,0 +1,550 @@
+"""Tests for the storylines job/integration layer (W5-W7).
+
+* W5: ``submit_storyline_generation`` + the ``run_storyline_generation``
+  worker — happy path, missing-service guard.
+* W6: ``StorylineExtensionClassifier`` — entity overlap fast path,
+  surface-form → LLM decider path, no-match short-circuit.
+* W6 decider: ``_parse_decision`` extracts the verdict from a
+  ``tool_use`` block; falls back to "maybe" on malformed response.
+* W7: ``_queue_post_ingestion_jobs`` queues a storyline_extension_check
+  job when the classifier is wired; skips silently when it isn't.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+import pytest
+
+from journal.db.jobs_repository import SQLiteJobRepository
+from journal.db.storyline_repository import SQLiteStorylineRepository
+from journal.entitystore.store import SQLiteEntityStore
+from journal.models import Entry
+from journal.providers.storyline_extension_decider import (
+    AnthropicStorylineExtensionDecider,
+    ExtensionDecision,
+    _parse_decision,
+)
+from journal.services.jobs.runner import JobRunner
+from journal.services.jobs.workers import WorkerContext
+from journal.services.jobs.workers.storyline_extension_check import (
+    run_storyline_extension_check,
+)
+from journal.services.jobs.workers.storyline_generation import (
+    run_storyline_generation,
+)
+from journal.services.storylines.extension import (
+    ExtensionResult,
+    StorylineExtensionClassifier,
+)
+from journal.services.storylines.service import GenerationResult
+
+if TYPE_CHECKING:
+    from journal.db.factory import ConnectionFactory
+
+
+# ── Fakes ───────────────────────────────────────────────────────
+
+
+class _FakeJobNotifier:
+    def __init__(self) -> None:
+        self.successes: list[tuple[str, Any]] = []
+        self.failures: list[tuple[str, str]] = []
+
+    def get_notify_strategy(self, _parent: str | None) -> str:
+        return "individual"
+
+    def notify_success(self, _user: int | None, job_type: str, payload: Any) -> None:  # noqa: ANN401
+        self.successes.append((job_type, payload))
+
+    def notify_failed(
+        self, _user: int | None, job_type: str, msg: str, _exc: Exception | None = None,
+    ) -> None:
+        self.failures.append((job_type, msg))
+
+    def try_pipeline_notification(
+        self, _parent_job_id: str, _user: int | None,
+    ) -> None:
+        return None
+
+
+class _FakeGenerationService:
+    def __init__(self, result: GenerationResult) -> None:
+        self._result = result
+        self.calls: list[int] = []
+
+    def regenerate(self, storyline_id: int) -> GenerationResult:
+        self.calls.append(storyline_id)
+        return self._result
+
+
+class _FakeClassifier:
+    def __init__(self, results_by_entry: dict[int, list[ExtensionResult]]) -> None:
+        self._by_entry = results_by_entry
+        self.calls: list[tuple[int, int]] = []
+
+    def classify_for_entry(
+        self, entry_id: int, user_id: int,
+    ) -> list[ExtensionResult]:
+        self.calls.append((entry_id, user_id))
+        return self._by_entry.get(entry_id, [])
+
+
+# ── W5: run_storyline_generation worker ─────────────────────────
+
+
+@pytest.fixture
+def job_ctx(
+    factory: ConnectionFactory,
+) -> tuple[SQLiteJobRepository, _FakeJobNotifier]:
+    return SQLiteJobRepository(factory), _FakeJobNotifier()
+
+
+class TestStorylineGenerationWorker:
+    def test_happy_path_marks_succeeded(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        jobs, notifier = job_ctx
+        svc = _FakeGenerationService(GenerationResult(
+            storyline_id=42, entry_count=3,
+            entity_mention_count=3, fts_fallback_count=0,
+            narrative_citation_count=5, curation_citation_count=3,
+            narrative_model="opus-fake", curation_model="haiku-fake",
+        ))
+        ctx = _build_minimal_ctx(jobs, notifier, generation=svc)
+
+        job = jobs.create(
+            "storyline_generation",
+            {"storyline_id": 42, "user_id": 1},
+            user_id=1,
+        )
+        run_storyline_generation(
+            ctx, job.id,
+            {"storyline_id": 42, "user_id": 1},
+        )
+        finished = jobs.get(job.id)
+        assert finished is not None
+        assert finished.status == "succeeded"
+        assert finished.result is not None
+        assert finished.result["entry_count"] == 3
+        assert finished.result["narrative_citation_count"] == 5
+        assert svc.calls == [42]
+        assert notifier.successes  # success was notified
+
+    def test_missing_service_marks_failed(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        jobs, notifier = job_ctx
+        ctx = _build_minimal_ctx(jobs, notifier, generation=None)
+        job = jobs.create(
+            "storyline_generation", {"storyline_id": 1, "user_id": 1},
+            user_id=1,
+        )
+        run_storyline_generation(
+            ctx, job.id, {"storyline_id": 1, "user_id": 1},
+        )
+        finished = jobs.get(job.id)
+        assert finished is not None
+        assert finished.status == "failed"
+        assert "not configured" in (finished.error_message or "")
+
+
+# ── W6: extension classifier ────────────────────────────────────
+
+
+@pytest.fixture
+def classifier_world(
+    factory: ConnectionFactory,
+) -> dict[str, Any]:
+    """Seed user, entity, entry, mention; build a classifier."""
+    conn = factory.get()
+    cur = conn.execute(
+        "INSERT INTO users (email, password_hash, display_name)"
+        " VALUES (?, ?, ?)", ("c@x.test", "x", "C"),
+    )
+    user_id = cur.lastrowid
+    conn.commit()
+
+    store = SQLiteEntityStore(factory)
+    entity = store.create_entity(
+        entity_type="activity", canonical_name="Running",
+        description="", first_seen="2026-02-15", user_id=user_id,
+    )
+    storyline_repo = SQLiteStorylineRepository(factory)
+    storyline = storyline_repo.create_storyline(
+        user_id=user_id, entity_id=entity.id, name="Running",
+    )
+
+    # An entry that mentions Running via entity_mentions (stage 1)
+    body_overlap = "I ran 5km today and it felt great."
+    cur = conn.execute(
+        "INSERT INTO entries"
+        " (entry_date, source_type, raw_text, final_text,"
+        "  word_count, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+        ("2026-03-01", "text", body_overlap, body_overlap, 8, user_id),
+    )
+    entry_overlap_id = cur.lastrowid
+    conn.execute(
+        "INSERT INTO entity_mentions"
+        " (entity_id, entry_id, quote, confidence, extraction_run_id)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (entity.id, entry_overlap_id, body_overlap, 0.95, "r-1"),
+    )
+
+    # An entry that contains the surface form "Running" but has no
+    # entity_mentions linking it (stage 2 path)
+    body_surface = "Running is fun. I do it often."
+    cur = conn.execute(
+        "INSERT INTO entries"
+        " (entry_date, source_type, raw_text, final_text,"
+        "  word_count, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+        ("2026-03-02", "text", body_surface, body_surface, 7, user_id),
+    )
+    entry_surface_id = cur.lastrowid
+
+    # An entry with no mention at all (stage 3 / no_match)
+    body_nope = "Today I baked sourdough bread."
+    cur = conn.execute(
+        "INSERT INTO entries"
+        " (entry_date, source_type, raw_text, final_text,"
+        "  word_count, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+        ("2026-03-03", "text", body_nope, body_nope, 5, user_id),
+    )
+    entry_nope_id = cur.lastrowid
+    conn.commit()
+
+    # Build entry repo helpers — load real Entry objects
+    class _MiniEntryRepo:
+        def get_entry(self, eid: int) -> Entry | None:
+            row = conn.execute(
+                "SELECT * FROM entries WHERE id = ?", (eid,),
+            ).fetchone()
+            if row is None:
+                return None
+            return Entry(
+                id=row["id"], entry_date=row["entry_date"],
+                source_type=row["source_type"],
+                raw_text=row["raw_text"],
+                final_text=row["final_text"] or "",
+                word_count=row["word_count"] or 0,
+                user_id=row["user_id"] or 0,
+            )
+
+        # Used by the generation service, not the classifier; here
+        # so the entry repo is interface-complete for any consumer
+        # that might pick it up later.
+        def search_text(self, **_: Any) -> list[Any]:  # noqa: ANN401
+            return []
+
+    @dataclass
+    class _CannedDecider:
+        verdict: ExtensionDecision
+        calls: list[dict[str, Any]] = field(default_factory=list)
+        model: str = "haiku-fake"
+
+        def decide(self, **kwargs: Any) -> ExtensionDecision:  # noqa: ANN401
+            self.calls.append(kwargs)
+            return self.verdict
+
+    decider = _CannedDecider(
+        verdict=ExtensionDecision(
+            decision="yes", reasoning="Surface form matches.",
+            model_used="haiku-fake",
+        ),
+    )
+    classifier = StorylineExtensionClassifier(
+        entity_store=store,
+        entry_repository=_MiniEntryRepo(),  # type: ignore[arg-type]
+        storyline_repository=storyline_repo,
+        decider=decider,
+    )
+    return {
+        "user_id": user_id,
+        "storyline_id": storyline.id,
+        "entity_id": entity.id,
+        "entry_overlap_id": entry_overlap_id,
+        "entry_surface_id": entry_surface_id,
+        "entry_nope_id": entry_nope_id,
+        "classifier": classifier,
+        "decider": decider,
+        "storyline_repo": storyline_repo,
+    }
+
+
+class TestExtensionClassifier:
+    def test_entity_overlap_yields_yes_without_llm(
+        self, classifier_world: dict[str, Any],
+    ) -> None:
+        results = classifier_world["classifier"].classify_for_entry(
+            entry_id=classifier_world["entry_overlap_id"],
+            user_id=classifier_world["user_id"],
+        )
+        assert len(results) == 1
+        assert results[0].decision == "yes"
+        assert results[0].stage == "entity_overlap"
+        # Decider was not called
+        assert classifier_world["decider"].calls == []
+        # last_extension_check_at recorded
+        s = classifier_world["storyline_repo"].get_storyline(
+            classifier_world["storyline_id"],
+        )
+        assert s is not None
+        assert s.last_extension_check_at is not None
+
+    def test_surface_form_invokes_decider(
+        self, classifier_world: dict[str, Any],
+    ) -> None:
+        results = classifier_world["classifier"].classify_for_entry(
+            entry_id=classifier_world["entry_surface_id"],
+            user_id=classifier_world["user_id"],
+        )
+        assert len(results) == 1
+        assert results[0].stage == "surface_form_llm"
+        assert results[0].decision == "yes"  # canned verdict
+        assert len(classifier_world["decider"].calls) == 1
+
+    def test_no_match_short_circuits(
+        self, classifier_world: dict[str, Any],
+    ) -> None:
+        results = classifier_world["classifier"].classify_for_entry(
+            entry_id=classifier_world["entry_nope_id"],
+            user_id=classifier_world["user_id"],
+        )
+        assert len(results) == 1
+        assert results[0].decision == "no"
+        assert results[0].stage == "no_match"
+        assert classifier_world["decider"].calls == []
+
+
+# ── W6 decider parser ──────────────────────────────────────────
+
+
+class TestExtensionDeciderParser:
+    def test_parses_tool_use_block(self) -> None:
+        response = type("R", (), {"content": [
+            {
+                "type": "tool_use",
+                "name": "record_decision",
+                "input": {"decision": "yes", "reasoning": "Direct match."},
+            },
+        ]})()
+        result = _parse_decision(response, model="haiku")
+        assert result.decision == "yes"
+        assert result.reasoning == "Direct match."
+        assert result.model_used == "haiku"
+
+    def test_malformed_response_falls_back_to_maybe(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        response = type("R", (), {"content": [
+            {"type": "text", "text": "I think yes"},  # not tool_use
+        ]})()
+        with caplog.at_level("WARNING"):
+            result = _parse_decision(response, model="haiku")
+        assert result.decision == "maybe"
+        assert "malformed" in result.reasoning.lower()
+
+    def test_invalid_decision_value_falls_back(self) -> None:
+        response = type("R", (), {"content": [
+            {
+                "type": "tool_use",
+                "name": "record_decision",
+                "input": {"decision": "definitely", "reasoning": "?"},
+            },
+        ]})()
+        result = _parse_decision(response, model="haiku")
+        assert result.decision == "maybe"
+
+    def test_api_failure_returns_maybe(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        class _Boom:
+            class _M:
+                def create(self, **_: Any) -> Any:  # noqa: ANN401
+                    raise RuntimeError("sad")
+            messages = _M()
+        decider = AnthropicStorylineExtensionDecider(
+            api_key="x", client=_Boom(),
+        )
+        with caplog.at_level("ERROR"):
+            out = decider.decide(
+                storyline_name="x",
+                storyline_description="",
+                entry_date="2026-01-01",
+                entry_text="anything",
+            )
+        assert out.decision == "maybe"
+
+
+# ── W7: extension-check worker + ingestion hook ────────────────
+
+
+class TestExtensionCheckWorker:
+    def test_yes_decisions_queue_regenerations(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        jobs, notifier = job_ctx
+        classifier = _FakeClassifier({
+            42: [
+                ExtensionResult(
+                    storyline_id=1, decision="yes",
+                    reasoning="ok", stage="entity_overlap",
+                ),
+                ExtensionResult(
+                    storyline_id=2, decision="no",
+                    reasoning="meh", stage="no_match",
+                ),
+                ExtensionResult(
+                    storyline_id=3, decision="maybe",
+                    reasoning="borderline", stage="surface_form_llm",
+                ),
+            ],
+        })
+        ctx = _build_minimal_ctx(jobs, notifier, classifier=classifier)
+        regen_calls: list[int] = []
+
+        def fake_regen(storyline_id: int, **_: Any) -> Any:  # noqa: ANN401
+            regen_calls.append(storyline_id)
+            return type("J", (), {"id": f"regen-{storyline_id}"})()
+
+        job = jobs.create(
+            "storyline_extension_check",
+            {"entry_id": 42, "user_id": 1}, user_id=1,
+        )
+        run_storyline_extension_check(
+            ctx, job.id,
+            {"entry_id": 42, "user_id": 1},
+            fake_regen,
+        )
+
+        finished = jobs.get(job.id)
+        assert finished is not None
+        assert finished.status == "succeeded"
+        assert regen_calls == [1]  # only the "yes" got a regen
+        assert finished.result is not None
+        classifications = finished.result["classifications"]
+        decisions = sorted(c["decision"] for c in classifications)
+        assert decisions == ["maybe", "no", "yes"]
+
+    def test_missing_classifier_marks_failed(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        jobs, notifier = job_ctx
+        ctx = _build_minimal_ctx(jobs, notifier, classifier=None)
+        job = jobs.create(
+            "storyline_extension_check",
+            {"entry_id": 1, "user_id": 1}, user_id=1,
+        )
+        run_storyline_extension_check(
+            ctx, job.id,
+            {"entry_id": 1, "user_id": 1},
+            lambda *_a, **_k: None,
+        )
+        finished = jobs.get(job.id)
+        assert finished is not None
+        assert finished.status == "failed"
+
+
+# ── _build_minimal_ctx helper ───────────────────────────────────
+
+
+def _build_minimal_ctx(
+    jobs: SQLiteJobRepository,
+    notifier: _FakeJobNotifier,
+    *,
+    generation: Any = None,  # noqa: ANN401
+    classifier: Any = None,  # noqa: ANN401
+) -> WorkerContext:
+    """Build a WorkerContext with only the fields the storyline
+    workers touch. Other fields are set to placeholder objects that
+    will blow up if anything else tries to read them (intentional —
+    if they get read, the test should fail loudly)."""
+    sentinel = object()
+    ctx = WorkerContext(
+        jobs=jobs,
+        notifier=notifier,  # type: ignore[arg-type]
+        extraction=sentinel,  # type: ignore[arg-type]
+        reembedder=sentinel,  # type: ignore[arg-type]
+        mood_backfill=sentinel,  # type: ignore[arg-type]
+        mood_scoring=sentinel,  # type: ignore[arg-type]
+        entries=sentinel,  # type: ignore[arg-type]
+        ingestion=None,
+        pop_pending_images=lambda _: [],
+        pop_pending_audio=lambda _: [],
+        queue_post_ingestion_jobs=lambda *_a, **_k: {},
+        storyline_generation=generation,
+        storyline_extension_classifier=classifier,
+    )
+    return ctx
+
+
+# ── JobRunner-level integration ─────────────────────────────────
+
+
+class TestJobRunnerStorylineSubmit:
+    def test_submit_generation_refuses_when_service_missing(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        runner = _build_minimal_runner(factory, generation=None)
+        with pytest.raises(RuntimeError, match="not configured"):
+            runner.submit_storyline_generation(1, user_id=1)
+        runner.shutdown(wait=True)
+
+    def test_submit_generation_queues_when_service_present(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        svc = _FakeGenerationService(GenerationResult(storyline_id=7))
+        runner = _build_minimal_runner(factory, generation=svc)
+        job = runner.submit_storyline_generation(7, user_id=1)
+        runner.shutdown(wait=True)
+        # Run completed: storyline_id 7 was passed through
+        assert svc.calls == [7]
+        finished = runner._jobs.get(job.id)  # type: ignore[attr-defined]
+        assert finished is not None
+        assert finished.status == "succeeded"
+
+    def test_submit_extension_check_refuses_when_classifier_missing(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        runner = _build_minimal_runner(factory, classifier=None)
+        with pytest.raises(RuntimeError, match="not configured"):
+            runner.submit_storyline_extension_check(1, user_id=1)
+        runner.shutdown(wait=True)
+
+
+def _build_minimal_runner(
+    factory: ConnectionFactory,
+    *,
+    generation: Any = None,  # noqa: ANN401
+    classifier: Any = None,  # noqa: ANN401
+) -> JobRunner:
+    """Construct a JobRunner with stub collaborators sufficient for
+    the storyline submit_* paths. Other collaborators are
+    placeholder objects that raise if touched."""
+    class _StubExtraction:
+        def reembed_entity_for_description(
+            self, _eid: int, *, user_id: int,  # noqa: ARG002
+        ) -> dict[str, Any]:
+            return {}
+
+    class _StubMood:
+        def score_entry(self, *_a: Any, **_k: Any) -> int:  # noqa: ANN401
+            return 0
+
+    return JobRunner(
+        job_repository=SQLiteJobRepository(factory),
+        entity_extraction_service=_StubExtraction(),  # type: ignore[arg-type]
+        mood_backfill_callable=lambda **_: None,
+        mood_scoring_service=_StubMood(),  # type: ignore[arg-type]
+        entry_repository=object(),  # type: ignore[arg-type]
+        storyline_generation_service=generation,
+        storyline_extension_classifier=classifier,
+    )

@@ -29,6 +29,12 @@ if TYPE_CHECKING:
     from journal.services.jobs.notifier import JobNotifier
     from journal.services.jobs.runner import EntityReembedder
     from journal.services.mood_scoring import MoodScoringService
+    from journal.services.storylines.extension import (
+        StorylineExtensionClassifierProtocol,
+    )
+    from journal.services.storylines.service import (
+        StorylineGenerationServiceProtocol,
+    )
 
 
 @dataclass
@@ -78,3 +84,10 @@ class WorkerContext:
     # opt-in gate as the fetch_*/normalize_* callables above).
     backfill_strava: Callable[..., BackfillResult] | None = None
     backfill_garmin: Callable[..., BackfillResult] | None = None
+    # Storylines seams (W5/W7). Both are optional because storylines
+    # is opt-in at server boot — when the providers/services aren't
+    # wired, JobRunner refuses to queue these jobs in the first place.
+    storyline_generation: StorylineGenerationServiceProtocol | None = None
+    storyline_extension_classifier: (
+        StorylineExtensionClassifierProtocol | None
+    ) = None

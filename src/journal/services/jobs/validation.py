@@ -78,6 +78,22 @@ FITNESS_BACKFILL_KEYS: dict[str, type | tuple[type, ...]] = {
     "end": str,
 }
 
+# Storylines (W5/W7). storyline_generation regenerates one storyline's
+# panels end-to-end. storyline_extension_check fires after each
+# ingestion to classify whether a new entry extends an active
+# storyline and (optionally) queue a regeneration.
+STORYLINE_GENERATION_KEYS: dict[str, type | tuple[type, ...]] = {
+    "storyline_id": int,
+    "user_id": int,
+    "parent_job_id": str,
+}
+
+STORYLINE_EXTENSION_CHECK_KEYS: dict[str, type | tuple[type, ...]] = {
+    "entry_id": int,
+    "user_id": int,
+    "parent_job_id": str,
+}
+
 
 def validate_params(
     params: dict[str, Any],
