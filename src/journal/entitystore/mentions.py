@@ -15,7 +15,12 @@ from typing import TYPE_CHECKING
 from journal.entitystore.protocol import _row_to_mention, _row_to_relationship
 
 if TYPE_CHECKING:
-    from journal.models import Entity, EntityMention, EntityRelationship
+    from journal.models import (
+        DatedEntryExcerpt,
+        Entity,
+        EntityMention,
+        EntityRelationship,
+    )
 
 
 class _MentionsMixin:
@@ -75,6 +80,66 @@ class _MentionsMixin:
         conn = self._conn()  # type: ignore[attr-defined]
         rows = conn.execute(sql, params).fetchall()
         return [_row_to_mention(r) for r in rows]
+
+    def get_dated_entity_excerpts(
+        self,
+        entity_id: int,
+        user_id: int,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[DatedEntryExcerpt]:
+        """Return one row per entry that mentions ``entity_id``, in
+        chronological order by ``entries.entry_date``, with each
+        entry's verbatim quotes from ``entity_mentions.quote``
+        aggregated into a list.
+
+        Used by the storyline generation service: the curation panel
+        iterates ``quotes`` for source-cited excerpts, and the
+        narrative panel passes ``final_text`` to Opus via the
+        Citations API as one custom-content document block per entry.
+
+        ``user_id`` is required (storylines are user-scoped). Date
+        bounds are inclusive ISO 8601 dates (e.g. ``"2026-02-12"``);
+        either may be ``None`` for an open bound.
+        """
+        from journal.models import DatedEntryExcerpt  # local import to avoid cycle
+
+        sql = (
+            "SELECT e.id AS entry_id, e.entry_date,"
+            "  COALESCE(NULLIF(e.final_text, ''), e.raw_text) AS body_text,"
+            "  m.quote"
+            " FROM entity_mentions m"
+            " JOIN entries e ON e.id = m.entry_id"
+            " WHERE m.entity_id = ? AND e.user_id = ?"
+        )
+        params: list[object] = [entity_id, user_id]
+        if start_date is not None:
+            sql += " AND e.entry_date >= ?"
+            params.append(start_date)
+        if end_date is not None:
+            sql += " AND e.entry_date <= ?"
+            params.append(end_date)
+        sql += " ORDER BY e.entry_date ASC, e.id ASC, m.id ASC"
+
+        conn = self._conn()  # type: ignore[attr-defined]
+        rows = conn.execute(sql, params).fetchall()
+
+        excerpts: list[DatedEntryExcerpt] = []
+        current: DatedEntryExcerpt | None = None
+        for row in rows:
+            entry_id_val = int(row["entry_id"])
+            if current is None or current.entry_id != entry_id_val:
+                current = DatedEntryExcerpt(
+                    entry_id=entry_id_val,
+                    entry_date=row["entry_date"],
+                    final_text=row["body_text"] or "",
+                    quotes=[],
+                )
+                excerpts.append(current)
+            quote = row["quote"] or ""
+            if quote:
+                current.quotes.append(quote)
+        return excerpts
 
     def get_mentions_for_entry(self, entry_id: int) -> list[EntityMention]:
         conn = self._conn()  # type: ignore[attr-defined]

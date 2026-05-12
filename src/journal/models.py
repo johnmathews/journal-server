@@ -321,6 +321,8 @@ JobType = Literal[
     "reprocess_embeddings",
     "fitness_sync_strava",
     "fitness_sync_garmin",
+    "storyline_generation",
+    "storyline_extension_check",
 ]
 
 
@@ -423,6 +425,72 @@ class ApiKeyInfo:
     expires_at: str | None = None
     last_used_at: str | None = None
     revoked_at: str | None = None
+
+
+# ── Storylines ──────────────────────────────────────────────────────
+#
+# Persistence dataclasses for the storylines feature. Schema lives in
+# migration 0027; design rationale in docs/storylines-plan.md.
+
+StorylineStatus = Literal["active", "archived"]
+StorylinePanelKind = Literal["curation", "narrative"]
+
+
+@dataclass
+class Storyline:
+    """One named, entity-anchored synthesized narrative."""
+
+    id: int
+    user_id: int
+    entity_id: int
+    name: str
+    description: str = ""
+    start_date: str | None = None
+    end_date: str | None = None
+    status: str = "active"
+    last_generated_at: str | None = None
+    last_extension_check_at: str | None = None
+    summary_embedding: list[float] | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass
+class StorylinePanel:
+    """One rendered panel of a storyline (curation or narrative).
+
+    `segments` follows the `Segment` shape in
+    `services/storylines/segments.py` — a JSON-serialisable list of
+    text-and-citation dicts. `source_entry_ids` is the deduplicated list
+    of entry IDs referenced by citations within this panel; useful for
+    UI badges ("3 entries cited") without scanning the segments list.
+    """
+
+    storyline_id: int
+    panel_kind: str
+    segments: list[dict[str, Any]] = field(default_factory=list)
+    source_entry_ids: list[int] = field(default_factory=list)
+    citation_count: int = 0
+    model_used: str = ""
+    generated_at: str = ""
+    id: int | None = None
+
+
+@dataclass
+class DatedEntryExcerpt:
+    """One entry's contribution to a storyline's source corpus.
+
+    Produced by the `get_dated_entity_excerpts` query on the entity
+    store. `quotes` is the verbatim list of `entity_mentions.quote`
+    rows for the (entity, entry) pair — used by the curation panel.
+    `final_text` is the full entry text — used by the narrative panel
+    via the Citations API as one document block.
+    """
+
+    entry_id: int
+    entry_date: str
+    final_text: str
+    quotes: list[str] = field(default_factory=list)
 
 
 # ── Fitness pipeline ────────────────────────────────────────────────

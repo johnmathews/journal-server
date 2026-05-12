@@ -55,6 +55,11 @@ the top of the linked doc tells you whether it's active, closed, or superseded.
   three-width resize, edit-layout mode, persisted preferences). Also closed the
   tooltip-parity ask (T6) and the Garmin Workouts/Wellness column split (T7). Verified
   post-deploy 2026-05-12. Kept as a record of decisions.
+- [`storylines-plan.md`](./storylines-plan.md) — **active, opened 2026-05-12.** Server-side
+  spike for a new feature: LLM-synthesized cross-entry narratives ("storylines") anchored on
+  entities, with a verbatim-excerpt curation panel and a third-person narrative panel grounded
+  via Anthropic's Citations API. Two seeded storylines (Running, Atlas) over the last 3 months.
+  Webapp cycle follows as a separate worktree once the server spike passes its W10 qualitative gate.
 - [`code-quality-principles.md`](./code-quality-principles.md) — standing rules referenced
   by the refactor docs.
 - **SQLite threading refactor — closed 2026-05-11.** All repos use a
@@ -95,8 +100,16 @@ with a small corpus".
 > UI) all closed by 2026-04-21 — see [`archive/tier-1-plan.md`](./archive/tier-1-plan.md) and
 > Closed items 13–15, 28 below for the shipped detail. T1.1.b dedup-threshold tuning (`0.88`)
 > was never executed but no work was blocked. **Fitness integration (Item 1 below) shipped
-> 2026-05-10** — kept here for reference until the next Tier 1 candidate is promoted; the
-> deferred follow-ups listed inline are independent ad-hoc work, not blocking.
+> 2026-05-10.** **Storylines (Item 2 below) opened 2026-05-12** as the next Tier 1 candidate.
+
+### 2. Storylines `[both]` — opened 2026-05-12
+
+LLM-synthesized cross-entry narratives about recurring threads. Each storyline anchors on a
+single entity (e.g. Atlas, Running) and renders as two parallel panels: a curation panel of
+verbatim entry excerpts in chronological order, and a third-person narrative panel grounded
+via Anthropic's Citations API. Server-side spike covers two seeded storylines (Running
+entity id 59, Atlas entity id 3) over the last three months. Webapp cycle follows once the
+server spike passes its W10 qualitative gate. Plan: [`storylines-plan.md`](./storylines-plan.md).
 
 ### 1. Fitness integration `[both]` — shipped 2026-05-10
 
