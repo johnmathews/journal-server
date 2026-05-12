@@ -551,6 +551,171 @@ def register_ingestion_routes(
             status_code=202,
         )
 
+    # -----------------------------------------------------------------
+    # Storyline routes (write/job-creation only — reads in api/storylines.py)
+    # -----------------------------------------------------------------
+
+    @mcp.custom_route(
+        "/api/storylines",
+        methods=["POST"],
+        name="api_create_storyline",
+    )
+    async def create_storyline(request: Request) -> JSONResponse:
+        """Create a new storyline.
+
+        Body: ``{entity_id: int, name: str, description?: str,
+        start_date?: ISO, end_date?: ISO}``. Returns 201 with the
+        new storyline dict, 409 if (user, entity, name) already
+        exists, 400 on bad input, 503 if storylines are not wired.
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503,
+            )
+        repo = services.get("storyline_repository")
+        if repo is None:
+            return JSONResponse(
+                {"error": "Storylines feature not configured"},
+                status_code=503,
+            )
+        user = get_authenticated_user(request)
+
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "Request body must be a JSON object"},
+                status_code=400,
+            )
+        entity_id = body.get("entity_id")
+        name = (body.get("name") or "").strip()
+        if not isinstance(entity_id, int) or not name:
+            return JSONResponse(
+                {"error": "entity_id (int) and name (str) are required"},
+                status_code=400,
+            )
+        description = body.get("description", "") or ""
+        start_date = body.get("start_date")
+        end_date = body.get("end_date")
+
+        # Refuse if (user, entity, name) already exists — caller can
+        # GET the existing one or regenerate.
+        existing = repo.find_by_entity(
+            user_id=user.user_id, entity_id=entity_id, name=name,
+        )
+        if existing is not None:
+            return JSONResponse(
+                {
+                    "error": "Storyline already exists",
+                    "storyline_id": existing.id,
+                },
+                status_code=409,
+            )
+        storyline = repo.create_storyline(
+            user_id=user.user_id,
+            entity_id=entity_id,
+            name=name,
+            description=description,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        log.info(
+            "POST /api/storylines — created storyline %d (entity_id=%d)",
+            storyline.id, entity_id,
+        )
+        return JSONResponse(
+            {
+                "id": storyline.id,
+                "user_id": storyline.user_id,
+                "entity_id": storyline.entity_id,
+                "name": storyline.name,
+                "description": storyline.description,
+                "status": storyline.status,
+                "created_at": storyline.created_at,
+            },
+            status_code=201,
+        )
+
+    @mcp.custom_route(
+        "/api/storylines/{storyline_id:int}/regenerate",
+        methods=["POST"],
+        name="api_regenerate_storyline",
+    )
+    async def regenerate_storyline(request: Request) -> JSONResponse:
+        """Queue a regeneration job for one storyline.
+
+        Returns 202 with ``{"job_id", "status"}``. Clients poll
+        ``GET /api/jobs/{job_id}`` to observe progress. 404 if the
+        storyline doesn't belong to the caller; 503 if the
+        StorylineGenerationService isn't wired on this server.
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503,
+            )
+        repo = services.get("storyline_repository")
+        job_runner: JobRunner | None = services.get("job_runner")
+        if repo is None or job_runner is None:
+            return JSONResponse(
+                {"error": "Storylines feature not configured"},
+                status_code=503,
+            )
+        user = get_authenticated_user(request)
+        sid = int(request.path_params["storyline_id"])
+        storyline = repo.get_storyline(sid, user_id=user.user_id)
+        if storyline is None:
+            return JSONResponse(
+                {"error": "Storyline not found"}, status_code=404,
+            )
+        try:
+            job = job_runner.submit_storyline_generation(
+                sid, user_id=user.user_id,
+            )
+        except RuntimeError as e:
+            log.warning("POST /api/storylines/%d/regenerate — %s", sid, e)
+            return JSONResponse({"error": str(e)}, status_code=503)
+        log.info(
+            "POST /api/storylines/%d/regenerate — queued job %s",
+            sid, job.id,
+        )
+        return JSONResponse(
+            {"job_id": job.id, "status": job.status},
+            status_code=202,
+        )
+
+    @mcp.custom_route(
+        "/api/storylines/{storyline_id:int}",
+        methods=["DELETE"],
+        name="api_delete_storyline",
+    )
+    async def delete_storyline(request: Request) -> JSONResponse:
+        services = services_getter()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503,
+            )
+        repo = services.get("storyline_repository")
+        if repo is None:
+            return JSONResponse(
+                {"error": "Storylines feature not configured"},
+                status_code=503,
+            )
+        user = get_authenticated_user(request)
+        sid = int(request.path_params["storyline_id"])
+        deleted = repo.delete_storyline(sid, user_id=user.user_id)
+        if not deleted:
+            return JSONResponse(
+                {"error": "Storyline not found"}, status_code=404,
+            )
+        log.info(
+            "DELETE /api/storylines/%d — removed", sid,
+        )
+        return JSONResponse({"deleted": True}, status_code=200)
+
     @mcp.custom_route(
         "/api/mood/backfill",
         methods=["POST"],

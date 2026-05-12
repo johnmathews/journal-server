@@ -1,0 +1,241 @@
+"""REST API tests for the storylines endpoints (W8).
+
+Covers GET list/detail and the POST create/regenerate/delete routes
+on a real Starlette test client wired to a real SQLite db. The
+JobRunner is built with a stub StorylineGenerationService whose
+``regenerate`` returns a recorded call, so we can assert that
+``POST /regenerate`` queued the job rather than running it
+synchronously.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+import pytest
+from mcp.server.fastmcp import FastMCP
+from starlette.testclient import TestClient
+
+from journal.api.ingestion import register_ingestion_routes
+from journal.api.storylines import register_storylines_routes
+from journal.auth import AuthenticatedUser, _current_user_id
+from journal.db.factory import ConnectionFactory
+from journal.db.jobs_repository import SQLiteJobRepository
+from journal.db.storyline_repository import SQLiteStorylineRepository
+from journal.entitystore.store import SQLiteEntityStore
+from journal.services.jobs import JobRunner
+from journal.services.storylines.service import GenerationResult
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+    from pathlib import Path
+
+
+_TEST_USER_ID = 1
+
+
+class _FakeAuthMiddleware:
+    def __init__(self, app: Any) -> None:  # noqa: ANN401
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:  # noqa: ANN401
+        if scope["type"] in ("http", "websocket"):
+            scope["user"] = AuthenticatedUser(
+                user_id=_TEST_USER_ID,
+                email="test@example.com",
+                display_name="Test User",
+                is_admin=False,
+                is_active=True,
+                email_verified=True,
+            )
+            token = _current_user_id.set(_TEST_USER_ID)
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                _current_user_id.reset(token)
+        else:
+            await self.app(scope, receive, send)
+
+
+class _FakeGenerationService:
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    def regenerate(self, storyline_id: int) -> GenerationResult:
+        self.calls.append(storyline_id)
+        return GenerationResult(storyline_id=storyline_id, entry_count=0)
+
+
+@pytest.fixture
+def app_with_storylines(
+    tmp_path: Path,
+) -> Generator[tuple[TestClient, dict[str, Any]]]:
+    db_path = tmp_path / "api.db"
+    factory = ConnectionFactory(db_path)
+    from journal.db.migrations import run_migrations
+    run_migrations(factory.get())
+
+    # Migration 0011 seeds an admin user with id=1, which matches _TEST_USER_ID.
+    entity_store = SQLiteEntityStore(factory)
+    entity = entity_store.create_entity(
+        entity_type="activity", canonical_name="Running",
+        description="", first_seen="2026-02-15",
+        user_id=_TEST_USER_ID,
+    )
+
+    storyline_repo = SQLiteStorylineRepository(factory)
+    job_repo = SQLiteJobRepository(factory)
+    gen_service = _FakeGenerationService()
+
+    class _StubExtraction:
+        def reembed_entity_for_description(
+            self, _eid: int, *, user_id: int,  # noqa: ARG002
+        ) -> dict[str, Any]:
+            return {}
+
+    class _StubMood:
+        def score_entry(self, *_a: Any, **_k: Any) -> int:  # noqa: ANN401
+            return 0
+
+    runner = JobRunner(
+        job_repository=job_repo,
+        entity_extraction_service=_StubExtraction(),  # type: ignore[arg-type]
+        mood_backfill_callable=lambda **_: None,
+        mood_scoring_service=_StubMood(),  # type: ignore[arg-type]
+        entry_repository=object(),  # type: ignore[arg-type]
+        storyline_generation_service=gen_service,
+    )
+
+    services_dict: dict[str, Any] = {
+        "storyline_repository": storyline_repo,
+        "job_runner": runner,
+    }
+
+    mcp = FastMCP("test-storylines")
+    register_storylines_routes(mcp, lambda: services_dict)
+    register_ingestion_routes(mcp, lambda: services_dict)
+
+    app = mcp.streamable_http_app()
+    app.add_middleware(_FakeAuthMiddleware)
+
+    client = TestClient(app)
+    try:
+        yield client, {
+            "factory": factory,
+            "repo": storyline_repo,
+            "entity_id": entity.id,
+            "gen_service": gen_service,
+            "runner": runner,
+        }
+    finally:
+        runner.shutdown(wait=True)
+        factory.close_current()
+
+
+class TestStorylinesAPI:
+    def test_list_returns_empty_envelope(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, _ = app_with_storylines
+        resp = client.get("/api/storylines")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body == {"items": [], "total": 0, "limit": 50, "offset": 0}
+
+    def test_create_then_list_then_detail(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        # Create
+        resp = client.post(
+            "/api/storylines",
+            json={"entity_id": ctx["entity_id"], "name": "Running"},
+        )
+        assert resp.status_code == 201
+        created = resp.json()
+        sid = created["id"]
+        assert created["name"] == "Running"
+
+        # List
+        resp = client.get("/api/storylines")
+        body = resp.json()
+        assert body["total"] == 1
+        assert body["items"][0]["id"] == sid
+
+        # Detail
+        resp = client.get(f"/api/storylines/{sid}")
+        assert resp.status_code == 200
+        detail = resp.json()
+        assert detail["id"] == sid
+        # No panels yet (haven't regenerated)
+        assert detail["panels"] == {}
+
+    def test_create_rejects_missing_fields(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, _ = app_with_storylines
+        resp = client.post("/api/storylines", json={})
+        assert resp.status_code == 400
+
+    def test_create_returns_409_on_duplicate(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        client.post(
+            "/api/storylines",
+            json={"entity_id": ctx["entity_id"], "name": "Running"},
+        )
+        resp = client.post(
+            "/api/storylines",
+            json={"entity_id": ctx["entity_id"], "name": "Running"},
+        )
+        assert resp.status_code == 409
+        assert "storyline_id" in resp.json()
+
+    def test_regenerate_queues_job(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        created = client.post(
+            "/api/storylines",
+            json={"entity_id": ctx["entity_id"], "name": "Running"},
+        ).json()
+        sid = created["id"]
+
+        resp = client.post(f"/api/storylines/{sid}/regenerate")
+        assert resp.status_code == 202
+        body = resp.json()
+        assert "job_id" in body
+
+        # Flush the executor and check the fake was called
+        ctx["runner"].shutdown(wait=True)
+        assert ctx["gen_service"].calls == [sid]
+
+    def test_regenerate_404_on_unknown(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, _ = app_with_storylines
+        resp = client.post("/api/storylines/99999/regenerate")
+        assert resp.status_code == 404
+
+    def test_delete_removes_storyline(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        created = client.post(
+            "/api/storylines",
+            json={"entity_id": ctx["entity_id"], "name": "Running"},
+        ).json()
+        sid = created["id"]
+        resp = client.delete(f"/api/storylines/{sid}")
+        assert resp.status_code == 200
+        # Now 404
+        resp = client.get(f"/api/storylines/{sid}")
+        assert resp.status_code == 404

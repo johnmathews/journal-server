@@ -48,6 +48,18 @@ def _get_fitness_repo(ctx: Context) -> FitnessRepository:
     return ctx.request_context.lifespan_context["fitness_repo"]
 
 
+def _get_storyline_repository(ctx: Context):  # type: ignore[no-untyped-def]
+    """Storyline repository — present when the storylines feature is
+    wired at server boot. Returns None when not configured (callers
+    surface that to the user as an actionable error)."""
+    from journal.db.storyline_repository import SQLiteStorylineRepository
+    repo = ctx.request_context.lifespan_context.get("storyline_repository")
+    if repo is None:
+        return None
+    assert isinstance(repo, SQLiteStorylineRepository)
+    return repo
+
+
 def _get_db_conn(ctx: Context) -> sqlite3.Connection:
     """Raw SQLite connection — used by tools that run hand-written SQL
     (correlation queries, integrity checks) where wrapping every join

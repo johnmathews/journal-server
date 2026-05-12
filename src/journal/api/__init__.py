@@ -27,6 +27,7 @@ from journal.api.jobs import register_jobs_routes
 from journal.api.notifications import register_notifications_routes
 from journal.api.search import register_search_routes
 from journal.api.settings import register_settings_routes
+from journal.api.storylines import register_storylines_routes
 from journal.api.users import register_users_routes
 
 if TYPE_CHECKING:
@@ -58,6 +59,7 @@ def register_api_routes(
     register_entities_routes(mcp, services_getter)
     register_entity_merge_routes(mcp, services_getter)
     register_fitness_routes(mcp, services_getter)
+    register_storylines_routes(mcp, services_getter)
 
 
 __all__ = [

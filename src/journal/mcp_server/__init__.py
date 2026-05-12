@@ -73,6 +73,12 @@ from journal.mcp_server.tools.queries import (
     journal_list_entries,
     journal_search_entries,
 )
+from journal.mcp_server.tools.storylines import (
+    journal_create_storyline,
+    journal_get_storyline,
+    journal_list_storylines,
+    journal_regenerate_storyline,
+)
 
 __all__ = [
     "_get_db_conn",
@@ -97,6 +103,7 @@ __all__ = [
     "fitness_sync_status",
     "fitness_trigger_sync",
     "journal_backfill_mood_scores_batch",
+    "journal_create_storyline",
     "journal_extract_entities",
     "journal_extract_entities_batch",
     "journal_get_entity_mentions",
@@ -105,6 +112,7 @@ __all__ = [
     "journal_get_job_status",
     "journal_get_mood_trends",
     "journal_get_statistics",
+    "journal_get_storyline",
     "journal_get_topic_frequency",
     "journal_ingest_media",
     "journal_ingest_media_from_url",
@@ -113,6 +121,8 @@ __all__ = [
     "journal_ingest_text",
     "journal_list_entities",
     "journal_list_entries",
+    "journal_list_storylines",
+    "journal_regenerate_storyline",
     "journal_search_entries",
     "journal_update_entry_text",
     "lifespan",
