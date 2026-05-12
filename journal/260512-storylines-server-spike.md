@@ -132,3 +132,77 @@ Five commits on `worktree-eng-storylines`:
   explicit request. If W10 shows narrative quality issues, the
   follow-up workstream gets to decide whether the extended-
   thinking model improves grounding.
+
+## Post-deploy: bugs found and W10 readout
+
+After the first redeploy of `main`, two real-data bugs surfaced
+on the first regen attempt and were fixed inline before the
+qualitative acceptance read.
+
+### Bug 1 — FTS fallback used a phantom kwarg (`2089531`)
+
+`_fts_fallback_excerpts` called
+`entry_repository.search_text(query=..., limit=50)`. The real
+`_SearchMixin.search_text` takes no `limit` (only the variant
+`search_text_with_snippets` does) and returns
+`list[Entry]`, not `list[SearchResult]`. The unit test used a
+permissive fake repo that accepted `limit=50` and returned
+`SearchResult` shapes — classic "fake too lenient to catch the
+integration bug." Fixed by dropping `limit=`, iterating returned
+`Entry` objects directly (no redundant `get_entry` hop), and
+adding `test_fts_fallback_against_real_repository` that wires
+`SQLiteEntryRepository` so the next signature drift is caught
+in unit tests rather than at deploy.
+
+### Bug 2 — Embedder input exceeded 8192 tokens
+
+After bug 1 was fixed, both storylines generated successfully
+but the worker logged `openai.BadRequestError: maximum input
+length is 8192 tokens` from the summary-embedding step (non-
+fatal — the embedding is only stored for a future extension-
+classifier stage and the storylines themselves were persisted).
+Cause: `_join_narrative_text` concatenated prose segments **plus
+every citation's `quote`**. For Citations API responses whose
+source is `content` blocks (our setup), `cited_text` is the
+whole wrapped entry — so 30+ citations × full-entry quotes
+blew the input cap. Fix: text-only segments contribute to the
+embed input (the synthesised prose captures the storyline's
+theme; citation text is duplicate of source we already index),
+plus a 32k-char belt-and-suspenders truncation. Two regression
+tests added: one asserting citation quotes never leak into the
+embed input, one asserting truncation when prose alone exceeds
+the cap.
+
+### W10 qualitative read — passed
+
+User read Running (storyline 3, 18 entries, 36 narrative
+citations) and Atlas (storyline 4, 17 entries, 26 narrative
+citations) and judged the panels good enough for an experiment.
+The narrative panel was specifically called out as faithful:
+third-person voice held, no fabricated events, citations
+tracked real entries, no emotional extrapolation. Kill
+criteria #1, #2, #3 did not fire.
+
+Two observations filed for the webapp cycle (not blockers):
+
+1. **Citation `cited_text` is the whole wrapped entry.** That's
+   expected for `source: "content"` documents — citation block
+   indices are whole-block, not sub-block. The webapp panel
+   renderer can collapse the quote text (entry id is sufficient
+   for SPA navigation). Future cleanup: switch to one
+   `source: "text"` document per entry — the API auto-chunks at
+   sentence boundaries so `cited_text` becomes a real short
+   excerpt.
+2. **Entity IDs reshuffled between recon and deploy.** Running
+   was entity 59 at recon time; on prod after deploy it's 513.
+   Atlas was 3; now 511. The previous entity rows still exist;
+   the new ones presumably came from a recent re-extraction.
+   Both new entities have fewer than 3 mentions in window, so
+   FTS fallback fired for the whole corpus, which is why the
+   curation panel shows entry-mention quotes from the
+   surface-form-match path rather than the entity-mention
+   table. Worked correctly. The follow-up backfill mentioned
+   above would reduce reliance on FTS but isn't required.
+
+Server cycle is now closed. Next: the webapp cycle in a fresh
+session, on the `webapp/` repo, in its own worktree.

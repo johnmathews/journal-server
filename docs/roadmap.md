@@ -55,11 +55,12 @@ the top of the linked doc tells you whether it's active, closed, or superseded.
   three-width resize, edit-layout mode, persisted preferences). Also closed the
   tooltip-parity ask (T6) and the Garmin Workouts/Wellness column split (T7). Verified
   post-deploy 2026-05-12. Kept as a record of decisions.
-- [`storylines-plan.md`](./storylines-plan.md) — **active, opened 2026-05-12.** Server-side
-  spike for a new feature: LLM-synthesized cross-entry narratives ("storylines") anchored on
-  entities, with a verbatim-excerpt curation panel and a third-person narrative panel grounded
-  via Anthropic's Citations API. Two seeded storylines (Running, Atlas) over the last 3 months.
-  Webapp cycle follows as a separate worktree once the server spike passes its W10 qualitative gate.
+- [`storylines-plan.md`](./storylines-plan.md) — **server cycle closed 2026-05-12.**
+  W1-W12 shipped (six commits `4b65fbf..885e4dc`); W10 acceptance gate passed on
+  prod data (Running + Atlas storylines read as faithful, third-person, non-fabricating);
+  two production bugs fixed in-line (`2089531` FTS-fallback signature; embedder input cap).
+  Webapp cycle pending as a separate worktree on `webapp/` — see "Webapp cycle handoff"
+  at the bottom of the plan doc for scope.
 - [`code-quality-principles.md`](./code-quality-principles.md) — standing rules referenced
   by the refactor docs.
 - **SQLite threading refactor — closed 2026-05-11.** All repos use a

@@ -1,6 +1,6 @@
 # Storylines — Plan
 
-**Status:** active. **Last updated:** 2026-05-12. **Supersedes:** none.
+**Status:** server cycle closed 2026-05-12 (W1-W12 + W10 acceptance gate passed). Webapp cycle pending — see "Webapp cycle handoff" at the bottom. **Last updated:** 2026-05-12. **Supersedes:** none.
 
 A new feature: LLM-synthesized cross-entry narratives about recurring threads in the journal. Each storyline anchors on a single entity (e.g. "Atlas the son" — entity id 3, 17 mentions; or "Running" — entity id 59, 18 mentions) and renders as two parallel panels:
 
@@ -185,11 +185,36 @@ The acceptance gate for the entire spike. **This work unit is the answer to "doe
 
 12 work units. Estimated 1-3 sessions for server cycle. W4 + W10 are the load-bearing units — everything else is connective tissue. If W10 passes, the webapp cycle begins (separate plan, separate worktree).
 
+## W10 acceptance — closed 2026-05-12
+
+Ran the seeded pair on prod data (Running entity id 59, 18 mentions; Atlas entity id 3, 17 mentions). Narrative panel reads as faithful and restrained — no invented events, citations track real entries, voice stays in third person without emotional extrapolation. User: *"it looks good enough for an experiment."* Kill criteria did not fire.
+
+Two production bugs surfaced and were fixed before the read passed (see `journal/260512-*.md`):
+
+1. **FTS fallback used a phantom `limit=` kwarg** on `_SearchMixin.search_text` (`2089531`). Caught because the unit-test fake had a permissive signature. Regression test now wires the real `SQLiteEntryRepository` end-to-end.
+2. **Embedder input exceeded 8192 tokens** (this commit). `_join_narrative_text` was concatenating prose plus every citation's `quote` text — and citation `quote` is the whole wrapped entry for `source: "content"` documents. Fix: text-only segments contribute to the embed input, plus a 32k-char belt-and-suspenders cap. Two regression tests added.
+
+## Webapp cycle handoff
+
+Server side is done. Webapp UI is a separate worktree on the `webapp/` repo. Scope:
+
+1. **List view** at `/storylines` mirroring `EntryListView.vue`
+2. **Detail view** at `/storylines/:id` with the two-panel layout
+3. **Pinia store** mirroring `entries.ts`
+4. **API client** at `src/api/storylines.ts` typed against the server's response shapes
+5. **Segment renderer** — a small Vue component that renders `{kind: "text"}` runs and `<RouterLink :to="/entries/${entry_id}">` for `{kind: "citation"}` segments. No markdown library needed.
+
+Two follow-ups to consider during the webapp cycle (not blockers):
+
+1. **Citation granularity.** Today the narrator uses `source: "content"` documents, so each citation's `cited_text` is the whole wrapped entry. The webapp can collapse / hide the bloated quote (entry id is sufficient for the link). Future cleanup is switching to `source: "text"` documents per entry, which auto-chunks at sentence boundaries and gives short `cited_text` excerpts.
+2. **Entity backfill.** Storyline 3 (Running) and 4 (Atlas) on prod used entity IDs 513 and 511 (new entities, not the 59/3 from the original recon — the entity layer reshuffled). With fewer than 3 entity mentions each in window, FTS fallback fired and pulled most of the corpus. A `journal extract-entities --stale-only` pass might reduce dependence on FTS but isn't required for the feature to work.
+
 ## Related docs
 
 - `docs/roadmap.md` — index
+- `docs/storylines.md` — feature reference
 - `docs/entity-tracking.md` — substrate (mentions, aliases, dedup)
 - `docs/mood-scoring.md` — precedent for LLM-output baked into service data
 - `docs/jobs.md` — job runner this work plugs into
-- `docs/architecture.md` — needs update in W11
+- `docs/architecture.md` — updated 2026-05-12 to name storylines as an in-service LLM-comprehension feature
 - `.engineering-team/storylines/recon-backend.md`, `recon-frontend-preview.md`, `recon-research.md`, `recon-product.md`, `evaluation-report.md` — Phase 1 reconnaissance backing this plan

@@ -505,6 +505,77 @@ class TestGenerationService:
         assert refreshed is not None
         assert refreshed.last_generated_at is not None
 
+    def test_embedder_receives_text_only_and_capped_input(
+        self,
+        seeded_storyline: tuple[Any, Any, int, int, int],
+    ) -> None:
+        """Regression for production bug: embedder was passed prose
+        plus every citation's `quote`. For Citations API responses
+        whose source is content blocks, `quote` is the whole wrapped
+        entry, so the join exceeded 8192 tokens and OpenAI returned
+        400. After the fix, only text segments contribute and the
+        result is character-capped.
+        """
+        repo, store, _user, _entity, storyline_id = seeded_storyline
+        huge_quote = "X" * 60_000  # would blow the 8192-token limit
+        narrator = _FakeNarrator(segments=[
+            {"kind": "text", "text": "A concise narrative summary."},
+            {"kind": "citation", "entry_id": 1, "quote": huge_quote},
+            {"kind": "text", "text": "Another concise observation."},
+        ])
+        received: list[str] = []
+
+        def embedder(text: str) -> list[float]:
+            received.append(text)
+            return [0.0]
+
+        svc = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=narrator,
+            glue=_FakeGlue(),
+            embedder=embedder,
+        )
+        svc.regenerate(storyline_id)
+        assert len(received) == 1
+        embedded = received[0]
+        # No citation quotes leaked in
+        assert "X" * 1000 not in embedded
+        assert "concise narrative summary" in embedded
+        assert "concise observation" in embedded
+        # Well below the 8192-token ceiling
+        assert len(embedded) <= 32_000
+
+    def test_embedder_input_is_truncated_when_prose_too_long(
+        self,
+        seeded_storyline: tuple[Any, Any, int, int, int],
+    ) -> None:
+        """If a future narrator emits >32k chars of prose, the
+        embedder still gets a capped input rather than a 400."""
+        repo, store, _user, _entity, storyline_id = seeded_storyline
+        long_prose = "lorem ipsum " * 10_000  # ~120k chars
+        narrator = _FakeNarrator(segments=[
+            {"kind": "text", "text": long_prose},
+        ])
+        received: list[str] = []
+
+        def embedder(text: str) -> list[float]:
+            received.append(text)
+            return [0.0]
+
+        svc = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=narrator,
+            glue=_FakeGlue(),
+            embedder=embedder,
+        )
+        svc.regenerate(storyline_id)
+        assert len(received) == 1
+        assert len(received[0]) <= 32_000
+
     def test_summary_embedding_persisted_when_embedder_given(
         self,
         seeded_storyline: tuple[Any, Any, int, int, int],
@@ -534,8 +605,9 @@ class TestGenerationService:
         assert refreshed.summary_embedding is not None
         assert len(refreshed.summary_embedding) == 3
         assert len(calls) == 1
-        assert "Hello world." in calls[0]
-        assert "cited" in calls[0]
+        # Embed input is the synthesised prose only — not citation quotes.
+        # (See _join_narrative_text docstring for rationale.)
+        assert calls[0] == "Hello world."
 
     def test_empty_window_persists_empty_panels(
         self,

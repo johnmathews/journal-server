@@ -351,18 +351,44 @@ def _first_excerpt_lede(excerpt: DatedEntryExcerpt) -> str:
 
 
 def _join_narrative_text(segments: list[dict[str, Any]]) -> str:
-    """Flatten the narrative segments into a single plain-text string
-    suitable for embedding. Citations contribute their cited_text to
-    the joined output so the embedding reflects the cited evidence,
-    not just the prose connectors."""
+    """Flatten the narrative *prose* segments into one plain string for
+    embedding.
+
+    Citation segments are intentionally excluded — they carry the
+    cited block from the Citations API, which for source=content
+    documents is the entire wrapped journal entry. Including those
+    would routinely push the join past ``text-embedding-3-large``'s
+    8192-token input limit (caught in production on the first real
+    regen). The synthesized prose is the right basis for the
+    storyline's summary embedding anyway: it captures the model's
+    third-person view of the thread, which is what the extension
+    classifier will compare future entries against.
+
+    A character cap is applied as belt-and-suspenders: ~32k chars
+    is a conservative ceiling well below 8192 tokens for English
+    prose (~4 chars/token). If a future narrator emits prose longer
+    than the cap we truncate rather than fail — the embedding is
+    best-effort and a truncated summary is still useful.
+    """
     parts: list[str] = []
     for seg in segments:
-        kind = seg.get("kind")
-        if kind == "text":
+        if seg.get("kind") == "text":
             parts.append(seg.get("text", ""))
-        elif kind == "citation":
-            parts.append(seg.get("quote", ""))
-    return " ".join(p.strip() for p in parts if p and p.strip())
+    joined = " ".join(p.strip() for p in parts if p and p.strip())
+    if len(joined) > _EMBED_MAX_CHARS:
+        log.info(
+            "Narrative prose %d chars > %d cap — truncating before embed",
+            len(joined), _EMBED_MAX_CHARS,
+        )
+        joined = joined[:_EMBED_MAX_CHARS]
+    return joined
+
+
+# Conservative ceiling for the embedder input. text-embedding-3-large
+# accepts 8192 tokens; English prose averages ~4 chars/token, so 32k
+# chars sits comfortably below the limit with headroom for token-density
+# variation (code snippets, citation markers, etc.).
+_EMBED_MAX_CHARS = 32_000
 
 
 def _extract_snippet(body: str, surface_form: str) -> str:
