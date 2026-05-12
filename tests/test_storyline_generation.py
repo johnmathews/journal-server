@@ -19,7 +19,7 @@ import pytest
 
 from journal.db.storyline_repository import SQLiteStorylineRepository
 from journal.entitystore.store import SQLiteEntityStore
-from journal.models import DatedEntryExcerpt, Entry, SearchResult
+from journal.models import DatedEntryExcerpt, Entry
 from journal.providers.storyline_glue import (
     AnthropicStorylineGlue,
     GlueResult,
@@ -441,18 +441,27 @@ def seeded_storyline(
 
 
 class _FakeEntryRepo:
-    """Minimal EntryRepository fake for FTS fallback testing."""
+    """Minimal EntryRepository fake for FTS fallback testing.
+
+    Signature mirrors `_SearchMixin.search_text` exactly — returns
+    `list[Entry]`, no `limit` kwarg, all date/user kwargs match the
+    real call. Mismatches here let a deploy-blocking bug through
+    once already; integration tests against the real repo guard
+    against regression.
+    """
 
     def __init__(self) -> None:
         self.entries: dict[int, Entry] = {}
-        self.search_results: list[SearchResult] = []
+        self.search_hits: list[Entry] = []
 
     def search_text(
-        self, *, query: str, user_id: int,  # noqa: ARG002
-        start_date: str | None = None, end_date: str | None = None,  # noqa: ARG002
-        limit: int = 50,  # noqa: ARG002
-    ) -> list[SearchResult]:
-        return list(self.search_results)
+        self,
+        query: str,  # noqa: ARG002
+        start_date: str | None = None,  # noqa: ARG002
+        end_date: str | None = None,  # noqa: ARG002
+        user_id: int | None = None,  # noqa: ARG002
+    ) -> list[Entry]:
+        return list(self.search_hits)
 
     def get_entry(self, entry_id: int) -> Entry | None:
         return self.entries.get(entry_id)
@@ -582,6 +591,63 @@ class TestGenerationService:
         with pytest.raises(ValueError, match="not found"):
             svc.regenerate(99999)
 
+    def test_fts_fallback_against_real_repository(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        """Regression for production bug: FTS fallback called
+        ``EntryRepository.search_text(..., limit=50)`` but the real
+        method on ``_SearchMixin`` doesn't accept a ``limit`` kwarg
+        (and returns ``list[Entry]``, not ``list[SearchResult]``).
+        Caught only after deploy because the fake-repo unit test had
+        a permissive signature. This test wires the *real* repository
+        so the integration is exercised end-to-end.
+        """
+        from journal.db.repository import SQLiteEntryRepository
+
+        conn = factory.get()
+        cur = conn.execute(
+            "INSERT INTO users (email, password_hash, display_name)"
+            " VALUES (?, ?, ?)", ("ftsreal@x.test", "x", "F"),
+        )
+        user_id = cur.lastrowid
+        conn.commit()
+        store = SQLiteEntityStore(factory)
+        entity = store.create_entity(
+            entity_type="person", canonical_name="Atlas",
+            description="", first_seen="2026-02-15", user_id=user_id,
+        )
+        # No entity mentions at all — FTS fallback path must fire.
+        body = "I picked up Atlas from school today. He ran ahead."
+        conn.execute(
+            "INSERT INTO entries"
+            " (entry_date, source_type, raw_text, final_text,"
+            "  word_count, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+            ("2026-03-01", "text", body, body, len(body.split()), user_id),
+        )
+        conn.commit()
+
+        repo = SQLiteStorylineRepository(factory)
+        storyline = repo.create_storyline(
+            user_id=user_id, entity_id=entity.id, name="Atlas",
+            start_date="2026-01-01", end_date="2026-12-31",
+        )
+        narrator = _FakeNarrator(segments=[
+            {"kind": "text", "text": "Atlas at school."},
+        ])
+        svc = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=SQLiteEntryRepository(factory),
+            storyline_repository=repo,
+            narrator=narrator,
+            glue=_FakeGlue(),
+            fts_fallback_threshold=3,
+        )
+        # Before the fix this raised TypeError on `limit=50`.
+        result = svc.regenerate(storyline.id)
+        assert result.fts_fallback_count == 1
+        assert result.entry_count == 1
+
     def test_fts_fallback_when_mentions_are_sparse(
         self,
         factory: ConnectionFactory,
@@ -641,12 +707,7 @@ class TestGenerationService:
                 final_text=row["final_text"], word_count=10, user_id=user_id,
             )
             fake_entry_repo.entries[row["id"]] = entry
-            fake_entry_repo.search_results.append(
-                SearchResult(
-                    entry_id=row["id"], entry_date=row["entry_date"],
-                    text=row["final_text"], score=0.5,
-                )
-            )
+            fake_entry_repo.search_hits.append(entry)
 
         repo = SQLiteStorylineRepository(factory)
         storyline = repo.create_storyline(

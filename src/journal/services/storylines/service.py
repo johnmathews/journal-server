@@ -279,19 +279,18 @@ class StorylineGenerationService:
     ) -> list[DatedEntryExcerpt]:
         from journal.models import DatedEntryExcerpt
 
-        results = self._entry_repository.search_text(
+        # `_SearchMixin.search_text` returns `list[Entry]` directly,
+        # ordered by FTS rank, with no pagination args. It does the
+        # date filtering for us.
+        entries = self._entry_repository.search_text(
             query=surface_form,
             user_id=user_id,
             start_date=start_date,
             end_date=end_date,
-            limit=50,
         )
         fallback: list[DatedEntryExcerpt] = []
-        for result in results:
-            if result.entry_id in exclude_entry_ids:
-                continue
-            entry = self._entry_repository.get_entry(result.entry_id)
-            if entry is None:
+        for entry in entries:
+            if entry.id in exclude_entry_ids:
                 continue
             body = entry.final_text or entry.raw_text
             if not body:
