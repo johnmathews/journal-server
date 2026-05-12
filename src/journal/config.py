@@ -355,6 +355,38 @@ class Config:
         default_factory=lambda: os.environ.get("RERANKER_MODEL", "claude-haiku-4-5")
     )
 
+    # Storylines (docs/storylines-plan.md)
+    storyline_narrator_model: str = field(
+        default_factory=lambda: os.environ.get(
+            "STORYLINE_NARRATOR_MODEL", "claude-opus-4-7",
+        )
+    )
+    storyline_narrator_max_tokens: int = field(
+        default_factory=lambda: int(
+            os.environ.get("STORYLINE_NARRATOR_MAX_TOKENS", "4096")
+        )
+    )
+    storyline_glue_model: str = field(
+        default_factory=lambda: os.environ.get(
+            "STORYLINE_GLUE_MODEL", "claude-haiku-4-5",
+        )
+    )
+    storyline_extension_decider_model: str = field(
+        default_factory=lambda: os.environ.get(
+            "STORYLINE_EXTENSION_DECIDER_MODEL", "claude-haiku-4-5",
+        )
+    )
+    storyline_default_window_days: int = field(
+        default_factory=lambda: int(
+            os.environ.get("STORYLINE_DEFAULT_WINDOW_DAYS", "90")
+        )
+    )
+    storyline_fts_fallback_threshold: int = field(
+        default_factory=lambda: int(
+            os.environ.get("STORYLINE_FTS_FALLBACK_THRESHOLD", "3")
+        )
+    )
+
     # Entity extraction
     entity_extraction_model: str = "claude-opus-4-6"
     entity_extraction_max_tokens: int = 4096

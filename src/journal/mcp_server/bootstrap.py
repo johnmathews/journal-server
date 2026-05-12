@@ -563,6 +563,70 @@ def _init_services() -> dict:
         config=config,
         notification_service=notification_service,
     )
+
+    # Storylines (docs/storylines-plan.md). Opt-in: only wired when an
+    # Anthropic API key is configured. Without these the storyline
+    # tools/routes return 503; submit_storyline_* on JobRunner raises.
+    storyline_repository = None
+    storyline_generation_service = None
+    storyline_extension_classifier = None
+    if config.anthropic_api_key:
+        from journal.db.storyline_repository import SQLiteStorylineRepository
+        from journal.providers.storyline_extension_decider import (
+            AnthropicStorylineExtensionDecider,
+        )
+        from journal.providers.storyline_glue import AnthropicStorylineGlue
+        from journal.providers.storyline_narrator import (
+            AnthropicStorylineNarrator,
+        )
+        from journal.services.storylines.extension import (
+            StorylineExtensionClassifier,
+        )
+        from journal.services.storylines.service import (
+            StorylineGenerationService,
+        )
+
+        storyline_repository = SQLiteStorylineRepository(db_factory)
+        narrator = AnthropicStorylineNarrator(
+            api_key=config.anthropic_api_key,
+            model=config.storyline_narrator_model,
+            max_tokens=config.storyline_narrator_max_tokens,
+        )
+        glue = AnthropicStorylineGlue(
+            api_key=config.anthropic_api_key,
+            model=config.storyline_glue_model,
+        )
+        decider = AnthropicStorylineExtensionDecider(
+            api_key=config.anthropic_api_key,
+            model=config.storyline_extension_decider_model,
+        )
+        storyline_generation_service = StorylineGenerationService(
+            entity_store=entity_store,
+            entry_repository=repo,
+            storyline_repository=storyline_repository,
+            narrator=narrator,
+            glue=glue,
+            embedder=lambda text: embeddings.embed_texts([text])[0],
+            window_days=config.storyline_default_window_days,
+            fts_fallback_threshold=config.storyline_fts_fallback_threshold,
+        )
+        storyline_extension_classifier = StorylineExtensionClassifier(
+            entity_store=entity_store,
+            entry_repository=repo,
+            storyline_repository=storyline_repository,
+            decider=decider,
+        )
+        log.info(
+            "  Storylines wired (narrator=%s, glue=%s, decider=%s)",
+            config.storyline_narrator_model,
+            config.storyline_glue_model,
+            config.storyline_extension_decider_model,
+        )
+    else:
+        log.info(
+            "  Storylines disabled (ANTHROPIC_API_KEY not set)",
+        )
+
     job_runner = JobRunner(
         job_repository=job_repository,
         entity_extraction_service=entity_extraction_service,
@@ -571,6 +635,8 @@ def _init_services() -> dict:
         entry_repository=repo,
         ingestion_service=ingestion_service,
         notification_service=notification_service,
+        storyline_generation_service=storyline_generation_service,
+        storyline_extension_classifier=storyline_extension_classifier,
         **fitness_callables,
     )
     # Garmin is wired unconditionally (per-user creds, W6). Strava is
@@ -673,6 +739,11 @@ def _init_services() -> dict:
         "notification_service": notification_service,
         # Fitness — repo for read APIs (W9) and the integrity check.
         "fitness_repo": fitness_repo,
+        # Storylines — None when ANTHROPIC_API_KEY is unset; the API
+        # routes and MCP tools detect that and return 503.
+        "storyline_repository": storyline_repository,
+        "storyline_generation": storyline_generation_service,
+        "storyline_extension_classifier": storyline_extension_classifier,
         # SQLite connection factory — used by API helpers that run
         # hand-written SQL (pricing reads/writes, fitness integrity)
         # without going through a repository.
