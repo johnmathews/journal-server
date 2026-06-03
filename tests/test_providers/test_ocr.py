@@ -96,6 +96,38 @@ class TestAnthropicOCRProvider:
         assert UNCERTAIN_OPEN not in result
         assert UNCERTAIN_CLOSE not in result
 
+    def test_extract_reflows_single_newlines(self) -> None:
+        """Anthropic OCR must also collapse intra-paragraph line breaks
+        into spaces while preserving paragraph breaks — same contract as
+        Gemini. Before this fix the Anthropic path returned model output
+        verbatim, so handwritten pages with one \\n per visual line came
+        through with every visual line break preserved."""
+        provider, client = self._make_provider()
+        mock_message = MagicMock()
+        mock_message.content = [
+            MagicMock(text="Today I went\nto the store.\n\nThen I came home.")
+        ]
+        client.messages.create.return_value = mock_message
+
+        result = provider.extract(b"data", "image/png")
+
+        assert result.text == "Today I went to the store.\n\nThen I came home."
+
+    def test_extract_reflow_preserves_uncertain_span_offsets(self) -> None:
+        """Uncertain spans must still point at the right text after reflow.
+        \\n→space is 1-for-1, so 'Ritsya' stays at offset 12..18 regardless
+        of the intermediate line break."""
+        provider, client = self._make_provider()
+        raw = f"Today I met\n{UNCERTAIN_OPEN}Ritsya{UNCERTAIN_CLOSE} at the park."
+        mock_message = MagicMock()
+        mock_message.content = [MagicMock(text=raw)]
+        client.messages.create.return_value = mock_message
+
+        result = provider.extract(b"data", "image/png")
+
+        assert result.text[12:18] == "Ritsya"
+        assert result.uncertain_spans == [(12, 18)]
+
     def test_system_prompt_included_without_context(self) -> None:
         provider, client = self._make_provider()
         mock_message = MagicMock()
@@ -122,6 +154,25 @@ class TestAnthropicOCRProvider:
         # Smell-test a couple of phrases to catch accidental deletes.
         assert "uncertain" in SYSTEM_PROMPT.lower()
         assert "sparingly" in SYSTEM_PROMPT.lower()
+
+    def test_system_prompt_does_not_instruct_line_structure_preservation(
+        self,
+    ) -> None:
+        """The original prompt said 'Preserve paragraph breaks and line
+        structure', which caused Gemini to mirror the page's visual line
+        breaks into the output. The new prompt must tell the model the
+        opposite — output continuous prose, treat line wraps as artifacts
+        of page width, and use paragraph breaks (blank lines) ONLY for
+        real paragraph boundaries."""
+        # The old phrasing must be gone.
+        assert "line structure" not in SYSTEM_PROMPT.lower()
+        # New phrasing must steer the model toward continuous prose.
+        # We assert on a couple of robust phrases rather than the exact
+        # wording, so future tweaks to the prompt don't break the test
+        # unless the intent itself changes.
+        lowered = SYSTEM_PROMPT.lower()
+        assert "continuous prose" in lowered or "do not preserve" in lowered
+        assert "paragraph" in lowered
 
     def test_image_is_base64_encoded(self) -> None:
         provider, client = self._make_provider()
