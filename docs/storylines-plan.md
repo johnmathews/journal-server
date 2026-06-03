@@ -1,6 +1,6 @@
 # Storylines — Plan
 
-**Status:** server cycle closed 2026-05-12 (W1-W12 + W10 acceptance gate passed). Webapp cycle pending — see "Webapp cycle handoff" at the bottom. **Last updated:** 2026-05-12. **Supersedes:** none.
+**Status:** server cycle closed 2026-05-12 (W1-W12 + W10 acceptance gate passed). Webapp cycle shipped 2026-05-12; multi-entity follow-up shipped 2026-05-12 (verified in the browser). Current state of the feature lives in [`storylines.md`](./storylines.md) (server) and [`../../webapp/docs/storylines.md`](../../webapp/docs/storylines.md). **Last updated:** 2026-05-12. **Supersedes:** none.
 
 A new feature: LLM-synthesized cross-entry narratives about recurring threads in the journal. Each storyline anchors on a single entity (e.g. "Atlas the son" — entity id 3, 17 mentions; or "Running" — entity id 59, 18 mentions) and renders as two parallel panels:
 

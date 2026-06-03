@@ -1,6 +1,6 @@
 # Storylines
 
-**Status:** active reference. Last updated 2026-05-12.
+**Status:** active reference. Last updated 2026-05-12 (multi-entity anchors shipped end-to-end and verified in the webapp).
 
 A storyline is a synthesized cross-entry narrative anchored on one or
 more entities. Multi-entity anchors are an equal-weight set: an entry
@@ -8,7 +8,7 @@ that mentions any anchor contributes once; the narrator sees a single
 unioned corpus, not per-anchor sub-narratives. Two parallel panels are
 rendered for each storyline:
 
-* **Curation panel** — chronologically-ordered verbatim excerpts from journal entries that mention the storyline's anchor entity, separated by minimal Haiku-generated transition prose ("Three days later:").
+* **Curation panel** — chronologically-ordered verbatim excerpts from journal entries that mention any of the storyline's anchor entities, separated by minimal Haiku-generated transition prose ("Three days later:").
 * **Narrative panel** — a flowing third-person prose narrative grounded via the Anthropic Citations API. Pointers from narrative text back to source entries are parsed by Anthropic from custom-content documents, so they cannot be fabricated.
 
 This document describes how the feature works in code. The design plan and tradeoffs live in [`storylines-plan.md`](./storylines-plan.md).
@@ -90,9 +90,10 @@ Read-side (`api/storylines.py`):
 
 Write-side (`api/ingestion.py`):
 
-* `POST /api/storylines` — body `{entity_id, name, description?, start_date?, end_date?}`. 201 on success, 409 if `(user, entity, name)` already exists, 400 on bad input.
-* `POST /api/storylines/{id}/regenerate` — queues a `storyline_generation` job. 202 with `{"job_id"}`; clients poll `GET /api/jobs/{id}`.
-* `DELETE /api/storylines/{id}` — removes the storyline (CASCADE drops its panels).
+* `POST /api/storylines` — body `{entity_ids: list[int], name, description?, start_date?, end_date?}`. `entity_ids` must have 1..15 entries (server cap = `MAX_ANCHORS`); duplicates are coalesced. 201 on success with `{..., anchors: [{id, canonical_name}, ...], generation_job_id}`, 409 if a storyline with the same name and the exact same anchor set already exists for this user, 400/422 on bad input. The server also auto-kicks generation and surfaces the `generation_job_id` so the client can poll without a second round-trip.
+* `PUT /api/storylines/{id}/anchors` — body `{entity_ids: list[int]}`. Set-replacement of the storyline's anchors (1..15). 200 with the updated `anchors` list; 404 if the storyline doesn't belong to the caller; 422 on empty/oversized input.
+* `POST /api/storylines/{id}/regenerate` — body is optional `{start_date?, end_date?, mode?}` where `mode ∈ {"replace", "append"}` (default `"replace"`). Append requires `start_date >= storyline.last_generated_at`; 400 on violation. Queues a `storyline_generation` job; 202 with `{"job_id"}`.
+* `DELETE /api/storylines/{id}` — removes the storyline (CASCADE drops its panels and anchors).
 
 All routes return 503 when the storylines feature is not configured on this server (missing `ANTHROPIC_API_KEY`).
 
@@ -100,10 +101,13 @@ All routes return 503 when the storylines feature is not configured on this serv
 
 In `mcp_server/tools/storylines.py`:
 
-* `journal_list_storylines` — text-formatted list
-* `journal_get_storyline` — detail view with both panels printed inline
-* `journal_create_storyline` — seed a storyline; refuses if `(user, entity, name)` already exists
-* `journal_regenerate_storyline` — queues a job and polls until terminal (default 120s)
+* `journal_storylines_guide` — zero-param Markdown overview of the feature and the other tools. Works even without `ANTHROPIC_API_KEY` (no model call). Designed as the "read me first" tool for a fresh MCP client.
+* `journal_list_storylines` — text-formatted list (`readOnlyHint`).
+* `journal_get_storyline` — detail view with both panels printed inline (`readOnlyHint`).
+* `journal_create_storyline` — seed a storyline; takes `entity_ids: list[int]` (1..15). Refuses with a 409-equivalent message if a storyline with the same name and the exact same anchor set already exists. Auto-kicks generation and polls until the job reaches a terminal state (default 120s), falling back to a "still running, job id …" message on timeout.
+* `journal_set_storyline_anchors` — set-replacement of an existing storyline's anchors. Takes `entity_ids: list[int]` (1..15). Sibling of the REST `PUT /api/storylines/{id}/anchors`.
+* `journal_regenerate_storyline` — queues a regeneration job (`idempotentHint`). Accepts optional `start_date`, `end_date`, and `mode` (`replace` / `append`). Polls until terminal (default 120s).
+* `journal_delete_storyline` — removes the storyline (`destructiveHint`). Cascades to panels and anchors.
 
 Each tool returns an actionable string when the storylines feature isn't configured. MCP clients (Nanoclaw, Claude Code, etc.) can use these tools to seed and read storylines without a webapp.
 
@@ -127,14 +131,14 @@ All env vars are optional; defaults make the feature work out of the box once `A
 * `AnthropicStorylineGlue` — Haiku batched call; the response parser accepts plain JSON, fenced-code-block JSON, and JSON embedded in prose. Deterministic fallback on failure.
 * `AnthropicStorylineExtensionDecider` — Haiku tool-use (`record_decision` tool). `maybe` fallback on any non-happy path.
 
-## Testing
+* `tests/test_storyline_repository.py` — CRUD, panel upsert, dated mentions query, segments helpers, plus multi-anchor `TestStorylineCRUD` + `TestAnchors` covering create-with-list, exact-set find, `set_anchors`, `add_anchor`, `remove_anchor`, `list_storylines_with_anchor`, and cascade behavior.
+* `tests/test_storyline_generation.py` — citation parser, glue parser, FTS fallback, end-to-end service with fake providers, append-mode (`TestAppendMode` including future-stamped `last_generated_at` to exercise the boundary).
+* `tests/test_storyline_jobs.py` — worker + classifier + decider + JobRunner integration, including append-mode param plumbing.
+* `tests/test_api_storylines.py` + `tests/test_api_storylines_write.py` — REST endpoints with TestClient: multi-anchor create, `anchors` in responses, `PUT /anchors` success / 404 / empty-rejection, regenerate body variants, `mode=append` validation.
+* `tests/test_mcp_tools_storylines.py` — `TestStorylinesGuide`, `TestDeleteStoryline`, `TestSetStorylineAnchors`, `TestCreateStoryline` (timeout fallback, not-configured, soft-fail).
+* Migration: `TestStorylineEntitiesMigration` covers the 0028 rebuild — fresh DB, prod-shaped backfill, dirty-fixture re-run, cascade delete, PK duplicate rejection, user_version check.
 
-* `tests/test_storyline_repository.py` — CRUD, panel upsert, dated mentions query, segments helpers (25 tests).
-* `tests/test_storyline_generation.py` — citation parser, glue parser, FTS fallback, end-to-end service with fake providers (26 tests).
-* `tests/test_storyline_jobs.py` — worker + classifier + decider + JobRunner integration (14 tests).
-* `tests/test_api_storylines.py` — REST endpoints with TestClient + fake generation service (7 tests).
-
-Total: 72 new tests for this feature. Real Anthropic API calls are never made in tests — providers accept an injected `client=` to receive a fake.
+Real Anthropic API calls are never made in tests — providers accept an injected `client=` to receive a fake.
 
 ## Related docs
 
