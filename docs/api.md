@@ -802,6 +802,12 @@ page, combines the text into a single entry, chunks, embeds, and stores.
 FEB 2026", "17/02/2026", "2026-02-17"). If found, it overrides the `entry_date` parameter. This means journal pages with
 handwritten dates are automatically dated correctly.
 
+**Multi-entry pages (single image only):** When a single uploaded image contains more than one journal entry — for
+example, the tail of yesterday's entry above a fresh dated entry — the OCR pipeline detects the boundary and creates one
+entry per detected segment. The orphan tail above the first new entry is discarded. `result.entry_id` points to the most
+recently dated segment; earlier segments are persisted independently and appear in the entries list. This behaviour does
+not apply to multi-image (multi-page) uploads, which are always treated as a single entry.
+
 **Request body (multipart/form-data):**
 
 | Field        | Type    | Required | Default | Description                                     |

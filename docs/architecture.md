@@ -139,6 +139,23 @@ one entry:
 - The entry's `raw_text` and `final_text` are the concatenation of all page texts
 - Adding pages to an existing entry triggers the same re-chunking and re-embedding flow
 
+### Multi-Entry Pages (single-image segmentation)
+
+The inverse case — a single photographed page containing the start of more than one journal entry (e.g. the tail of
+yesterday's entry above a fresh dated entry, or two short entries written back-to-back) — is handled in the single-image
+ingest path. The OCR system prompt asks the vision model to emit the marker `<<<NEW ENTRY>>>` on its own line between
+consecutive entries. `ingest_image` then:
+
+- Splits the OCR text on the marker via `split_text_into_entries`
+- **Discards the orphan tail** above the first marker (per the project's "discard orphan tail" policy — the tail belongs
+  to a previous entry that's already stored elsewhere)
+- Creates one entry per remaining segment, each with its own `source_files` row referencing the shared image hash
+- Returns the most recently dated entry (typically the new one the user just photographed)
+
+Multi-image uploads (`ingest_multi_page_entry`) do not run segmentation — when a user uploads a batch of images as one
+entry, that intent is honoured. If a page in the batch happens to contain the marker, it survives as literal text in
+the combined entry; users who actually have a multi-entry multi-page situation should upload each page individually.
+
 ## Chunking Strategies
 
 Chunking — splitting a journal entry into overlapping fragments before embedding — is the single biggest lever on

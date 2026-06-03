@@ -105,6 +105,194 @@ class TestIngestImage:
             ingestion_service.ingest_image(b"blank page", "image/jpeg", "2026-03-22")
 
 
+class TestSplitTextIntoEntries:
+    """Unit tests for the OCR-text segmentation helper. The OCR prompt
+    asks the vision model to emit ``<<<NEW ENTRY>>>`` between consecutive
+    journal entries on a single photographed page; this helper splits on
+    that marker and discards the orphan tail above the first marker."""
+
+    def test_no_delimiter_returns_single_segment_unchanged(self) -> None:
+        from journal.services.ingestion.image import split_text_into_entries
+
+        text = "Just one entry, no boundaries."
+        result = split_text_into_entries(text, [])
+        assert result == [(text, [])]
+
+    def test_single_delimiter_discards_orphan_tail(self) -> None:
+        from journal.services.ingestion.image import (
+            ENTRY_DELIMITER,
+            split_text_into_entries,
+        )
+
+        orphan = "…and we ate dinner together."
+        new_entry = "3 June 2026\n\nToday I went for a walk."
+        text = f"{orphan}\n\n{ENTRY_DELIMITER}\n\n{new_entry}"
+        result = split_text_into_entries(text, [])
+        assert len(result) == 1
+        assert result[0][0] == new_entry
+        assert result[0][1] == []
+
+    def test_two_delimiters_yield_two_entries(self) -> None:
+        from journal.services.ingestion.image import (
+            ENTRY_DELIMITER,
+            split_text_into_entries,
+        )
+
+        orphan = "…leftover bit."
+        entry_a = "1 June 2026\n\nFirst entry body."
+        entry_b = "3 June 2026\n\nSecond entry body."
+        text = (
+            f"{orphan}\n\n{ENTRY_DELIMITER}\n\n{entry_a}"
+            f"\n\n{ENTRY_DELIMITER}\n\n{entry_b}"
+        )
+        result = split_text_into_entries(text, [])
+        assert len(result) == 2
+        assert result[0][0] == entry_a
+        assert result[1][0] == entry_b
+
+    def test_delimiter_at_start_is_no_orphan_case(self) -> None:
+        """If the delimiter is at the very start with no content above,
+        there is no orphan to discard — the entry below is the only
+        content and should be returned."""
+        from journal.services.ingestion.image import (
+            ENTRY_DELIMITER,
+            split_text_into_entries,
+        )
+
+        entry = "3 June 2026\n\nA fresh entry."
+        text = f"{ENTRY_DELIMITER}\n\n{entry}"
+        result = split_text_into_entries(text, [])
+        assert len(result) == 1
+        assert result[0][0] == entry
+
+    def test_trailing_delimiter_falls_back_to_single_entry(self) -> None:
+        """If the model emits a delimiter at the very end with nothing
+        after, the only real content is BEFORE the delimiter. Discarding
+        it (per the orphan-tail rule) would lose everything, so the
+        helper falls back to treating the text as a single entry with
+        the trailing delimiter stripped."""
+        from journal.services.ingestion.image import (
+            ENTRY_DELIMITER,
+            split_text_into_entries,
+        )
+
+        body = "Just one entry that the model marked oddly."
+        text = f"{body}\n\n{ENTRY_DELIMITER}"
+        result = split_text_into_entries(text, [])
+        assert len(result) == 1
+        # Body preserved, delimiter stripped (so it doesn't leak into raw_text).
+        assert ENTRY_DELIMITER not in result[0][0]
+        assert "Just one entry" in result[0][0]
+
+    def test_uncertain_spans_reanchored_into_segment_coords(self) -> None:
+        """A span pointing at 'Ritsya' in the original combined text
+        must still point at 'Ritsya' after splitting — its char offsets
+        are shifted into the surviving segment's local coordinates."""
+        from journal.services.ingestion.image import (
+            ENTRY_DELIMITER,
+            split_text_into_entries,
+        )
+
+        orphan = "old tail."
+        new_entry = "Today I met Ritsya at the park."
+        text = f"{orphan}\n\n{ENTRY_DELIMITER}\n\n{new_entry}"
+        # 'Ritsya' starts at offset (len(orphan) + len("\n\n<<<NEW ENTRY>>>\n\n") + 12)
+        # in the original combined text. We pass that span and assert it
+        # comes back pointing at offset 12 in the new_entry segment.
+        ritsya_start_in_combined = text.index("Ritsya")
+        spans = [(ritsya_start_in_combined, ritsya_start_in_combined + 6)]
+        result = split_text_into_entries(text, spans)
+        assert len(result) == 1
+        seg_text, seg_spans = result[0]
+        assert seg_text == new_entry
+        assert seg_text[seg_spans[0][0]:seg_spans[0][1]] == "Ritsya"
+
+    def test_spans_in_orphan_tail_are_dropped(self) -> None:
+        """Uncertain spans living inside the orphan tail get dropped —
+        the orphan text itself is discarded, so its annotations have
+        nowhere to land."""
+        from journal.services.ingestion.image import (
+            ENTRY_DELIMITER,
+            split_text_into_entries,
+        )
+
+        orphan = "old uncertain bit."
+        new_entry = "New entry body."
+        text = f"{orphan}\n\n{ENTRY_DELIMITER}\n\n{new_entry}"
+        # Span over 'uncertain' in the orphan.
+        u_start = text.index("uncertain")
+        spans = [(u_start, u_start + len("uncertain"))]
+        result = split_text_into_entries(text, spans)
+        assert result[0][1] == []
+
+
+class TestIngestImageMultipleEntries:
+    """End-to-end tests for the OCR-emits-delimiter → split into N entries
+    path. Exercises ``ingest_image`` with a mocked OCR provider that
+    returns text containing the segmentation delimiter."""
+
+    def test_delimiter_creates_two_entries_and_returns_latest(
+        self, ingestion_service, mock_ocr, repo
+    ) -> None:
+        from journal.services.ingestion.image import ENTRY_DELIMITER
+
+        entry_a = "1 June 2026\n\nFirst entry body about Vienna."
+        entry_b = "3 June 2026\n\nSecond entry body about Atlas."
+        mock_ocr.extract.return_value = _ocr_result(
+            f"…tail of previous.\n\n{ENTRY_DELIMITER}\n\n{entry_a}"
+            f"\n\n{ENTRY_DELIMITER}\n\n{entry_b}"
+        )
+
+        returned = ingestion_service.ingest_image(
+            b"page with two entries", "image/jpeg", "2026-06-03",
+        )
+
+        # The last-created entry is returned (most recent dated entry).
+        assert "Atlas" in returned.raw_text
+        # Both entries persisted with their own raw_text — orphan
+        # discarded, delimiter stripped.
+        all_entries = repo.list_entries(limit=10)
+        atlas_entry = next(e for e in all_entries if "Atlas" in e.raw_text)
+        vienna_entry = next(e for e in all_entries if "Vienna" in e.raw_text)
+        assert ENTRY_DELIMITER not in atlas_entry.raw_text
+        assert ENTRY_DELIMITER not in vienna_entry.raw_text
+        assert "tail of previous" not in atlas_entry.raw_text
+        assert "tail of previous" not in vienna_entry.raw_text
+
+    def test_no_delimiter_preserves_existing_single_entry_behaviour(
+        self, ingestion_service, mock_ocr, repo
+    ) -> None:
+        # mock_ocr fixture default already returns delimiter-free text.
+        # This test just pins the contract: no delimiter → exactly one
+        # entry, same as before this feature existed.
+        before = len(repo.list_entries(limit=100))
+        ingestion_service.ingest_image(
+            b"single-entry page", "image/jpeg", "2026-03-22",
+        )
+        after = len(repo.list_entries(limit=100))
+        assert after - before == 1
+
+    def test_orphan_only_with_trailing_delimiter_creates_one_entry(
+        self, ingestion_service, mock_ocr, repo
+    ) -> None:
+        from journal.services.ingestion.image import ENTRY_DELIMITER
+
+        # Model emitted a trailing delimiter but there's no entry after
+        # it. The helper falls back to single-entry so we never lose
+        # content.
+        mock_ocr.extract.return_value = _ocr_result(
+            f"Just one entry, model marked oddly.\n\n{ENTRY_DELIMITER}"
+        )
+        before = len(repo.list_entries(limit=100))
+        entry = ingestion_service.ingest_image(
+            b"oddly-marked page", "image/jpeg", "2026-03-22",
+        )
+        after = len(repo.list_entries(limit=100))
+        assert after - before == 1
+        assert ENTRY_DELIMITER not in entry.raw_text
+        assert "Just one entry" in entry.raw_text
+
+
 class TestIngestVoice:
     def test_ingest_voice(self, ingestion_service, mock_transcription, mock_embeddings):
         entry = ingestion_service.ingest_voice(
