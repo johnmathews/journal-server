@@ -75,10 +75,10 @@ def run_storyline_generation(
 
         if parent_job_id:
             ctx.notifier.try_pipeline_notification(parent_job_id, user_id)
-        else:
-            ctx.notifier.notify_success(
-                user_id, "storyline_generation", summary,
-            )
+        # No success notification by default — storyline_generation
+        # fires on every entry that matches an active storyline's
+        # anchors and would be noisy. Failures still notify. Mirrors
+        # the pattern in run_storyline_extension_check.
     except Exception as exc:  # noqa: BLE001 — terminal-state guard
         log.exception("Storyline generation job %s failed", job_id)
         try:

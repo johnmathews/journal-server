@@ -137,7 +137,10 @@ class TestStorylineGenerationWorker:
         assert finished.result["entry_count"] == 3
         assert finished.result["narrative_citation_count"] == 5
         assert svc.calls == [42]
-        assert notifier.successes  # success was notified
+        # storyline_generation is too noisy for Pushover: this fires on
+        # every entry that extends an active storyline. Failures still
+        # notify; success does not. Mirrors storyline_extension_check.
+        assert notifier.successes == []
 
     def test_passes_date_range_and_mode_through_to_service(
         self,
