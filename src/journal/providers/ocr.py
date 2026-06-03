@@ -45,8 +45,15 @@ UNCERTAIN_CLOSE = "\u27EB"  # ⟫
 
 SYSTEM_PROMPT = (
     "You are an expert handwriting OCR system. Extract all text from the provided "
-    "handwritten image as accurately as possible. Preserve paragraph breaks and line "
-    "structure. Output only the extracted text with no commentary or preamble. "
+    "handwritten image as accurately as possible.\n\n"
+    "Output continuous prose. Do NOT preserve the physical line breaks from the "
+    "page — when a sentence wraps to the next visual line because it ran out of "
+    "horizontal space, join the lines with a single space. A line break in the "
+    "image is an artifact of the page width, not part of the text.\n\n"
+    "Use a paragraph break (two consecutive newlines) ONLY between distinct "
+    "paragraphs, where the author left a clear visual gap, indented a new line, "
+    "or started a new thought. When in doubt, prefer fewer paragraph breaks.\n\n"
+    "Output only the extracted text with no commentary or preamble. "
     "When you are unsure about a word or short phrase — illegible strokes, ambiguous "
     "letters, a guess you cannot make with confidence — wrap that word or phrase in "
     "the sentinels \u27EA and \u27EB. Use the sentinels sparingly and only around the "
@@ -373,6 +380,12 @@ class AnthropicOCRProvider:
 
         raw = message.content[0].text
         clean_text, spans = parse_uncertain_markers(raw)
+        # The OCR prompt asks the model to reflow line wraps as a single
+        # space, but Anthropic (like Gemini) occasionally preserves a
+        # physical line break from the page. Reflow as a safety net —
+        # single \n → space, \n\n+ kept. Character offsets are unchanged
+        # so uncertain_spans don't need re-anchoring.
+        clean_text = reflow_paragraphs(clean_text)
         logger.info(
             "OCR extraction complete (%d characters, %d uncertain span(s))",
             len(clean_text),
