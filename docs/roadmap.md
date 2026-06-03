@@ -64,9 +64,10 @@ the top of the linked doc tells you whether it's active, closed, or superseded.
 - [`storylines-2026-05-mcp-and-append.md`](./storylines-2026-05-mcp-and-append.md) —
   active follow-up cycle (2026-05-12) covering MCP discoverability (new
   `journal_storylines_guide` + `journal_delete_storyline` tools, rewritten docstrings),
-  append-update mode on regenerate, and auto-kick generation on create. Multi-entity
-  storylines deferred — see `.engineering-team/plan-storylines-ux.md` "Deferred /
-  out-of-scope".
+  append-update mode on regenerate, and auto-kick generation on create. **Multi-entity
+  storylines shipped 2026-05-12** end-to-end (migration 0028 + service + REST/MCP +
+  multi-select webapp picker) and verified in the browser; see
+  `journal/260512-multi-entity-storylines.md` (server) and the matching webapp entry.
 - [`code-quality-principles.md`](./code-quality-principles.md) — standing rules referenced
   by the refactor docs.
 - **SQLite threading refactor — closed 2026-05-11.** All repos use a
@@ -109,14 +110,18 @@ with a small corpus".
 > was never executed but no work was blocked. **Fitness integration (Item 1 below) shipped
 > 2026-05-10.** **Storylines (Item 2 below) opened 2026-05-12** as the next Tier 1 candidate.
 
-### 2. Storylines `[both]` — opened 2026-05-12
+### 2. Storylines `[both]` — opened 2026-05-12, core shipped 2026-05-12
 
-LLM-synthesized cross-entry narratives about recurring threads. Each storyline anchors on a
-single entity (e.g. Atlas, Running) and renders as two parallel panels: a curation panel of
+LLM-synthesized cross-entry narratives about recurring threads. Each storyline anchors on
+**one or more entities** (1..15) and renders as two parallel panels: a curation panel of
 verbatim entry excerpts in chronological order, and a third-person narrative panel grounded
-via Anthropic's Citations API. Server-side spike covers two seeded storylines (Running
-entity id 59, Atlas entity id 3) over the last three months. Webapp cycle follows once the
-server spike passes its W10 qualitative gate. Plan: [`storylines-plan.md`](./storylines-plan.md).
+via Anthropic's Citations API. The server-side spike, the webapp cycle, the MCP
+discoverability + append + auto-kick follow-up, and the multi-entity follow-up have all
+shipped and are verified in the browser. Current-state references:
+[`storylines.md`](./storylines.md) (server) and
+[`../../webapp/docs/storylines.md`](../../webapp/docs/storylines.md). Remaining gap:
+anchor *edit* UX on the webapp detail view — REST (`PUT /api/storylines/{id}/anchors`)
+and MCP (`journal_set_storyline_anchors`) surfaces exist today.
 
 ### 1. Fitness integration `[both]` — shipped 2026-05-10
 

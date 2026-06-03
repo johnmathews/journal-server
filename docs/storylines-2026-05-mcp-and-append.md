@@ -1,6 +1,6 @@
 # Storylines — MCP Discoverability + Append Mode (2026-05-12)
 
-**Status:** active reference. **Last updated:** 2026-05-12. **Supersedes:** none.
+**Status:** active reference. **Last updated:** 2026-05-12 (multi-entity follow-up shipped and verified in the webapp). **Supersedes:** none.
 **Related:** [`storylines.md`](./storylines.md) (feature reference),
 [`storylines-plan.md`](./storylines-plan.md) (closed 2026-05-12 server cycle).
 
@@ -145,25 +145,50 @@ These came out of W6/W7 review. None blocking, but worth a future eyeball.
    be queued — call journal_regenerate_storyline({id}) to retry."`) is a
    one-line follow-up.
 
-## Deferred — multi-entity storylines
+## Shipped follow-up — multi-entity storylines (2026-05-12)
 
-The plan's D1 was "one storyline anchored on multiple entities" (Option
-B). Deferred in this cycle — see the **Deferred / out-of-scope** section
-of `plan-storylines-ux.md` (units W5b/c/d). Multi-entity needs:
+The "multi-anchor storylines" follow-up cycle landed on 2026-05-12 and
+was verified end-to-end in the webapp (create a 2-anchor storyline via
+the modal, regenerate, see both anchors mentioned in the narrative;
+anchor chips render on the list and detail views). Full picture in
+`server/journal/260512-multi-entity-storylines.md` and
+`webapp/journal/260512-multi-entity-storylines.md`.
 
-- Migration `0028_storyline_entities.sql` adding a join table with backfill
-  from existing `storylines.entity_id`.
-- Service-layer change: `_fetch_excerpts()` unions across anchors with
-  dedup; the extension classifier matches any anchor for `yes`.
-- API + MCP: `entity_ids: list[int]` on `POST /api/storylines` and
-  `journal_create_storyline`.
-- Webapp: the entity picker in `StorylineCreateModal` upgrades from
-  single-select to multi-select (the component scaffold was already
-  built multi-select-ready).
+What changed across the stack:
 
-Per the project's migration-testing convention, the schema work needs
-proper data-shape probing first. Single-entity storylines remain the
-contract until that follow-up cycle picks the multi-entity work up.
+- **Migration `0028_storyline_entities.sql`** — table rebuild adding the
+  `storyline_entities` join table (PK `(storyline_id, entity_id)`),
+  backfilling from `storylines.entity_id`, and dropping both
+  `storylines.entity_id` and the legacy
+  `UNIQUE(user_id, entity_id, name)` constraint. Idempotent and
+  re-runnable from a partially-failed state. Application-level dedup in
+  `find_by_anchor_set(user_id, entity_ids, name)` replaces the dropped
+  UNIQUE.
+- **Service / classifier** — `_fetch_excerpts()` unions per-anchor excerpts
+  and deduplicates on `entry_id`; FTS fallback runs per-anchor and unions.
+  The extension classifier triggers `yes` if any anchor entity-id appears
+  in extracted mentions or if any anchor's canonical name appears in the
+  entry text.
+- **API + MCP** — `POST /api/storylines` takes `entity_ids: list[int]`
+  (1..15 via `MAX_ANCHORS`); new `PUT /api/storylines/{id}/anchors` for
+  set-replacement; new `journal_set_storyline_anchors` MCP tool. Every
+  response carries `anchors: [{id, canonical_name}, ...]` where the old
+  `entity_id` field used to be.
+- **Webapp** — `StorylineCreateModal` is now a multi-select picker with
+  removable chips and an English-join auto-name ("X", "X and Y",
+  "X, Y, and Z"); list and detail views render anchors as clickable
+  violet-pill chips; the list-view sort column renamed Entity → Anchors.
+
+Anchors are presented as semantic equals — no "primary" / "secondary."
+Internally sorted by `entity_id ASC` for deterministic prompt input.
+Narrative weight emerges from data volume (more mentions of entity Y
+means Y dominates the corpus), not from any explicit weighting in the
+prompt template; the narrator and glue prompts were not touched.
+
+Anchor *edit* UX on an existing storyline is the remaining gap on the
+webapp — the REST and MCP set-replacement surfaces are live today, but
+the detail view doesn't yet expose them. Tracked as a follow-up in
+`webapp/docs/storylines.md`.
 
 ## Test coverage
 
