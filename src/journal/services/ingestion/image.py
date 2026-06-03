@@ -21,6 +21,106 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+ENTRY_DELIMITER = "<<<NEW ENTRY>>>"
+"""Marker the OCR vision model emits between consecutive journal entries
+on a single photographed page. See ``SYSTEM_PROMPT`` in
+``journal.providers.ocr`` for the exact instruction sent to the model."""
+
+
+def split_text_into_entries(
+    text: str,
+    spans: list[tuple[int, int]],
+) -> list[tuple[str, list[tuple[int, int]]]]:
+    """Split OCR text on ``ENTRY_DELIMITER``; discard the orphan tail.
+
+    A single photographed page may contain the start of more than one
+    journal entry — most commonly, the last few lines of yesterday's
+    entry sitting above a fresh date heading. The OCR prompt asks the
+    vision model to emit ``ENTRY_DELIMITER`` on its own line between
+    each pair of consecutive entries. This helper splits on the marker
+    and discards the text BEFORE the first marker (the orphan tail) per
+    the project's "discard orphan tail" policy.
+
+    Behaviour:
+
+    - **No delimiter present:** the page is a single entry; return
+      ``[(text, spans)]`` unchanged.
+    - **Delimiter present with at least one non-empty segment after it:**
+      drop the orphan tail (segment before the first delimiter); return
+      one ``(segment_text, segment_spans)`` tuple per remaining non-empty
+      segment. Each segment is stripped of leading/trailing whitespace
+      and the marker itself is removed. Spans are re-anchored into
+      segment-local coordinates; spans that lay inside the orphan tail
+      or that straddled a segment boundary are dropped.
+    - **Trailing delimiter with empty segment after it:** the model
+      marked something but the only real content is BEFORE the marker.
+      Discarding it would lose everything, so the helper falls back to
+      ``[(text_with_delimiter_stripped, spans)]`` — single entry. Spans
+      that overlap the stripped delimiter are dropped; surviving spans
+      are shifted to account for the removed marker bytes.
+    """
+    if ENTRY_DELIMITER not in text:
+        return [(text, list(spans))]
+
+    # Walk the text and record (segment_start, segment_end) byte ranges
+    # for each piece between delimiter occurrences. Segment_end is the
+    # char index of the next delimiter (exclusive); segment_start of the
+    # piece after the delimiter is delim_end (inclusive).
+    raw_segments: list[tuple[int, int]] = []
+    cursor = 0
+    delim_len = len(ENTRY_DELIMITER)
+    while True:
+        idx = text.find(ENTRY_DELIMITER, cursor)
+        if idx == -1:
+            raw_segments.append((cursor, len(text)))
+            break
+        raw_segments.append((cursor, idx))
+        cursor = idx + delim_len
+
+    # Helper to materialise a segment with span re-anchoring.
+    def _materialise(
+        seg_start: int, seg_end: int,
+    ) -> tuple[str, list[tuple[int, int]]] | None:
+        seg_text = text[seg_start:seg_end]
+        lstripped = seg_text.lstrip()
+        leading = len(seg_text) - len(lstripped)
+        stripped = lstripped.rstrip()
+        if not stripped:
+            return None
+        offset = seg_start + leading
+        seg_len = len(stripped)
+        seg_spans: list[tuple[int, int]] = []
+        for s, e in spans:
+            ns = s - offset
+            ne = e - offset
+            if ns >= 0 and ne <= seg_len and ne > ns:
+                seg_spans.append((ns, ne))
+        return stripped, seg_spans
+
+    # Skip the first segment (orphan tail). Materialise the rest.
+    entries: list[tuple[str, list[tuple[int, int]]]] = []
+    for seg_start, seg_end in raw_segments[1:]:
+        materialised = _materialise(seg_start, seg_end)
+        if materialised is not None:
+            entries.append(materialised)
+
+    if entries:
+        return entries
+
+    # Fallback: the page had a delimiter (probably trailing) but no
+    # non-empty segment after it. Don't drop content — return the text
+    # before the first delimiter as a single entry, with the marker
+    # stripped. Shift spans to account for any removed delimiter bytes
+    # that preceded them.
+    first_delim_end = raw_segments[0][1]
+    body_text = text[:first_delim_end].rstrip()
+    body_spans: list[tuple[int, int]] = []
+    for s, e in spans:
+        if e <= len(body_text):
+            body_spans.append((s, e))
+    return [(body_text, body_spans)]
+
+
 def _strip_and_shift_page_spans(
     page_text: str,
     page_spans: list[tuple[int, int]],
@@ -66,7 +166,16 @@ class _ImageIngestMixin:
         skip_mood: bool = False,
         user_id: int = 1,
     ) -> Entry:
-        """Ingest a journal page image: OCR -> chunk -> embed -> store."""
+        """Ingest a journal page image: OCR -> chunk -> embed -> store.
+
+        If the OCR output contains the ``ENTRY_DELIMITER`` marker (i.e.
+        the page contains more than one journal entry, e.g. the tail of
+        a previous entry above a fresh dated entry), the page is split
+        into segments. The orphan tail above the first delimiter is
+        discarded; each remaining segment becomes its own entry. The
+        most recently dated entry — typically the new one the user just
+        photographed — is returned.
+        """
         log.info(
             "Ingesting image for date %s (%s, %d bytes)",
             date, media_type, len(image_data),
@@ -86,52 +195,101 @@ class _ImageIngestMixin:
         )
 
         # Extract text + uncertainty spans via OCR. Spans are in
-        # ocr_result.text coordinates; since we store that text as-is
-        # in entries.raw_text (no stripping in the single-page path),
-        # no offset shifting is needed here.
+        # ocr_result.text coordinates.
         ocr_result = self._ocr.extract(image_data, media_type)  # type: ignore[attr-defined]
-        raw_text = ocr_result.text
-        if not raw_text.strip():
+        if not ocr_result.text.strip():
             raise ValueError("OCR extracted no text from image")
 
-        # Try to extract date from the OCR text if caller used a default
+        # Split into segments if the model marked any entry boundaries.
+        # The common case (single-entry page) returns one segment with
+        # text and spans unchanged.
+        segments = split_text_into_entries(
+            ocr_result.text, ocr_result.uncertain_spans,
+        )
+        if len(segments) > 1:
+            log.info(
+                "OCR output contained %d entry boundaries; "
+                "splitting page into %d entries (orphan tail discarded)",
+                len(segments),
+                len(segments),
+            )
+
+        created_entries: list[Entry] = []
+        for seg_idx, (segment_text, segment_spans) in enumerate(segments, 1):
+            entry = self._create_entry_from_image_segment(
+                segment_text=segment_text,
+                segment_spans=segment_spans,
+                fallback_date=date,
+                media_type=media_type,
+                file_hash=file_hash,
+                user_id=user_id,
+                skip_mood=skip_mood,
+                segment_index=seg_idx,
+            )
+            created_entries.append(entry)
+
+        # Return the last entry (most recent dated segment) — the one
+        # the user typically intended to capture by photographing the
+        # page. The earlier entries (if any) are persisted independently
+        # and visible in the entries list.
+        return created_entries[-1]
+
+    def _create_entry_from_image_segment(
+        self,
+        *,
+        segment_text: str,
+        segment_spans: list[tuple[int, int]],
+        fallback_date: str,
+        media_type: str,
+        file_hash: str,
+        user_id: int,
+        skip_mood: bool,
+        segment_index: int,
+    ) -> Entry:
+        """Persist one segment of a (possibly multi-entry) image upload.
+
+        Runs date extraction and heading detection on the segment text
+        in isolation, so a page containing two dated entries lands each
+        under its own date rather than collapsing to a single date for
+        the whole page.
+        """
+        # Try to extract date from the segment text if caller used a default.
         from journal.services.date_extraction import extract_date_from_text
 
-        extracted = extract_date_from_text(raw_text)
+        date = fallback_date
+        extracted = extract_date_from_text(segment_text)
         if extracted:
             date = extracted
 
-        # Optional date-heading detection. The detected date drives the
-        # entry's filing date; it is NOT removed from the body, which
-        # keeps the date phrase as the user wrote it (so the entry text
-        # reads naturally with the date as its first line). raw_text is
-        # left verbatim so the OCR overlay / audit trail still points
-        # at exactly what the model returned. If the detector resolved
-        # an ISO date (covers spelled-out and relative phrases the regex
-        # can't), it overrides — the LLM is the more capable of the two
-        # extractors.
-        det = self._detect_heading(raw_text, date)  # type: ignore[attr-defined]
+        # Optional date-heading detection per segment. See the original
+        # comment block below for why we don't strip the date from the
+        # body: keeps the entry reading as the user wrote it; raw_text
+        # stays verbatim so the OCR overlay / audit trail still points
+        # at exactly what the model returned.
+        det = self._detect_heading(segment_text, date)  # type: ignore[attr-defined]
         if det.date_iso:
             date = det.date_iso
         final_text = det.body if det.has_heading else None
 
-        # Store entry (final_text defaults to raw_text when None)
-        word_count = len(raw_text.split())
+        word_count = len(segment_text.split())
         entry = self._repo.create_entry(  # type: ignore[attr-defined]
-            date, "photo", raw_text, word_count, user_id=user_id,
+            date, "photo", segment_text, word_count, user_id=user_id,
             final_text=final_text,
         )
+        # Each entry gets its own source_files row referencing the same
+        # image hash. source_files.file_hash is indexed but not unique,
+        # so the same image can be the source for N entries — the
+        # upload-time dedup check at the top of ingest_image is the only
+        # guard against re-uploads.
         source_file_id = self.store_source_file(  # type: ignore[attr-defined]
-            entry.id, f"image_{date}", media_type, file_hash,
+            entry.id, f"image_{date}_{segment_index}", media_type, file_hash,
         )
 
-        # Add page record
-        self._repo.add_entry_page(entry.id, 1, raw_text, source_file_id)  # type: ignore[attr-defined]
+        self._repo.add_entry_page(  # type: ignore[attr-defined]
+            entry.id, 1, segment_text, source_file_id,
+        )
+        self._repo.add_uncertain_spans(entry.id, segment_spans)  # type: ignore[attr-defined]
 
-        # Record uncertain spans anchored to raw_text.
-        self._repo.add_uncertain_spans(entry.id, ocr_result.uncertain_spans)  # type: ignore[attr-defined]
-
-        # Chunk, embed, and store in vector DB
         chunk_count = self._process_text(  # type: ignore[attr-defined]
             entry.id, entry.final_text, date,
             skip_mood=skip_mood, user_id=user_id,
@@ -139,8 +297,8 @@ class _ImageIngestMixin:
         self._repo.update_chunk_count(entry.id, chunk_count)  # type: ignore[attr-defined]
 
         log.info(
-            "Ingested image entry %d: %d words, date %s",
-            entry.id, word_count, date,
+            "Ingested image entry %d: %d words, date %s (segment %d)",
+            entry.id, word_count, date, segment_index,
         )
         return self._repo.get_entry(entry.id)  # type: ignore[attr-defined,return-value]
 
