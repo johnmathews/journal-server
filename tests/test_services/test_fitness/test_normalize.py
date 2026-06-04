@@ -464,7 +464,10 @@ def test_drift_without_notifier_still_records_sync_run(
 @pytest.mark.parametrize(
     ("sport_type", "expected"),
     [
-        ("Rowing", "other"),
+        # W5: `Rowing` now collapses to the canonical `row` type, not
+        # `other`. The verbatim sport_type is still preserved in
+        # source_subtype for downstream filtering.
+        ("Rowing", "row"),
         ("WeightTraining", "strength"),
         ("MountainBikeRide", "ride"),
         ("VirtualRun", "run"),
@@ -489,6 +492,9 @@ def test_strava_activity_type_mapping(sport_type: str, expected: str) -> None:
         ("walking", "walk"),
         ("hiking", "hike"),
         ("strength_training", "strength"),
+        # W5: both Garmin rowing typeKeys map to the new canonical `row`.
+        ("rowing", "row"),
+        ("indoor_rowing", "row"),
         ("kayaking", "other"),
         ("unknown_future_thing", "other"),
     ],
