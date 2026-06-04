@@ -1,6 +1,25 @@
 ## Fitness Multi-User Plan
 
-**Status:** in progress. **Last updated:** 2026-05-11. **Supersedes:** none.
+**Status:** closed 2026-06-04. **Last updated:** 2026-06-04.
+**Supersedes:** none. **Superseded by:** none — this plan finished its
+work. The acceptance-gate verification (W14 of this plan) lives in
+`journal/260604-fitness-multiuser-w14-verification.md` (to be written
+once the user 2 walkthrough completes).
+
+The final-mile work documented in
+`.engineering-team/runs/manual-2026-06-03-fitness-multiuser/`
+closed out the remaining items in `§7 Out of scope`'s deferred list:
+
+- Per-user integrity + cross-user tests (W1 of the final-mile plan ↔
+  W4 here — implementation was already shipped, only the
+  cross-user-isolation tests were added).
+- `--code <code>` CLI flag on `fitness-reauth-strava` (final-mile W2 ↔
+  parent §7 "W11 OAuth listener" deferral).
+- W7 normalize watermark race (final-mile W3 ↔ parent §7 deferral).
+- Vestigial `STRAVA_REFRESH_TOKEN` documented as removed (final-mile W4
+  ↔ parent W6 follow-up).
+- `Rowing → row` canonical activity type (final-mile W5 ↔ parent §7
+  follow-up).
 
 **Progress snapshot (2026-05-11):**
 - **Shipped (server):** W1 (audit, `4dd90c4`), W2 (Garmin connect/MFA, `59f7714`),
@@ -14,7 +33,11 @@
   Domain at developers.strava.com updated to the prod webapp hostname,
   `STRAVA_REDIRECT_URI` in prod `.env` flipped to the webapp callback,
   2026-05-11; see `journal/260511-fitness-multiuser-w13-strava-callback.md`).
-- **Remaining:** W14 (end-to-end verification with user 2).
+- **Final-mile (2026-06-04):** server-side `--code` flag, watermark fix,
+  cross-user integrity tests, `row` canonical type, plan archival.
+- **Remaining:** W14 end-to-end verification with user 2 — the acceptance
+  gate is itself the final step of the final-mile plan and not part of
+  this plan's tracked work.
 
 This plan moves the fitness pipeline from its current single-user posture (operator-managed
 credentials in env vars, CLI re-auth with `--user-id 1` defaults, all data attributed to

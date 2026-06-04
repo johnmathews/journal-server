@@ -75,7 +75,7 @@ Re-connect is also the recovery path when a source transitions to
 `auth_status="broken"` (see [§5](#5-status-health-and-integrity)).
 
 > **`--user-id` is required on every `fitness-*` CLI subcommand** (per
-> `docs/fitness-multiuser-plan.md` W7). There is no implicit default —
+> `docs/archive/fitness-multiuser-plan.md` W7). There is no implicit default —
 > running `journal fitness-sync` without `--user-id N` exits non-zero
 > with an argparse error. Every CLI example below names the user
 > explicitly.
@@ -124,7 +124,7 @@ See [`api.md`](./api.md#post-apifitnessgarminconnect) for the full
 endpoint reference (including the `post_mfa_profile_fetch_failed`
 branch that surfaces intermittent Garmin profile-endpoint flakiness as
 a distinct retry signal) and
-[`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md) §5 W2 for
+[`archive/fitness-multiuser-plan.md`](./archive/fitness-multiuser-plan.md) §5 W2 for
 context.
 
 ### 2b. Strava — connecting via the webapp (primary)
@@ -172,7 +172,7 @@ still drives the CLI listener path in §2d / §2e for dev/laptop bootstrap.
 
 See [`api.md`](./api.md#get-apifitnessstravaauthorize_url) for the full
 endpoint reference and
-[`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md) §5 W3 for
+[`archive/fitness-multiuser-plan.md`](./archive/fitness-multiuser-plan.md) §5 W3 for
 context.
 
 ### 2c. Garmin — CLI operator fallback
@@ -483,7 +483,7 @@ Per-user data isolation audit. Walks every fitness table
   validation).
 
 Exits 0 when clean, exit code 1 when any violation is found. Used as the
-pre-flight check before the multi-user rollout (`fitness-multiuser-plan.md`
+pre-flight check before the multi-user rollout (`archive/fitness-multiuser-plan.md`
 W1) and as the post-rollout verification gate (W14): the row-count
 snapshot before W2/W3 ship is the regression target after user 2 starts
 populating their own rows.

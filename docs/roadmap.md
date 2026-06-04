@@ -37,12 +37,15 @@ the top of the linked doc tells you whether it's active, closed, or superseded.
   troubleshooting), and
   [`archive/fitness-tier-plan.md`](./archive/fitness-tier-plan.md) (W1–W15
   execution sequencing — closed 2026-05-10, all work units shipped). Item 1 below.
-- [`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md) — per-user
-  posture on top of the fitness pipeline: webapp-driven Garmin / Strava
-  connect flows, drop global Garmin env vars, CLI `--user-id` required.
-  Server-side W1–W7 and W11 shipped; W12 docs sweep is the current unit;
-  W13 is an operator step (Strava callback URL); W14 is the staging-gated
-  end-to-end verification with user 2.
+- [`archive/fitness-multiuser-plan.md`](./archive/fitness-multiuser-plan.md) — **closed 2026-06-04.**
+  Per-user posture on the fitness pipeline: webapp-driven Garmin / Strava
+  connect flows, dropped global Garmin env vars, CLI `--user-id` required,
+  per-user integrity scope. Server W1–W7 + W11–W13 and webapp W8–W11
+  shipped over 2026-05-09..05-11; the final-mile work
+  (cross-user integrity tests, `--code` flag, watermark-race fix,
+  `STRAVA_REFRESH_TOKEN` audit, `row` canonical activity type) shipped
+  2026-06-04. W14 end-to-end verification with user 2 follows as a
+  separate staged walkthrough.
 - [`archive/fitness-followup-plan.md`](./archive/fitness-followup-plan.md) — **closed 2026-05-11**,
   all eight work units (F1–F8) shipped same-day and verified post-deploy. Fixed `rows_normalized`
   always-0, switched workout dedup to time-window overlap (the 2026-05-09 case now collapses
@@ -146,10 +149,15 @@ orchestrator + first live smoke (W13), operator + engineer documentation
 80 Garmin activities + 129 Garmin daily wellness rows for 2026-01-07 →
 2026-05-09.
 
-**Deferred follow-ups (independent, ad-hoc):** `--code <code>` CLI flag for
-headless Strava re-auth; W7 dense-backfill watermark fix; explicit
-`Rowing → other` activity-type map entry; ~~in-app re-auth flow~~ (shipped
-2026-05-10 as part of [`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md)
+**Deferred follow-ups (independent, ad-hoc):**
+~~`--code <code>` CLI flag for headless Strava re-auth~~ (shipped
+2026-06-04, fitness-multiuser-final-mile W2);
+~~W7 dense-backfill watermark fix~~ (shipped 2026-06-04, final-mile W3);
+~~explicit `Rowing → other` activity-type map entry~~ (shipped 2026-06-04
+as `Rowing → row` — final-mile W5 promoted rowing to a canonical type
+instead);
+~~in-app re-auth flow~~ (shipped 2026-05-10 as part of
+[`archive/fitness-multiuser-plan.md`](./archive/fitness-multiuser-plan.md)
 W2/W3/W8–W11 — webapp Settings panel + Reconnect banner); mood × fitness
 correlation views (webapp).
 
