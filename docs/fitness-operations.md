@@ -346,11 +346,14 @@ daily)`) skip windows already fully ingested. Mid-window crashes leave clean
 state because the raw layer is `INSERT OR IGNORE` on payload SHA and
 normalized rows are upserts.
 
-**After a fresh backfill, run a force-renormalize once.** During a fast
-backfill the per-window normalize step undercounts — multiple raw rows can
-land within the same SQLite-1-second `fetched_at` and the W7 watermark's
-strict `>` filter excludes the second-and-later rows. The recovery is
-idempotent:
+**After a fresh backfill, run a force-renormalize once on any DB whose
+backfill predates the W3 watermark fix (server `fitness-multiuser-final-mile`,
+2026-06-04).** Pre-fix, the per-window normalize step undercounted because
+multiple raw rows could land within the same SQLite-1-second `fetched_at`
+and the scalar watermark's strict `>` filter dropped the second-and-later
+rows in each tied group. Post-fix the composite `(fetched_at, id)`
+watermark makes this safe. Running the one-liner on a post-fix DB is a
+clean no-op. The recovery is idempotent either way:
 
 ```bash
 docker exec journal-server uv run python -c "
@@ -372,8 +375,8 @@ print('garmin:', normalize_garmin(repo, user_id=1, since='').rows_normalized)
 This re-projects every raw row that isn't already normalized. Idempotent — a
 second invocation reports `rows_normalized=0` because everything is in sync.
 
-See [§7 Known limitations](#7-known-limitations) for the underlying watermark
-quirk and the planned fix.
+See [§7 Known limitations](#7-known-limitations) for the watermark fix
+status and what the original quirk looked like.
 
 **Abort modes.** `fitness-backfill` exits non-zero with an actionable
 `aborted_reason` in three cases:
@@ -559,34 +562,23 @@ flag on `fitness-reauth-strava` that bypasses the listener entirely (~10
 lines of CLI + a unit test). Filed as a future small follow-up. Until that
 ships, the inline-python recipe is the recommended headless path.
 
-### W7 incremental normalize watermark loses rows under dense writes
+### W7 incremental normalize watermark loses rows under dense writes — **fixed**
 
-`normalize_strava` / `normalize_garmin` use a watermark of
-`MAX(fetched_at) FROM fitness_*` over already-normalized rows, then read raw
-rows where `fetched_at > watermark`. SQLite's default
-`strftime('%Y-%m-%dT%H:%M:%SZ', 'now')` is 1-second resolution, so multiple
-raw rows landing in the same wall-clock second tie on `fetched_at`. The
-strict `>` filter excludes the second-and-later rows in each tied group from
-the next normalize pass. After a fast backfill this leaves a chunk of raws
-unprojected until a follow-up `normalize_*(since="")` projects them.
+**Status:** fixed 2026-06-04 (server `fitness-multiuser-final-mile` W3).
+The watermark used by `normalize_strava` / `normalize_garmin` is now the
+composite `(fetched_at, id)` tuple returned by
+`max_normalized_fetched_at`, and `list_raw_since` filters with row-value
+comparison (`(fetched_at, id) > (?, ?)`). The AUTOINCREMENT raw-row id
+breaks ties at SQLite's default 1-second `fetched_at` resolution, so
+raw rows landing in the same wall-clock second can no longer drop on a
+subsequent normalize pass. Regression test:
+`tests/test_db/test_fitness_repository.py::test_watermark_tied_fetched_at_no_row_loss`.
 
-Recovery is the force-renormalize one-liner in
-[§3](#3-historical-backfill). Routine syncs rarely hit this in steady state
-(a single watch upload per minute doesn't tie at second resolution), so the
-limitation primarily affects backfills.
-
-The fix is one of:
-
-1. Composite `(fetched_at, id)` watermark — break ties by row id. Cleanest
-   semantically; touches `list_raw_since` and `max_normalized_fetched_at`
-   plus the normalize entry points.
-2. Sub-second `fetched_at` resolution
-   (`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` or microsecond storage). Schema
-   change; impacts every existing raw row.
-3. Tail-call `normalize_*(since="")` once at the end of every backfill.
-   Trivial code change; doesn't help routine syncs.
-
-Deferred to a future work unit — none of the options are W14 scope.
+The force-renormalize one-liner in [§3](#3-historical-backfill) remains
+useful for any DB state that accumulated unprojected rows before the
+fix; running it once is a safe no-op on a clean DB. Routine syncs in
+steady state were unaffected (a single watch upload per minute doesn't
+tie at second resolution).
 
 ### `Rowing` Strava activities collapse to `activity_type="other"`
 

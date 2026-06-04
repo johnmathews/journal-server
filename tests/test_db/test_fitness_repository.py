@@ -411,8 +411,11 @@ def test_list_raw_since_filters_by_fetched_at(
     all_rows = list(repo.list_raw_since(source="strava", user_id=1))
     assert len(all_rows) == 2
 
+    # Composite (fetched_at, id) watermark per W3. The `id=0` floor is
+    # below every real raw row id (AUTOINCREMENT starts at 1), so this
+    # matches every row strictly after the wall-clock-second boundary.
     fresh = list(repo.list_raw_since(
-        source="strava", user_id=1, since="2026-04-01T00:00:00Z",
+        source="strava", user_id=1, since=("2026-04-01T00:00:00Z", 0),
     ))
     assert len(fresh) == 1
     assert fresh[0].source_id == "200"
@@ -549,7 +552,71 @@ def test_max_normalized_fetched_at_tracks_latest_raw(
     watermark = repo.max_normalized_fetched_at(
         source="strava", user_id=1, kind="activities",
     )
-    assert watermark == "2026-05-09T00:00:00Z"
+    # Composite (fetched_at, id) watermark — the raw row id breaks ties at
+    # SQLite's 1-second fetched_at resolution. The "latest" is the row with
+    # the largest fetched_at; among ties, the largest id.
+    assert watermark == ("2026-05-09T00:00:00Z", newer_raw)
+
+
+def test_watermark_tied_fetched_at_no_row_loss(
+    repo: FitnessRepository, db_conn: sqlite3.Connection,
+) -> None:
+    """Regression for the W7 watermark race documented in
+    fitness-operations.md §7. Two raw rows sharing a fetched_at (SQLite's
+    default 1-second resolution ties them) must both be picked up across
+    consecutive normalize passes. The pre-fix scalar `MAX(fetched_at)`
+    watermark combined with a strict `>` filter in ``list_raw_since``
+    dropped every row tied at the watermark second on the next pass.
+    """
+    run_id = repo.start_sync_run(user_id=1, source="strava")
+    tied_at = "2026-05-10T12:00:00Z"
+
+    # First raw row at the tied second.
+    raw_a_id = db_conn.execute(
+        """
+        INSERT INTO fitness_raw_strava (
+            user_id, source_id, endpoint, fetched_at, payload_json,
+            payload_sha256, sync_run_id
+        ) VALUES (1, 'A', 'activities', ?, '{}', 'sha-a', ?)
+        """,
+        (tied_at, run_id),
+    ).lastrowid
+    db_conn.commit()
+
+    # Normalize the first row by upserting an activity that points at it.
+    # Watermark now advances to (tied_at, raw_a_id).
+    a = _make_activity("A", local_date="2026-05-10")
+    a.raw_ref_id = raw_a_id
+    repo.upsert_activity(a)
+
+    # Second raw row arrives at the SAME tied second. SQLite's
+    # AUTOINCREMENT guarantees raw_b_id > raw_a_id, so the composite
+    # watermark (tied_at, raw_a_id) is strictly less than (tied_at,
+    # raw_b_id) — the next normalize pass MUST see this row.
+    raw_b_id = db_conn.execute(
+        """
+        INSERT INTO fitness_raw_strava (
+            user_id, source_id, endpoint, fetched_at, payload_json,
+            payload_sha256, sync_run_id
+        ) VALUES (1, 'B', 'activities', ?, '{}', 'sha-b', ?)
+        """,
+        (tied_at, run_id),
+    ).lastrowid
+    db_conn.commit()
+    assert raw_b_id > raw_a_id, "test precondition: B inserted after A"
+
+    # Recompute the watermark as the next normalize pass would.
+    watermark = repo.max_normalized_fetched_at(
+        source="strava", user_id=1, kind="activities",
+    )
+    remaining = list(repo.list_raw_since(
+        source="strava", user_id=1, since=watermark,
+    ))
+    remaining_ids = {r.id for r in remaining}
+    assert raw_b_id in remaining_ids, (
+        "raw_b tied with raw_a on fetched_at was dropped — W7 watermark "
+        "race regression. Watermark must be composite (fetched_at, id)."
+    )
 
 
 # ── Factory path ───────────────────────────────────────────────────
