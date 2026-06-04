@@ -154,10 +154,17 @@ def _oauth_listener(
 def cmd_fitness_reauth_strava(args: argparse.Namespace, config: Config) -> None:
     """Run the Strava OAuth flow and persist the resulting tokens.
 
-    The operator-driven re-auth differs from the bootstrap-time persist
-    closure on one point: re-auth declares ``auth_status="ok"`` and
-    clears ``auth_broken_since`` because the operator has just fixed
-    the auth interactively. ``extra_state``, ``last_refresh_at``, and
+    Two code paths share the same DB write. When ``--code`` is supplied
+    the listener is skipped entirely and the code is exchanged inline —
+    the primary path for headless deploys where the server already
+    owns ``STRAVA_REDIRECT_URI``'s port (see ``docs/fitness-operations.md``
+    §2e). Without ``--code`` the command prints the authorize URL and
+    blocks on a one-shot HTTP listener bound to the redirect URI's
+    host/port, the classic laptop/dev bootstrap flow (§2d).
+
+    The operator-driven re-auth declares ``auth_status="ok"`` and clears
+    ``auth_broken_since`` because the operator has just fixed the auth
+    interactively. ``extra_state``, ``last_refresh_at``, and
     ``created_at`` are read-then-merged from the existing row to
     preserve fields the fetch service maintains independently.
     """
@@ -169,32 +176,45 @@ def cmd_fitness_reauth_strava(args: argparse.Namespace, config: Config) -> None:
         )
         sys.exit(1)
 
-    parsed = urlparse(config.strava_redirect_uri)
-    host = parsed.hostname or "localhost"
-    port = parsed.port or 8400
-    callback_path = parsed.path or "/strava/callback"
+    code = getattr(args, "code", None)
+    if code is not None:
+        print("Exchanging code via --code (skipping OAuth listener)...")
+    else:
+        parsed = urlparse(config.strava_redirect_uri)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 8400
+        callback_path = parsed.path or "/strava/callback"
 
-    auth_url = _build_strava_authorize_url(
-        client_id=config.strava_client_id,
-        redirect_uri=config.strava_redirect_uri,
-    )
-    print("Open this URL in your browser to authorise Strava:")
-    print(f"  {auth_url}")
-    print(f"Listening for callback on http://{host}:{port}{callback_path} ...")
+        auth_url = _build_strava_authorize_url(
+            client_id=config.strava_client_id,
+            redirect_uri=config.strava_redirect_uri,
+        )
+        print("Open this URL in your browser to authorise Strava:")
+        print(f"  {auth_url}")
+        print(
+            f"Listening for callback on http://{host}:{port}{callback_path} ...",
+        )
+
+        try:
+            code = _oauth_listener(
+                host=host, port=port, callback_path=callback_path,
+            )
+        except KeyboardInterrupt:
+            print("\nCancelled — no tokens written.", file=sys.stderr)
+            sys.exit(130)
 
     try:
-        code = _oauth_listener(
-            host=host, port=port, callback_path=callback_path,
+        tokens, athlete_id = exchange_code(
+            client_id=config.strava_client_id,
+            client_secret=config.strava_client_secret,
+            code=code,
         )
-    except KeyboardInterrupt:
-        print("\nCancelled — no tokens written.", file=sys.stderr)
-        sys.exit(130)
-
-    tokens, athlete_id = exchange_code(
-        client_id=config.strava_client_id,
-        client_secret=config.strava_client_secret,
-        code=code,
-    )
+    except Exception as exc:  # noqa: BLE001 — surface upstream error
+        print(
+            f"Error: Strava token exchange failed: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     user_id = args.user_id
     db_factory = ConnectionFactory(config.db_path)

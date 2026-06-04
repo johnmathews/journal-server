@@ -620,6 +620,18 @@ def main():
         required=True,
         help="Owner of the auth row (required — no default).",
     )
+    p_fit_strava.add_argument(
+        "--code",
+        default=None,
+        help=(
+            "Skip the OAuth listener and exchange this authorization code "
+            "directly. Use when the listener cannot bind (e.g. running "
+            "inside the long-running server container, or behind a NAT "
+            "without port-forwarding). Obtain the code by visiting the "
+            "Strava authorize URL in a browser and copying the `code` "
+            "query param from the redirect URL."
+        ),
+    )
 
     # fitness-reauth-garmin
     p_fit_garmin = subparsers.add_parser(

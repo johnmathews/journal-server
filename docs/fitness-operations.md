@@ -223,13 +223,31 @@ emergency re-auth from a developer machine.
 
 When the default `STRAVA_REDIRECT_URI` reuses port `8400`, which the
 long-running journal-server is already bound to, the §2d listener can't
-bind. Two workarounds; the inline-python recipe below is the
-recommended path.
+bind. Three approaches in descending preference.
 
-**Recommended — skip the listener, exchange the code inline.** Build the
-authorize URL by hand, paste it into a browser, copy the `code` param out of
-the redirect URL bar (the browser tab will fail to load — that's fine), then
-exchange the code in a one-off Python invocation against the live container:
+**Primary — `--code <code>`.** Pass the authorization code straight to
+the CLI; no listener is started, no port juggling, no inline-python
+boilerplate. Build the authorize URL once (see Fallback A below for the
+shape), paste it into a browser, approve, and copy the `code` param out
+of the redirect URL bar (the browser tab will fail to load — that's
+fine):
+
+```bash
+docker exec journal-server uv run journal fitness-reauth-strava \
+    --user-id 1 --code "<PASTE_CODE_HERE>"
+```
+
+Exits 0 with `Strava re-auth complete — tokens persisted.` on success; on
+an invalid or expired code the upstream error surfaces on stderr and the
+command exits non-zero (no DB row is written).
+
+**Fallback A — inline-python recipe.** Useful if you want full control
+over the exchange-and-persist path (e.g. preserving a hand-curated
+`extra_state` blob across the re-auth). Same outcome as `--code`, more
+typing. Build the authorize URL by hand, paste it into a browser, copy
+the `code` param out of the redirect URL bar (the browser tab will fail
+to load — that's fine), then exchange the code in a one-off Python
+invocation against the live container:
 
 ```bash
 # 1. Build the authorize URL (replace <CLIENT_ID> with the value from .env).
@@ -279,9 +297,10 @@ print('Strava re-auth complete — tokens persisted.')
 This bypasses the W11 listener entirely. Same DB shape, same audit trail. No
 container restart, no port juggling.
 
-**Fallback — stop-server + one-off container with `--service-ports`.** If you
-want the native OAuth roundtrip (e.g. to verify the listener works), free port
-`8400` and run the CLI in a fresh container that publishes it:
+**Fallback B — stop-server + one-off container with `--service-ports`.**
+If you want the native OAuth roundtrip (e.g. to verify the listener
+works after a config change), free port `8400` and run the CLI in a
+fresh container that publishes it:
 
 ```bash
 docker compose stop journal-server
@@ -297,8 +316,8 @@ restarted server picks it up.
 
 **Browser on a remote laptop?** SSH-forward the listener port (`-L
 8400:localhost:8400 user@vm`) **and** apply the stop-server-plus-`--service-ports`
-recipe on the VM. Two SSH sessions, fragile. The inline-python recipe above
-makes this go away — strongly preferred for headless deployments.
+recipe on the VM. Two SSH sessions, fragile. The `--code` primary path
+above makes this go away — preferred for headless deployments.
 
 ---
 
@@ -484,7 +503,8 @@ prod DB before shipping any of the multi-user work units.
 ### Strava re-auth fails with `OSError: [Errno 98] Address already in use`
 
 The `STRAVA_REDIRECT_URI` port collides with the long-running journal-server.
-Use the inline-python recipe from [§2e](#2e-strava--cli-operator-fallback-headless-deployment-server-on-8400).
+Use the `--code <code>` primary path in [§2e](#2e-strava--cli-operator-fallback-headless-deployment-server-on-8400)
+— no listener bind, no port juggling.
 
 ### Garmin re-auth prints `429: Mobile login returned 429 — IP rate limited by Garmin`
 
@@ -554,13 +574,14 @@ re-auth commands with the fresh credentials in `.env`.
 These are documented gaps with planned follow-ups. They are not bugs — the
 pipeline works correctly given the documented operator workarounds.
 
-### W11 OAuth listener is colocated with the server
+### W11 OAuth listener is colocated with the server — **fixed**
 
-The recipe in [§2b](#2b-strava--headless-deployment-server-already-on-8400)
-is a workaround, not a permanent design. The clean fix is a `--code <code>`
-flag on `fitness-reauth-strava` that bypasses the listener entirely (~10
-lines of CLI + a unit test). Filed as a future small follow-up. Until that
-ships, the inline-python recipe is the recommended headless path.
+**Status:** fixed 2026-06-04 (server `fitness-multiuser-final-mile` W2).
+`fitness-reauth-strava` now accepts `--code <code>` and exchanges the
+code directly, skipping the in-process HTTP listener entirely. See
+[§2e](#2e-strava--cli-operator-fallback-headless-deployment-server-on-8400)
+for the primary path; the previous inline-python recipe stays in §2e as
+Fallback A for operators who want full control of the exchange call.
 
 ### W7 incremental normalize watermark loses rows under dense writes — **fixed**
 
