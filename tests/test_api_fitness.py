@@ -595,6 +595,44 @@ def test_integrity_clean_db_returns_empty(client: TestClient) -> None:
     assert resp.json() == {"activities": [], "daily": []}
 
 
+def _build_client_for_user(services: dict, user_id: int) -> TestClient:
+    """Same plumbing as ``_build_client`` but authenticates as ``user_id``
+    instead of the module-level ``_TEST_USER_ID``. Used by the cross-user
+    integrity tests (W1 of the fitness multi-user final-mile plan)."""
+    from mcp.server.fastmcp import FastMCP
+
+    from journal.api import register_api_routes
+
+    class _ClientAuthMiddleware:
+        def __init__(self, app: Any) -> None:
+            self.app = app
+
+        async def __call__(
+            self, scope: Any, receive: Any, send: Any,
+        ) -> None:
+            if scope["type"] in ("http", "websocket"):
+                scope["user"] = AuthenticatedUser(
+                    user_id=user_id,
+                    email=f"user{user_id}@example.com",
+                    display_name=f"User {user_id}",
+                    is_admin=False,
+                    is_active=True,
+                    email_verified=True,
+                )
+                token = _current_user_id.set(user_id)
+                try:
+                    await self.app(scope, receive, send)
+                finally:
+                    _current_user_id.reset(token)
+            else:
+                await self.app(scope, receive, send)
+
+    test_mcp = FastMCP(f"test-journal-fitness-user-{user_id}")
+    register_api_routes(test_mcp, lambda: services)
+    app = _ClientAuthMiddleware(test_mcp.streamable_http_app())
+    return TestClient(app, raise_server_exceptions=False)
+
+
 def test_integrity_with_orphans(
     client: TestClient,
     fitness_db: sqlite3.Connection,
@@ -640,6 +678,144 @@ def test_integrity_with_orphans(
     daily_orphan = body["daily"][0]
     assert daily_orphan["source"] == "garmin"
     assert daily_orphan["missing_raw_ids"] == [88888]
+
+
+def test_integrity_user_a_cannot_see_user_b_orphans(
+    services: dict,
+    fitness_db: sqlite3.Connection,
+    fitness_repo: FitnessRepository,
+) -> None:
+    """W1 of the fitness multi-user final-mile plan: the integrity
+    endpoint must scope to the calling user. Seed orphans for both
+    users and assert each user's report contains only their own —
+    even when the orphan ``raw_ref_id`` values exist as real rows in
+    the other user's raw table.
+    """
+    user_a, user_b = 1, 2
+
+    # Seed a second user so the FK from fitness_activities can resolve.
+    fitness_db.execute(
+        """
+        INSERT OR IGNORE INTO users (id, email, password_hash, display_name,
+                                     email_verified, is_admin)
+        VALUES (?, 'user2@example.com', 'x', 'user2', 1, 0)
+        """,
+        (user_b,),
+    )
+    fitness_db.commit()
+
+    # User A: one activity with a dangling raw_ref_id.
+    fitness_db.execute(
+        """
+        INSERT INTO fitness_activities (
+            user_id, source, source_id, activity_type, source_subtype,
+            start_time, local_date, duration_s, raw_ref_id
+        ) VALUES (?, 'strava', 'A-ORPHAN', 'run', 'Run',
+                  '2026-05-02T08:00:00Z', '2026-05-02', 1800, 11111)
+        """,
+        (user_a,),
+    )
+    # User B: one activity with a different dangling raw_ref_id and one
+    # daily orphan. The activity id chosen here is intentionally distinct
+    # so it can't be confused with user A's in the asserted output.
+    fitness_db.execute(
+        """
+        INSERT INTO fitness_activities (
+            user_id, source, source_id, activity_type, source_subtype,
+            start_time, local_date, duration_s, raw_ref_id
+        ) VALUES (?, 'strava', 'B-ORPHAN', 'run', 'Run',
+                  '2026-05-03T08:00:00Z', '2026-05-03', 1800, 22222)
+        """,
+        (user_b,),
+    )
+    fitness_db.execute(
+        """
+        INSERT INTO fitness_daily (
+            user_id, source, local_date, sleep_score, raw_ref_ids_json
+        ) VALUES (?, 'garmin', '2026-05-03', 70, '[33333]')
+        """,
+        (user_b,),
+    )
+    fitness_db.commit()
+
+    # User A's report sees A-ORPHAN only.
+    client_a = _build_client_for_user(services, user_a)
+    body_a = client_a.get("/api/fitness/integrity").json()
+    a_raw_refs = {o["raw_ref_id"] for o in body_a["activities"]}
+    assert a_raw_refs == {11111}, body_a
+    assert body_a["daily"] == [], body_a
+
+    # User B's report sees B's activity + daily, never A's.
+    client_b = _build_client_for_user(services, user_b)
+    body_b = client_b.get("/api/fitness/integrity").json()
+    b_raw_refs = {o["raw_ref_id"] for o in body_b["activities"]}
+    assert b_raw_refs == {22222}, body_b
+    assert len(body_b["daily"]) == 1
+    assert body_b["daily"][0]["missing_raw_ids"] == [33333]
+
+    # Disjoint sets by construction; the strict equalities above already
+    # prove this, but state it explicitly as a regression anchor.
+    assert a_raw_refs.isdisjoint(b_raw_refs)
+
+
+def test_integrity_cross_user_raw_row_does_not_satisfy_pointer(
+    services: dict,
+    fitness_db: sqlite3.Connection,
+    fitness_repo: FitnessRepository,
+) -> None:
+    """The inner ``fitness_raw_*`` lookup that resolves soft pointers
+    must also be user-scoped: a raw row owned by user B at id N must
+    not silently satisfy user A's normalized row that points at id N.
+    Without the per-user filter in the JOIN, user A's orphan would
+    silently disappear from their report — a stealth integrity bug.
+    """
+    user_a, user_b = 1, 2
+    fitness_db.execute(
+        """
+        INSERT OR IGNORE INTO users (id, email, password_hash, display_name,
+                                     email_verified, is_admin)
+        VALUES (?, 'user2@example.com', 'x', 'user2', 1, 0)
+        """,
+        (user_b,),
+    )
+    fitness_db.commit()
+
+    # Seed a real raw row owned by user B. id is autoincrement so we
+    # read it back to point user A's bogus activity at the same id.
+    cur = fitness_db.execute(
+        """
+        INSERT INTO fitness_raw_strava (
+            user_id, source_id, endpoint, fetched_at, payload_json,
+            payload_sha256, sync_run_id
+        ) VALUES (?, 'B-REAL', 'activities',
+                  '2026-05-04T10:00:00Z', '{}', 'sha-b-real', NULL)
+        """,
+        (user_b,),
+    )
+    user_b_raw_id = cur.lastrowid
+    assert user_b_raw_id is not None
+
+    # User A activity points at user B's raw row id. Without per-user
+    # scoping, the JOIN would resolve — masking the orphan.
+    fitness_db.execute(
+        """
+        INSERT INTO fitness_activities (
+            user_id, source, source_id, activity_type, source_subtype,
+            start_time, local_date, duration_s, raw_ref_id
+        ) VALUES (?, 'strava', 'A-MASKED', 'run', 'Run',
+                  '2026-05-04T08:00:00Z', '2026-05-04', 1800, ?)
+        """,
+        (user_a, user_b_raw_id),
+    )
+    fitness_db.commit()
+
+    client_a = _build_client_for_user(services, user_a)
+    body_a = client_a.get("/api/fitness/integrity").json()
+    a_raw_refs = {o["raw_ref_id"] for o in body_a["activities"]}
+    assert user_b_raw_id in a_raw_refs, (
+        "user A's soft pointer to a user-B-owned raw row must surface "
+        "as an orphan — the per-user inner-join scope is the regression."
+    )
 
 
 # --------------------------------------------------------------------

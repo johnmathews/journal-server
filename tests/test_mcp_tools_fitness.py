@@ -391,6 +391,63 @@ def test_integrity_with_orphans(
     assert out["activities"][0]["raw_ref_id"] == 99999
 
 
+def test_integrity_user_a_cannot_see_user_b_orphans(
+    ctx: SimpleNamespace, db: sqlite3.Connection,
+) -> None:
+    """W1 of the fitness multi-user final-mile plan: the
+    ``fitness_integrity_check`` MCP tool must scope to the calling
+    user via ``_user_id(ctx)``. Seed orphans for both users; assert
+    each user's tool invocation returns only their own.
+    """
+    user_a, user_b = 1, 2
+
+    db.execute(
+        """
+        INSERT OR IGNORE INTO users (id, email, password_hash, display_name,
+                                     email_verified, is_admin)
+        VALUES (?, 'user2@example.com', 'x', 'user2', 1, 0)
+        """,
+        (user_b,),
+    )
+    db.execute(
+        """
+        INSERT INTO fitness_activities (
+            user_id, source, source_id, activity_type, source_subtype,
+            start_time, local_date, duration_s, raw_ref_id
+        ) VALUES (?, 'strava', 'A-ORPHAN', 'run', 'Run',
+                  '2026-05-02T08:00:00Z', '2026-05-02', 1800, 11111)
+        """,
+        (user_a,),
+    )
+    db.execute(
+        """
+        INSERT INTO fitness_activities (
+            user_id, source, source_id, activity_type, source_subtype,
+            start_time, local_date, duration_s, raw_ref_id
+        ) VALUES (?, 'strava', 'B-ORPHAN', 'run', 'Run',
+                  '2026-05-03T08:00:00Z', '2026-05-03', 1800, 22222)
+        """,
+        (user_b,),
+    )
+    db.commit()
+
+    # The autouse ``_set_test_user`` fixture has set ``_current_user_id``
+    # to user A; verify A sees only A's orphan.
+    out_a = fitness_tools.fitness_integrity_check(ctx=ctx)
+    a_refs = {o["raw_ref_id"] for o in out_a["activities"]}
+    assert a_refs == {11111}, out_a
+
+    # Swap the ContextVar to user B and re-invoke; B must only see B's.
+    token = _current_user_id.set(user_b)
+    try:
+        out_b = fitness_tools.fitness_integrity_check(ctx=ctx)
+    finally:
+        _current_user_id.reset(token)
+    b_refs = {o["raw_ref_id"] for o in out_b["activities"]}
+    assert b_refs == {22222}, out_b
+    assert a_refs.isdisjoint(b_refs)
+
+
 # --------------------------------------------------------------------
 # Operational tool: fitness_trigger_sync
 # --------------------------------------------------------------------
