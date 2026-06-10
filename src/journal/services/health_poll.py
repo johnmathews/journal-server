@@ -110,9 +110,18 @@ class HealthPoller:
         )
         self._thread.start()
 
-    def stop(self) -> None:
-        """Signal the poller to stop."""
+    def stop(self, *, timeout: float = 5.0) -> None:
+        """Signal the poller to stop and join the polling thread.
+
+        Idempotent and safe to call before ``start()``: setting an
+        already-set event is a no-op, and the join is skipped if the
+        thread was never started. Joining (bounded by *timeout*) makes
+        shutdown deterministic — callers know the thread is gone, so
+        nothing can log after process teardown has closed the streams.
+        """
         self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
 
     def is_running(self) -> bool:
         """True iff the polling thread is alive (started, not yet joined)."""
@@ -160,4 +169,8 @@ class HealthPoller:
             except Exception:  # noqa: BLE001
                 log.exception("Health poll cycle failed")
             self._stop_event.wait(self._poll_interval)
-        log.info("Health poller stopped")
+        # Deliberately no shutdown log here: stop() is invoked from an
+        # atexit hook (mcp_server/bootstrap.py), which runs after pytest
+        # or uvicorn may have closed stdout/stderr — logging then raises
+        # "ValueError: I/O operation on closed file" inside the stdlib
+        # handler. The startup log above is enough of a lifecycle trace.
