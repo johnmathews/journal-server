@@ -2293,11 +2293,11 @@ For the data flow, see [`fitness-pipeline.md`](fitness-pipeline.md); for
 connecting, re-auth, backfill, and troubleshooting, see
 [`fitness-operations.md`](fitness-operations.md). The multi-user posture and
 per-user connect flows are spelled out in
-[`fitness-multiuser-plan.md`](fitness-multiuser-plan.md).
+[`archive/fitness-multiuser-plan.md`](archive/fitness-multiuser-plan.md).
 
 ### GET /api/fitness/activities
 
-Activities (run, ride, swim, walk, hike, strength, other) in a date window.
+Activities (run, ride, swim, walk, hike, row, strength, other) in a date window.
 
 **Query parameters:**
 

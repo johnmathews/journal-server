@@ -62,7 +62,7 @@ consumption by other applications, not just the journal webapp.
   carries `user_id` so multi-user is a future migration, not a rewrite.~~ **Pivoted 2026-05-10:**
   multi-user fitness data is now in scope — each user connects their own Strava and Garmin
   accounts through the webapp. See [Q7](#q7-multi-user-pivot-2026-05-10) for the resolution and
-  [`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md) for the execution plan.
+  [`archive/fitness-multiuser-plan.md`](./archive/fitness-multiuser-plan.md) for the execution plan.
 - Wearable integrations beyond Garmin/Strava (Whoop, Oura, Apple Health, etc.).
 - Workout planning, training load forecasts, or any predictive modelling.
 
@@ -289,7 +289,7 @@ service, and job workers are all already per-user-aware — the pivot is purely 
 connect endpoints, new pending-session stores, no migrations).
 
 **Where the work lives.** Architectural decisions and W1–W14 execution sequencing are in
-[`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md), not here. The integration plan
+[`archive/fitness-multiuser-plan.md`](./archive/fitness-multiuser-plan.md), not here. The integration plan
 remains the rationale doc for the underlying pipeline; the multi-user plan is the rationale
 doc for the multi-user posture on top.
 

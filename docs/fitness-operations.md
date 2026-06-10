@@ -75,7 +75,7 @@ Re-connect is also the recovery path when a source transitions to
 `auth_status="broken"` (see [§5](#5-status-health-and-integrity)).
 
 > **`--user-id` is required on every `fitness-*` CLI subcommand** (per
-> `docs/fitness-multiuser-plan.md` W7). There is no implicit default —
+> `docs/archive/fitness-multiuser-plan.md` W7). There is no implicit default —
 > running `journal fitness-sync` without `--user-id N` exits non-zero
 > with an argparse error. Every CLI example below names the user
 > explicitly.
@@ -124,7 +124,7 @@ See [`api.md`](./api.md#post-apifitnessgarminconnect) for the full
 endpoint reference (including the `post_mfa_profile_fetch_failed`
 branch that surfaces intermittent Garmin profile-endpoint flakiness as
 a distinct retry signal) and
-[`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md) §5 W2 for
+[`archive/fitness-multiuser-plan.md`](./archive/fitness-multiuser-plan.md) §5 W2 for
 context.
 
 ### 2b. Strava — connecting via the webapp (primary)
@@ -172,7 +172,7 @@ still drives the CLI listener path in §2d / §2e for dev/laptop bootstrap.
 
 See [`api.md`](./api.md#get-apifitnessstravaauthorize_url) for the full
 endpoint reference and
-[`fitness-multiuser-plan.md`](./fitness-multiuser-plan.md) §5 W3 for
+[`archive/fitness-multiuser-plan.md`](./archive/fitness-multiuser-plan.md) §5 W3 for
 context.
 
 ### 2c. Garmin — CLI operator fallback
@@ -223,13 +223,31 @@ emergency re-auth from a developer machine.
 
 When the default `STRAVA_REDIRECT_URI` reuses port `8400`, which the
 long-running journal-server is already bound to, the §2d listener can't
-bind. Two workarounds; the inline-python recipe below is the
-recommended path.
+bind. Three approaches in descending preference.
 
-**Recommended — skip the listener, exchange the code inline.** Build the
-authorize URL by hand, paste it into a browser, copy the `code` param out of
-the redirect URL bar (the browser tab will fail to load — that's fine), then
-exchange the code in a one-off Python invocation against the live container:
+**Primary — `--code <code>`.** Pass the authorization code straight to
+the CLI; no listener is started, no port juggling, no inline-python
+boilerplate. Build the authorize URL once (see Fallback A below for the
+shape), paste it into a browser, approve, and copy the `code` param out
+of the redirect URL bar (the browser tab will fail to load — that's
+fine):
+
+```bash
+docker exec journal-server uv run journal fitness-reauth-strava \
+    --user-id 1 --code "<PASTE_CODE_HERE>"
+```
+
+Exits 0 with `Strava re-auth complete — tokens persisted.` on success; on
+an invalid or expired code the upstream error surfaces on stderr and the
+command exits non-zero (no DB row is written).
+
+**Fallback A — inline-python recipe.** Useful if you want full control
+over the exchange-and-persist path (e.g. preserving a hand-curated
+`extra_state` blob across the re-auth). Same outcome as `--code`, more
+typing. Build the authorize URL by hand, paste it into a browser, copy
+the `code` param out of the redirect URL bar (the browser tab will fail
+to load — that's fine), then exchange the code in a one-off Python
+invocation against the live container:
 
 ```bash
 # 1. Build the authorize URL (replace <CLIENT_ID> with the value from .env).
@@ -279,9 +297,10 @@ print('Strava re-auth complete — tokens persisted.')
 This bypasses the W11 listener entirely. Same DB shape, same audit trail. No
 container restart, no port juggling.
 
-**Fallback — stop-server + one-off container with `--service-ports`.** If you
-want the native OAuth roundtrip (e.g. to verify the listener works), free port
-`8400` and run the CLI in a fresh container that publishes it:
+**Fallback B — stop-server + one-off container with `--service-ports`.**
+If you want the native OAuth roundtrip (e.g. to verify the listener
+works after a config change), free port `8400` and run the CLI in a
+fresh container that publishes it:
 
 ```bash
 docker compose stop journal-server
@@ -297,8 +316,8 @@ restarted server picks it up.
 
 **Browser on a remote laptop?** SSH-forward the listener port (`-L
 8400:localhost:8400 user@vm`) **and** apply the stop-server-plus-`--service-ports`
-recipe on the VM. Two SSH sessions, fragile. The inline-python recipe above
-makes this go away — strongly preferred for headless deployments.
+recipe on the VM. Two SSH sessions, fragile. The `--code` primary path
+above makes this go away — preferred for headless deployments.
 
 ---
 
@@ -346,11 +365,14 @@ daily)`) skip windows already fully ingested. Mid-window crashes leave clean
 state because the raw layer is `INSERT OR IGNORE` on payload SHA and
 normalized rows are upserts.
 
-**After a fresh backfill, run a force-renormalize once.** During a fast
-backfill the per-window normalize step undercounts — multiple raw rows can
-land within the same SQLite-1-second `fetched_at` and the W7 watermark's
-strict `>` filter excludes the second-and-later rows. The recovery is
-idempotent:
+**After a fresh backfill, run a force-renormalize once on any DB whose
+backfill predates the W3 watermark fix (server `fitness-multiuser-final-mile`,
+2026-06-04).** Pre-fix, the per-window normalize step undercounted because
+multiple raw rows could land within the same SQLite-1-second `fetched_at`
+and the scalar watermark's strict `>` filter dropped the second-and-later
+rows in each tied group. Post-fix the composite `(fetched_at, id)`
+watermark makes this safe. Running the one-liner on a post-fix DB is a
+clean no-op. The recovery is idempotent either way:
 
 ```bash
 docker exec journal-server uv run python -c "
@@ -372,8 +394,8 @@ print('garmin:', normalize_garmin(repo, user_id=1, since='').rows_normalized)
 This re-projects every raw row that isn't already normalized. Idempotent — a
 second invocation reports `rows_normalized=0` because everything is in sync.
 
-See [§7 Known limitations](#7-known-limitations) for the underlying watermark
-quirk and the planned fix.
+See [§7 Known limitations](#7-known-limitations) for the watermark fix
+status and what the original quirk looked like.
 
 **Abort modes.** `fitness-backfill` exits non-zero with an actionable
 `aborted_reason` in three cases:
@@ -461,7 +483,7 @@ Per-user data isolation audit. Walks every fitness table
   validation).
 
 Exits 0 when clean, exit code 1 when any violation is found. Used as the
-pre-flight check before the multi-user rollout (`fitness-multiuser-plan.md`
+pre-flight check before the multi-user rollout (`archive/fitness-multiuser-plan.md`
 W1) and as the post-rollout verification gate (W14): the row-count
 snapshot before W2/W3 ship is the regression target after user 2 starts
 populating their own rows.
@@ -481,7 +503,8 @@ prod DB before shipping any of the multi-user work units.
 ### Strava re-auth fails with `OSError: [Errno 98] Address already in use`
 
 The `STRAVA_REDIRECT_URI` port collides with the long-running journal-server.
-Use the inline-python recipe from [§2e](#2e-strava--cli-operator-fallback-headless-deployment-server-on-8400).
+Use the `--code <code>` primary path in [§2e](#2e-strava--cli-operator-fallback-headless-deployment-server-on-8400)
+— no listener bind, no port juggling.
 
 ### Garmin re-auth prints `429: Mobile login returned 429 — IP rate limited by Garmin`
 
@@ -551,48 +574,38 @@ re-auth commands with the fresh credentials in `.env`.
 These are documented gaps with planned follow-ups. They are not bugs — the
 pipeline works correctly given the documented operator workarounds.
 
-### W11 OAuth listener is colocated with the server
+### W11 OAuth listener is colocated with the server — **fixed**
 
-The recipe in [§2b](#2b-strava--headless-deployment-server-already-on-8400)
-is a workaround, not a permanent design. The clean fix is a `--code <code>`
-flag on `fitness-reauth-strava` that bypasses the listener entirely (~10
-lines of CLI + a unit test). Filed as a future small follow-up. Until that
-ships, the inline-python recipe is the recommended headless path.
+**Status:** fixed 2026-06-04 (server `fitness-multiuser-final-mile` W2).
+`fitness-reauth-strava` now accepts `--code <code>` and exchanges the
+code directly, skipping the in-process HTTP listener entirely. See
+[§2e](#2e-strava--cli-operator-fallback-headless-deployment-server-on-8400)
+for the primary path; the previous inline-python recipe stays in §2e as
+Fallback A for operators who want full control of the exchange call.
 
-### W7 incremental normalize watermark loses rows under dense writes
+### W7 incremental normalize watermark loses rows under dense writes — **fixed**
 
-`normalize_strava` / `normalize_garmin` use a watermark of
-`MAX(fetched_at) FROM fitness_*` over already-normalized rows, then read raw
-rows where `fetched_at > watermark`. SQLite's default
-`strftime('%Y-%m-%dT%H:%M:%SZ', 'now')` is 1-second resolution, so multiple
-raw rows landing in the same wall-clock second tie on `fetched_at`. The
-strict `>` filter excludes the second-and-later rows in each tied group from
-the next normalize pass. After a fast backfill this leaves a chunk of raws
-unprojected until a follow-up `normalize_*(since="")` projects them.
+**Status:** fixed 2026-06-04 (server `fitness-multiuser-final-mile` W3).
+The watermark used by `normalize_strava` / `normalize_garmin` is now the
+composite `(fetched_at, id)` tuple returned by
+`max_normalized_fetched_at`, and `list_raw_since` filters with row-value
+comparison (`(fetched_at, id) > (?, ?)`). The AUTOINCREMENT raw-row id
+breaks ties at SQLite's default 1-second `fetched_at` resolution, so
+raw rows landing in the same wall-clock second can no longer drop on a
+subsequent normalize pass. Regression test:
+`tests/test_db/test_fitness_repository.py::test_watermark_tied_fetched_at_no_row_loss`.
 
-Recovery is the force-renormalize one-liner in
-[§3](#3-historical-backfill). Routine syncs rarely hit this in steady state
-(a single watch upload per minute doesn't tie at second resolution), so the
-limitation primarily affects backfills.
+The force-renormalize one-liner in [§3](#3-historical-backfill) remains
+useful for any DB state that accumulated unprojected rows before the
+fix; running it once is a safe no-op on a clean DB. Routine syncs in
+steady state were unaffected (a single watch upload per minute doesn't
+tie at second resolution).
 
-The fix is one of:
+### ~~`Rowing` Strava activities collapse to `activity_type="other"`~~ — resolved 2026-06-04
 
-1. Composite `(fetched_at, id)` watermark — break ties by row id. Cleanest
-   semantically; touches `list_raw_since` and `max_normalized_fetched_at`
-   plus the normalize entry points.
-2. Sub-second `fetched_at` resolution
-   (`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` or microsecond storage). Schema
-   change; impacts every existing raw row.
-3. Tail-call `normalize_*(since="")` once at the end of every backfill.
-   Trivial code change; doesn't help routine syncs.
-
-Deferred to a future work unit — none of the options are W14 scope.
-
-### `Rowing` Strava activities collapse to `activity_type="other"`
-
-The `coarse_strava` map covers seven canonical types (`run`, `ride`, `swim`,
-`walk`, `hike`, `strength`, `other`); `Rowing` falls through to `other`.
-`source_subtype` is preserved on the row, so the data isn't lost — just
-bucketed coarsely for the activity-type filter. Adding `Rowing → other`
-explicitly (semantic no-op, documents intent) or introducing a `row`
-canonical type are both possible future enhancements.
+`row` is now the eighth canonical type (`run`, `ride`, `swim`, `walk`,
+`hike`, `row`, `strength`, `other`) — added as W5 of the fitness
+multi-user final-mile plan. `_activity_type_map.py` maps Strava
+`Rowing` to `row`, and migration `0029_fitness_activity_type_add_row.sql`
+backfills pre-existing rows that had collapsed to `other` (identified
+via their preserved `source_subtype`) when it runs on deploy.

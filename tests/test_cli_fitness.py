@@ -164,6 +164,72 @@ def test_fitness_reauth_strava_user_cancellation(fitness_env, capsys):
     assert _read_state(fitness_env, source="strava") is None
 
 
+def test_fitness_reauth_strava_with_code_skips_listener(fitness_env):
+    """W2 of the fitness multi-user final-mile plan: ``--code <code>``
+    must bypass the OAuth listener entirely and exchange the code
+    directly. The previous headless path required the inline-python
+    recipe in fitness-operations.md §2e; this CLI flag is the clean
+    replacement.
+    """
+    fake_tokens = Tokens(
+        access_token="DIRECT_ACC",
+        refresh_token="DIRECT_REF",
+        token_expires_at="2026-07-01T00:00:00Z",
+    )
+
+    def _boom(*_a: object, **_kw: object) -> str:
+        raise AssertionError(
+            "_oauth_listener must not be invoked when --code is supplied",
+        )
+
+    with patch("journal.cli.fitness._oauth_listener", side_effect=_boom), \
+         patch(
+             "journal.cli.fitness.exchange_code",
+             return_value=(fake_tokens, "888888"),
+         ) as mock_exchange:
+        sys.argv = [
+            "journal", "fitness-reauth-strava",
+            "--user-id", "1",
+            "--code", "PASTED_CODE_FROM_BROWSER",
+        ]
+        main()
+
+    assert mock_exchange.call_count == 1
+    assert mock_exchange.call_args.kwargs["code"] == "PASTED_CODE_FROM_BROWSER"
+
+    state = _read_state(fitness_env, source="strava")
+    assert state is not None
+    assert state.access_token == "DIRECT_ACC"
+    assert state.refresh_token == "DIRECT_REF"
+    assert state.auth_status == "ok"
+    assert state.extra_state.get("upstream_user_id") == "888888"
+
+
+def test_fitness_reauth_strava_with_invalid_code_exits_nonzero(
+    fitness_env, capsys,
+):
+    """An invalid / expired code surfaces as a clear error on stderr and
+    a non-zero exit, not an uncaught traceback. No DB row is written.
+    """
+    with patch(
+        "journal.cli.fitness.exchange_code",
+        side_effect=RuntimeError("invalid_grant: code already used"),
+    ):
+        sys.argv = [
+            "journal", "fitness-reauth-strava",
+            "--user-id", "1",
+            "--code", "STALE_CODE",
+        ]
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code != 0
+
+    err = capsys.readouterr().err
+    assert "Strava token exchange failed" in err
+    assert "invalid_grant" in err
+    assert _read_state(fitness_env, source="strava") is None
+
+
 def test_fitness_reauth_strava_preserves_existing_extra_state(fitness_env):
     """Re-auth merges existing extra_state instead of clobbering it."""
     conn, repo = _open_repo(fitness_env)

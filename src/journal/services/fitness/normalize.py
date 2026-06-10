@@ -122,9 +122,16 @@ def normalize_strava(
         ``None`` for code paths that don't tie a normalize pass to a
         specific fetch run (CLI manual normalize, backfill batches).
     """
-    watermark = since if since is not None else repo.max_normalized_fetched_at(
-        source="strava", user_id=user_id, kind="activities",
-    )
+    # Watermark shape: composite (fetched_at, id) per W3 (the W7 race fix).
+    # A caller-supplied `since` is still accepted as a bare ISO string for
+    # the force-renormalize one-liner in fitness-operations.md §3; wrap it as
+    # ``(s, 0)`` because `id` is a positive AUTOINCREMENT rowid.
+    if since is not None:
+        watermark: tuple[str, int] | None = (since, 0)
+    else:
+        watermark = repo.max_normalized_fetched_at(
+            source="strava", user_id=user_id, kind="activities",
+        )
     rows_normalized = 0
     drift_count = 0
     for raw in repo.list_raw_since(
@@ -254,12 +261,21 @@ def normalize_garmin(
 
     ``sync_run_id`` — see :func:`normalize_strava`.
     """
-    daily_watermark = since if since is not None else repo.max_normalized_fetched_at(
-        source="garmin", user_id=user_id, kind="daily",
-    )
-    activity_watermark = since if since is not None else repo.max_normalized_fetched_at(
-        source="garmin", user_id=user_id, kind="activities",
-    )
+    # Watermark shape: composite (fetched_at, id) per W3 (the W7 race fix).
+    # A caller-supplied `since` is still accepted as a bare ISO string for
+    # the force-renormalize one-liner in fitness-operations.md §3; wrap it
+    # as ``(s, 0)`` so both daily and activity passes start strictly after
+    # any real row with that fetched_at value.
+    if since is not None:
+        daily_watermark: tuple[str, int] | None = (since, 0)
+        activity_watermark: tuple[str, int] | None = (since, 0)
+    else:
+        daily_watermark = repo.max_normalized_fetched_at(
+            source="garmin", user_id=user_id, kind="daily",
+        )
+        activity_watermark = repo.max_normalized_fetched_at(
+            source="garmin", user_id=user_id, kind="activities",
+        )
 
     workouts_normalized = 0
     wellness_normalized = 0

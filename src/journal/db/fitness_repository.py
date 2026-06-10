@@ -544,23 +544,40 @@ class FitnessRepository:
         *,
         source: Literal["strava", "garmin"],
         user_id: int,
-        since: str | None = None,
+        since: tuple[str, int] | None = None,
     ) -> Iterator[FitnessRawRow]:
+        """Yield raw rows for ``(source, user_id)`` strictly after the
+        composite watermark ``since=(fetched_at, id)``.
+
+        SQLite's default ``fetched_at`` resolution is one second, so two
+        raw rows landing in the same wall-clock second tie. Combined with
+        the strict ``>`` filter the pre-W3 scalar watermark used, that
+        dropped every tied-second row on the next normalize pass. The
+        composite ``(fetched_at, id)`` watermark with row-value
+        comparison (SQLite 3.15+) breaks ties on the AUTOINCREMENT id and
+        is total-order monotone — see W3 in
+        ``docs/archive/fitness-multiuser-plan.md``.
+
+        Callers that previously passed a bare ISO string should wrap it as
+        ``(s, 0)``: ``id`` is positive, so 0 is below every real row.
+        """
         table = _raw_table_for(source)
         conn = self._conn()
         if since is None:
             rows = conn.execute(
-                f"SELECT * FROM {table} WHERE user_id = ? ORDER BY fetched_at",  # noqa: S608
+                f"SELECT * FROM {table} WHERE user_id = ? "  # noqa: S608
+                f"ORDER BY fetched_at, id",
                 (user_id,),
             ).fetchall()
         else:
+            wm_fetched_at, wm_id = since
             rows = conn.execute(
                 f"""
                 SELECT * FROM {table}
-                WHERE user_id = ? AND fetched_at > ?
-                ORDER BY fetched_at
+                WHERE user_id = ? AND (fetched_at, id) > (?, ?)
+                ORDER BY fetched_at, id
                 """,  # noqa: S608
-                (user_id, since),
+                (user_id, wm_fetched_at, wm_id),
             ).fetchall()
         for row in rows:
             yield _row_to_raw(row)
@@ -734,40 +751,57 @@ class FitnessRepository:
         source: Literal["strava", "garmin"],
         user_id: int,
         kind: Literal["activities", "daily"],
-    ) -> str | None:
-        """Watermark for incremental normalize (W7).
+    ) -> tuple[str, int] | None:
+        """Composite ``(fetched_at, id)`` watermark for incremental
+        normalize (W3 of the fitness multi-user final-mile work).
 
-        Returns the largest ``fetched_at`` of raw rows referenced by
-        normalized rows in this user/source/kind. The normalize service
-        reads raw rows with ``fetched_at > <watermark>`` to resume
-        from the last point. NULL on first run (empty normalized table).
+        Returns the lex-largest ``(fetched_at, id)`` of raw rows referenced
+        by normalized rows in this user/source/kind, or ``None`` when the
+        normalized table is empty. The normalize service reads raw rows
+        strictly after the watermark via ``list_raw_since(..., since=<wm>)``
+        — see that method for the ordering invariant.
 
-        For activities, the watermark is computed by joining
-        ``fitness_activities.raw_ref_id`` against the matching raw
-        table's ``fetched_at``. For daily, it is the max ``fetched_at``
-        from raw rows whose id appears in any
-        ``fitness_daily.raw_ref_ids_json`` array.
+        The composite shape exists because SQLite's default ``fetched_at``
+        resolution is one second; tied-second raw rows would be dropped
+        on the next pass with a scalar ``MAX(fetched_at)`` watermark and
+        a strict ``>`` filter. The raw row id is monotonic
+        (``INTEGER PRIMARY KEY AUTOINCREMENT``) and unique per table, so
+        tying on ``fetched_at`` and breaking ties on ``id`` is a total
+        order. See the pre-fix limitation note in
+        ``docs/archive/fitness-multiuser-plan.md`` W3 and the
+        ``test_watermark_tied_fetched_at_no_row_loss`` regression test.
+
+        For activities, the watermark joins ``fitness_activities.raw_ref_id``
+        against the matching raw table. For daily, it joins through
+        ``json_each(fitness_daily.raw_ref_ids_json)`` since one daily row
+        fans in from several raw endpoints.
         """
         raw_table = _raw_table_for(source)
         conn = self._conn()
         if kind == "activities":
             row = conn.execute(
                 f"""
-                SELECT MAX(r.fetched_at) AS at
+                SELECT r.fetched_at AS at, r.id AS rid
                 FROM fitness_activities fa
                 JOIN {raw_table} r ON r.id = fa.raw_ref_id
                 WHERE fa.user_id = ? AND fa.source = ?
+                ORDER BY r.fetched_at DESC, r.id DESC
+                LIMIT 1
                 """,  # noqa: S608
                 (user_id, source),
             ).fetchone()
         else:
             row = conn.execute(
                 f"""
-                SELECT MAX(r.fetched_at) AS at
+                SELECT r.fetched_at AS at, r.id AS rid
                 FROM fitness_daily fd, json_each(fd.raw_ref_ids_json) j
                 JOIN {raw_table} r ON r.id = j.value
                 WHERE fd.user_id = ? AND fd.source = ?
+                ORDER BY r.fetched_at DESC, r.id DESC
+                LIMIT 1
                 """,  # noqa: S608
                 (user_id, source),
             ).fetchone()
-        return row["at"] if row and row["at"] else None
+        if row is None or row["at"] is None:
+            return None
+        return (row["at"], row["rid"])

@@ -230,8 +230,9 @@ rather than rely on application-level validation.
 
 **`activity_type` normalization (Strava → coarse).** Strava's `sport_type` enum has 54
 values (`Run`, `TrailRun`, `VirtualRun`, `Ride`, `GravelRide`, `MountainBikeRide`, `Rowing`,
-`Yoga`, `WeightTraining`, `AlpineSki`, `RockClimbing`, …). The coarse `activity_type` collapses
-them as follows:
+`Yoga`, `WeightTraining`, `AlpineSki`, `RockClimbing`, …). The coarse `activity_type` is
+**eight values** (`run`, `ride`, `swim`, `walk`, `hike`, `row`, `strength`, `other`) and
+collapses Strava's enum as follows:
 
 | `activity_type` | Strava `sport_type` values |
 |---|---|
@@ -240,15 +241,22 @@ them as follows:
 | `swim`     | `Swim` |
 | `walk`     | `Walk` |
 | `hike`     | `Hike` |
+| `row`      | `Rowing` |
 | `strength` | `WeightTraining`, `Crossfit`, `HighIntensityIntervalTraining` |
-| `other`    | everything else (~35 values incl. Rowing, Yoga, AlpineSki, RockClimbing, Pilates, Kayaking, NordicSki, StairStepper) |
+| `other`    | everything else (~34 values incl. Yoga, AlpineSki, RockClimbing, Pilates, Kayaking, NordicSki, StairStepper) |
+
+`row` was added under migration 0029 (W5 of the fitness multi-user final-mile plan,
+2026-06-04). The migration backfills existing `Rowing`-subtype rows from `'other'` into
+`'row'`; on Garmin the mapped typeKeys are `rowing` and `indoor_rowing`. Subtype is
+preserved in `source_subtype` so on-water-vs-ergometer filtering remains possible without a
+further schema change.
 
 The verbatim source string is preserved in `source_subtype`, so a future query that wants
-e.g. trail-runs only or weekly rowing volume can filter on it without a schema change. The
-coarse `activity_type` is what the locked-in correlation queries (Q2 in §8) join on.
-Garmin's normalize maps from its activity-type strings into the same coarse buckets — exact
-mapping deferred to the normalize implementation since Garmin's enum is less stable than
-Strava's and the project pulls activities primarily from Strava per master plan D2.
+e.g. trail-runs only can filter on it without a schema change. The coarse `activity_type`
+is what the locked-in correlation queries (Q2 in §8) join on. Garmin's normalize maps from
+its activity-type strings into the same coarse buckets — exact mapping deferred to the
+normalize implementation since Garmin's enum is less stable than Strava's and the project
+pulls activities primarily from Strava per master plan D2.
 
 **HR/scale CHECK ranges** mirror the `mood_scores.score CHECK(score >= -1.0 AND score <= 1.0)`
 pattern at `migrations/0001_initial_schema.sql:21`. All Garmin 0-100 scores, sleep
