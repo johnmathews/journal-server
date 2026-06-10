@@ -259,6 +259,40 @@ class TestIngestImageMultipleEntries:
         assert "tail of previous" not in atlas_entry.raw_text
         assert "tail of previous" not in vienna_entry.raw_text
 
+    def test_ingest_image_entries_returns_all_created_entries(
+        self, ingestion_service, mock_ocr, repo
+    ) -> None:
+        """``ingest_image_entries`` exposes every entry created from the
+        page, in segment order — the job worker uses it to queue
+        follow-up jobs per entry (W27)."""
+        from journal.services.ingestion.image import ENTRY_DELIMITER
+
+        entry_a = "1 June 2026\n\nFirst entry body about Vienna."
+        entry_b = "3 June 2026\n\nSecond entry body about Atlas."
+        mock_ocr.extract.return_value = _ocr_result(
+            f"…tail of previous.\n\n{ENTRY_DELIMITER}\n\n{entry_a}"
+            f"\n\n{ENTRY_DELIMITER}\n\n{entry_b}"
+        )
+
+        created = ingestion_service.ingest_image_entries(
+            b"page with two entries", "image/jpeg", "2026-06-03",
+        )
+
+        assert len(created) == 2
+        assert "Vienna" in created[0].raw_text
+        assert "Atlas" in created[1].raw_text
+        # Same persistence as ingest_image: both entries in the repo.
+        assert len(repo.list_entries(limit=10)) == 2
+
+    def test_ingest_image_entries_single_entry_page_returns_one(
+        self, ingestion_service, mock_ocr, repo
+    ) -> None:
+        created = ingestion_service.ingest_image_entries(
+            b"single-entry page", "image/jpeg", "2026-03-22",
+        )
+        assert len(created) == 1
+        assert "Vienna" in created[0].raw_text
+
     def test_no_delimiter_preserves_existing_single_entry_behaviour(
         self, ingestion_service, mock_ocr, repo
     ) -> None:

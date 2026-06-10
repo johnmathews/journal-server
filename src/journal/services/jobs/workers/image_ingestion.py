@@ -1,4 +1,10 @@
-"""Worker body: ingest one or more images into a single entry."""
+"""Worker body: ingest one or more images.
+
+A multi-image upload becomes a single multi-page entry. A single image
+usually becomes one entry, but can segment into several when the OCR
+model marks entry boundaries on the page — each created entry gets its
+own mood-scoring + entity-extraction follow-up jobs.
+"""
 
 from __future__ import annotations
 
@@ -51,22 +57,25 @@ def run_image_ingestion(
         def operation():  # noqa: ANN202 — local helper
             assert ctx.ingestion is not None  # noqa: S101 — guarded above
             if len(images) == 1:
+                # A single image can segment into multiple entries (the
+                # OCR model marks entry boundaries) — fetch them ALL so
+                # every created entry gets its own follow-up jobs below.
                 ctx.jobs.update_progress(job_id, 0, total)
-                entry = ctx.ingestion.ingest_image(
+                created = ctx.ingestion.ingest_image_entries(
                     images[0][0], images[0][1], entry_date,
                     skip_mood=True, user_id=job_user_id or 1,
                 )
                 ctx.jobs.update_progress(job_id, 1, total)
             else:
                 ctx.jobs.update_progress(job_id, 0, total)
-                entry = ctx.ingestion.ingest_multi_page_entry(
+                created = [ctx.ingestion.ingest_multi_page_entry(
                     images, entry_date, skip_mood=True,
                     on_progress=progress_callback,
                     user_id=job_user_id or 1,
-                )
-            return entry
+                )]
+            return created
 
-        entry = run_with_retry(
+        entries = run_with_retry(
             jobs=ctx.jobs,
             notifier=ctx.notifier,
             job_id=job_id,
@@ -75,13 +84,31 @@ def run_image_ingestion(
             operation=operation,
             log_prefix="Image ingestion",
         )
+        # Primary entry: the most recently dated segment — the one the
+        # user typically intended to capture. Matches what
+        # ``ingest_image`` would have returned.
+        entry = entries[-1]
 
         ctx.jobs.update_progress(job_id, total, total)
 
-        # Queue follow-up jobs: mood scoring + entity extraction.
-        follow_up_ids = ctx.queue_post_ingestion_jobs(
-            job_id, "Image", entry.id, job_user_id,
-        )
+        # Queue follow-up jobs (mood scoring + entity extraction) for
+        # EVERY entry created from the page, not just the primary one
+        # (see journal/260603-ocr-multi-entry-segmentation.md). The
+        # primary entry keeps the unsuffixed map keys so the combined
+        # pipeline notification renders unchanged; secondary entries'
+        # keys are suffixed with their entry id to stay collision-free.
+        follow_up_ids: dict[str, str] = {}
+        for created_entry in entries:
+            ids = ctx.queue_post_ingestion_jobs(
+                job_id, "Image", created_entry.id, job_user_id,
+            )
+            if created_entry.id == entry.id:
+                follow_up_ids.update(ids)
+            else:
+                follow_up_ids.update({
+                    f"{key}_entry_{created_entry.id}": job
+                    for key, job in ids.items()
+                })
 
         result: dict[str, Any] = {
             "entry_id": entry.id,
@@ -92,6 +119,8 @@ def run_image_ingestion(
             "page_count": total,
             "follow_up_jobs": follow_up_ids,
         }
+        if len(entries) > 1:
+            result["entry_ids"] = [e.id for e in entries]
         ctx.jobs.mark_succeeded(job_id, result)
         if not follow_up_ids:
             # No follow-ups were queued (e.g. executor shutting down) —

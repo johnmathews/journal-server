@@ -54,6 +54,14 @@ let post-OCR code split on a known marker. Specifically:
   re-scoring run or can be triggered manually. If this becomes common, a
   small follow-up PR can change the worker to queue follow-ups per
   created entry; deferred for now to keep PR2 focused.
+  - **Closed 2026-06-10 (W27):** the image-ingestion worker now calls the
+    new `ingest_image_entries` (returns ALL created entries) and queues
+    mood-scoring + entity-extraction (+ storyline extension check, when
+    wired) follow-ups for every entry. The primary (last) entry keeps the
+    unsuffixed `follow_up_jobs` keys; secondary entries' keys get an
+    `_entry_<id>` suffix, and the result carries `entry_ids` when more
+    than one entry was created so the combined notification lists them
+    all. `ingest_image`'s `Entry` return type is unchanged.
 - **Return type unchanged (`Entry`, not `list[Entry]`).** Avoids breaking
   the MCP tool and the job worker callers. Sacrifices: the caller doesn't
   know about the secondary entries, only the primary one. The entries
