@@ -296,6 +296,26 @@ class Config:
         default_factory=lambda: int(os.environ.get("SESSION_EXPIRY_DAYS", "7"))
     )
 
+    # Per-IP rate limiting on the anonymous auth endpoints (login,
+    # register, forgot-password, reset-password). On by default — opt
+    # out explicitly via `AUTH_RATE_LIMIT_ENABLED=false`. Defaults allow
+    # 10 POSTs per 5 minutes per IP per path; see `journal/ratelimit.py`.
+    auth_rate_limit_enabled: bool = field(
+        default_factory=lambda: os.environ.get(
+            "AUTH_RATE_LIMIT_ENABLED", "true"
+        ).lower() in ("1", "true", "yes", "on")
+    )
+    auth_rate_limit_max_requests: int = field(
+        default_factory=lambda: int(
+            os.environ.get("AUTH_RATE_LIMIT_MAX_REQUESTS", "10")
+        )
+    )
+    auth_rate_limit_window_seconds: int = field(
+        default_factory=lambda: int(
+            os.environ.get("AUTH_RATE_LIMIT_WINDOW_SECONDS", "300")
+        )
+    )
+
     # Email (SMTP)
     smtp_host: str = field(
         default_factory=lambda: os.environ.get("SMTP_HOST", "smtp.gmail.com")

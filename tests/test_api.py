@@ -1410,26 +1410,46 @@ class TestHealth:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "ok"
-        assert data["ingestion"]["total_entries"] == 0
-        assert data["queries"]["total_queries"] == 0
         assert isinstance(data["checks"], list)
         # sqlite + chromadb + anthropic + openai = 4.
         assert len(data["checks"]) == 4
 
-    def test_health_reflects_populated_corpus(
+    def test_unauth_health_omits_corpus_and_query_stats(
         self,
         health_client: tuple[TestClient, dict],
         repo: SQLiteEntryRepository,
     ) -> None:
+        """The unauthenticated `/health` is a liveness probe only —
+        it must not leak corpus statistics (entry counts, per-table
+        row counts, recent activity) or query stats to anonymous
+        callers."""
+        client, services = health_client
+        query_svc: QueryService = services["query"]
+        repo.create_entry("2026-03-22", "photo", "Vienna today", 2)
+        query_svc.search_entries("vienna")
+
+        data = client.get("/health").json()
+        assert "ingestion" not in data
+        assert "queries" not in data
+        # Liveness fields survive.
+        assert data["status"] == "ok"
+        assert isinstance(data["checks"], list)
+
+    def test_api_health_reflects_populated_corpus(
+        self,
+        health_client: tuple[TestClient, dict],
+        repo: SQLiteEntryRepository,
+    ) -> None:
+        """Authenticated `/api/health` keeps the full stats payload."""
         client, _ = health_client
         repo.create_entry("2026-03-22", "photo", "Vienna today", 2)
         repo.create_entry("2026-03-23", "voice", "a voice note", 3)
-        data = client.get("/health").json()
+        data = client.get("/api/health").json()
         assert data["ingestion"]["total_entries"] == 2
         assert data["ingestion"]["by_source_type"] == {"photo": 1, "voice": 1}
         assert data["ingestion"]["row_counts"]["entries"] == 2
 
-    def test_health_reflects_query_stats_after_searches(
+    def test_api_health_reflects_query_stats_after_searches(
         self,
         health_client: tuple[TestClient, dict],
         repo: SQLiteEntryRepository,
@@ -1438,11 +1458,11 @@ class TestHealth:
         query_svc: QueryService = services["query"]
         repo.create_entry("2026-03-22", "photo", "Vienna today", 2)
 
-        # Fire two hybrid searches, then snapshot via /health.
+        # Fire two hybrid searches, then snapshot via /api/health.
         query_svc.search_entries("vienna")
         query_svc.search_entries("anything")
 
-        data = client.get("/health").json()
+        data = client.get("/api/health").json()
         assert data["queries"]["total_queries"] == 2
         by_type = data["queries"]["by_type"]
         assert by_type["hybrid_search"]["count"] == 2
@@ -1524,11 +1544,11 @@ class TestHealth:
         query_svc: QueryService = services["query"]
         repo.create_entry("2026-03-22", "photo", "sensitive marker word", 3)
         query_svc.search_entries("sensitive")
-        data = client.get("/health").json()
-        dumped = _json.dumps(data)
-        # Assert the search term does not appear anywhere in the
-        # serialized envelope — query stats are counts-only.
-        assert "sensitive" not in dumped
+        # Both the anonymous probe and the authenticated mirror must
+        # keep search terms out — query stats are counts-only.
+        for path in ("/health", "/api/health"):
+            dumped = _json.dumps(client.get(path).json())
+            assert "sensitive" not in dumped
 
 
 class TestApiHealthFitness:

@@ -75,10 +75,34 @@ def main() -> None:
         )
 
     # Session + API key authentication middleware. Replaces the old
-    # single bearer token approach with per-user auth.
+    # single bearer token approach with per-user auth. The anonymous
+    # auth endpoints additionally get per-IP rate limiting (on by
+    # default; AUTH_RATE_LIMIT_ENABLED=false to opt out).
+    from journal.ratelimit import FixedWindowRateLimiter
+
+    rate_limiter: FixedWindowRateLimiter | None = None
+    if config.auth_rate_limit_enabled:
+        rate_limiter = FixedWindowRateLimiter(
+            max_requests=config.auth_rate_limit_max_requests,
+            window_seconds=config.auth_rate_limit_window_seconds,
+        )
+
     auth_service = services["auth_service"]
-    app = build_auth_middleware_stack(app, auth_service)
-    log.info("Auth middleware installed (session + API key)")
+    app = build_auth_middleware_stack(
+        app, auth_service, rate_limiter=rate_limiter
+    )
+    if rate_limiter is not None:
+        log.info(
+            "Auth middleware installed (session + API key; rate limit "
+            "%d req / %ds per IP on auth endpoints)",
+            config.auth_rate_limit_max_requests,
+            config.auth_rate_limit_window_seconds,
+        )
+    else:
+        log.info(
+            "Auth middleware installed (session + API key; rate limiting "
+            "disabled via AUTH_RATE_LIMIT_ENABLED)"
+        )
 
     async def _serve() -> None:
         uvi_config = uvicorn.Config(

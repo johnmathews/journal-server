@@ -173,6 +173,29 @@ class TestHybridSearch:
         assert c.reranker_model == "claude-sonnet-4-6"
 
 
+class TestAuthRateLimitConfig:
+    def test_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for var in (
+            "AUTH_RATE_LIMIT_ENABLED",
+            "AUTH_RATE_LIMIT_MAX_REQUESTS",
+            "AUTH_RATE_LIMIT_WINDOW_SECONDS",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        c = Config()
+        assert c.auth_rate_limit_enabled is True
+        assert c.auth_rate_limit_max_requests == 10
+        assert c.auth_rate_limit_window_seconds == 300
+
+    def test_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AUTH_RATE_LIMIT_ENABLED", "false")
+        monkeypatch.setenv("AUTH_RATE_LIMIT_MAX_REQUESTS", "25")
+        monkeypatch.setenv("AUTH_RATE_LIMIT_WINDOW_SECONDS", "60")
+        c = Config()
+        assert c.auth_rate_limit_enabled is False
+        assert c.auth_rate_limit_max_requests == 25
+        assert c.auth_rate_limit_window_seconds == 60
+
+
 def _clean_transcription_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in (
         "TRANSCRIPTION_PROVIDER",
