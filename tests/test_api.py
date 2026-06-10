@@ -14,6 +14,7 @@ from journal.db.fitness_repository import FitnessRepository
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
+from journal.db.user_repository import SQLiteUserRepository
 from journal.entitystore.store import SQLiteEntityStore
 from journal.services.ingestion import IngestionService
 from journal.services.query import QueryService
@@ -109,6 +110,7 @@ def services(
     )
     entity_store = SQLiteEntityStore(api_factory)
     job_repository = SQLiteJobRepository(api_factory)
+    user_repo = SQLiteUserRepository(api_factory)
 
     from journal.config import Config
     from journal.services.runtime_settings import RuntimeSettings
@@ -121,6 +123,7 @@ def services(
         "query": query,
         "entity_store": entity_store,
         "job_repository": job_repository,
+        "user_repo": user_repo,
         "config": config,
         "runtime_settings": runtime,
         "db_factory": api_factory,
@@ -3019,6 +3022,104 @@ def non_admin_client(services: dict) -> Generator[TestClient]:
     app = _FakeNonAdminMiddleware(test_mcp.streamable_http_app())
     with TestClient(app, raise_server_exceptions=False) as tc:
         yield tc
+
+
+class TestNonAdminGating:
+    """Residual non-admin gates (W15): runtime settings, admin-only
+    preference keys, and per-user job scoping."""
+
+    def test_patch_runtime_requires_admin(
+        self, non_admin_client: TestClient,
+    ) -> None:
+        resp = non_admin_client.patch(
+            "/api/settings/runtime",
+            json={"ocr_dual_pass": True},
+        )
+        assert resp.status_code == 403
+        assert resp.json() == {"error": "Admin access required"}
+        # Value must be unchanged (defaults to False).
+        get_resp = non_admin_client.get("/api/settings/runtime")
+        assert get_resp.status_code == 200
+        by_key = {s["key"]: s for s in get_resp.json()["settings"]}
+        assert by_key["ocr_dual_pass"]["value"] is False
+
+    def test_patch_preferences_admin_only_key_forbidden(
+        self, non_admin_client: TestClient,
+    ) -> None:
+        resp = non_admin_client.patch(
+            "/api/users/me/preferences",
+            json={"notif_admin_job_failed": True},
+        )
+        assert resp.status_code == 403
+        assert "requires admin" in resp.json()["error"]
+        # The forbidden key must not have been persisted.
+        prefs = non_admin_client.get("/api/users/me/preferences").json()
+        assert "notif_admin_job_failed" not in prefs["preferences"]
+
+    def test_patch_preferences_normal_key_allowed(
+        self, non_admin_client: TestClient,
+    ) -> None:
+        resp = non_admin_client.patch(
+            "/api/users/me/preferences",
+            json={"notif_job_failed": False},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["preferences"]["notif_job_failed"] is False
+
+    def test_patch_preferences_admin_can_set_admin_only_key(
+        self, client: TestClient,
+    ) -> None:
+        resp = client.patch(
+            "/api/users/me/preferences",
+            json={"notif_admin_job_failed": True},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["preferences"]["notif_admin_job_failed"] is True
+
+    @pytest.fixture
+    def two_user_jobs(self, services: dict) -> dict[str, str]:
+        """Seed one job each for user 1 (the test user) and a second user."""
+        other = services["user_repo"].create_user(
+            email="other@example.com", display_name="Other User",
+        )
+        job_repo: SQLiteJobRepository = services["job_repository"]
+        own = job_repo.create("entity_extraction", {}, user_id=_TEST_USER_ID)
+        theirs = job_repo.create("entity_extraction", {}, user_id=other.id)
+        return {"own": own.id, "theirs": theirs.id}
+
+    def test_admin_lists_all_users_jobs(
+        self, client: TestClient, two_user_jobs: dict[str, str],
+    ) -> None:
+        resp = client.get("/api/jobs")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+        assert {j["id"] for j in data["items"]} == set(two_user_jobs.values())
+
+    def test_non_admin_lists_only_own_jobs(
+        self, non_admin_client: TestClient, two_user_jobs: dict[str, str],
+    ) -> None:
+        resp = non_admin_client.get("/api/jobs")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert [j["id"] for j in data["items"]] == [two_user_jobs["own"]]
+
+    def test_non_admin_gets_404_for_other_users_job(
+        self, non_admin_client: TestClient, two_user_jobs: dict[str, str],
+    ) -> None:
+        resp = non_admin_client.get(f"/api/jobs/{two_user_jobs['theirs']}")
+        assert resp.status_code == 404
+        # Their own job is still reachable.
+        own = non_admin_client.get(f"/api/jobs/{two_user_jobs['own']}")
+        assert own.status_code == 200
+
+    def test_admin_can_get_any_users_job(
+        self, client: TestClient, two_user_jobs: dict[str, str],
+    ) -> None:
+        resp = client.get(f"/api/jobs/{two_user_jobs['theirs']}")
+        assert resp.status_code == 200
+        assert resp.json()["id"] == two_user_jobs["theirs"]
 
 
 class TestPricing:
