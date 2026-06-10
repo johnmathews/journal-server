@@ -77,8 +77,10 @@ The suite has two tiers:
   external services. `uv run pytest` runs them and they always pass.
 - **Integration tests** (`tests/integration/`, marked
   `@pytest.mark.integration`): need a real ChromaDB. `tests/integration/
-  conftest.py` opens a TCP probe on `CHROMA_HOST:CHROMA_PORT` (default
-  `localhost:8401` — the dev compose port) and **auto-skips the suite
+  conftest.py` opens a TCP probe on `CHROMADB_HOST:CHROMADB_PORT` (default
+  `localhost:8401` — the dev compose port; the legacy `CHROMA_HOST`/
+  `CHROMA_PORT` names still work as a one-release fallback) and
+  **auto-skips the suite
   with an actionable reason** if Chroma isn't reachable. So plain
   `uv run pytest` from a cold dev box now reports
   "1925 passed, 8 skipped" rather than 8 errors.
@@ -94,10 +96,10 @@ Three modes:
    ```
 3. **Match what CI does for the unit job (force-skip integration even
    if Chroma is up):** `uv run pytest -m "not integration"`. CI runs
-   the integration job separately with `CHROMA_PORT=8000` against its
+   the integration job separately with `CHROMADB_PORT=8000` against its
    own service container — see `.github/workflows/ci-and-deploy.yml`.
 
-`CHROMA_PORT` defaults to `8401` locally because that's what
+`CHROMADB_PORT` defaults to `8401` locally because that's what
 `docker-compose.dev.yml` exposes; the previous default of 8000 silently
 made local integration runs fail even when Chroma was up via the dev
 compose. Override the env var if you've brought up Chroma some other

@@ -10,13 +10,18 @@ reason.
 
 CI is unaffected: the integration job in ``ci-and-deploy.yml`` runs
 ChromaDB as a service on port 8000 and explicitly sets
-``CHROMA_PORT=8000``, so the probe succeeds and the tests run.
+``CHROMADB_PORT=8000``, so the probe succeeds and the tests run.
 
 Local default is **port 8401**, not 8000 — that's the port
 ``docker-compose.dev.yml`` exposes for the dev stack. CI overrides via
 the env var when it needs 8000. The earlier default of 8000 was a
 silent footgun for local devs who'd brought up Chroma via the dev
 compose only to see all integration tests still fail.
+
+The canonical env vars are ``CHROMADB_HOST`` / ``CHROMADB_PORT``,
+matching the runtime config in ``journal.config``. The legacy
+``CHROMA_HOST`` / ``CHROMA_PORT`` names are still honoured as
+fallbacks for one release — see :func:`chroma_endpoint`.
 """
 
 from __future__ import annotations
@@ -34,11 +39,17 @@ if TYPE_CHECKING:
 def chroma_endpoint() -> tuple[str, int]:
     """Resolve the Chroma endpoint from env vars.
 
-    Default port is 8401 (matches ``docker-compose.dev.yml``); CI sets
-    ``CHROMA_PORT=8000`` explicitly to use the service container.
+    Canonical vars are ``CHROMADB_HOST`` / ``CHROMADB_PORT`` (aligned
+    with the runtime config). Default port is 8401 (matches
+    ``docker-compose.dev.yml``); CI sets ``CHROMADB_PORT=8000``
+    explicitly to use the service container.
+
+    Deprecated: the legacy ``CHROMA_HOST`` / ``CHROMA_PORT`` names are
+    honoured as fallbacks for one release and will be removed after
+    that. Switch any local scripts to the ``CHROMADB_*`` names.
     """
-    host = os.getenv("CHROMA_HOST", "localhost")
-    port = int(os.getenv("CHROMA_PORT", "8401"))
+    host = os.getenv("CHROMADB_HOST") or os.getenv("CHROMA_HOST", "localhost")
+    port = int(os.getenv("CHROMADB_PORT") or os.getenv("CHROMA_PORT", "8401"))
     return host, port
 
 
@@ -70,7 +81,7 @@ def pytest_collection_modifyitems(
         reason=(
             f"ChromaDB not reachable at {host}:{port}. Bring it up with "
             "`docker compose -f docker-compose.dev.yml up -d` (dev port 8401), "
-            "then re-run. CI sets CHROMA_PORT=8000 against its service container."
+            "then re-run. CI sets CHROMADB_PORT=8000 against its service container."
         ),
     )
     for item in items:
