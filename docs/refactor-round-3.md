@@ -1,6 +1,7 @@
 # Refactor round 3 — kickoff doc for the next session
 
-**Status:** active. **Last updated:** 2026-05-09. **Supersedes:**
+**Status:** active. **Last updated:** 2026-06-10 (standing facts re-measured after the
+2026-06-10 quality round; see `journal/260610-quality-round.md`). **Supersedes:**
 [`archive/code-quality-refactor-plan.md`](./archive/code-quality-refactor-plan.md) and
 [`archive/refactor-follow-ups.md`](./archive/refactor-follow-ups.md).
 Both child plans ([`archive/refactor-repository-plan.md`](./archive/refactor-repository-plan.md) and
@@ -236,9 +237,9 @@ meantime.
 
 ## Standing facts (verify before acting)
 
-These snapshots are accurate as of 2026-05-09 (file sizes and reach-in
-counts re-verified). Each has a re-verification command. Trust the
-command output, not the snapshot.
+These snapshots are accurate as of 2026-06-10 (file sizes, reach-in
+counts, and test counts re-verified after the quality round). Each has a
+re-verification command. Trust the command output, not the snapshot.
 
 ### Reach-in count from `api/` to private service state
 
@@ -254,10 +255,16 @@ Expected: zero hits.
 grep -rE '\._[a-z]' tests/ --include='*.py' | grep -v 'self\._' | grep -v 'import \|from ' | wc -l
 ```
 
-Expected: ~37 after item 7. A *rise* means a new test reached into
-private state and should be addressed at the source.
+Expected: 61 (re-measured 2026-06-10; was 37 after item 7 on
+2026-05-09). The rise comes from the fitness, storylines, and
+quality-round test waves landed between 2026-05-10 and 2026-06-10 —
+the new sites have not been re-bucketed against the four categories
+below. Re-bucket (and push back on any avoidable reach-ins) the next
+time a refactor session touches the affected suites; a further *rise*
+beyond 61 means a new test reached into private state and should be
+addressed at the source.
 
-Residual breakdown (what makes up the 37):
+Residual breakdown as of 2026-05-09 (what made up the original 37):
 1. Docstring text in `services/ingestion/service.py` (2 sites) —
    intentional references to the old reach-in pattern.
 2. Production reach-in mirrors (~6 sites for `_system_text` /
@@ -276,33 +283,37 @@ Residual breakdown (what makes up the 37):
 find src/journal -name '*.py' -exec wc -l {} + | sort -rn | head -10
 ```
 
-Top-10 sizes (re-measured 2026-05-09):
+Top-10 sizes (re-measured 2026-06-10):
 
 | File | Lines | Status |
 |---|---:|---|
-| `services/entity_extraction/service.py` | 809 | Acknowledged-permanent (see table above). |
+| `services/storylines/service.py` | 879 | Acknowledged — generation orchestrator from the storylines cycle (2026-05-12). Same shape-argument as `entity_extraction/service.py`: mostly inherent pipeline glue. Split when next materially touched, or if it crosses ~1000 lines. |
+| `services/notifications.py` | 877 | Acknowledged — grew from 744 via the Pushover topic additions. Natural seam exists (toast vs Pushover dispatch); split when next touched. |
+| `services/entity_extraction/service.py` | 809 | Acknowledged-permanent (see table above). Unchanged. |
+| `db/fitness_repository.py` | 807 | Acknowledged — three table families (activities / daily wellness / auth state) in one repo; the `db/repository/` package pattern applies cleanly. Split when next touched. |
+| `cli/fitness.py` | 803 | Acknowledged — per-command bodies, mostly argument plumbing + output formatting. Split per command group (auth / sync / backfill / audit) when next touched. |
 | `providers/transcription.py` | 778 | Within range. |
-| `providers/ocr.py` | 753 | Within range. |
-| `services/notifications.py` | 744 | Grown by item 3 part E (module helpers). |
-| `cli/_seed_samples.py` | 679 | Pure data — no edits expected. |
-| `cli/__init__.py` | 620 | Within range. |
-| `api/dashboard.py` | 609 | Marginally over-cap; item 6 exception. |
-| `api/ingestion.py` | 591 | Within range. |
-| `providers/extraction.py` | 563 | Within range. |
-| `services/chunking.py` | 538 | Within range. |
+| `cli/__init__.py` | 774 | Within range (grew from 620). |
+| `providers/ocr.py` | 773 | Within range. |
+| `mcp_server/bootstrap.py` | 768 | Within range (grew from 475 via fitness + storylines wiring). |
+| `services/jobs/runner.py` | 742 | Within range (grew from 471 via fitness + storylines job types). |
 
-Largest `auth_api/` file is `account.py` at 355 lines (does not
-make the top-10).
+Two former over-cap entries were split on 2026-06-10 (PR #36):
+`api/ingestion.py` and `api/fitness.py` — the largest fragments are
+now `api/ingestion.py` at 541 and `api/fitness_garmin.py` at 525
+lines, both under the cap. `cli/_seed_samples.py` (679, pure data)
+dropped out of the top-10. Largest `auth_api/` file is still
+`account.py` (~355 lines).
 
 ### Test counts
 
 ```bash
 uv run pytest -q -m 'not integration' 2>&1 | grep -E 'passed|failed' | tail -1
-CHROMA_HOST=localhost CHROMA_PORT=8401 uv run pytest -m integration -q 2>&1 | grep -E 'passed|failed' | tail -1
+CHROMADB_HOST=localhost CHROMADB_PORT=8401 uv run pytest -m integration -q 2>&1 | grep -E 'passed|failed' | tail -1
 ```
 
-Expected on a clean main branch: 1800 unit + 8 integration = 1808
-total.
+Expected on a clean main branch (re-measured 2026-06-10): 2583 unit +
+11 integration = 2594 total.
 
 ### Working tree + branch state
 

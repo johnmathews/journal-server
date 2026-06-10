@@ -76,3 +76,10 @@ multi-user final-mile work documented in
 `.engineering-team/runs/manual-2026-06-03-fitness-multiuser/improvement-plan.md`.
 No source or test changes were needed — the W6 work in May 2026 already
 removed every read site; this run is the formal sign-off.
+
+## 2026-06-10 closure
+
+2026-06-10: removed from prod `.env` (backup `.env.bak-260610`), container
+recreated healthy; old token revocation in the Strava UI pending. The
+load-bearing operator note in `docs/fitness-operations.md` §1 was removed
+the same day.

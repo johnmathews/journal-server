@@ -1,7 +1,9 @@
 # Journal Tool — Consolidated Roadmap
 
-**Status:** active. **Last updated:** 2026-05-10 (W14 fitness docs shipped — Tier 1 #1 server-side
-complete, only W15 webapp remaining). **Supersedes:**
+**Status:** active. **Last updated:** 2026-06-10 (quality round: fitness final mile merged +
+deployed, storylines anchor-edit UX shipped, security/test/deploy hardening across ~20 PRs —
+see `journal/260610-quality-round.md`; W14 multi-user verification is the remaining open gate).
+**Supersedes:**
 [`archive/phase-2-brief.md`](./archive/phase-2-brief.md) (2026-03-23) and
 `webapp/docs/archive/future-features.md`.
 Pulls in all outstanding TODOs from memory files and recent journal entries.
@@ -114,19 +116,6 @@ with a small corpus".
 > was never executed but no work was blocked. **Fitness integration (Item 1 below) shipped
 > 2026-05-10.** **Storylines (Item 2 below) opened 2026-05-12** as the next Tier 1 candidate.
 
-### 2. Storylines `[both]` — opened 2026-05-12, core shipped 2026-05-12
-
-LLM-synthesized cross-entry narratives about recurring threads. Each storyline anchors on
-**one or more entities** (1..15) and renders as two parallel panels: a curation panel of
-verbatim entry excerpts in chronological order, and a third-person narrative panel grounded
-via Anthropic's Citations API. The server-side spike, the webapp cycle, the MCP
-discoverability + append + auto-kick follow-up, and the multi-entity follow-up have all
-shipped and are verified in the browser. Current-state references:
-[`storylines.md`](./storylines.md) (server) and
-[`../../webapp/docs/storylines.md`](../../webapp/docs/storylines.md). Remaining gap:
-anchor *edit* UX on the webapp detail view — REST (`PUT /api/storylines/{id}/anchors`)
-and MCP (`journal_set_storyline_anchors`) surfaces exist today.
-
 ### 1. Fitness integration `[both]` — shipped 2026-05-10
 
 Ingestion pipeline for fitness-tracker data (Strava + Garmin Connect). Decisions in
@@ -148,7 +137,14 @@ normalize service (W7), job workers (W8), REST endpoints (W9), MCP tools
 orchestrator + first live smoke (W13), operator + engineer documentation
 (W14), webapp views (W15). Production currently holds 80 Strava activities +
 80 Garmin activities + 129 Garmin daily wellness rows for 2026-01-07 →
-2026-05-09.
+2026-05-09. The multi-user final mile (server PR #21 + webapp PR #11)
+merged and deployed 2026-06-10.
+
+**Remaining open item:** the fitness-multiuser **W14 end-to-end
+verification with user 2** (staged walkthrough per
+[`archive/fitness-multiuser-plan.md`](./archive/fitness-multiuser-plan.md) W7/W14)
+has never been executed — it is the acceptance gate for the multi-user
+initiative and needs a human-driven prod session.
 
 **Deferred follow-ups (independent, ad-hoc):**
 ~~`--code <code>` CLI flag for headless Strava re-auth~~ (shipped
@@ -162,11 +158,26 @@ instead);
 W2/W3/W8–W11 — webapp Settings panel + Reconnect banner); mood × fitness
 correlation views (webapp).
 
+### 2. Storylines `[both]` — opened 2026-05-12, core shipped 2026-05-12
+
+LLM-synthesized cross-entry narratives about recurring threads. Each storyline anchors on
+**one or more entities** (1..15) and renders as two parallel panels: a curation panel of
+verbatim entry excerpts in chronological order, and a third-person narrative panel grounded
+via Anthropic's Citations API. The server-side spike, the webapp cycle, the MCP
+discoverability + append + auto-kick follow-up, and the multi-entity follow-up have all
+shipped and are verified in the browser. Current-state references:
+[`storylines.md`](./storylines.md) (server) and
+[`../../webapp/docs/storylines.md`](../../webapp/docs/storylines.md).
+~~Remaining gap: anchor *edit* UX on the webapp detail view~~ — **CLOSED**,
+shipped 2026-06-10 (webapp PR #15: `StorylineAnchorEditor` on
+`StorylineDetailView` wired to `PUT /api/storylines/{id}/anchors`, with
+diff-vs-current display and optional regenerate on save).
+
 ---
 
 ## Tier 2 — Blocked on data, Tier 1, or both
 
-### 2. Entity graph visualization view `[webapp]`
+### 3. Entity graph visualization view `[webapp]`
 
 New `/graph` route using **Cytoscape.js** (library bake-off already happened — see
 `journal-webapp/journal/260411-auth-header-overlay-cache-entity-views.md`). Renders the entity-and-relationship graph as
@@ -191,7 +202,7 @@ to Tier 1 next time you pick this up.
 
 ---
 
-### 3. LadybugDB graph-backend experiment `[server]`
+### 4. LadybugDB graph-backend experiment `[server]`
 
 Swap in a second `EntityStore` implementation backed by LadybugDB (Kuzu's successor) while keeping SQLite as the
 fallback. The `EntityStore` Protocol in `src/journal/entitystore/protocol.py` (re-exported from `entitystore/store.py`)
@@ -230,7 +241,7 @@ feature.
 > Multi-page ingestion UI (previously listed here) is shipped as part of `/entries/new` —
 > see Closed item 17.
 
-### 4. Voice note playback `[both]`
+### 5. Voice note playback `[both]`
 
 Audio player alongside transcript in `EntryDetailView` for voice entries. Needs:
 
@@ -242,7 +253,7 @@ Audio player alongside transcript in `EntryDetailView` for voice entries. Needs:
 
 ---
 
-### 5. Export `[both]`
+### 6. Export `[both]`
 
 Export entries (or a filtered subset) to Markdown, PDF, or JSON. `GET /api/export?format=markdown&from=...&to=...` with
 server-side rendering. Button on `EntryListView` above the filtered list.
@@ -251,7 +262,7 @@ server-side rendering. Button on `EntryListView` above the filtered list.
 
 ---
 
-### 6. Semantic-chunker percentile tuning `[server]`
+### 7. Semantic-chunker percentile tuning `[server]`
 
 `SemanticChunker` ships with `boundary_percentile=25` and `decisive_percentile=10` as defaults. These were picked by gut
 feel because the user had 2 real entries at the time — meaningless stats. The 20-entry threshold the original session
@@ -268,7 +279,7 @@ Open questions to answer during tuning:
 
 ---
 
-### 7. Predicate normalisation for the entity graph `[server]`
+### 8. Predicate normalisation for the entity graph `[server]`
 
 Relationship predicates (`met`, `saw`, `caught up with`, `had lunch with`) are free-text. Over time they drift and a
 single underlying relationship gets expressed as N different predicates. A normalisation pass — small clustering LLM call
@@ -282,7 +293,7 @@ then cluster.
 
 ---
 
-### 8. Coreference resolution `[server]`
+### 9. Coreference resolution `[server]`
 
 Currently only first-person (`I`, `me`, `my`) is resolved, via the `JOURNAL_AUTHOR_NAME` config. Pronouns like `we`,
 `she`, `him`, `they` are not resolved — the extractor sees them as strings with no entity link, so "she told me..."
@@ -295,7 +306,7 @@ fill in pronoun references. Expensive if done every run; cheap if done only as p
 
 ---
 
-### 9. OCR context priming empirical evaluation `[server]`
+### 10. OCR context priming empirical evaluation `[server]`
 
 OCR context priming shipped 2026-04-11 but was never measured against a real baseline. Run the same handwritten sample
 through the OCR provider with and without `OCR_CONTEXT_DIR` set and eyeball the proper-noun accuracy delta.
@@ -314,7 +325,7 @@ minimum) or rip it out.
 
 ---
 
-### 10. `FixedTokenChunker` sizing review `[server]`
+### 11. `FixedTokenChunker` sizing review `[server]`
 
 Observed on 2026-04-11 via the webapp chunks overlay on entry 7 (277 words, 2 pages, date 2026-02-15): the current
 `FixedTokenChunker(max_tokens=150, overlap_tokens=40)` produces **5 chunks** for that entry, which is over-fragmented.
@@ -333,14 +344,14 @@ Candidate points: `(150,40)` baseline, `(200,40)`, `(250,30)`, `(300,25)`. Expec
 277-word entry with clean paragraph boundaries. Commit the winner to `config.py` and update the regression test
 `test_ingest_multi_page_packs_efficiently` (currently locks the old 2-chunk count at `max_tokens=150`).
 
-**Related:** #6 (semantic chunker percentile tuning). Both sweeps are worth doing in the same session — the corpus is
+**Related:** #7 (semantic chunker percentile tuning). Both sweeps are worth doing in the same session — the corpus is
 now at 69 entries (≥ 3× the original gating threshold), so numbers are meaningful.
 
 **Source:** conversation with Claude, 2026-04-11, reviewing the chunks overlay on entry 7.
 
 ---
 
-### 11. Grow OCR glossary `[server]`
+### 12. Grow OCR glossary `[server]`
 
 `OCR_CONTEXT_DIR` glossary growth is worth doing for two independent reasons: OCR accuracy on proper nouns, and (when
 running an Anthropic primary) prompt-caching economics.
@@ -369,7 +380,7 @@ ignored and every request will pay full input price.
 This is a "do it when you have more proper nouns to add" item, not urgent. If you decide _not_ to, consider adding a
 `warning_suppressed` flag to silence the Anthropic repeat warning so it doesn't numb you to other cache-related issues.
 
-**Related:** #9 (glossary accuracy evaluation across both providers). Do both in the same session.
+**Related:** #10 (glossary accuracy evaluation across both providers). Do both in the same session.
 
 **Source:** conversation with Claude, 2026-04-11; provider-pivot notes 2026-05-01 (multi-provider transcription) and the
 audit on 2026-05-09.

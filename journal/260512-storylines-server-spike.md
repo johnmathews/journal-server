@@ -101,7 +101,9 @@ Five commits on `worktree-eng-storylines`:
   shows it's worth keeping.
 * **Coreference resolution.** Pronominal references to entities
   ("my son" → Atlas) remain unresolved. The FTS fallback is the
-  spike's workaround; the real fix is Tier 3 #8 on the roadmap.
+  spike's workaround; the real fix is coreference resolution on the
+  roadmap (Tier 3 #9 after the 2026-06-10 global renumber; #8 at
+  the time of writing).
 
 ## Stats
 
