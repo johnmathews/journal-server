@@ -440,3 +440,347 @@ class TestIngestTextTool:
             ctx=ingest_ctx,
         )
         assert "hiking" in result
+
+
+class _FakeOCR:
+    """OCR fake returning a real OCRResult (MagicMock would not survive
+    ``ocr_result.text.strip()`` in the image ingest path)."""
+
+    def __init__(self, texts: list[str] | None = None) -> None:
+        self._texts = texts or ["Met a friend for coffee and we talked for hours"]
+        self.calls = 0
+
+    def extract(self, image_data: bytes, media_type: str):
+        from journal.providers.ocr import OCRResult
+
+        text = self._texts[min(self.calls, len(self._texts) - 1)]
+        self.calls += 1
+        return OCRResult(text=text)
+
+
+class _FakeTranscription:
+    """Transcription fake returning a real TranscriptionResult."""
+
+    def __init__(self, text: str = "Talked about the garden and the weather") -> None:
+        self._text = text
+
+    def transcribe(self, audio_data: bytes, media_type: str, language: str = "en"):
+        from journal.models import TranscriptionResult
+
+        return TranscriptionResult(text=self._text)
+
+
+@pytest.fixture
+def media_ingest_ctx(factory):
+    """Real IngestionService over in-memory repo/vector store with
+    real-result OCR/transcription fakes; faked MCP Context around it."""
+    from journal.db.repository import SQLiteEntryRepository
+    from journal.services.chunking import FixedTokenChunker
+    from journal.services.ingestion import IngestionService
+    from journal.vectorstore.store import InMemoryVectorStore
+
+    mock_emb = MagicMock()
+    mock_emb.embed_texts.return_value = [[0.1, 0.2, 0.3]]
+
+    service = IngestionService(
+        repository=SQLiteEntryRepository(factory),
+        vector_store=InMemoryVectorStore(),
+        ocr_provider=_FakeOCR(),
+        transcription_provider=_FakeTranscription(),
+        embeddings_provider=mock_emb,
+        chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+        preprocess_images=False,
+    )
+
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context = {"ingestion": service}
+    return ctx, service
+
+
+def _b64(data: bytes) -> str:
+    import base64
+
+    return base64.b64encode(data).decode("ascii")
+
+
+class TestIngestMediaTool:
+    """Behavioral tests for the journal_ingest_media MCP tool."""
+
+    def test_image_happy_path(self, media_ingest_ctx):
+        from journal.mcp_server import journal_ingest_media
+
+        ctx, _service = media_ingest_ctx
+        result = journal_ingest_media(
+            source_type="image",
+            data_base64=_b64(b"fake-image-bytes"),
+            media_type="image/jpeg",
+            date="2026-04-15",
+            ctx=ctx,
+        )
+        assert "Entry ingested successfully" in result
+        assert "2026-04-15" in result
+        assert "Source: photo" in result
+        assert "coffee" in result
+
+    def test_voice_happy_path(self, media_ingest_ctx):
+        from journal.mcp_server import journal_ingest_media
+
+        ctx, _service = media_ingest_ctx
+        result = journal_ingest_media(
+            source_type="voice",
+            data_base64=_b64(b"fake-audio-bytes"),
+            media_type="audio/mp3",
+            date="2026-04-15",
+            ctx=ctx,
+        )
+        assert "Entry ingested successfully" in result
+        assert "Source: voice" in result
+        assert "garden" in result
+
+    def test_invalid_source_type(self, media_ingest_ctx):
+        from journal.mcp_server import journal_ingest_media
+
+        ctx, _service = media_ingest_ctx
+        result = journal_ingest_media(
+            source_type="document",
+            data_base64=_b64(b"whatever"),
+            media_type="application/pdf",
+            ctx=ctx,
+        )
+        assert result == "Invalid source_type 'document'. Must be 'image' or 'voice'."
+
+    def test_malformed_base64_returns_error_string(self, media_ingest_ctx):
+        """Malformed base64 must map to an "Error: ..." string, not raise.
+
+        Note: b64decode is lenient about some junk (non-alphabet chars are
+        discarded before decoding), so use an input that actually raises.
+        """
+        from journal.mcp_server import journal_ingest_media
+
+        ctx, _service = media_ingest_ctx
+        result = journal_ingest_media(
+            source_type="image",
+            data_base64="abc",  # 3 data chars -> binascii.Error
+            media_type="image/jpeg",
+            ctx=ctx,
+        )
+        assert result.startswith("Error:")
+
+    def test_duplicate_image_returns_error_string(self, media_ingest_ctx):
+        """Second upload of the same image maps the service ValueError to
+        an "Error: ..." string like sibling tools do."""
+        from journal.mcp_server import journal_ingest_media
+
+        ctx, _service = media_ingest_ctx
+        payload = _b64(b"same-image-bytes")
+        first = journal_ingest_media(
+            source_type="image",
+            data_base64=payload,
+            media_type="image/jpeg",
+            date="2026-04-15",
+            ctx=ctx,
+        )
+        assert "Entry ingested successfully" in first
+
+        second = journal_ingest_media(
+            source_type="image",
+            data_base64=payload,
+            media_type="image/jpeg",
+            date="2026-04-16",
+            ctx=ctx,
+        )
+        assert second.startswith("Error: This image has already been uploaded")
+
+    def test_date_defaults_to_today(self, media_ingest_ctx):
+        from datetime import date as date_type
+
+        from journal.mcp_server import journal_ingest_media
+
+        ctx, _service = media_ingest_ctx
+        result = journal_ingest_media(
+            source_type="image",
+            data_base64=_b64(b"undated-image-bytes"),
+            media_type="image/jpeg",
+            ctx=ctx,
+        )
+        assert "Entry ingested successfully" in result
+        assert date_type.today().isoformat() in result
+
+
+class TestIngestMultiPageTool:
+    """Behavioral tests for the journal_ingest_multi_page MCP tool."""
+
+    def test_happy_path_two_pages_one_entry(self, media_ingest_ctx):
+        from journal.mcp_server import journal_ingest_multi_page
+
+        ctx, service = media_ingest_ctx
+        service.replace_ocr(
+            _FakeOCR(["First page about the morning walk",
+                      "Second page about the evening meal"])
+        )
+        result = journal_ingest_multi_page(
+            images_base64=[_b64(b"page-one-bytes"), _b64(b"page-two-bytes")],
+            media_types=["image/jpeg", "image/jpeg"],
+            date="2026-04-15",
+            ctx=ctx,
+        )
+        assert "Multi-page entry ingested successfully" in result
+        assert "Pages: 2" in result
+        # Both pages combined into ONE entry.
+        assert service.repository.count_entries() == 1
+        assert "morning walk" in result
+        assert "evening meal" in result
+
+    def test_length_mismatch_returns_error_string(self, media_ingest_ctx):
+        from journal.mcp_server import journal_ingest_multi_page
+
+        ctx, _service = media_ingest_ctx
+        result = journal_ingest_multi_page(
+            images_base64=[_b64(b"page-one-bytes"), _b64(b"page-two-bytes")],
+            media_types=["image/jpeg"],
+            date="2026-04-15",
+            ctx=ctx,
+        )
+        assert result == "Error: images_base64 and media_types must have the same length."
+
+    def test_malformed_base64_returns_error_string(self, media_ingest_ctx):
+        from journal.mcp_server import journal_ingest_multi_page
+
+        ctx, _service = media_ingest_ctx
+        result = journal_ingest_multi_page(
+            images_base64=["abc"],  # 3 data chars -> binascii.Error
+            media_types=["image/jpeg"],
+            ctx=ctx,
+        )
+        assert result.startswith("Error:")
+
+    def test_duplicate_page_returns_error_string(self, media_ingest_ctx):
+        from journal.mcp_server import journal_ingest_multi_page
+
+        ctx, _service = media_ingest_ctx
+        payload = _b64(b"reused-page-bytes")
+        first = journal_ingest_multi_page(
+            images_base64=[payload],
+            media_types=["image/jpeg"],
+            date="2026-04-15",
+            ctx=ctx,
+        )
+        assert "Multi-page entry ingested successfully" in first
+
+        second = journal_ingest_multi_page(
+            images_base64=[payload],
+            media_types=["image/jpeg"],
+            date="2026-04-16",
+            ctx=ctx,
+        )
+        assert second.startswith("Error: Page 1 has already been uploaded")
+
+    def test_date_defaults_to_today(self, media_ingest_ctx):
+        from datetime import date as date_type
+
+        from journal.mcp_server import journal_ingest_multi_page
+
+        ctx, _service = media_ingest_ctx
+        result = journal_ingest_multi_page(
+            images_base64=[_b64(b"undated-page-bytes")],
+            media_types=["image/jpeg"],
+            ctx=ctx,
+        )
+        assert "Multi-page entry ingested successfully" in result
+        assert date_type.today().isoformat() in result
+
+
+class TestIngestMediaFromUrlTool:
+    """Behavioral tests for journal_ingest_media_from_url.
+
+    URL fetching is monkeypatched at the service-method boundary —
+    no network access."""
+
+    @pytest.fixture
+    def url_entry(self, media_ingest_ctx):
+        _ctx, service = media_ingest_ctx
+        return service.ingest_text(
+            "A pre-made entry for the URL tool",
+            "2026-04-20",
+            "photo",
+            skip_mood=True,
+            user_id=1,
+        )
+
+    def test_image_url_happy_path(self, media_ingest_ctx, url_entry, monkeypatch):
+        from journal.mcp_server import journal_ingest_media_from_url
+
+        ctx, service = media_ingest_ctx
+        calls: dict[str, object] = {}
+
+        def fake_ingest(url, date, media_type, *, user_id):
+            calls["url"] = url
+            calls["date"] = date
+            return url_entry
+
+        monkeypatch.setattr(service, "ingest_image_from_url", fake_ingest)
+        result = journal_ingest_media_from_url(
+            source_type="image",
+            url="https://example.com/page.jpg",
+            date="2026-04-20",
+            ctx=ctx,
+        )
+        assert "Entry ingested successfully" in result
+        assert calls["url"] == "https://example.com/page.jpg"
+        assert calls["date"] == "2026-04-20"
+
+    def test_voice_url_happy_path(self, media_ingest_ctx, url_entry, monkeypatch):
+        from journal.mcp_server import journal_ingest_media_from_url
+
+        ctx, service = media_ingest_ctx
+        calls: dict[str, object] = {}
+
+        def fake_ingest(url, date, media_type, language, *, user_id):
+            calls["url"] = url
+            calls["language"] = language
+            return url_entry
+
+        monkeypatch.setattr(service, "ingest_voice_from_url", fake_ingest)
+        result = journal_ingest_media_from_url(
+            source_type="voice",
+            url="https://example.com/note.mp3",
+            language="nl",
+            ctx=ctx,
+        )
+        assert "Entry ingested successfully" in result
+        assert calls["url"] == "https://example.com/note.mp3"
+        assert calls["language"] == "nl"
+
+    def test_invalid_source_type(self, media_ingest_ctx):
+        from journal.mcp_server import journal_ingest_media_from_url
+
+        ctx, _service = media_ingest_ctx
+        result = journal_ingest_media_from_url(
+            source_type="document",
+            url="https://example.com/file.pdf",
+            ctx=ctx,
+        )
+        assert result == "Invalid source_type 'document'. Must be 'image' or 'voice'."
+
+    def test_service_value_error_maps_to_error_string(
+        self, media_ingest_ctx, monkeypatch
+    ):
+        """Duplicate-style ValueErrors from the service must map to an
+        "Error: ..." string instead of raising through the tool."""
+        from journal.mcp_server import journal_ingest_media_from_url
+
+        ctx, service = media_ingest_ctx
+
+        def raise_duplicate(url, date, media_type, *, user_id):
+            raise ValueError(
+                "This image has already been uploaded in another entry. "
+                "Delete the existing entry first if you want to re-upload."
+            )
+
+        monkeypatch.setattr(service, "ingest_image_from_url", raise_duplicate)
+        result = journal_ingest_media_from_url(
+            source_type="image",
+            url="https://example.com/dup.jpg",
+            ctx=ctx,
+        )
+        assert result.startswith("Error: This image has already been uploaded")
