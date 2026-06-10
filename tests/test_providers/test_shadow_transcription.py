@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-import time
+import threading
 from unittest.mock import MagicMock
 
 import pytest
@@ -183,29 +183,36 @@ def test_primary_failure_propagates() -> None:
         wrapper.transcribe(b"audio", "audio/mp3", "en")
 
 
-def test_runs_in_parallel(caplog: pytest.LogCaptureFixture) -> None:
-    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+def test_runs_in_parallel() -> None:
+    """Primary and shadow must execute concurrently.
+
+    Each provider blocks on a shared two-party barrier inside its
+    transcribe call, so the barrier only releases when both calls are
+    in flight at the same time. Sequential execution would leave the
+    first caller stranded until the barrier timeout, raising
+    BrokenBarrierError and failing the test — no wall-clock timing
+    involved, so the assertion is immune to loaded CI runners.
+    """
+    barrier = threading.Barrier(2, timeout=5)
     primary = MagicMock(spec=TranscriptionProvider)
     shadow = MagicMock(spec=TranscriptionProvider)
 
-    def slow_primary(*args: object, **kwargs: object) -> TranscriptionResult:
-        time.sleep(0.05)
+    def primary_side(*args: object, **kwargs: object) -> TranscriptionResult:
+        barrier.wait()
         return _result("primary")
 
-    def slow_shadow(*args: object, **kwargs: object) -> TranscriptionResult:
-        time.sleep(0.05)
+    def shadow_side(*args: object, **kwargs: object) -> TranscriptionResult:
+        barrier.wait()
         return _result("shadow")
 
-    primary.transcribe.side_effect = slow_primary
-    shadow.transcribe.side_effect = slow_shadow
+    primary.transcribe.side_effect = primary_side
+    shadow.transcribe.side_effect = shadow_side
 
     wrapper = ShadowTranscriptionProvider(primary=primary, shadow=shadow)
-    start = time.perf_counter()
-    wrapper.transcribe(b"audio", "audio/mp3", "en")
-    elapsed = time.perf_counter() - start
+    result = wrapper.transcribe(b"audio", "audio/mp3", "en")
 
-    # Sequential would be ~0.10s; parallel should be < 0.08s comfortably.
-    assert elapsed < 0.08, f"expected parallel execution but took {elapsed:.3f}s"
+    assert result.text == "primary"
+    assert not barrier.broken
 
 
 def test_shadow_label_appears_in_log(caplog: pytest.LogCaptureFixture) -> None:
