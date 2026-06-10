@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from starlette.responses import JSONResponse
 
+from journal.api._handler import handler
 from journal.auth import get_authenticated_user
 
 if TYPE_CHECKING:
@@ -27,25 +28,24 @@ if TYPE_CHECKING:
 
     from journal.db.storyline_repository import SQLiteStorylineRepository
     from journal.models import Storyline, StorylinePanel
+    from journal.service_registry import ServicesDict
 
 log = logging.getLogger(__name__)
 
 
 def register_storylines_routes(
     mcp: FastMCP,
-    services_getter: Callable[[], dict | None],
+    services_getter: Callable[[], ServicesDict | None],
 ) -> None:
     """Register the read-side storylines routes."""
 
     @mcp.custom_route(
         "/api/storylines", methods=["GET"], name="api_list_storylines",
     )
-    async def list_storylines(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503,
-            )
+    @handler(services_getter)
+    def list_storylines(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         repo: SQLiteStorylineRepository | None = services.get(
             "storyline_repository",
         )
@@ -84,12 +84,10 @@ def register_storylines_routes(
         "/api/storylines/{storyline_id:int}",
         methods=["GET"], name="api_storyline_detail",
     )
-    async def storyline_detail(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503,
-            )
+    @handler(services_getter)
+    def storyline_detail(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         repo: SQLiteStorylineRepository | None = services.get(
             "storyline_repository",
         )
