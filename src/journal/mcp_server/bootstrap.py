@@ -690,7 +690,14 @@ def _init_services() -> dict:
         secret_key=config.secret_key,
         session_expiry_days=config.session_expiry_days,
     )
-    log.info("  Auth service initialized")
+    # Sweep expired sessions left over from the previous process —
+    # same boot-time hygiene pattern as reconcile_stuck_jobs above.
+    # (create_session also sweeps on every login.)
+    purged_sessions = user_repo.cleanup_expired_sessions()
+    log.info(
+        "  Auth service initialized (purged %d expired session(s))",
+        purged_sessions,
+    )
 
     email_service: EmailService | None = None
     if config.smtp_username and config.smtp_password:

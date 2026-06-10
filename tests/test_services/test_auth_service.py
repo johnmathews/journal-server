@@ -153,6 +153,33 @@ class TestSessions:
         auth.logout(token)
         assert auth.validate_session(token) is None
 
+    def test_create_session_purges_expired_sessions(
+        self,
+        auth: AuthService,
+        user_repo: SQLiteUserRepository,
+        db_conn: sqlite3.Connection,
+    ) -> None:
+        """Every new login sweeps expired session rows, so the table
+        cannot accumulate dead sessions indefinitely."""
+        user = auth.register_user("purge@example.com", "pw", "Purge")
+        user_repo.create_session(
+            "expired-session-hash", user.id, "2020-01-01T00:00:00Z"
+        )
+        row = db_conn.execute(
+            "SELECT COUNT(*) AS n FROM user_sessions"
+        ).fetchone()
+        assert row["n"] == 1
+
+        token = auth.create_session(user.id)
+
+        ids = {
+            r["id"]
+            for r in db_conn.execute("SELECT id FROM user_sessions").fetchall()
+        }
+        assert "expired-session-hash" not in ids
+        assert len(ids) == 1  # only the freshly created session remains
+        assert auth.validate_session(token) is not None
+
     def test_logout_all(self, auth: AuthService) -> None:
         user = auth.register_user("logoutall@example.com", "pw", "LogoutAll")
         t1 = auth.create_session(user.id)

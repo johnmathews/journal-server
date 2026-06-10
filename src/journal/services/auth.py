@@ -154,7 +154,12 @@ class AuthService:
 
         The raw token is returned to the caller (for the cookie).
         Only the SHA-256 hash is stored in ``user_sessions.id``.
+
+        Every call first sweeps expired session rows — logins are the
+        natural low-frequency hook, so the table cannot accumulate
+        dead sessions without needing a background thread.
         """
+        self._repo.cleanup_expired_sessions()
         token = secrets.token_urlsafe(32)
         token_hash = self._hash_session_token(token)
         expires = datetime.now(UTC) + timedelta(days=self._session_expiry_days)
