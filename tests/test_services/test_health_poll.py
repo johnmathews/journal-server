@@ -124,6 +124,17 @@ class TestHealthPoller:
     def test_start_stop(self, poller: HealthPoller) -> None:
         poller.start()
         assert poller.is_running()
+        # stop() joins the thread itself — no separate wait() needed.
         poller.stop()
-        poller.wait(timeout=3)
+        assert not poller.is_running()
+
+    def test_stop_idempotent_and_before_start(self, poller: HealthPoller) -> None:
+        # stop() before start() must be a safe no-op.
+        poller.stop()
+        assert not poller.is_running()
+
+        # And calling stop() repeatedly after a start/stop cycle is harmless.
+        poller.start()
+        poller.stop()
+        poller.stop()
         assert not poller.is_running()
