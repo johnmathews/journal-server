@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 
 from starlette.responses import JSONResponse
 
+from journal.api._handler import JsonBody, handler
 from journal.api._shared import _entity_detail, _entity_summary
 from journal.auth import get_authenticated_user
 
@@ -34,13 +35,14 @@ if TYPE_CHECKING:
     from starlette.requests import Request
 
     from journal.entitystore.store import EntityStore
+    from journal.service_registry import ServicesDict
 
 log = logging.getLogger(__name__)
 
 
 def register_entity_merge_routes(
     mcp: FastMCP,
-    services_getter: Callable[[], dict | None],
+    services_getter: Callable[[], ServicesDict | None],
 ) -> None:
     """Register the entity merge / quarantine / candidate routes."""
 
@@ -49,18 +51,13 @@ def register_entity_merge_routes(
         methods=["POST"],
         name="api_merge_entities",
     )
-    async def merge_entities_route(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter, parse_json=JsonBody(require_dict=False))
+    def merge_entities_route(
+        request: Request, services: ServicesDict, body: dict | object
+    ) -> JSONResponse:
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
-
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
         survivor_id = body.get("survivor_id")
         absorbed_ids = body.get("absorbed_ids")
@@ -110,10 +107,10 @@ def register_entity_merge_routes(
         methods=["GET"],
         name="api_list_quarantined_entities",
     )
-    async def list_quarantined_entities_route(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter)
+    def list_quarantined_entities_route(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -130,19 +127,14 @@ def register_entity_merge_routes(
         methods=["POST"],
         name="api_quarantine_entity",
     )
-    async def quarantine_entity_route(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter, parse_json=JsonBody(invalid_error=None, require_dict=False))
+    def quarantine_entity_route(
+        request: Request, services: ServicesDict, body: dict | object
+    ) -> JSONResponse:
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
         entity_id = int(request.path_params["entity_id"])
-
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
 
         reason = body.get("reason", "") if isinstance(body, dict) else ""
         if reason is not None and not isinstance(reason, str):
@@ -179,10 +171,10 @@ def register_entity_merge_routes(
         methods=["POST"],
         name="api_release_quarantine_entity",
     )
-    async def release_quarantine_route(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter)
+    def release_quarantine_route(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -214,12 +206,10 @@ def register_entity_merge_routes(
         methods=["GET"],
         name="api_merge_candidates",
     )
-    async def list_merge_candidates_route(
-        request: Request,
+    @handler(services_getter)
+    def list_merge_candidates_route(
+        request: Request, services: ServicesDict, body: None
     ) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -255,21 +245,14 @@ def register_entity_merge_routes(
         methods=["PATCH"],
         name="api_resolve_merge_candidate",
     )
-    async def resolve_merge_candidate_route(
-        request: Request,
+    @handler(services_getter, parse_json=JsonBody(require_dict=False))
+    def resolve_merge_candidate_route(
+        request: Request, services: ServicesDict, body: dict | object
     ) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
         candidate_id = int(request.path_params["candidate_id"])
-
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
         status = body.get("status")
         if status not in ("accepted", "dismissed"):
@@ -304,15 +287,15 @@ def register_entity_merge_routes(
         methods=["GET"],
         name="api_list_pair_decisions",
     )
-    async def list_pair_decisions_route(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def list_pair_decisions_route(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """List the user's persistent "not a duplicate" decisions.
 
         Backs the past-dismissals UI so the user can audit and undo
         decisions taken in earlier sessions.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -351,17 +334,15 @@ def register_entity_merge_routes(
         methods=["DELETE"],
         name="api_delete_pair_decision",
     )
-    async def delete_pair_decision_route(
-        request: Request,
+    @handler(services_getter)
+    def delete_pair_decision_route(
+        request: Request, services: ServicesDict, body: None
     ) -> JSONResponse:
         """Undo a "not a duplicate" decision.
 
         Removes the rejection record so the pair is once again
         eligible to be flagged as a candidate by future extractions.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -384,10 +365,10 @@ def register_entity_merge_routes(
         methods=["GET"],
         name="api_entity_merge_history",
     )
-    async def entity_merge_history(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter)
+    def entity_merge_history(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
