@@ -601,11 +601,11 @@ fix; running it once is a safe no-op on a clean DB. Routine syncs in
 steady state were unaffected (a single watch upload per minute doesn't
 tie at second resolution).
 
-### `Rowing` Strava activities collapse to `activity_type="other"`
+### ~~`Rowing` Strava activities collapse to `activity_type="other"`~~ — resolved 2026-06-04
 
-The `coarse_strava` map covers seven canonical types (`run`, `ride`, `swim`,
-`walk`, `hike`, `strength`, `other`); `Rowing` falls through to `other`.
-`source_subtype` is preserved on the row, so the data isn't lost — just
-bucketed coarsely for the activity-type filter. Adding `Rowing → other`
-explicitly (semantic no-op, documents intent) or introducing a `row`
-canonical type are both possible future enhancements.
+`row` is now the eighth canonical type (`run`, `ride`, `swim`, `walk`,
+`hike`, `row`, `strength`, `other`) — added as W5 of the fitness
+multi-user final-mile plan. `_activity_type_map.py` maps Strava
+`Rowing` to `row`, and migration `0029_fitness_activity_type_add_row.sql`
+backfills pre-existing rows that had collapsed to `other` (identified
+via their preserved `source_subtype`) when it runs on deploy.
