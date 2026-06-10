@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 from starlette.responses import JSONResponse
 
+from journal.api._handler import JsonBody, handler
 from journal.api._shared import (
     _entity_detail,
     _entity_summary,
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
     from starlette.requests import Request
 
     from journal.entitystore.store import EntityStore
+    from journal.service_registry import ServicesDict
     from journal.services.jobs import JobRunner
     from journal.services.query import QueryService
 
@@ -50,15 +52,15 @@ log = logging.getLogger(__name__)
 
 def register_entities_routes(
     mcp: FastMCP,
-    services_getter: Callable[[], dict | None],
+    services_getter: Callable[[], ServicesDict | None],
 ) -> None:
     """Register the entity CRUD + read-sub-resource routes."""
 
     @mcp.custom_route("/api/entities", methods=["GET"], name="api_list_entities")
-    async def list_entities_route(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter)
+    def list_entities_route(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -100,10 +102,10 @@ def register_entities_routes(
         methods=["GET"],
         name="api_entity_detail",
     )
-    async def entity_detail(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter)
+    def entity_detail(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -121,10 +123,10 @@ def register_entities_routes(
         methods=["GET"],
         name="api_entity_mentions",
     )
-    async def entity_mentions(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter)
+    def entity_mentions(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         entity_store: EntityStore = services["entity_store"]
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
@@ -173,10 +175,10 @@ def register_entities_routes(
         methods=["GET"],
         name="api_entity_relationships",
     )
-    async def entity_relationships(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter)
+    def entity_relationships(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -209,19 +211,14 @@ def register_entities_routes(
         methods=["PATCH"],
         name="api_update_entity",
     )
-    async def update_entity(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter, parse_json=JsonBody(require_dict=False))
+    def update_entity(
+        request: Request, services: ServicesDict, body: dict | object
+    ) -> JSONResponse:
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
         entity_id = int(request.path_params["entity_id"])
-
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
         canonical_name = body.get("canonical_name")
         entity_type = body.get("entity_type")
@@ -298,10 +295,10 @@ def register_entities_routes(
         methods=["DELETE"],
         name="api_delete_entity",
     )
-    async def delete_entity_route(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter)
+    def delete_entity_route(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -320,10 +317,10 @@ def register_entities_routes(
         methods=["GET"],
         name="api_lookup_alias",
     )
-    async def lookup_alias(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter)
+    def lookup_alias(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -350,19 +347,14 @@ def register_entities_routes(
         methods=["POST"],
         name="api_add_entity_alias",
     )
-    async def add_entity_alias(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter, parse_json=JsonBody(require_dict=False))
+    def add_entity_alias(
+        request: Request, services: ServicesDict, body: dict | object
+    ) -> JSONResponse:
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
         entity_id = int(request.path_params["entity_id"])
-
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
         alias_raw = body.get("alias") if isinstance(body, dict) else None
         if not isinstance(alias_raw, str) or not alias_raw.strip():
@@ -398,10 +390,10 @@ def register_entities_routes(
         methods=["DELETE"],
         name="api_delete_entity_alias",
     )
-    async def delete_entity_alias(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter)
+    def delete_entity_alias(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
