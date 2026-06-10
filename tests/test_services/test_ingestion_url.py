@@ -100,6 +100,13 @@ def _mock_urlopen(data: bytes, content_type: str = "image/jpeg"):
     return response
 
 
+def _redirect_error(url: str, location: str, code: int = 302) -> HTTPError:
+    """Build the HTTPError a redirect-disabled opener raises for a 3xx."""
+    return HTTPError(
+        url=url, code=code, msg="Found", hdrs={"Location": location}, fp=None,
+    )
+
+
 class TestIngestImageFromUrl:
     @patch("journal.services.ingestion.url_sources.urlopen")
     def test_downloads_and_ingests(self, mock_url, ingestion_service, mock_ocr):
@@ -223,6 +230,191 @@ class TestSlackUrlAuth:
 
         req = mock_url.call_args[0][0]
         assert req.get_header("Authorization") is None
+
+
+class TestSlackTokenScoping:
+    """The Slack bearer token must be scoped to the exact host
+    ``files.slack.com`` over https — never attached because the string
+    happens to appear elsewhere in the URL, and never forwarded to a
+    different host across a redirect."""
+
+    @patch("journal.services.ingestion.url_sources.urlopen")
+    def test_no_auth_header_when_slack_host_only_in_query(
+        self, mock_url, ingestion_service_with_slack,
+    ):
+        # "files.slack.com" appears in the query string of a non-Slack
+        # host — a substring match would leak the token here.
+        mock_url.return_value = _mock_urlopen(b"not slack")
+
+        ingestion_service_with_slack.ingest_image_from_url(
+            url="https://evil.example/photo.jpg?x=files.slack.com",
+            date="2026-03-22",
+        )
+
+        req = mock_url.call_args[0][0]
+        assert req.get_header("Authorization") is None
+
+    @patch("journal.services.ingestion.url_sources.urlopen")
+    def test_no_auth_header_when_slack_host_only_in_path(
+        self, mock_url, ingestion_service_with_slack,
+    ):
+        mock_url.return_value = _mock_urlopen(b"not slack")
+
+        ingestion_service_with_slack.ingest_image_from_url(
+            url="https://evil.example/files.slack.com/photo.jpg",
+            date="2026-03-22",
+        )
+
+        req = mock_url.call_args[0][0]
+        assert req.get_header("Authorization") is None
+
+    @patch("journal.services.ingestion.url_sources.urlopen")
+    def test_no_auth_header_for_plain_http_slack_host(
+        self, mock_url, ingestion_service_with_slack,
+    ):
+        # The token is a credential — only send it over https.
+        mock_url.return_value = _mock_urlopen(b"slack image")
+
+        ingestion_service_with_slack.ingest_image_from_url(
+            url="http://files.slack.com/files-pri/T0X-F0X/journal.jpg",
+            date="2026-03-22",
+        )
+
+        req = mock_url.call_args[0][0]
+        assert req.get_header("Authorization") is None
+
+    @patch("journal.services.ingestion.url_sources.urlopen")
+    def test_token_not_forwarded_across_redirect_off_slack(
+        self, mock_url, ingestion_service_with_slack,
+    ):
+        # files.slack.com redirects to a third-party CDN: the first
+        # request carries the bearer token, the redirected one must not.
+        mock_url.side_effect = [
+            _redirect_error(
+                "https://files.slack.com/files-pri/T0X-F0X/journal.jpg",
+                "https://cdn.example.com/journal.jpg",
+            ),
+            _mock_urlopen(b"redirected image"),
+        ]
+
+        entry = ingestion_service_with_slack.ingest_image_from_url(
+            url="https://files.slack.com/files-pri/T0X-F0X/journal.jpg",
+            date="2026-03-22",
+        )
+
+        assert entry.source_type == "photo"
+        first_req = mock_url.call_args_list[0][0][0]
+        second_req = mock_url.call_args_list[1][0][0]
+        assert (
+            first_req.get_header("Authorization")
+            == "Bearer xoxb-test-token-123"
+        )
+        assert second_req.get_header("Authorization") is None
+
+
+class TestRedirectHandling:
+    """_download must follow redirects manually, re-validating every hop
+    against the SSRF guard and capping the chain length."""
+
+    @patch("journal.services.ingestion.url_sources.urlopen")
+    def test_redirect_to_private_address_rejected(
+        self, mock_url, ingestion_service,
+    ):
+        # Public URL 302s to the cloud-metadata IP. The redirect target
+        # must be run through _validate_public_url and refused.
+        mock_url.side_effect = _redirect_error(
+            "https://example.com/photo.jpg",
+            "http://169.254.169.254/latest/meta-data/",
+        )
+
+        def _validate(url: str) -> None:
+            if "169.254.169.254" in url:
+                raise ValueError(
+                    f"Refusing to fetch {url!r} — host resolved to "
+                    "non-public address 169.254.169.254"
+                )
+
+        with patch(
+            "journal.services.ingestion.url_sources._validate_public_url",
+            side_effect=_validate,
+        ) as mock_validate, pytest.raises(ValueError, match="non-public"):
+            ingestion_service.ingest_image_from_url(
+                url="https://example.com/photo.jpg",
+                date="2026-03-22",
+            )
+
+        # Both the original URL and the redirect target were validated.
+        validated = [c.args[0] for c in mock_validate.call_args_list]
+        assert validated == [
+            "https://example.com/photo.jpg",
+            "http://169.254.169.254/latest/meta-data/",
+        ]
+        # The private target was never fetched.
+        assert mock_url.call_count == 1
+
+    @patch("journal.services.ingestion.url_sources.urlopen")
+    def test_relative_redirect_resolved_against_current_url(
+        self, mock_url, ingestion_service, mock_ocr,
+    ):
+        mock_url.side_effect = [
+            _redirect_error(
+                "https://example.com/a/photo.jpg", "/b/photo.jpg",
+            ),
+            _mock_urlopen(b"image bytes"),
+        ]
+
+        ingestion_service.ingest_image_from_url(
+            url="https://example.com/a/photo.jpg",
+            date="2026-03-22",
+        )
+
+        second_req = mock_url.call_args_list[1][0][0]
+        assert second_req.full_url == "https://example.com/b/photo.jpg"
+        mock_ocr.extract.assert_called_once_with(b"image bytes", "image/jpeg")
+
+    @patch("journal.services.ingestion.url_sources.urlopen")
+    def test_redirect_chain_longer_than_five_hops_raises(
+        self, mock_url, ingestion_service,
+    ):
+        mock_url.side_effect = [
+            _redirect_error(
+                f"https://example.com/hop{i}",
+                f"https://example.com/hop{i + 1}",
+            )
+            for i in range(10)
+        ]
+
+        with pytest.raises(ValueError, match="[Tt]oo many redirects"):
+            ingestion_service.ingest_image_from_url(
+                url="https://example.com/hop0",
+                date="2026-03-22",
+            )
+
+        # Original request + at most 5 followed redirects.
+        assert mock_url.call_count == 6
+
+    @patch("journal.services.ingestion.url_sources.urlopen")
+    def test_redirect_chain_of_five_hops_succeeds(
+        self, mock_url, ingestion_service, mock_ocr,
+    ):
+        mock_url.side_effect = [
+            *(
+                _redirect_error(
+                    f"https://example.com/hop{i}",
+                    f"https://example.com/hop{i + 1}",
+                )
+                for i in range(5)
+            ),
+            _mock_urlopen(b"final image"),
+        ]
+
+        ingestion_service.ingest_image_from_url(
+            url="https://example.com/hop0",
+            date="2026-03-22",
+        )
+
+        assert mock_url.call_count == 6
+        mock_ocr.extract.assert_called_once_with(b"final image", "image/jpeg")
 
 
 class TestIngestMultiPageFromUrls:
