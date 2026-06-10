@@ -34,6 +34,17 @@ jobs:
       - name: Test
         run: uv run pytest -m "not integration" --cov --cov-report=term-missing
 
+      # Dependency-vulnerability gate (W19). Audits the exact pinned set
+      # from uv.lock (exported to requirements format so pip-audit reads
+      # the resolved versions rather than re-resolving). --disable-pip
+      # stops pip-audit from installing anything; it only queries the
+      # advisory DBs. Blocking by design: if an advisory lands, prefer
+      # `uv lock --upgrade-package <name>` to a blanket --ignore-vuln.
+      - name: Audit dependencies (pip-audit)
+        run: |
+          uv export --no-emit-project --format requirements-txt > /tmp/audit-reqs.txt
+          uvx pip-audit -r /tmp/audit-reqs.txt --disable-pip
+
   integration-test:
     runs-on: ubuntu-latest
     needs: test
