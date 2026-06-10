@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 from starlette.responses import JSONResponse
 
+from journal.api._handler import handler
 from journal.auth import get_authenticated_user
 
 if TYPE_CHECKING:
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
     from starlette.requests import Request
 
+    from journal.service_registry import ServicesDict
     from journal.services.query import QueryService
 
 log = logging.getLogger(__name__)
@@ -38,7 +40,7 @@ log = logging.getLogger(__name__)
 
 def register_dashboard_routes(
     mcp: FastMCP,
-    services_getter: Callable[[], dict | None],
+    services_getter: Callable[[], ServicesDict | None],
 ) -> None:
     """Register the ``/api/dashboard/*`` routes."""
 
@@ -47,7 +49,10 @@ def register_dashboard_routes(
         methods=["GET"],
         name="api_dashboard_writing_stats",
     )
-    async def dashboard_writing_stats(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def dashboard_writing_stats(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Aggregate writing frequency + word count per time bucket.
 
         Query params:
@@ -63,10 +68,6 @@ def register_dashboard_routes(
         frontend is expected to fill gaps client-side if it wants
         a dense line chart.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
-
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -117,8 +118,9 @@ def register_dashboard_routes(
         methods=["GET"],
         name="api_dashboard_mood_dimensions",
     )
-    async def dashboard_mood_dimensions(
-        request: Request,
+    @handler(services_getter)
+    def dashboard_mood_dimensions(
+        request: Request, services: ServicesDict, body: None
     ) -> JSONResponse:
         """Return the currently-loaded mood dimensions.
 
@@ -134,10 +136,6 @@ def register_dashboard_routes(
         200 — callers should treat that as "no mood data to
         display" rather than an error.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
-
         dimensions = services.get("mood_dimensions") or ()
         payload = [
             {
@@ -168,7 +166,10 @@ def register_dashboard_routes(
         methods=["GET"],
         name="api_dashboard_mood_trends",
     )
-    async def dashboard_mood_trends(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def dashboard_mood_trends(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Aggregate mood scores per bucket, grouped by dimension.
 
         Query params:
@@ -186,10 +187,6 @@ def register_dashboard_routes(
         Empty buckets are omitted — a bucket with zero scored
         entries does not appear in the series.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
-
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -245,7 +242,10 @@ def register_dashboard_routes(
         methods=["GET"],
         name="api_dashboard_mood_drilldown",
     )
-    async def dashboard_mood_drilldown(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def dashboard_mood_drilldown(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Return per-entry scores for one dimension within a date window.
 
         Query params:
@@ -253,10 +253,6 @@ def register_dashboard_routes(
         - `from` (required) — ISO-8601 start date, inclusive
         - `to` (required) — ISO-8601 end date, inclusive
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
-
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -311,7 +307,10 @@ def register_dashboard_routes(
         methods=["GET"],
         name="api_dashboard_entity_distribution",
     )
-    async def dashboard_entity_distribution(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def dashboard_entity_distribution(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Return entity mention counts grouped by entity name.
 
         Query params:
@@ -320,10 +319,6 @@ def register_dashboard_routes(
         - `to` (optional) — ISO-8601 end date
         - `limit` (optional) — max items, default 50, max 200
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
-
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -374,7 +369,10 @@ def register_dashboard_routes(
         methods=["GET"],
         name="api_dashboard_calendar_heatmap",
     )
-    async def dashboard_calendar_heatmap(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def dashboard_calendar_heatmap(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Daily entry counts for a calendar heatmap visualization.
 
         Query params:
@@ -384,10 +382,6 @@ def register_dashboard_routes(
         Returns ``{from, to, days: [{date, entry_count, total_words}, ...]}``
         with one item per day that has at least one entry.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
-
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -419,7 +413,10 @@ def register_dashboard_routes(
         methods=["GET"],
         name="api_dashboard_entity_trends",
     )
-    async def dashboard_entity_trends(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def dashboard_entity_trends(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Entity mention counts over time, showing how topics wax and wane.
 
         Query params:
@@ -429,10 +426,6 @@ def register_dashboard_routes(
         - `type` (optional) — entity_type filter
         - `limit` (optional) — top N entities, default 8, max 50
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
-
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -495,7 +488,10 @@ def register_dashboard_routes(
         methods=["GET"],
         name="api_dashboard_mood_entity_correlation",
     )
-    async def dashboard_mood_entity_correlation(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def dashboard_mood_entity_correlation(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Average mood score when a specific entity is mentioned vs overall.
 
         Query params:
@@ -505,10 +501,6 @@ def register_dashboard_routes(
         - `type` (optional) — entity_type filter
         - `limit` (optional) — top N entities, default 10, max 50
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
-
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -561,7 +553,10 @@ def register_dashboard_routes(
         methods=["GET"],
         name="api_dashboard_word_count_distribution",
     )
-    async def dashboard_word_count_distribution(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def dashboard_word_count_distribution(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Histogram of entry word counts with summary statistics.
 
         Query params:
@@ -569,10 +564,6 @@ def register_dashboard_routes(
         - `to` (optional) — ISO-8601 end date
         - `bucket_size` (optional) — bucket width, default 100, min 10
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
-
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
         user_id = user.user_id
