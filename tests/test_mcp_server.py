@@ -249,7 +249,7 @@ class TestBatchJobTools:
 
         yield ctx, repo, runner, extraction, mood
 
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
         factory.close_current()
 
     def test_extract_entities_batch_happy_path(self, job_context):

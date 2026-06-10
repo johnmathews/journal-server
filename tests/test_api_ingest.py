@@ -139,7 +139,7 @@ def services(
         "job_runner": job_runner,
         "job_repository": job_repo,
     }
-    job_runner.shutdown(wait=True)
+    job_runner.shutdown(wait=True, cancel_futures=False)
 
 
 @pytest.fixture
@@ -579,7 +579,7 @@ class TestApiIngestWithFactory:
         # ThreadPoolExecutor in JobRunner must shut down cleanly so the
         # background ingestion job (if it ran) doesn't leak past test exit
         # and segfault CI.
-        job_runner.shutdown(wait=True)
+        job_runner.shutdown(wait=True, cancel_futures=False)
 
     @pytest.fixture
     def factory_client(

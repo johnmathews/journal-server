@@ -78,7 +78,7 @@ def app_with_storylines(
     tmp_path: Path,
 ) -> Generator[tuple[TestClient, dict[str, Any]]]:
     """Wire a Starlette TestClient against a real SQLite db + fake
-    generation service. ``runner.shutdown(wait=True)`` runs in
+    generation service. ``runner.shutdown(wait=True, cancel_futures=False)`` runs in
     teardown so the ThreadPoolExecutor is flushed before the process
     exits — missed shutdown causes CI segfaults (per memory)."""
     db_path = tmp_path / "api.db"
@@ -139,7 +139,7 @@ def app_with_storylines(
             "runner": runner,
         }
     finally:
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
         factory.close_current()
 
 
@@ -179,7 +179,7 @@ class TestCreateAutoKick:
             json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         )
         sid = resp.json()["id"]
-        ctx["runner"].shutdown(wait=True)
+        ctx["runner"].shutdown(wait=True, cancel_futures=False)
         assert ctx["gen_service"].calls == [sid]
 
     def test_create_duplicate_does_not_kick_job(
@@ -194,7 +194,7 @@ class TestCreateAutoKick:
             json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         )
         # Reset the recorder to see whether the second call submits.
-        ctx["runner"].shutdown(wait=True)
+        ctx["runner"].shutdown(wait=True, cancel_futures=False)
         first_calls = list(ctx["gen_service"].calls)
 
         resp = client.post(
@@ -232,7 +232,7 @@ class TestRegenerateBodyParams:
         body = resp.json()
         assert "job_id" in body
 
-        ctx["runner"].shutdown(wait=True)
+        ctx["runner"].shutdown(wait=True, cancel_futures=False)
         # The explicit regen recorded an entry with NO override kwargs.
         last = ctx["gen_service"].kwargs[-1]
         assert "start_date" not in last
@@ -259,7 +259,7 @@ class TestRegenerateBodyParams:
             },
         )
         assert resp.status_code == 202
-        ctx["runner"].shutdown(wait=True)
+        ctx["runner"].shutdown(wait=True, cancel_futures=False)
         # The fake recorded kwargs — last call is the explicit regen.
         last = ctx["gen_service"].kwargs[-1]
         assert last.get("mode") == "replace"
@@ -282,7 +282,7 @@ class TestRegenerateBodyParams:
             json={"mode": "append", "start_date": "2099-04-01"},
         )
         assert resp.status_code == 202
-        ctx["runner"].shutdown(wait=True)
+        ctx["runner"].shutdown(wait=True, cancel_futures=False)
         last = ctx["gen_service"].kwargs[-1]
         assert last.get("mode") == "append"
         assert last.get("start_date") == "2099-04-01"

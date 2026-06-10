@@ -12,7 +12,7 @@ Covers:
 
 The fixture boots a minimal test app by registering the REST routes
 against an in-process FastMCP instance, plus a real JobRunner wired
-to fake services. Tests wait on `job_runner.shutdown(wait=True)` to
+to fake services. Tests wait on `job_runner.shutdown(wait=True, cancel_futures=False)` to
 flush the executor before asserting terminal state — the brief's
 "never assert immediately after submit" discipline.
 """
@@ -196,7 +196,7 @@ def job_runner(
         entry_repository=object(),  # type: ignore[arg-type]
     )
     yield runner
-    runner.shutdown(wait=True)
+    runner.shutdown(wait=True, cancel_futures=False)
 
 
 @pytest.fixture
@@ -266,7 +266,7 @@ class TestEntityExtractionRoute:
         assert body["status"] == "queued"
 
         # Flush the executor so the terminal state is deterministic.
-        job_runner.shutdown(wait=True)
+        job_runner.shutdown(wait=True, cancel_futures=False)
 
         final = client.get(f"/api/jobs/{body['job_id']}")
         assert final.status_code == 200
@@ -301,7 +301,7 @@ class TestEntityExtractionRoute:
         assert resp.status_code == 202
         job_id = resp.json()["job_id"]
 
-        job_runner.shutdown(wait=True)
+        job_runner.shutdown(wait=True, cancel_futures=False)
 
         final = client.get(f"/api/jobs/{job_id}").json()
         assert final["status"] == "succeeded"
@@ -330,7 +330,7 @@ class TestMoodBackfillRoute:
         body = resp.json()
         assert body["status"] == "queued"
 
-        job_runner.shutdown(wait=True)
+        job_runner.shutdown(wait=True, cancel_futures=False)
 
         payload = client.get(f"/api/jobs/{body['job_id']}").json()
         assert payload["status"] == "succeeded"
@@ -386,7 +386,7 @@ class TestListJobsRoute:
         self, client: TestClient, job_runner: JobRunner
     ) -> None:
         r1 = client.post("/api/entities/extract", json={"stale_only": True})
-        job_runner.shutdown(wait=True)
+        job_runner.shutdown(wait=True, cancel_futures=False)
         _wait_for_job(client, r1.json()["job_id"])
 
         resp = client.get("/api/jobs")
@@ -402,7 +402,7 @@ class TestListJobsRoute:
     ) -> None:
         r1 = client.post("/api/entities/extract", json={"stale_only": True})
         assert r1.status_code in (200, 202), r1.text
-        job_runner.shutdown(wait=True)
+        job_runner.shutdown(wait=True, cancel_futures=False)
 
         resp = client.get("/api/jobs?status=succeeded")
         assert resp.status_code == 200
@@ -415,7 +415,7 @@ class TestListJobsRoute:
         assert r1.status_code in (200, 202), r1.text
         r2 = client.post("/api/mood/backfill", json={"mode": "stale-only"})
         assert r2.status_code in (200, 202), r2.text
-        job_runner.shutdown(wait=True)
+        job_runner.shutdown(wait=True, cancel_futures=False)
 
         resp = client.get("/api/jobs?type=entity_extraction")
         assert resp.status_code == 200
@@ -430,7 +430,7 @@ class TestListJobsRoute:
         assert r1.status_code in (200, 202), r1.text
         r2 = client.post("/api/mood/backfill", json={"mode": "stale-only"})
         assert r2.status_code in (200, 202), r2.text
-        job_runner.shutdown(wait=True)
+        job_runner.shutdown(wait=True, cancel_futures=False)
 
         resp = client.get("/api/jobs?limit=1&offset=0")
         data = resp.json()
@@ -458,7 +458,7 @@ class TestJobDetailRoute:
             json={"stale_only": True},
         )
         job_id = submit.json()["job_id"]
-        job_runner.shutdown(wait=True)
+        job_runner.shutdown(wait=True, cancel_futures=False)
 
         payload = _wait_for_job(client, job_id)
         expected_keys = {
