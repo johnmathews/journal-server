@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from starlette.responses import JSONResponse
 
+from journal.api._handler import handler
 from journal.auth import get_authenticated_user
 from journal.services.liveness import (
     check_api_key,
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
     from starlette.requests import Request
 
+    from journal.service_registry import ServicesDict
     from journal.services.query import QueryService
 
 log = logging.getLogger(__name__)
@@ -38,12 +40,22 @@ log = logging.getLogger(__name__)
 
 def register_health_routes(
     mcp: FastMCP,
-    services_getter: Callable[[], dict | None],
+    services_getter: Callable[[], ServicesDict | None],
 ) -> None:
     """Register /health, /api/health, and /api/stats routes."""
 
+    def _uninitialized_health() -> JSONResponse:
+        """Historical 503 shape for the two health routes."""
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": "Server not initialized",
+            },
+            status_code=503,
+        )
+
     def _build_health_payload(
-        services: dict,
+        services: ServicesDict,
         *,
         fitness_user_id: int | None,
         include_stats: bool,
@@ -148,7 +160,10 @@ def register_health_routes(
         return payload
 
     @mcp.custom_route("/health", methods=["GET"], name="api_health")
-    async def get_health(request: Request) -> JSONResponse:
+    @handler(services_getter, on_uninitialized=_uninitialized_health)
+    def get_health(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Operational health endpoint. Bypasses bearer auth.
 
         Liveness only:
@@ -165,16 +180,6 @@ def register_health_routes(
         similarly omitted. See the authenticated `/api/health` for
         the full payload.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse(
-                {
-                    "status": "error",
-                    "message": "Server not initialized",
-                },
-                status_code=503,
-            )
-
         payload = _build_health_payload(
             services, fitness_user_id=None, include_stats=False,
         )
@@ -182,7 +187,10 @@ def register_health_routes(
         return JSONResponse(payload)
 
     @mcp.custom_route("/api/health", methods=["GET"], name="api_health_authed")
-    async def get_health_authed(request: Request) -> JSONResponse:
+    @handler(services_getter, on_uninitialized=_uninitialized_health)
+    def get_health_authed(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Authenticated mirror of `/health` for the webapp.
 
         Carries the liveness fields from `/health` plus the full stats
@@ -198,16 +206,6 @@ def register_health_routes(
         longer than `FITNESS_HEALTH_BROKEN_DEGRADED_HOURS` (default
         48h).
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse(
-                {
-                    "status": "error",
-                    "message": "Server not initialized",
-                },
-                status_code=503,
-            )
-
         user = get_authenticated_user(request)
         payload = _build_health_payload(
             services, fitness_user_id=user.user_id, include_stats=True,
@@ -221,12 +219,11 @@ def register_health_routes(
         return JSONResponse(payload)
 
     @mcp.custom_route("/api/stats", methods=["GET"], name="api_stats")
-    async def get_stats(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def get_stats(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Get journal statistics."""
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
-
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
         user_id = user.user_id
