@@ -209,6 +209,7 @@ class TestApiKeys:
 
 class TestPasswordResetTokens:
     def test_generate_and_validate_reset_token(self, auth: AuthService) -> None:
+        auth.register_user("reset@example.com", "password123", "Reset")
         token = auth.generate_reset_token("reset@example.com")
         email = auth.validate_reset_token(token)
         assert email == "reset@example.com"
@@ -236,9 +237,35 @@ class TestPasswordResetTokens:
         assert authed.email == "pwreset@example.com"
 
     def test_reset_password_unknown_email(self, auth: AuthService) -> None:
+        # A token generated for an unregistered email must never
+        # validate — and must not reveal whether the account exists.
         token = auth.generate_reset_token("ghost@example.com")
-        with pytest.raises(ValueError, match="User not found"):
-            auth.reset_password(token, "irrelevant")
+        with pytest.raises(ValueError, match="Invalid or expired reset token"):
+            auth.reset_password(token, "irrelevant-pw")
+
+    def test_reset_token_is_single_use(self, auth: AuthService) -> None:
+        """A reset token is bound to the password hash it was issued
+        against: once the password changes, replaying the same token
+        must fail like any invalid/expired token."""
+        auth.register_user("single@example.com", "first-password", "Single")
+        token = auth.generate_reset_token("single@example.com")
+        auth.reset_password(token, "second-password")
+        with pytest.raises(ValueError, match="Invalid or expired reset token"):
+            auth.reset_password(token, "third-password")
+        # The first reset still holds.
+        authed = auth.authenticate("single@example.com", "second-password")
+        assert authed.email == "single@example.com"
+
+    def test_outstanding_reset_tokens_invalidated_by_any_reset(
+        self, auth: AuthService
+    ) -> None:
+        """Two outstanding tokens: using either one invalidates the other."""
+        auth.register_user("pair@example.com", "first-password", "Pair")
+        token_a = auth.generate_reset_token("pair@example.com")
+        token_b = auth.generate_reset_token("pair@example.com")
+        auth.reset_password(token_a, "second-password")
+        with pytest.raises(ValueError, match="Invalid or expired reset token"):
+            auth.validate_reset_token(token_b)
 
 
 # ── Email verification tokens ──────────────────────────────────────
