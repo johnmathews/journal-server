@@ -17,6 +17,11 @@ themselves are stateless and can be re-pulled at any time.
 - **Compose file:** `/srv/media/docker-compose.yml`
 - **Environment file:** `/srv/media/.env`
 - **Project name:** `media`
+- **Versioned mirror (this repo):** [`deploy/docker-compose.prod.yml`](../deploy/docker-compose.prod.yml)
+  — the three journal services extracted verbatim from the VM file, with a
+  last-synced date in its header. Re-sync the mirror whenever the journal
+  section of the VM file changes; the journal stack is reproducible from this
+  repo + `/srv/media/.env` alone.
 
 All three journal services are containers within this single compose project — they aren't
 in their own stack. Compose subcommands run from `/srv/media` operate on the whole VM, so
@@ -123,6 +128,10 @@ themselves are reproducible from `ghcr.io` and don't need to be backed up.
 
 ## Known fragilities
 
+- ~~**The compose file exists only on the VM.**~~ Resolved 2026-06-10: the journal
+  services are mirrored at [`deploy/docker-compose.prod.yml`](../deploy/docker-compose.prod.yml)
+  with a sync-provenance header. Residual risk: the mirror goes stale if VM-side
+  edits aren't re-synced — check the header's last-synced date when in doubt.
 - **All images pinned to `:latest`, no auto-update.** A bad release on `main` becomes
   the operator's problem the next time they run `docker compose pull`. Mitigation:
   pin to SHAs, or add Watchtower with a label allowlist.
