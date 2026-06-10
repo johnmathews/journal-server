@@ -11,9 +11,9 @@ All configuration is via environment variables. No config files are needed.
 | `OPENAI_API_KEY`     | OpenAI API key. Used for embeddings (`text-embedding-3-large`) and any OpenAI transcription adapter (primary, shadow, or `whisper-1` fallback).                                                                                                            |
 | `GOOGLE_API_KEY`     | Google API key — required when `OCR_PROVIDER=gemini` (the prod default) or when Gemini is the primary/shadow transcription provider.                                                                                                                       |
 
-> **Migration note (2026-04-15):** the legacy `JOURNAL_API_TOKEN` single bearer-token was retired when multi-user auth
-> shipped. Auth is now session cookies (web) + per-user API keys (programmatic). The `api_bearer_token` field still
-> exists in `config.py` for back-compat but is **not read by any production code path** — setting it has no effect.
+> **Migration note (2026-04-15, finalized 2026-06-10):** the legacy `JOURNAL_API_TOKEN` single bearer-token was retired
+> when multi-user auth shipped. Auth is now session cookies (web) + per-user API keys (programmatic). The vestigial
+> `api_bearer_token` field has since been deleted from `config.py` entirely — setting `JOURNAL_API_TOKEN` has no effect.
 > See [`auth.md`](auth.md) for the current model.
 
 See `docs/security.md` for the threat model and how auth fits in.
