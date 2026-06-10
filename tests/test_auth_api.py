@@ -458,6 +458,9 @@ class TestRegister:
         client: TestClient,
         auth_service: AuthService,
     ) -> None:
+        """Duplicate email returns a generic error — the response must
+        not reveal whether an email address is already registered
+        (account enumeration)."""
         auth_service.register_user("dup@example.com", "securepassword", "Dup")
         resp = client.post(
             "/api/auth/register",
@@ -468,7 +471,9 @@ class TestRegister:
             },
         )
         assert resp.status_code == 400
-        assert resp.json()["error"] == "duplicate_email"
+        body = resp.json()
+        assert body["error"] == "registration_failed"
+        assert "already registered" not in body["message"].lower()
 
     def test_register_weak_password(self, client: TestClient) -> None:
         resp = client.post(
@@ -643,6 +648,32 @@ class TestResetPassword:
         # Verify new password works
         user = auth_service.authenticate("reset@example.com", "newpassword1")
         assert user.email == "reset@example.com"
+
+    def test_reset_password_token_replay_returns_400(
+        self,
+        client: TestClient,
+        auth_service: AuthService,
+    ) -> None:
+        """A reset token is single-use: replaying it after a successful
+        reset must 400 like any invalid token."""
+        auth_service.register_user("replay@example.com", "oldpassword1", "Replay")
+        token = auth_service.generate_reset_token("replay@example.com")
+        first = client.post(
+            "/api/auth/reset-password",
+            json={"token": token, "password": "newpassword1"},
+        )
+        assert first.status_code == 200
+
+        replay = client.post(
+            "/api/auth/reset-password",
+            json={"token": token, "password": "attackerpw1"},
+        )
+        assert replay.status_code == 400
+        assert replay.json()["error"] == "invalid_token"
+
+        # The replay attempt must not have changed the password.
+        user = auth_service.authenticate("replay@example.com", "newpassword1")
+        assert user.email == "replay@example.com"
 
     def test_reset_password_invalid_token(self, client: TestClient) -> None:
         resp = client.post(

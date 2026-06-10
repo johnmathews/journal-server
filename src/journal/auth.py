@@ -22,6 +22,8 @@ from starlette.authentication import (
 from starlette.middleware.authentication import AuthenticationMiddleware
 from starlette.responses import JSONResponse
 
+from journal.ratelimit import AuthRateLimitMiddleware, FixedWindowRateLimiter
+
 if TYPE_CHECKING:
     from starlette.requests import HTTPConnection, Request
     from starlette.responses import Response
@@ -354,21 +356,28 @@ def build_auth_middleware_stack(
     *,
     exempt_paths: frozenset[str] = PUBLIC_PATHS,
     verification_exempt_paths: frozenset[str] = VERIFICATION_EXEMPT_PATHS,
-) -> AuthenticationMiddleware:
-    """Convenience factory that wires up both middleware layers in the
+    rate_limiter: FixedWindowRateLimiter | None = None,
+) -> ASGIApp:
+    """Convenience factory that wires up the middleware layers in the
     correct order.
 
     Returns the outermost middleware, ready to be used as the ASGI app.
 
     Layer order (outer to inner)::
 
-        AuthenticationMiddleware -> RequireAuthMiddleware -> route
+        [AuthRateLimitMiddleware ->] AuthenticationMiddleware
+            -> RequireAuthMiddleware -> route
 
-    ``AuthenticationMiddleware`` runs first and populates ``scope["user"]``
-    (either an :class:`AuthenticatedUser` or Starlette's
-    ``UnauthenticatedUser``).  ``RequireAuthMiddleware`` then reads
-    ``scope["user"]`` and enforces access rules before the request
-    reaches the route handler.
+    ``AuthenticationMiddleware`` populates ``scope["user"]`` (either an
+    :class:`AuthenticatedUser` or Starlette's ``UnauthenticatedUser``).
+    ``RequireAuthMiddleware`` then reads ``scope["user"]`` and enforces
+    access rules before the request reaches the route handler.
+
+    When *rate_limiter* is provided, :class:`AuthRateLimitMiddleware`
+    wraps the whole stack so over-limit POSTs to the anonymous auth
+    endpoints are rejected with 429 before any credential work. The
+    default (``None``) applies no rate limiting — production passes a
+    limiter from ``Config.auth_rate_limit_*`` in ``runserver.py``.
     """
     require_auth = RequireAuthMiddleware(
         app,
@@ -376,8 +385,11 @@ def build_auth_middleware_stack(
         verification_exempt_paths=verification_exempt_paths,
     )
     backend = SessionOrKeyBackend(auth_service)
-    return AuthenticationMiddleware(
+    stack: ASGIApp = AuthenticationMiddleware(
         require_auth,
         backend=backend,
         on_error=_on_auth_error,
     )
+    if rate_limiter is not None:
+        stack = AuthRateLimitMiddleware(stack, rate_limiter)
+    return stack

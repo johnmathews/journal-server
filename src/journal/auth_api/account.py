@@ -99,9 +99,15 @@ def register_account_routes(
         try:
             user = auth_service.register_user(email, password, display_name)
         except ValueError as exc:
+            # The specific reason (e.g. duplicate email) stays in the
+            # log only — echoing it to the client would let anonymous
+            # callers enumerate registered addresses.
             log.info("Registration failed for %s: %s", email, exc)
             return JSONResponse(
-                {"error": "duplicate_email", "message": str(exc)},
+                {
+                    "error": "registration_failed",
+                    "message": "Unable to register with the provided details",
+                },
                 status_code=400,
             )
 

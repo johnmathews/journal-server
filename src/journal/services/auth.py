@@ -154,7 +154,12 @@ class AuthService:
 
         The raw token is returned to the caller (for the cookie).
         Only the SHA-256 hash is stored in ``user_sessions.id``.
+
+        Every call first sweeps expired session rows — logins are the
+        natural low-frequency hook, so the table cannot accumulate
+        dead sessions without needing a background thread.
         """
+        self._repo.cleanup_expired_sessions()
         token = secrets.token_urlsafe(32)
         token_hash = self._hash_session_token(token)
         expires = datetime.now(UTC) + timedelta(days=self._session_expiry_days)
@@ -248,22 +253,65 @@ class AuthService:
 
     # ── Token generation (password reset / email verification) ──────────
 
+    @staticmethod
+    def _password_hash_fingerprint(password_hash: str) -> str:
+        """Short, non-reversible fingerprint of an Argon2 password hash.
+
+        Embedded in reset tokens to bind each token to the password it
+        was issued against. The 16-hex-char SHA-256 prefix reveals
+        nothing useful about the hash (which is itself not the
+        password) but changes whenever the password does.
+        """
+        return hashlib.sha256(password_hash.encode()).hexdigest()[:16]
+
     def generate_reset_token(self, email: str) -> str:
-        """Generate a signed password-reset token for the given email."""
-        return self._serializer.dumps(email, salt="password-reset")
+        """Generate a signed password-reset token for the given email.
+
+        The token payload carries a fingerprint of the user's *current*
+        password hash, making tokens effectively single-use: a
+        successful reset changes the hash, so every outstanding token
+        (including the one just used) stops validating. For an unknown
+        email — or a user without a password — a random fingerprint is
+        used so the token can never validate, keeping generate-time
+        behavior uniform (no account enumeration).
+        """
+        user = self._repo.get_user_by_email(email)
+        password_hash = self._repo.get_password_hash(user.id) if user else None
+        if password_hash:
+            fingerprint = self._password_hash_fingerprint(password_hash)
+        else:
+            fingerprint = secrets.token_hex(8)
+        payload = {"email": email, "ph": fingerprint}
+        return self._serializer.dumps(payload, salt="password-reset")
 
     def validate_reset_token(self, token: str, max_age: int = 1800) -> str:
         """Validate a password-reset token and return the email.
 
-        Raises ``ValueError`` if the token is invalid or expired (30 min default).
+        Raises ``ValueError`` if the token is invalid, expired (30 min
+        default), or was issued against a previous password (i.e. the
+        password has changed since — single-use semantics).
         """
+        invalid = ValueError("Invalid or expired reset token")
         try:
-            email: str = self._serializer.loads(
+            payload = self._serializer.loads(
                 token, salt="password-reset", max_age=max_age
             )
-            return email
         except (BadSignature, SignatureExpired) as e:
-            raise ValueError("Invalid or expired reset token") from e
+            raise invalid from e
+        if not isinstance(payload, dict):
+            # Legacy (pre-fingerprint) or malformed payload.
+            raise invalid
+        email = payload.get("email")
+        fingerprint = payload.get("ph")
+        if not isinstance(email, str) or not isinstance(fingerprint, str):
+            raise invalid
+        user = self._repo.get_user_by_email(email)
+        current_hash = self._repo.get_password_hash(user.id) if user else None
+        if current_hash is None or not secrets.compare_digest(
+            fingerprint, self._password_hash_fingerprint(current_hash)
+        ):
+            raise invalid
+        return email
 
     def generate_verification_token(self, email: str) -> str:
         """Generate a signed email-verification token."""

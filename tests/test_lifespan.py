@@ -116,3 +116,39 @@ async def test_config_loaded_once(monkeypatch, config, _mock_chromadb):
         pass
 
     assert call_count == 1
+
+
+async def test_expired_sessions_purged_at_startup(
+    monkeypatch, config, _mock_chromadb
+):
+    """Expired session rows left by a previous process are purged at
+    boot. The wiring in `_init_services` must call
+    `cleanup_expired_sessions` when the auth service is constructed,
+    mirroring the `reconcile_stuck_jobs` boot pattern."""
+    from journal.db.factory import ConnectionFactory
+    from journal.db.migrations import run_migrations
+    from journal.db.user_repository import SQLiteUserRepository
+
+    # Seed one expired and one live session in the same database the
+    # lifespan will open.
+    seed_factory = ConnectionFactory(config.db_path)
+    run_migrations(seed_factory.get())
+    seed_repo = SQLiteUserRepository(seed_factory)
+    user = seed_repo.create_user("sessions@example.com", "Sessions", "hash")
+    seed_repo.create_session(
+        "expired-session-hash", user.id, "2020-01-01T00:00:00Z"
+    )
+    seed_repo.create_session(
+        "live-session-hash", user.id, "2999-01-01T00:00:00Z"
+    )
+    seed_factory.close_current()
+
+    monkeypatch.setattr("journal.mcp_server.bootstrap.load_config", lambda: config)
+
+    async with lifespan(None):
+        check_factory = ConnectionFactory(config.db_path)
+        rows = check_factory.get().execute(
+            "SELECT id FROM user_sessions"
+        ).fetchall()
+        check_factory.close_current()
+        assert {row["id"] for row in rows} == {"live-session-hash"}
