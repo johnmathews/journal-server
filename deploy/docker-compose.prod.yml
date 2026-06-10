@@ -1,0 +1,97 @@
+# Production compose — journal services, versioned mirror.
+#
+# Source of truth relationship: the live stack runs from
+# /srv/media/docker-compose.yml on the media VM (one file for the whole
+# media stack; its header says it is templated from media_vm/files/
+# docker-compose.yml in the infrastructure repo). This file mirrors the
+# THREE JOURNAL SERVICES of that file verbatim so the journal stack is
+# reproducible from this repo alone.
+#
+# Last synced: 2026-06-10 (ssh media cat /srv/media/docker-compose.yml).
+# Re-sync after any compose change on the VM:
+#   ssh media cat /srv/media/docker-compose.yml   # extract journal-* services
+#
+# All secrets are ${VAR} interpolations resolved from /srv/media/.env on
+# the VM — nothing literal lives here. Known drift carried verbatim from
+# prod (do not "fix" silently; fix on the VM first, then re-sync):
+#   - STRAVE_ACCESS_TOKEN typo and vestigial STRAVA_REFRESH_TOKEN /
+#     GARMIN_USERNAME / GARMIN_PASSWORD injections (retired per the
+#     2026-06-04 vestigial audit; remove on the VM during the next ops pass)
+#   - journal-server publishes 8400 on all interfaces (security-roadmap
+#     item 2b recommends a loopback or LAN-restricted bind)
+services:
+  journal-webapp:
+    container_name: journal-webapp
+    image: ghcr.io/johnmathews/journal-webapp:latest
+    ports:
+      - "8402:80"
+    depends_on:
+      - journal-server
+    restart: unless-stopped
+
+  journal-server:
+    container_name: journal-server
+    image: ghcr.io/johnmathews/journal-server:latest
+    environment:
+      - TZ=${TZ:-Europe/Amsterdam}
+      - DB_PATH=/data/journal.db
+      - CHROMADB_HOST=journal-chromadb
+      - CHROMADB_PORT=8000
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8400
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS}
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
+      - OCR_CONTEXT_DIR=./context
+      - OCR_CONTEXT_CACHE_TTL=1h
+      - JOURNAL_ENABLE_MOOD_SCORING=true
+      - OCR_PROVIDER=${JOURNAL_INSIGHTS_APP_OCR_PROVIDER}
+      - OCR_MODEL=${OCR_MODEL}
+      - TRANSCRIPTION_SHADOW_PROVIDER=gemini
+      - GOOGLE_API_KEY=${GOOGLE_GEMINI_JOURNAL_INSIGHTS_API_KEY}
+      - JOURNAL_SECRET_KEY=${JOURNAL_SECRET_KEY}
+      - SMTP_USERNAME=${SMTP_USERNAME}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - SMTP_FROM_EMAIL=${SMTP_FROM_EMAIL}
+      - APP_BASE_URL=${APP_BASE_URL}
+      - REGISTRATION_ENABLED=${REGISTRATION_ENABLED}
+      - OCR_DUAL_PASS=true
+      - PREPROCESS_IMAGES=true
+      - PUSHOVER_USER_KEY=${PUSHOVER_USER_KEY}
+      - PUSHOVER_APP_API_TOKEN=${PUSHOVER_APP_API_TOKEN}
+      - STRAVA_CLIENT_ID=${STRAVA_CLIENT_ID}
+      - STRAVA_REDIRECT_URI=${STRAVA_REDIRECT_URI}
+      - STRAVA_CLIENT_SECRET=${STRAVA_CLIENT_SECRET}
+      - STRAVE_ACCESS_TOKEN=${STRAVE_ACCESS_TOKEN}
+      - STRAVA_REFRESH_TOKEN=${STRAVA_REFRESH_TOKEN}
+      - GARMIN_USERNAME=${GARMIN_USERNAME}
+      - GARMIN_PASSWORD=${GARMIN_PASSWORD}
+    volumes:
+      - /srv/media/config/journal/data:/data
+      - /srv/media/config/journal/context:/app/context
+      - /srv/media/config/journal/mood-dimensions.toml:/app/config/mood-dimensions.toml:ro
+    ports:
+      - "8400:8400"
+    depends_on:
+      journal-chromadb:
+        condition: service_healthy
+    restart: always
+
+  journal-chromadb:
+    container_name: journal-chromadb
+    image: ghcr.io/johnmathews/journal-chromadb:latest
+    environment:
+      - TZ=${TZ:-Europe/Amsterdam}
+    volumes:
+      - /srv/media/config/journal/chromadb:/data
+    ports:
+      - "8401:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+      start_interval: 2s
+
