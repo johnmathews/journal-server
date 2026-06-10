@@ -26,7 +26,6 @@ Auth is enforced by ``RequireAuthMiddleware``: every route below assumes
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -39,6 +38,7 @@ from garminconnect import (
 )
 from starlette.responses import JSONResponse
 
+from journal.api._handler import JsonBody, handler
 from journal.auth import get_authenticated_user
 from journal.db.fitness_integrity import check_fitness_integrity
 from journal.models import FitnessAuthState
@@ -62,6 +62,7 @@ if TYPE_CHECKING:
         FitnessDaily,
         FitnessSyncRun,
     )
+    from journal.service_registry import ServicesDict
 
 log = logging.getLogger(__name__)
 
@@ -240,7 +241,7 @@ def _persist_garmin_auth(
 
 def register_fitness_routes(
     mcp: FastMCP,
-    services_getter: Callable[[], dict | None],
+    services_getter: Callable[[], ServicesDict | None],
 ) -> None:
     """Register the four ``GET /api/fitness/*`` read routes.
 
@@ -254,10 +255,10 @@ def register_fitness_routes(
         methods=["GET"],
         name="api_fitness_list_activities",
     )
-    async def list_activities(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter)
+    def list_activities(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         user = get_authenticated_user(request)
         repo: FitnessRepository = services["fitness_repo"]
 
@@ -286,10 +287,10 @@ def register_fitness_routes(
         methods=["GET"],
         name="api_fitness_list_daily",
     )
-    async def list_daily(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter)
+    def list_daily(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         user = get_authenticated_user(request)
         repo: FitnessRepository = services["fitness_repo"]
 
@@ -312,10 +313,10 @@ def register_fitness_routes(
         methods=["GET"],
         name="api_fitness_sync_status",
     )
-    async def sync_status(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter)
+    def sync_status(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         user = get_authenticated_user(request)
         repo: FitnessRepository = services["fitness_repo"]
 
@@ -335,10 +336,10 @@ def register_fitness_routes(
         methods=["GET"],
         name="api_fitness_integrity",
     )
-    async def integrity(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter)
+    def integrity(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         # Per-user scoped (W4 of the fitness multi-user plan): each caller
         # sees only their own orphans. A non-admin caller never sees other
         # users' raw rows in their report, even via the existence of orphan
@@ -360,22 +361,14 @@ def register_fitness_routes(
 
     # ── W2: Garmin per-user connect / MFA / disconnect ───────────────
 
-    def _services_or_503() -> tuple[dict | None, JSONResponse | None]:
-        services = services_getter()
-        if services is None:
-            return None, JSONResponse(
-                {"error": "Server not initialized"}, status_code=503,
-            )
-        return services, None
-
-    def _garmin_pending(services: dict) -> GarminPendingStore:
+    def _garmin_pending(services: ServicesDict) -> GarminPendingStore:
         store = services.get("garmin_pending")
         if store is None:
             store = GarminPendingStore()
             services["garmin_pending"] = store
         return store
 
-    def _garmin_cooldown(services: dict) -> GarminCooldownTracker:
+    def _garmin_cooldown(services: ServicesDict) -> GarminCooldownTracker:
         tracker = services.get("garmin_cooldown")
         if tracker is None:
             tracker = GarminCooldownTracker()
@@ -387,20 +380,16 @@ def register_fitness_routes(
         methods=["POST"],
         name="api_fitness_garmin_connect",
     )
-    async def garmin_connect(request: Request) -> JSONResponse:
-        services, err = _services_or_503()
-        if err is not None:
-            return err
+    @handler(services_getter, parse_json=JsonBody(invalid_error="Invalid JSON", require_dict=False))
+    def garmin_connect(
+        request: Request, services: ServicesDict, body: dict | object
+    ) -> JSONResponse:
         user = get_authenticated_user(request)
         repo: FitnessRepository = services["fitness_repo"]
         pending = _garmin_pending(services)
         cooldown = _garmin_cooldown(services)
         client_factory = services.get("garmin_client_factory") or Garmin
 
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
         username = (body.get("username") or "").strip()
         password = body.get("password") or ""
         if not username or not password:
@@ -427,9 +416,9 @@ def register_fitness_routes(
                 status_code=429,
             )
 
-        # Build the client outside the threadpool — instantiation is cheap
-        # and we want the password living in handler scope only as long as
-        # absolutely needed.
+        # Instantiation is cheap; we want the password living in handler
+        # scope only as long as absolutely needed. (The whole body already
+        # runs on a worker thread via the handler decorator.)
         client = client_factory(
             email=username, password=password, return_on_mfa=True,
         )
@@ -438,7 +427,7 @@ def register_fitness_routes(
         del password
 
         try:
-            result = await asyncio.to_thread(client.login)
+            result = client.login()
         except GarminConnectAuthenticationError as exc:
             cooldown.record_failure(username)
             log.info(
@@ -513,9 +502,7 @@ def register_fitness_routes(
 
         # No-MFA success: capture upstream id + token blob, persist.
         try:
-            upstream = await asyncio.to_thread(
-                _extract_upstream_user_id, client, username,
-            )
+            upstream = _extract_upstream_user_id(client, username)
         except Exception as exc:  # noqa: BLE001
             log.exception(
                 "POST /api/fitness/garmin/connect — profile fetch failed "
@@ -594,19 +581,15 @@ def register_fitness_routes(
         methods=["POST"],
         name="api_fitness_garmin_connect_mfa",
     )
-    async def garmin_connect_mfa(request: Request) -> JSONResponse:
-        services, err = _services_or_503()
-        if err is not None:
-            return err
+    @handler(services_getter, parse_json=JsonBody(invalid_error="Invalid JSON", require_dict=False))
+    def garmin_connect_mfa(
+        request: Request, services: ServicesDict, body: dict | object
+    ) -> JSONResponse:
         user = get_authenticated_user(request)
         repo: FitnessRepository = services["fitness_repo"]
         pending = _garmin_pending(services)
         cooldown = _garmin_cooldown(services)
 
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
         token = body.get("pending_session") or ""
         code = (body.get("code") or "").strip()
         if not token or not code:
@@ -647,9 +630,7 @@ def register_fitness_routes(
 
         client = entry.client
         try:
-            await asyncio.to_thread(
-                client.resume_login, entry.state_token, code,
-            )
+            client.resume_login(entry.state_token, code)
         except GarminConnectAuthenticationError as exc:
             log.info(
                 "POST /api/fitness/garmin/connect/mfa — bad MFA code "
@@ -682,9 +663,7 @@ def register_fitness_routes(
         # "wrong code" so the UI can ask for a retry rather than blame
         # the user's credentials.
         try:
-            upstream = await asyncio.to_thread(
-                _extract_upstream_user_id, client, "",
-            )
+            upstream = _extract_upstream_user_id(client, "")
         except Exception as exc:  # noqa: BLE001
             log.warning(
                 "POST /api/fitness/garmin/connect/mfa — post-MFA profile "
@@ -776,10 +755,10 @@ def register_fitness_routes(
         methods=["POST"],
         name="api_fitness_garmin_disconnect",
     )
-    async def garmin_disconnect(request: Request) -> JSONResponse:
-        services, err = _services_or_503()
-        if err is not None:
-            return err
+    @handler(services_getter)
+    def garmin_disconnect(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         user = get_authenticated_user(request)
         repo: FitnessRepository = services["fitness_repo"]
         deleted = repo.delete_auth_state(user_id=user.user_id, source="garmin")
@@ -791,14 +770,14 @@ def register_fitness_routes(
 
     # ── W3: Strava per-user authorize_url / exchange / disconnect ────
 
-    def _strava_pending(services: dict) -> StravaPendingStore:
+    def _strava_pending(services: ServicesDict) -> StravaPendingStore:
         store = services.get("strava_pending")
         if store is None:
             store = StravaPendingStore()
             services["strava_pending"] = store
         return store
 
-    def _strava_exchange(services: dict) -> Any:
+    def _strava_exchange(services: ServicesDict) -> Any:
         return services.get("strava_exchange_code") or strava_exchange_code_default
 
     def _persist_strava_auth(
@@ -841,10 +820,10 @@ def register_fitness_routes(
         methods=["GET"],
         name="api_fitness_strava_authorize_url",
     )
-    async def strava_authorize_url(request: Request) -> JSONResponse:
-        services, err = _services_or_503()
-        if err is not None:
-            return err
+    @handler(services_getter)
+    def strava_authorize_url(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         user = get_authenticated_user(request)
         config = services.get("config")
         client_id = getattr(config, "strava_client_id", "") if config else ""
@@ -893,10 +872,10 @@ def register_fitness_routes(
         methods=["POST"],
         name="api_fitness_strava_exchange",
     )
-    async def strava_exchange(request: Request) -> JSONResponse:
-        services, err = _services_or_503()
-        if err is not None:
-            return err
+    @handler(services_getter, parse_json=JsonBody(invalid_error="Invalid JSON", require_dict=False))
+    def strava_exchange(
+        request: Request, services: ServicesDict, body: dict | object
+    ) -> JSONResponse:
         user = get_authenticated_user(request)
         repo: FitnessRepository = services["fitness_repo"]
         pending = _strava_pending(services)
@@ -907,10 +886,6 @@ def register_fitness_routes(
             getattr(config, "strava_client_secret", "") if config else ""
         )
 
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
         code = (body.get("code") or "").strip()
         state = (body.get("state") or "").strip()
         if not code or not state:
@@ -955,8 +930,7 @@ def register_fitness_routes(
         pending.consume(state)
 
         try:
-            tokens, athlete_id = await asyncio.to_thread(
-                exchange,
+            tokens, athlete_id = exchange(
                 client_id=client_id,
                 client_secret=client_secret,
                 code=code,
@@ -1037,10 +1011,10 @@ def register_fitness_routes(
         methods=["POST"],
         name="api_fitness_strava_disconnect",
     )
-    async def strava_disconnect(request: Request) -> JSONResponse:
-        services, err = _services_or_503()
-        if err is not None:
-            return err
+    @handler(services_getter)
+    def strava_disconnect(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         user = get_authenticated_user(request)
         repo: FitnessRepository = services["fitness_repo"]
         deleted = repo.delete_auth_state(user_id=user.user_id, source="strava")
