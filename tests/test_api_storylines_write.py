@@ -15,8 +15,8 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 from starlette.testclient import TestClient
 
-from journal.api.ingestion import register_ingestion_routes
 from journal.api.storylines import register_storylines_routes
+from journal.api.storylines_write import register_storylines_write_routes
 from journal.auth import AuthenticatedUser, _current_user_id
 from journal.db.factory import ConnectionFactory
 from journal.db.jobs_repository import SQLiteJobRepository
@@ -123,7 +123,7 @@ def app_with_storylines(
 
     mcp = FastMCP("test-storylines-write")
     register_storylines_routes(mcp, lambda: services_dict)
-    register_ingestion_routes(mcp, lambda: services_dict)
+    register_storylines_write_routes(mcp, lambda: services_dict)
 
     app = mcp.streamable_http_app()
     app.add_middleware(_FakeAuthMiddleware)

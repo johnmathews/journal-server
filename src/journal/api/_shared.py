@@ -7,9 +7,14 @@ src/journal/api/" before adding new routes):
    in `api/<resource>.py`. Cross-resource routes place by URL prefix root
    and call across services as needed.
 2. **Override — responsibility (write/job creation).** Routes whose primary
-   effect is to create a job or perform a long-running write live in
-   `api/ingestion.py`, regardless of URL prefix. See `ingestion.py`'s
-   docstring for the current list and the rationale.
+   effect is to create a job or perform a long-running write live in a
+   write module, regardless of URL prefix. The override family is split
+   across three sibling modules (carved out of `ingestion.py` per the
+   ~800-line size rule): `api/ingestion.py` (entry ingest + entity
+   extraction + mood backfill), `api/storylines_write.py` (storyline
+   create/regenerate/delete/anchors), and `api/fitness_jobs.py` (fitness
+   sync + backfill). See each module's docstring for its route list and
+   the rationale.
 
 Helpers in this module are free functions — no closure capture. Resource
 modules import what they need. Helpers used by a single resource module
@@ -20,6 +25,7 @@ shared serialisers and utilities.
 from __future__ import annotations
 
 import io
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import tiktoken
@@ -28,6 +34,11 @@ from PIL import Image
 if TYPE_CHECKING:
     from journal.db.pricing import PricingEntry
     from journal.models import Job
+
+
+def _now_iso() -> str:
+    """UTC now as ``YYYY-MM-DDTHH:MM:SSZ`` (auth-state timestamp format)."""
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 # Cache the encoding at module load — tiktoken.get_encoding is not free
 # and the tokens endpoint may be called repeatedly as the user switches
