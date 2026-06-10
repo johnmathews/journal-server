@@ -48,8 +48,9 @@ src/journal/
                           entity casing
   mcp_server/           — FastMCP server: bootstrap, app, runserver, tools/*
   api/                  — REST routes (auth, dashboard, entries, entities,
-                          entity_merge, ingestion, jobs, notifications, search,
-                          settings, users, health)
+                          entity_merge, fitness, fitness_garmin, fitness_jobs,
+                          fitness_strava, ingestion, jobs, notifications, search,
+                          settings, storylines, storylines_write, users, health)
   auth_api/             — Auth REST endpoints carved into core/account/profile/
                           api_keys/admin
   cli/                  — Typer CLI: __init__ (entry), entities, mood, _services,
@@ -113,7 +114,8 @@ way.
 - FTS5 + dense retrieval + RRF fusion + listwise rerank for hybrid search
 - MCP server is a thin interface layer — business logic lives in services/
 - API routing follows URL-resource layout by default; write/job-creation routes are
-  bundled in `api/ingestion.py`. See `docs/code-quality-principles.md`.
+  bundled in `api/ingestion.py` / `api/storylines_write.py` / `api/fitness_jobs.py`.
+  See `docs/code-quality-principles.md`.
 
 ## Tech Stack
 

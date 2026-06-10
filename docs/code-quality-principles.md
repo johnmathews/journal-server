@@ -69,18 +69,29 @@ The HTTP layer follows two rules in this order:
    grep. Cross-resource handlers (e.g. `/api/entries/{id}/entities`) place by **URL prefix root**
    (entries here), and call across services as needed.
 2. **Override — responsibility (write/job creation).** Routes whose primary effect is to create a
-   job or perform a long-running write live in `api/ingestion.py`, regardless of URL prefix. Today
-   that covers `/api/entries/ingest/*`, `/api/entities/extract`, and `/api/mood/backfill`.
+   job or perform a long-running write live in a write module, regardless of URL prefix.
    Rationale: these routes share a dependency cluster (`IngestionService`, `JobRunner`, OCR /
    transcription / extraction providers) that read/CRUD handlers never touch, and bundling them
-   with their resource's reads pushes single files past the readable-context budget. Adding a
-   new "kick off a job" route? Put it in `ingestion.py` and add a one-line comment at the call
-   site noting which URL it serves.
+   with their resource's reads pushes single files past the readable-context budget. The
+   override family was originally a single file (`api/ingestion.py`); when it outgrew the
+   ~800-line size rule it was split into three siblings — same category, one rule:
+   - `api/ingestion.py` — `/api/entries/ingest/*`, `/api/entities/extract`, `/api/mood/backfill`.
+   - `api/storylines_write.py` — `POST /api/storylines`, `POST .../regenerate`,
+     `DELETE /api/storylines/{id}`, `PUT .../anchors` (reads stay in `api/storylines.py`).
+   - `api/fitness_jobs.py` — `POST /api/fitness/sync/{source}`,
+     `POST /api/fitness/backfill/{source}` (reads stay in `api/fitness.py`; the Garmin/Strava
+     auth flows are plain URL-resource modules, `api/fitness_garmin.py` /
+     `api/fitness_strava.py`, not part of the override).
+
+   Adding a new "kick off a job" route? Put it in the matching write module (or `ingestion.py`
+   if no sibling matches) and add a one-line comment at the call site noting which URL it serves.
 
 The override is the first explicit deviation from URL-prefix purity in this codebase. It must
-stay narrow: "write/job creation" is the only currently-recognised category. New deviation
-categories require updating this section (the v2 refactor plan that originally captured the
-rule, `archive/code-quality-refactor-plan.md`, is closed and only kept as a historical record).
+stay narrow: "write/job creation" is the only currently-recognised category, and splitting the
+family by resource (as above) is a size-rule split, not a new category. New deviation
+categories require updating this section **and** `api/_shared.py`'s docstring in the same
+commit (the v2 refactor plan that originally captured the rule,
+`archive/code-quality-refactor-plan.md`, is closed and only kept as a historical record).
 
 ---
 

@@ -5,7 +5,8 @@ each per-resource ``register_*_routes`` function in sequence.
 
 Routes are organised by resource module under ``journal/api/`` — see
 ``_shared.py``'s docstring for the routing rules (default = primary URL
-resource; override = ingestion.py for write/job-creation routes).
+resource; override = the write/job-creation family: ingestion.py,
+storylines_write.py, fitness_jobs.py).
 """
 
 from __future__ import annotations
@@ -21,6 +22,9 @@ from journal.api.entities import register_entities_routes
 from journal.api.entity_merge import register_entity_merge_routes
 from journal.api.entries import register_entries_routes
 from journal.api.fitness import register_fitness_routes
+from journal.api.fitness_garmin import register_fitness_garmin_routes
+from journal.api.fitness_jobs import register_fitness_jobs_routes
+from journal.api.fitness_strava import register_fitness_strava_routes
 from journal.api.health import register_health_routes
 from journal.api.ingestion import register_ingestion_routes
 from journal.api.jobs import register_jobs_routes
@@ -28,6 +32,7 @@ from journal.api.notifications import register_notifications_routes
 from journal.api.search import register_search_routes
 from journal.api.settings import register_settings_routes
 from journal.api.storylines import register_storylines_routes
+from journal.api.storylines_write import register_storylines_write_routes
 from journal.api.users import register_users_routes
 
 if TYPE_CHECKING:
@@ -49,6 +54,11 @@ def register_api_routes(
     """
     register_entries_routes(mcp, services_getter)
     register_ingestion_routes(mcp, services_getter)
+    # The other two write/job-creation modules register immediately after
+    # ingestion so their routes keep the position they had when they lived
+    # inside register_ingestion_routes.
+    register_storylines_write_routes(mcp, services_getter)
+    register_fitness_jobs_routes(mcp, services_getter)
     register_settings_routes(mcp, services_getter)
     register_users_routes(mcp, services_getter)
     register_notifications_routes(mcp, services_getter)
@@ -59,6 +69,8 @@ def register_api_routes(
     register_entities_routes(mcp, services_getter)
     register_entity_merge_routes(mcp, services_getter)
     register_fitness_routes(mcp, services_getter)
+    register_fitness_garmin_routes(mcp, services_getter)
+    register_fitness_strava_routes(mcp, services_getter)
     register_storylines_routes(mcp, services_getter)
 
 
