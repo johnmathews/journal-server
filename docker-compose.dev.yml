@@ -12,7 +12,10 @@ services:
     ports:
       - "8401:8000"
     volumes:
-      - chromadb-dev-data:/chroma/chroma
+      # Current chromadb/chroma images persist to /data (verified via the
+      # image config) — the old /chroma/chroma path left dev embeddings
+      # unpersisted across container restarts.
+      - chromadb-dev-data:/data
     # The base chromadb/chroma image has no curl, wget, python, or nc —
     # only bash + standard utils. Use bash's built-in /dev/tcp virtual
     # file to probe the port directly. The prod image

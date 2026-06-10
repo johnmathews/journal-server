@@ -87,27 +87,16 @@ class TestOcrContext:
         assert config.ocr_context_cache_ttl == "5m"
 
 
-class TestApiBearerToken:
-    def test_default_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # No env var → None. `mcp_server.main()` uses this sentinel to
-        # fail closed and refuse to start.
-        monkeypatch.delenv("JOURNAL_API_TOKEN", raising=False)
-        config = Config()
-        assert config.api_bearer_token is None
-
-    def test_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("JOURNAL_API_TOKEN", "abc123")
-        config = Config()
-        assert config.api_bearer_token == "abc123"
-
-    def test_empty_string_treated_as_none(
+class TestRetiredApiBearerToken:
+    def test_api_bearer_token_field_removed(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # An explicitly empty JOURNAL_API_TOKEN= line in .env must not
-        # silently disable auth — it's equivalent to "not set".
-        monkeypatch.setenv("JOURNAL_API_TOKEN", "")
+        # The JOURNAL_API_TOKEN bearer-token scheme was replaced by the
+        # multi-user session / API-key auth layer. Setting the old env
+        # var must have no effect on config.
+        monkeypatch.setenv("JOURNAL_API_TOKEN", "leftover-token")
         config = Config()
-        assert config.api_bearer_token is None
+        assert not hasattr(config, "api_bearer_token")
 
 
 class TestPreprocessImages:

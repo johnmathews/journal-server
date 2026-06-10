@@ -245,15 +245,6 @@ class Config:
         ]
     )
 
-    # REST API / MCP bearer token. Every request to /api/* and /mcp must
-    # send `Authorization: Bearer <token>` matching this value. None means
-    # no token is configured, which is fail-closed: the server refuses to
-    # start in `mcp_server.main()`. Generate a token with:
-    #     python -c "import secrets; print(secrets.token_urlsafe(32))"
-    api_bearer_token: str | None = field(
-        default_factory=lambda: os.environ.get("JOURNAL_API_TOKEN") or None
-    )
-
     # Mood scoring. On by default — opt out explicitly via
     # `JOURNAL_ENABLE_MOOD_SCORING=false`. When enabled, ingestion
     # calls the MoodScorer provider after chunking/embedding for

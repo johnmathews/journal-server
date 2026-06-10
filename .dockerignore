@@ -1,0 +1,18 @@
+# The image only COPYies pyproject.toml, uv.lock, src/, and config/
+# (see Dockerfile), so this file mainly keeps the `docker build .`
+# context small and ensures secrets / local state can never leak into
+# a build — without it the context ships the real journal DB and venv.
+.git/
+.venv/
+.env*
+!.env.example
+journal.db*
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+context/
+.claude/
+journal/
+docs/
+tests/

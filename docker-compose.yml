@@ -1,12 +1,13 @@
 # Production: runs on the media VM. Images are built by GitHub Actions CI
-# and pushed to ghcr.io, then manually pulled on the VM.
-# For local dev, run: docker compose up
+# and pushed to ghcr.io, then manually pulled on the VM. This is the
+# prod-shaped stack (app + ChromaDB); for local development use
+# docker-compose.dev.yml (ChromaDB only) and run the server natively.
 #
 # On media VM, MCP endpoint is reachable at http://127.0.0.1:8400/mcp from
 # the VM itself. External clients (Slack agent, webapp) MUST go through a
 # reverse proxy that terminates TLS and adds any additional authentication
-# — the port is intentionally bound to loopback only and the container
-# requires a JOURNAL_API_TOKEN bearer token on every request.
+# — the port is intentionally bound to loopback only and every request is
+# authenticated in-app via sessions or per-user API keys.
 
 services:
   journal:
@@ -34,17 +35,33 @@ services:
       # OCR provider: "anthropic" (default) or "gemini"
       - OCR_PROVIDER=${OCR_PROVIDER:-anthropic}
       - OCR_MODEL=${OCR_MODEL:-}
-      # Bearer token required on every /api/* and /mcp request. The
-      # server refuses to start if this is unset.
-      - JOURNAL_API_TOKEN=${JOURNAL_API_TOKEN}
+      # Secret key for session tokens and signed URLs. The server refuses
+      # to start without it (mcp_server/runserver.py), so fail fast at
+      # compose time with a clear message instead of at container boot.
+      - JOURNAL_SECRET_KEY=${JOURNAL_SECRET_KEY:?JOURNAL_SECRET_KEY must be set in .env}
+      # Auth / accounts — all optional. The compose defaults below mirror
+      # config.py's own defaults (registration closed, rate limiting on)
+      # so behavior is identical whether or not the var is set in .env.
+      # Note: an empty string is NOT a safe default for the int/bool vars
+      # (int("") crashes, "" parses as false), hence the explicit values.
+      - REGISTRATION_ENABLED=${REGISTRATION_ENABLED:-false}
+      - APP_BASE_URL=${APP_BASE_URL:-http://localhost:5173}
+      - AUTH_RATE_LIMIT_ENABLED=${AUTH_RATE_LIMIT_ENABLED:-true}
+      - AUTH_RATE_LIMIT_MAX_REQUESTS=${AUTH_RATE_LIMIT_MAX_REQUESTS:-10}
+      - AUTH_RATE_LIMIT_WINDOW_SECONDS=${AUTH_RATE_LIMIT_WINDOW_SECONDS:-300}
+      # SMTP — needed only for verification / password-reset emails.
+      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-465}
+      - SMTP_USERNAME=${SMTP_USERNAME:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM_EMAIL=${SMTP_FROM_EMAIL:-}
       # Fitness pipeline (see docs/fitness-tier-plan.md). Strava client
-      # credentials and the Garmin Connect login are required at W11+
-      # for live token refresh; W4–W10 use fixtures and don't need them.
+      # credentials are required at W11+ for live token refresh. Garmin
+      # credentials are per-user (stored in the DB via the webapp /
+      # CLI re-auth flow), not global env vars.
       - STRAVA_CLIENT_ID=${STRAVA_CLIENT_ID:-}
       - STRAVA_CLIENT_SECRET=${STRAVA_CLIENT_SECRET:-}
       - STRAVA_REDIRECT_URI=${STRAVA_REDIRECT_URI:-http://localhost:8400/strava/callback}
-      - GARMIN_USERNAME=${GARMIN_USERNAME:-}
-      - GARMIN_PASSWORD=${GARMIN_PASSWORD:-}
       - FITNESS_BACKFILL_START=${FITNESS_BACKFILL_START:-2026-01-01}
       - FITNESS_TRANSIENT_FAILURE_THRESHOLD=${FITNESS_TRANSIENT_FAILURE_THRESHOLD:-3}
     volumes:

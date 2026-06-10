@@ -16,6 +16,7 @@ ENV DB_PATH=/data/journal.db
 ENV CHROMADB_HOST=chromadb
 ENV CHROMADB_PORT=8000
 
-EXPOSE 8000
+# The server binds MCP_PORT, which docker-compose.yml sets to 8400.
+EXPOSE 8400
 
 CMD ["/app/.venv/bin/python", "-m", "journal.mcp_server"]
