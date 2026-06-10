@@ -11,11 +11,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING
 
 from starlette.responses import JSONResponse
 
+from journal.api._handler import handler
 from journal.api._shared import _pricing_to_dict, _runtime_get
 from journal.auth import get_authenticated_user
 from journal.db.pricing import get_all_pricing, update_pricing
@@ -26,24 +28,26 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
     from starlette.requests import Request
 
+    from journal.service_registry import ServicesDict
+
 log = logging.getLogger(__name__)
 
 
 def register_settings_routes(
     mcp: FastMCP,
-    services_getter: Callable[[], dict | None],
+    services_getter: Callable[[], ServicesDict | None],
 ) -> None:
     """Register /api/settings, /api/settings/runtime, /api/settings/pricing."""
 
     @mcp.custom_route("/api/settings", methods=["GET"], name="api_settings")
-    async def get_settings(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def get_settings(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Return current server configuration (non-secret values only).
 
         Secrets (API keys, bearer tokens, Slack bot token) are redacted.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         config = services.get("config")
         if config is None:
             return JSONResponse({"error": "Config not available"}, status_code=503)
@@ -125,11 +129,11 @@ def register_settings_routes(
     @mcp.custom_route(
         "/api/settings/runtime", methods=["GET"], name="api_runtime_settings_get",
     )
-    async def get_runtime_settings(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def get_runtime_settings(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Return all runtime-editable settings with metadata."""
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         runtime = services.get("runtime_settings")
         if runtime is None:
             return JSONResponse({"error": "Runtime settings not available"}, status_code=503)
@@ -138,21 +142,23 @@ def register_settings_routes(
     @mcp.custom_route(
         "/api/settings/runtime", methods=["PATCH"], name="api_runtime_settings_patch",
     )
-    async def patch_runtime_settings(request: Request) -> JSONResponse:
+    @handler(services_getter, parse_json="raw")
+    def patch_runtime_settings(
+        request: Request, services: ServicesDict, raw: bytes
+    ) -> JSONResponse:
         """Update one or more runtime settings. Admin-only."""
         user = get_authenticated_user(request)
         if not user or not user.is_admin:
             return JSONResponse({"error": "Admin access required"}, status_code=403)
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         runtime = services.get("runtime_settings")
         if runtime is None:
             return JSONResponse({"error": "Runtime settings not available"}, status_code=503)
 
+        # Parse in-body ("raw" mode): the admin 403 above must keep
+        # precedence over body-shape 400s.
         try:
-            body = await request.json()
-        except Exception:
+            body = json.loads(raw)
+        except ValueError:
             return JSONResponse({"error": "Invalid JSON"}, status_code=400)
 
         if not isinstance(body, dict):
@@ -181,11 +187,11 @@ def register_settings_routes(
     @mcp.custom_route(
         "/api/settings/pricing", methods=["GET"], name="api_pricing_get",
     )
-    async def get_pricing(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def get_pricing(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Return all API model pricing entries."""
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         db_factory = services.get("db_factory")
         if db_factory is None:
             return JSONResponse({"error": "Database not available"}, status_code=503)
@@ -195,22 +201,24 @@ def register_settings_routes(
     @mcp.custom_route(
         "/api/settings/pricing", methods=["PATCH"], name="api_pricing_patch",
     )
-    async def patch_pricing(request: Request) -> JSONResponse:
+    @handler(services_getter, parse_json="raw")
+    def patch_pricing(
+        request: Request, services: ServicesDict, raw: bytes
+    ) -> JSONResponse:
         """Update pricing for one or more models. Admin-only."""
         user = get_authenticated_user(request)
         if not user or not user.is_admin:
             return JSONResponse({"error": "Admin access required"}, status_code=403)
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         db_factory = services.get("db_factory")
         if db_factory is None:
             return JSONResponse({"error": "Database not available"}, status_code=503)
         conn = db_factory.get()
 
+        # Parse in-body ("raw" mode): the admin 403 above must keep
+        # precedence over body-shape 400s.
         try:
-            body = await request.json()
-        except Exception:
+            body = json.loads(raw)
+        except ValueError:
             return JSONResponse({"error": "Invalid JSON"}, status_code=400)
 
         if not isinstance(body, dict):

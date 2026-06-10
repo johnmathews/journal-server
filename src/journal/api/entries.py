@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from starlette.responses import JSONResponse
 
+from journal.api._handler import handler
 from journal.api._shared import (
     _TOKEN_ENCODING_NAME,
     _TOKEN_MODEL_HINT,
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
     from starlette.requests import Request
 
     from journal.entitystore.store import EntityStore
+    from journal.service_registry import ServicesDict
     from journal.services.ingestion import IngestionService
     from journal.services.jobs import JobRunner
     from journal.services.query import QueryService
@@ -52,18 +54,16 @@ log = logging.getLogger(__name__)
 
 def register_entries_routes(
     mcp: FastMCP,
-    services_getter: Callable[[], dict | None],
+    services_getter: Callable[[], ServicesDict | None],
 ) -> None:
     """Register the ``/api/entries/...`` read/CRUD routes."""
 
     @mcp.custom_route("/api/entries", methods=["GET"], name="api_list_entries")
-    async def list_entries(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def list_entries(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """List journal entries with pagination and optional date filtering."""
-        services = services_getter()
-        if services is None:
-            log.error("GET /api/entries — services not initialized")
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
-
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -105,26 +105,27 @@ def register_entries_routes(
         methods=["GET", "PATCH", "DELETE"],
         name="api_entry_detail",
     )
-    async def entry_detail(request: Request) -> JSONResponse:
+    @handler(services_getter, parse_json="raw")
+    def entry_detail(
+        request: Request, services: ServicesDict, raw: bytes
+    ) -> JSONResponse:
         """Get, update, or delete a single journal entry."""
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
-
         entry_id = int(request.path_params["entry_id"])
         user = get_authenticated_user(request)
         user_id = user.user_id
 
         if request.method == "GET":
-            return await _get_entry(services, entry_id, user_id)
+            return _get_entry(services, entry_id, user_id)
         elif request.method == "PATCH":
-            return await _patch_entry(request, services, entry_id, user_id)
+            return _patch_entry(raw, services, entry_id, user_id)
         elif request.method == "DELETE":
-            return await _delete_entry(services, entry_id, user_id)
+            return _delete_entry(services, entry_id, user_id)
         else:
             return JSONResponse({"error": "Method not allowed"}, status_code=405)
 
-    async def _get_entry(services: dict, entry_id: int, user_id: int) -> JSONResponse:
+    def _get_entry(
+        services: ServicesDict, entry_id: int, user_id: int
+    ) -> JSONResponse:
         query_svc: QueryService = services["query"]
         entry = query_svc.get_entry(entry_id, user_id=user_id)
         if entry is None:
@@ -135,8 +136,8 @@ def register_entries_routes(
         log.info("GET /api/entries/%d — %s, %d words", entry_id, entry.entry_date, entry.word_count)
         return JSONResponse(_entry_to_dict(entry, page_count, uncertain_spans))
 
-    async def _patch_entry(
-        request: Request, services: dict, entry_id: int, user_id: int
+    def _patch_entry(
+        raw: bytes, services: ServicesDict, entry_id: int, user_id: int
     ) -> JSONResponse:
         query_svc: QueryService = services["query"]
         ingestion_svc: IngestionService = services["ingestion"]
@@ -146,9 +147,11 @@ def register_entries_routes(
         if entry is None:
             return JSONResponse({"error": f"Entry {entry_id} not found"}, status_code=404)
 
-        # Parse request body
+        # Parse request body ("raw" mode: parse must stay after the
+        # entry-404 check above, and a non-dict body must keep its
+        # historical behavior).
         try:
-            body = await request.json()
+            body = json.loads(raw)
         except (json.JSONDecodeError, ValueError):
             return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
@@ -249,7 +252,9 @@ def register_entries_routes(
             resp["pipeline_job_id"] = pipeline_job_id
         return JSONResponse(resp)
 
-    async def _delete_entry(services: dict, entry_id: int, user_id: int) -> JSONResponse:
+    def _delete_entry(
+        services: ServicesDict, entry_id: int, user_id: int
+    ) -> JSONResponse:
         job_repo = services["job_repository"]
         active_jobs = job_repo.has_active_jobs_for_entry(entry_id)
         if active_jobs:
@@ -302,7 +307,10 @@ def register_entries_routes(
         methods=["POST"],
         name="api_verify_doubts",
     )
-    async def verify_doubts(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def verify_doubts(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Mark all OCR doubts on an entry as verified.
 
         Sets doubts_verified=1 on the entry. The underlying uncertain
@@ -310,10 +318,6 @@ def register_entries_routes(
         GET and list endpoints return uncertain_span_count=0 and an
         empty uncertain_spans array for this entry.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
-
         query_svc: QueryService = services["query"]
         ingestion_svc: IngestionService = services["ingestion"]
         user = get_authenticated_user(request)
@@ -335,7 +339,10 @@ def register_entries_routes(
         methods=["GET"],
         name="api_entry_chunks",
     )
-    async def entry_chunks(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def entry_chunks(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Return the persisted chunks for an entry, with source offsets.
 
         Used by the webapp overlay to draw chunk boundaries on top of
@@ -343,10 +350,6 @@ def register_entries_routes(
         distinguished from `entry_not_found` so the webapp can surface
         a clear message telling the user to re-ingest or run backfill.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
-
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -402,7 +405,10 @@ def register_entries_routes(
         methods=["GET"],
         name="api_entry_tokens",
     )
-    async def entry_tokens(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def entry_tokens(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Tokenise an entry's text on demand using tiktoken `cl100k_base`.
 
         Returns per-token `{index, token_id, text, char_start, char_end}`
@@ -413,10 +419,6 @@ def register_entries_routes(
         journal-scale text) and avoids any cache invalidation logic
         when `final_text` is edited.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
-
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -472,10 +474,10 @@ def register_entries_routes(
         methods=["GET"],
         name="api_entry_entities",
     )
-    async def entry_entities(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+    @handler(services_getter)
+    def entry_entities(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         entity_store: EntityStore = services["entity_store"]
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)

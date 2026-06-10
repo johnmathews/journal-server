@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 
 from starlette.responses import JSONResponse
 
+from journal.api._handler import JsonBody, handler
 from journal.api._shared import _convert_heic_to_jpeg, _entry_to_dict
 from journal.auth import get_authenticated_user
 
@@ -50,8 +51,12 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
     from starlette.requests import Request
 
+    from journal.api_utils import UploadedFile
+    from journal.service_registry import ServicesDict
     from journal.services.ingestion import IngestionService
     from journal.services.jobs import JobRunner
+
+    MultipartBody = tuple[dict[str, str], dict[str, list[UploadedFile]]]
 
 log = logging.getLogger(__name__)
 
@@ -77,7 +82,7 @@ def _anchors_for(repo, entity_store, storyline_id: int) -> list[dict[str, Any]]:
 
 def register_ingestion_routes(
     mcp: FastMCP,
-    services_getter: Callable[[], dict | None],
+    services_getter: Callable[[], ServicesDict | None],
 ) -> None:
     """Register write/job-creation routes (see module docstring for the rule)."""
 
@@ -86,7 +91,10 @@ def register_ingestion_routes(
         methods=["POST"],
         name="api_ingest_text",
     )
-    async def ingest_text(request: Request) -> JSONResponse:
+    @handler(services_getter, parse_json=True)
+    def ingest_text(
+        request: Request, services: ServicesDict, body: dict[str, Any]
+    ) -> JSONResponse:
         """Create a journal entry from plain text (no OCR).
 
         Request body (JSON):
@@ -96,24 +104,9 @@ def register_ingestion_routes(
 
         Returns 201 with the created entry and an optional mood_job_id.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
-
         ingestion_svc: IngestionService = services["ingestion"]
         user = get_authenticated_user(request)
         user_id = user.user_id
-
-        try:
-            body = await request.json()
-        except (json.JSONDecodeError, ValueError):
-            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
-
-        if not isinstance(body, dict):
-            return JSONResponse(
-                {"error": "Request body must be a JSON object"},
-                status_code=400,
-            )
 
         text = body.get("text")
         if text is None or not isinstance(text, str):
@@ -185,7 +178,10 @@ def register_ingestion_routes(
         methods=["POST"],
         name="api_ingest_file",
     )
-    async def ingest_file(request: Request) -> JSONResponse:
+    @handler(services_getter, parse_multipart=True)
+    def ingest_file(
+        request: Request, services: ServicesDict, body: MultipartBody
+    ) -> JSONResponse:
         """Create a journal entry from an uploaded .md or .txt file.
 
         Expects multipart/form-data with:
@@ -194,25 +190,11 @@ def register_ingestion_routes(
 
         Returns 201 with the created entry and an optional mood_job_id.
         """
-        from journal.api_utils import parse_multipart_request
-
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
-
         ingestion_svc: IngestionService = services["ingestion"]
         user = get_authenticated_user(request)
         user_id = user.user_id
 
-        try:
-            fields, files = await parse_multipart_request(request)
-        except Exception as e:
-            log.warning("POST /api/entries/ingest/file — parse error: %s", e)
-            return JSONResponse(
-                {"error": f"Failed to parse multipart request: {e}"},
-                status_code=400,
-            )
-
+        fields, files = body
         file_list = files.get("file", [])
         if len(file_list) != 1:
             return JSONResponse(
@@ -320,7 +302,10 @@ def register_ingestion_routes(
         methods=["POST"],
         name="api_ingest_images",
     )
-    async def ingest_images(request: Request) -> JSONResponse:
+    @handler(services_getter, parse_multipart=True)
+    def ingest_images(
+        request: Request, services: ServicesDict, body: MultipartBody
+    ) -> JSONResponse:
         """Upload one or more journal page images for OCR ingestion.
 
         Expects multipart/form-data with:
@@ -329,23 +314,10 @@ def register_ingestion_routes(
 
         Returns 202 with a job_id for async processing.
         """
-        from journal.api_utils import parse_multipart_request
-
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
         user_id = user.user_id
 
-        try:
-            fields, files = await parse_multipart_request(request)
-        except Exception as e:
-            log.warning("POST /api/entries/ingest/images — parse error: %s", e)
-            return JSONResponse(
-                {"error": f"Failed to parse multipart request: {e}"},
-                status_code=400,
-            )
-
+        fields, files = body
         image_list = files.get("images", [])
         if not image_list:
             return JSONResponse(
@@ -420,7 +392,10 @@ def register_ingestion_routes(
         methods=["POST"],
         name="api_ingest_audio",
     )
-    async def ingest_audio(request: Request) -> JSONResponse:
+    @handler(services_getter, parse_multipart=True)
+    def ingest_audio(
+        request: Request, services: ServicesDict, body: MultipartBody
+    ) -> JSONResponse:
         """Upload one or more audio recordings for transcription ingestion.
 
         Expects multipart/form-data with:
@@ -431,23 +406,10 @@ def register_ingestion_routes(
 
         Returns 202 with a job_id for async processing.
         """
-        from journal.api_utils import parse_multipart_request
-
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
         user_id = user.user_id
 
-        try:
-            fields, files = await parse_multipart_request(request)
-        except Exception as e:
-            log.warning("POST /api/entries/ingest/audio — parse error: %s", e)
-            return JSONResponse(
-                {"error": f"Failed to parse multipart request: {e}"},
-                status_code=400,
-            )
-
+        fields, files = body
         audio_list = files.get("audio", [])
         if not audio_list:
             return JSONResponse(
@@ -528,7 +490,10 @@ def register_ingestion_routes(
         methods=["POST"],
         name="api_entities_extract",
     )
-    async def extract_entities(request: Request) -> JSONResponse:
+    @handler(services_getter, parse_json=JsonBody(invalid_error=None))
+    def extract_entities(
+        request: Request, services: ServicesDict, body: dict[str, Any]
+    ) -> JSONResponse:
         """Submit an entity-extraction batch job.
 
         Request body matches the legacy synchronous shape —
@@ -542,22 +507,10 @@ def register_ingestion_routes(
         poll ``GET /api/jobs/{job_id}`` to observe progress and
         result.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
         user_id = user.user_id
         job_runner: JobRunner = services["job_runner"]
 
-        try:
-            body = await request.json()
-        except (json.JSONDecodeError, ValueError):
-            body = {}
-        if not isinstance(body, dict):
-            return JSONResponse(
-                {"error": "Request body must be a JSON object"},
-                status_code=400,
-            )
         try:
             job = job_runner.submit_entity_extraction(body, user_id=user_id)
         except ValueError as e:
@@ -579,7 +532,10 @@ def register_ingestion_routes(
         methods=["POST"],
         name="api_create_storyline",
     )
-    async def create_storyline(request: Request) -> JSONResponse:
+    @handler(services_getter, parse_json="raw")
+    def create_storyline(
+        request: Request, services: ServicesDict, raw: bytes
+    ) -> JSONResponse:
         """Create a new storyline.
 
         Body: ``{entity_ids: list[int], name: str, description?: str,
@@ -596,11 +552,6 @@ def register_ingestion_routes(
         ``storyline_generation`` job so the new storyline's panels
         start populating without a separate regenerate call.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503,
-            )
         repo = services.get("storyline_repository")
         if repo is None:
             return JSONResponse(
@@ -610,8 +561,10 @@ def register_ingestion_routes(
         entity_store = services.get("entity_store")
         user = get_authenticated_user(request)
 
+        # Parse in-body ("raw" mode): the repo-503 check above must
+        # keep precedence over body-shape 400s.
         try:
-            body = await request.json()
+            body = json.loads(raw)
         except (json.JSONDecodeError, ValueError):
             body = {}
         if not isinstance(body, dict):
@@ -716,7 +669,10 @@ def register_ingestion_routes(
         methods=["POST"],
         name="api_regenerate_storyline",
     )
-    async def regenerate_storyline(request: Request) -> JSONResponse:
+    @handler(services_getter, parse_json="raw")
+    def regenerate_storyline(
+        request: Request, services: ServicesDict, raw_body: bytes
+    ) -> JSONResponse:
         """Queue a regeneration job for one storyline.
 
         Optional JSON body: ``{start_date?: ISO, end_date?: ISO,
@@ -728,11 +684,6 @@ def register_ingestion_routes(
         invalid mode); 404 if the storyline doesn't belong to the
         caller; 503 if the StorylineGenerationService isn't wired.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503,
-            )
         repo = services.get("storyline_repository")
         job_runner: JobRunner | None = services.get("job_runner")
         if repo is None or job_runner is None:
@@ -748,11 +699,11 @@ def register_ingestion_routes(
                 {"error": "Storyline not found"}, status_code=404,
             )
 
-        # Parse and validate optional body. Missing body / empty
-        # body == replace mode with the storyline row's stored
-        # window — same shape as the original W6 contract.
+        # Parse and validate optional body ("raw" mode: parse must stay
+        # after the 404 check above). Missing body / empty body ==
+        # replace mode with the storyline row's stored window — same
+        # shape as the original W6 contract.
         try:
-            raw_body = await request.body()
             body: dict[str, Any]
             if not raw_body:
                 body = {}
@@ -808,12 +759,10 @@ def register_ingestion_routes(
         methods=["DELETE"],
         name="api_delete_storyline",
     )
-    async def delete_storyline(request: Request) -> JSONResponse:
-        services = services_getter()
-        if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503,
-            )
+    @handler(services_getter)
+    def delete_storyline(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         repo = services.get("storyline_repository")
         if repo is None:
             return JSONResponse(
@@ -837,7 +786,10 @@ def register_ingestion_routes(
         methods=["PUT"],
         name="api_set_storyline_anchors",
     )
-    async def set_storyline_anchors(request: Request) -> JSONResponse:
+    @handler(services_getter, parse_json="raw")
+    def set_storyline_anchors(
+        request: Request, services: ServicesDict, raw: bytes
+    ) -> JSONResponse:
         """Replace the anchor set on an existing storyline.
 
         Body: ``{entity_ids: list[int]}`` — 1..MAX_ANCHORS entries.
@@ -849,11 +801,6 @@ def register_ingestion_routes(
         this endpoint is available via REST + MCP so Claude and
         scripted clients can manage anchors today.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503,
-            )
         repo = services.get("storyline_repository")
         if repo is None:
             return JSONResponse(
@@ -868,8 +815,10 @@ def register_ingestion_routes(
             return JSONResponse(
                 {"error": "Storyline not found"}, status_code=404,
             )
+        # Parse in-body ("raw" mode): the 503/404 checks above must keep
+        # precedence over body-shape 400s.
         try:
-            body = await request.json()
+            body = json.loads(raw)
         except (json.JSONDecodeError, ValueError):
             body = {}
         if not isinstance(body, dict):
@@ -915,7 +864,10 @@ def register_ingestion_routes(
         methods=["POST"],
         name="api_mood_backfill",
     )
-    async def mood_backfill(request: Request) -> JSONResponse:
+    @handler(services_getter, parse_json=JsonBody(invalid_error=None))
+    def mood_backfill(
+        request: Request, services: ServicesDict, body: dict[str, Any]
+    ) -> JSONResponse:
         """Submit a mood-score backfill batch job.
 
         Request body: ``{mode, start_date?, end_date?}`` where
@@ -923,22 +875,10 @@ def register_ingestion_routes(
         or bad types return 400. Returns 202 with
         ``{"job_id", "status"}``.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
         user_id = user.user_id
         job_runner: JobRunner = services["job_runner"]
 
-        try:
-            body = await request.json()
-        except (json.JSONDecodeError, ValueError):
-            body = {}
-        if not isinstance(body, dict):
-            return JSONResponse(
-                {"error": "Request body must be a JSON object"},
-                status_code=400,
-            )
         try:
             job = job_runner.submit_mood_backfill(body, user_id=user_id)
         except ValueError as e:
@@ -956,7 +896,10 @@ def register_ingestion_routes(
         methods=["POST"],
         name="api_fitness_sync",
     )
-    async def fitness_sync(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def fitness_sync(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Trigger a fitness fetch+normalize job for the given source.
 
         ``source`` must be ``"strava"`` or ``"garmin"``. Returns 202 with
@@ -974,9 +917,6 @@ def register_ingestion_routes(
         without a Garmin auth row produces a clean ``auth_broken`` sync
         rather than a 503.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
         user_id = user.user_id
         source = str(request.path_params["source"])
@@ -1036,7 +976,10 @@ def register_ingestion_routes(
         methods=["POST"],
         name="api_fitness_backfill",
     )
-    async def fitness_backfill(request: Request) -> JSONResponse:
+    @handler(services_getter, parse_json="raw")
+    def fitness_backfill(
+        request: Request, services: ServicesDict, raw: bytes
+    ) -> JSONResponse:
         """Queue a historical backfill job for ``source`` (W5).
 
         Body: ``{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"?}``. Returns
@@ -1051,9 +994,6 @@ def register_ingestion_routes(
         ``journal fitness-backfill`` CLI, so resume / abort /
         transient-streak semantics are identical.
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
         user_id = user.user_id
         source = str(request.path_params["source"])
@@ -1063,8 +1003,10 @@ def register_ingestion_routes(
                 status_code=400,
             )
 
+        # Parse in-body ("raw" mode): the source-validation 400 above
+        # must keep precedence over body-shape 400s.
         try:
-            body = await request.json()
+            body = json.loads(raw)
         except json.JSONDecodeError:
             return JSONResponse(
                 {"error": "Request body must be valid JSON"},

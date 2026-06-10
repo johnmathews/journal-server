@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from starlette.responses import JSONResponse
 
+from journal.api._handler import handler
 from journal.api._shared import _job_to_dict
 from journal.auth import get_authenticated_user
 
@@ -24,13 +25,14 @@ if TYPE_CHECKING:
     from starlette.requests import Request
 
     from journal.db.jobs_repository import SQLiteJobRepository
+    from journal.service_registry import ServicesDict
 
 log = logging.getLogger(__name__)
 
 
 def register_jobs_routes(
     mcp: FastMCP,
-    services_getter: Callable[[], dict | None],
+    services_getter: Callable[[], ServicesDict | None],
 ) -> None:
     """Register /api/jobs and /api/jobs/{job_id}."""
 
@@ -39,11 +41,11 @@ def register_jobs_routes(
         methods=["GET"],
         name="api_list_jobs",
     )
-    async def list_jobs(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def list_jobs(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """List jobs with optional filters, ordered newest first."""
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
         user_id = None if user.is_admin else user.user_id
         job_repository: SQLiteJobRepository = services["job_repository"]
@@ -86,15 +88,15 @@ def register_jobs_routes(
         methods=["GET"],
         name="api_job_detail",
     )
-    async def job_detail(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def job_detail(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Return the current state of a batch job by id.
 
         404 if the job id is unknown. Otherwise returns the full
         serialised job dict (``_job_to_dict`` shape).
         """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
         user_id = None if user.is_admin else user.user_id
         job_repository: SQLiteJobRepository = services["job_repository"]

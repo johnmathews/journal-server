@@ -197,9 +197,7 @@ class TestSessionOrKeyBackend:
             "path": "/api/entries",
         }
         conn = HTTPConnection(scope)
-        result = asyncio.get_event_loop().run_until_complete(
-            backend.authenticate(conn)
-        )
+        result = asyncio.run(backend.authenticate(conn))
         assert result is None
 
     def test_authenticates_via_session_cookie(self) -> None:
@@ -219,9 +217,7 @@ class TestSessionOrKeyBackend:
             "path": "/api/entries",
         }
         conn = HTTPConnection(scope)
-        result = asyncio.get_event_loop().run_until_complete(
-            backend.authenticate(conn)
-        )
+        result = asyncio.run(backend.authenticate(conn))
         assert result is not None
         creds, user = result
         assert "authenticated" in creds.scopes
@@ -245,9 +241,7 @@ class TestSessionOrKeyBackend:
             "path": "/api/entries",
         }
         conn = HTTPConnection(scope)
-        result = asyncio.get_event_loop().run_until_complete(
-            backend.authenticate(conn)
-        )
+        result = asyncio.run(backend.authenticate(conn))
         assert result is not None
         creds, user = result
         assert "authenticated" in creds.scopes
@@ -278,9 +272,7 @@ class TestSessionOrKeyBackend:
             "path": "/api/entries",
         }
         conn = HTTPConnection(scope)
-        result = asyncio.get_event_loop().run_until_complete(
-            backend.authenticate(conn)
-        )
+        result = asyncio.run(backend.authenticate(conn))
         assert result is not None
         _, user = result
         assert user.user_id == 1  # user_a from session, not user_b from key
@@ -303,9 +295,7 @@ class TestSessionOrKeyBackend:
             "path": "/api/entries",
         }
         conn = HTTPConnection(scope)
-        result = asyncio.get_event_loop().run_until_complete(
-            backend.authenticate(conn)
-        )
+        result = asyncio.run(backend.authenticate(conn))
         assert result is not None
         creds, _ = result
         assert "admin" in creds.scopes
@@ -333,9 +323,7 @@ class TestSessionOrKeyBackend:
             "path": "/api/entries",
         }
         conn = HTTPConnection(scope)
-        result = asyncio.get_event_loop().run_until_complete(
-            backend.authenticate(conn)
-        )
+        result = asyncio.run(backend.authenticate(conn))
         assert result is not None
         _, auth_user = result
         assert auth_user.user_id == 5
@@ -357,9 +345,7 @@ class TestSessionOrKeyBackend:
             "path": "/api/entries",
         }
         conn = HTTPConnection(scope)
-        result = asyncio.get_event_loop().run_until_complete(
-            backend.authenticate(conn)
-        )
+        result = asyncio.run(backend.authenticate(conn))
         assert result is not None
 
     def test_non_bearer_scheme_ignored(self) -> None:
@@ -379,9 +365,7 @@ class TestSessionOrKeyBackend:
             "path": "/api/entries",
         }
         conn = HTTPConnection(scope)
-        result = asyncio.get_event_loop().run_until_complete(
-            backend.authenticate(conn)
-        )
+        result = asyncio.run(backend.authenticate(conn))
         assert result is None
 
 

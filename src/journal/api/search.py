@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from starlette.responses import JSONResponse
 
+from journal.api._handler import handler
 from journal.api._shared import _search_result_dict
 from journal.auth import get_authenticated_user
 
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
     from starlette.requests import Request
 
+    from journal.service_registry import ServicesDict
     from journal.services.query import QueryService
 
 log = logging.getLogger(__name__)
@@ -29,12 +31,13 @@ log = logging.getLogger(__name__)
 
 def register_search_routes(
     mcp: FastMCP,
-    services_getter: Callable[[], dict | None],
+    services_getter: Callable[[], ServicesDict | None],
 ) -> None:
     """Register /api/search."""
 
     @mcp.custom_route("/api/search", methods=["GET"], name="api_search")
-    async def search(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def search(request: Request, services: ServicesDict, body: None) -> JSONResponse:
         """Hybrid search across journal entries.
 
         Combines BM25 (SQLite FTS5) and dense (embedding) retrieval,
@@ -52,11 +55,11 @@ def register_search_routes(
         The `mode` query parameter has been retired. Passing it is a
         client bug — the response is 400 `mode_removed` so the bug is
         visible.
-        """
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
 
+        Runs as a sync body on a worker thread via the ``handler``
+        decorator — the embed + rerank pipeline must not block the
+        event loop.
+        """
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
         user_id = user.user_id

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from starlette.responses import JSONResponse
 
+from journal.api._handler import JsonBody, handler
 from journal.auth import get_authenticated_user
 
 if TYPE_CHECKING:
@@ -21,12 +22,14 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
     from starlette.requests import Request
 
+    from journal.service_registry import ServicesDict
+
 log = logging.getLogger(__name__)
 
 
 def register_notifications_routes(
     mcp: FastMCP,
-    services_getter: Callable[[], dict | None],
+    services_getter: Callable[[], ServicesDict | None],
 ) -> None:
     """Register /api/notifications/* routes."""
 
@@ -35,12 +38,12 @@ def register_notifications_routes(
         methods=["GET"],
         name="api_notif_topics",
     )
-    async def get_notification_topics(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def get_notification_topics(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Return notification topics with the user's current toggle state."""
         user = get_authenticated_user(request)
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         notif = services.get("notification_service")
         if notif is None:
             return JSONResponse({"error": "Notification service not configured"}, status_code=503)
@@ -52,12 +55,12 @@ def register_notifications_routes(
         methods=["GET"],
         name="api_notif_status",
     )
-    async def get_notification_status(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def get_notification_status(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Return whether the user has Pushover credentials configured."""
         user = get_authenticated_user(request)
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         notif = services.get("notification_service")
         if notif is None:
             return JSONResponse({"configured": False})
@@ -68,20 +71,15 @@ def register_notifications_routes(
         methods=["POST"],
         name="api_notif_validate",
     )
-    async def validate_notification_credentials(request: Request) -> JSONResponse:
+    @handler(services_getter, parse_json=JsonBody(invalid_error="Invalid JSON", require_dict=False))
+    def validate_notification_credentials(
+        request: Request, services: ServicesDict, body: dict | object
+    ) -> JSONResponse:
         """Validate Pushover credentials and save them if valid."""
         user = get_authenticated_user(request)
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         notif = services.get("notification_service")
         if notif is None:
             return JSONResponse({"error": "Notification service not configured"}, status_code=503)
-
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
 
         user_key = body.get("user_key", "")
         app_token = body.get("app_token", "")
@@ -112,12 +110,12 @@ def register_notifications_routes(
         methods=["POST"],
         name="api_notif_test",
     )
-    async def send_test_notification(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def send_test_notification(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Send a test Pushover notification using the user's saved credentials."""
         user = get_authenticated_user(request)
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         notif = services.get("notification_service")
         if notif is None:
             return JSONResponse({"error": "Notification service not configured"}, status_code=503)

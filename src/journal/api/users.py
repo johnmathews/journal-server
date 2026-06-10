@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from starlette.responses import JSONResponse
 
+from journal.api._handler import JsonBody, handler
 from journal.auth import get_authenticated_user
 
 if TYPE_CHECKING:
@@ -22,12 +23,14 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
     from starlette.requests import Request
 
+    from journal.service_registry import ServicesDict
+
 log = logging.getLogger(__name__)
 
 
 def register_users_routes(
     mcp: FastMCP,
-    services_getter: Callable[[], dict | None],
+    services_getter: Callable[[], ServicesDict | None],
 ) -> None:
     """Register /api/users/me/preferences GET and PATCH."""
 
@@ -36,12 +39,12 @@ def register_users_routes(
         methods=["GET"],
         name="api_preferences_get",
     )
-    async def get_preferences(request: Request) -> JSONResponse:
+    @handler(services_getter)
+    def get_preferences(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
         """Return all preferences for the authenticated user."""
         user = get_authenticated_user(request)
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user_repo = services["user_repo"]
         prefs = user_repo.get_preferences(user.user_id)
         return JSONResponse({"preferences": prefs})
@@ -51,27 +54,17 @@ def register_users_routes(
         methods=["PATCH"],
         name="api_preferences_patch",
     )
-    async def patch_preferences(request: Request) -> JSONResponse:
+    @handler(services_getter, parse_json=JsonBody(invalid_error="Invalid JSON"))
+    def patch_preferences(
+        request: Request, services: ServicesDict, body: dict
+    ) -> JSONResponse:
         """Update one or more preferences for the authenticated user.
 
         Body: ``{"key": value, ...}`` — each key is a preference name,
         value is any JSON-serialisable object.
         """
         user = get_authenticated_user(request)
-        services = services_getter()
-        if services is None:
-            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user_repo = services["user_repo"]
-
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-
-        if not isinstance(body, dict):
-            return JSONResponse(
-                {"error": "Request body must be a JSON object"}, status_code=400,
-            )
 
         # Admin-only notification topics cannot be set by non-admin users.
         from journal.services.notifications import TOPICS
