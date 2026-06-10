@@ -17,11 +17,17 @@ src/journal/
   logging.py            — Structured logging setup
   models.py             — Shared data models (dataclasses)
   db/
-    connection.py       — Connection factory with PRAGMAs
+    connection.py       — get_connection() with PRAGMAs (same-thread guard on)
+    factory.py          — ConnectionFactory: per-thread SQLite connections
     migrations.py       — Migration runner (PRAGMA user_version)
-    migrations/*.sql    — SQL migration files (currently 0001 → 0022)
+    migrations/*.sql    — SQL migration files (currently 0001 → 0029)
     repository/         — SQLiteEntryRepository carved into protocol/store/core/
                           pages/chunks/search/mood/stats/analytics
+    fitness_repository.py    — Fitness activities / daily wellness / auth state
+    fitness_integrity.py     — Fitness data integrity checks
+    storyline_repository.py  — Storylines + storyline-entity anchors
+    jobs_repository.py       — Background jobs table
+    user_repository.py       — Users, sessions, API keys
   providers/            — External-API adapters behind Protocol interfaces
     ocr.py              — OCR Protocol + Anthropic and Gemini adapters (prod = Gemini)
     transcription.py    — Transcription Protocol + OpenAI (gpt-4o-transcribe / whisper-1)
@@ -40,21 +46,26 @@ src/journal/
     chunking.py         — Text chunking with tiktoken
     hybrid.py           — Hybrid BM25 + dense + RRF + listwise rerank pipeline
     entity_extraction/  — Entity extraction service (orchestrator + helpers)
+    fitness/            — Strava/Garmin fetch, normalize, backfill + activity-type map
+    storylines/         — Storyline generation service, extension classifier, segments
     jobs/               — Background job runner: workers/, runner, save_pipeline,
                           notifier, retry
     auth.py / email.py  — Multi-user auth (sessions, API keys, password reset)
     notifications.py    — Toast + Pushover notification dispatch
     reload.py           — Live-reload hooks for context files / mood dimensions /
                           entity casing
-  mcp_server/           — FastMCP server: bootstrap, app, runserver, tools/*
-  api/                  — REST routes (auth, dashboard, entries, entities,
-                          entity_merge, fitness, fitness_garmin, fitness_jobs,
-                          fitness_strava, ingestion, jobs, notifications, search,
-                          settings, storylines, storylines_write, users, health)
+  mcp_server/           — FastMCP server: bootstrap, app, runserver, tools/
+                          (queries, ingestion, entities, jobs, fitness, storylines)
+  api/                  — REST routes (dashboard, entries, entities, entity_merge,
+                          fitness, fitness_garmin, fitness_jobs, fitness_strava,
+                          ingestion, jobs, notifications, search, settings,
+                          storylines, storylines_write, users, health — see
+                          api/__init__.py for the authoritative list; auth routes
+                          live in auth_api/)
   auth_api/             — Auth REST endpoints carved into core/account/profile/
                           api_keys/admin
-  cli/                  — Typer CLI: __init__ (entry), entities, mood, _services,
-                          _seed_samples
+  cli/                  — Typer CLI: __init__ (entry), entities, fitness, mood,
+                          _services, _seed_samples
 tests/                  — pytest tests mirroring src structure
 docs/                   — Project documentation
 journal/                — Development journal entries (YYMMDD-name.md)
@@ -74,7 +85,7 @@ journal/                — Development journal entries (YYMMDD-name.md)
 
 The suite has two tiers:
 
-- **Unit tests** (~1900 tests): pure Python + in-memory SQLite. No
+- **Unit tests** (~2580 tests): pure Python + in-memory SQLite. No
   external services. `uv run pytest` runs them and they always pass.
 - **Integration tests** (`tests/integration/`, marked
   `@pytest.mark.integration`): need a real ChromaDB. `tests/integration/
@@ -84,7 +95,7 @@ The suite has two tiers:
   **auto-skips the suite
   with an actionable reason** if Chroma isn't reachable. So plain
   `uv run pytest` from a cold dev box now reports
-  "1925 passed, 8 skipped" rather than 8 errors.
+  "2583 passed, 11 skipped" rather than 11 errors.
 
 Three modes:
 
@@ -93,7 +104,7 @@ Three modes:
 2. **Run integration tests too:** bring up Chroma first, then run.
    ```bash
    docker compose -f docker-compose.dev.yml up -d   # Chroma on :8401
-   uv run pytest                                    # all 1933 pass
+   uv run pytest                                    # all 2594 pass
    ```
 3. **Match what CI does for the unit job (force-skip integration even
    if Chroma is up):** `uv run pytest -m "not integration"`. CI runs

@@ -96,15 +96,16 @@ def submit_save_entry_pipeline(
     follow_ups: dict[str, str] = {}
 
     # Defer every child's executor.submit until AFTER this thread is
-    # done writing to SQLite. The connection is opened with
-    # check_same_thread=False and shared with the worker thread; if a
-    # child starts executing while this thread is still calling
-    # _jobs.create / mark_succeeded, the two threads collide on the
-    # connection and one commit fails with
-    # ``sqlite3.OperationalError: not an error``. The fix is to do
-    # all of this thread's writes first, then dispatch workers in a
-    # batch — single-worker executor + serialised dispatch keeps the
-    # worker thread idle until we are done.
+    # done writing to SQLite. Historical origin: when all threads
+    # shared one ``check_same_thread=False`` connection, an
+    # early-starting child collided with this thread's
+    # _jobs.create / mark_succeeded commits
+    # (``sqlite3.OperationalError: not an error``). Per-thread
+    # connections (db/factory.py, 2026-05-11) removed that failure
+    # mode, but the deferred dispatch is kept deliberately: children
+    # must observe the parent row (and their own rows) fully
+    # committed when they start, and batched FIFO dispatch keeps the
+    # pipeline ordering deterministic.
     deferred: list[Callable[[], None]] = []
 
     def _stage_child(

@@ -60,13 +60,17 @@ This means the worst case after an unexpected crash is "the user sees the job th
 
 ## Threading and SQLite
 
-The main server connection is opened with `check_same_thread=False` (`src/journal/db/connection.py::get_connection`) so
-that the JobRunner's worker thread can write to it from outside the thread where it was created.
+SQLite access is **per-thread**: every thread (the JobRunner's worker thread and each API request thread) gets its own
+`sqlite3.Connection` from the process-wide `ConnectionFactory` (`src/journal/db/factory.py`), opened with the default
+`check_same_thread=True` so accidental cross-thread use trips Python's built-in guard. WAL mode lets independent
+connections read while another writes, and SQLite's file-level writer lock plus the 5s `busy_timeout` serialises
+writers.
 
-**This is only safe because the executor has `max_workers=1`.** WAL + `synchronous=NORMAL` are safe for cross-thread
-access _as long as all writes serialise_ — and single-worker guarantees that. If the pool is ever bumped to multiple
-workers, the SQLite threading model must be revisited. There is a prominent comment in `services/jobs.py` next to the
-executor construction that flags this invariant.
+The previous model — one shared `check_same_thread=False` connection written by multiple threads — caused two
+production incidents and was retired on 2026-05-11; see
+[`archive/sqlite-per-thread-connections-plan.md`](archive/sqlite-per-thread-connections-plan.md). `max_workers=1` on
+the executor remains a deliberate choice (predictable LLM rate usage, no job-vs-job races — see the docstrings in
+`services/jobs/runner.py`), but it is no longer an SQLite-safety requirement.
 
 ## REST surface
 

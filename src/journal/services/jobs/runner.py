@@ -17,19 +17,19 @@ It owns:
     1. Predictable LLM rate usage (no contention for tokens).
     2. Simpler failure reasoning: jobs cannot be racing each other.
 
-  A third thing it does *not* fully give us is SQLite safety.
-  The shared connection opened with `check_same_thread=False`
-  is also touched by the API request thread, so the runner's
-  worker thread is not the only writer. See `db/connection.py`
-  for the full hazard analysis.
+  SQLite safety is *not* part of that list any more: since the
+  per-thread `ConnectionFactory` migration (2026-05-11, see
+  `db/factory.py` and
+  `docs/archive/sqlite-per-thread-connections-plan.md`), each
+  thread — worker or API — opens its own connection, so the old
+  shared-connection commit race is structurally impossible.
 
-IMPORTANT: bumping `max_workers` above 1 is a serious change. With
-one worker plus the API thread there are already TWO writer
-threads on the shared connection — multiple worker threads would
-add more, compounding the residual race risk documented in
-`db/connection.py`. The schema access pattern must be redesigned
-(per-thread connections or a connection-wide write lock holding
-across multi-step transactions) before any concurrency increase.
+IMPORTANT: if `max_workers` is ever bumped above 1, the two
+rationales above are what you are giving up — LLM rate usage
+becomes contended and job-vs-job interactions need real analysis.
+SQLite is no longer the blocker (WAL + per-thread connections +
+the file-level writer lock handle concurrent writers), but the
+LLM-rate and reasoning constraints still make 1 the right number.
 
 Worker bodies live in ``services/jobs/workers/<name>.py``. Each one
 is a free function ``run_<name>(ctx, job_id, params)`` taking a
@@ -145,18 +145,19 @@ class JobRunner:
     serialised — this keeps LLM rate-limiting simple and reasoning
     about job-vs-job interactions tractable.
 
-    NOTE: the API thread is also a writer to the shared SQLite
-    connection (the MCP server opens it with
-    `check_same_thread=False` so this runner can use it). The
-    "single worker" only constrains background concurrency, not
-    overall connection concurrency — see `db/connection.py` for
-    the residual cross-thread race notes.
+    NOTE: SQLite access is per-thread. The worker thread and each
+    API thread get their own connection from the process-wide
+    `ConnectionFactory` (`db/factory.py`); the historical
+    shared-connection hazard (one `check_same_thread=False`
+    connection written by multiple threads) was retired on
+    2026-05-11 — see
+    `docs/archive/sqlite-per-thread-connections-plan.md`.
 
-    IMPORTANT: if `max_workers` is ever bumped above 1, the
-    threading hazard documented in `db/connection.py` becomes
-    materially worse — multiple worker threads + the API thread
-    on one connection compounds the existing risk and the access
-    pattern must be redesigned before any change.
+    IMPORTANT: `max_workers=1` is a deliberate choice for the two
+    reasons above (predictable LLM rate usage, tractable job-vs-job
+    reasoning), not an SQLite constraint. Bumping it requires
+    re-thinking LLM rate limits and inter-job interactions, not
+    the database layer.
     """
 
     def __init__(

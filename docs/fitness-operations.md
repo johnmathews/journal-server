@@ -1,6 +1,6 @@
 # Fitness Operations
 
-**Status:** active. **Last updated:** 2026-05-10.
+**Status:** active. **Last updated:** 2026-06-10 (prod `.env` hygiene completed — the retired `GARMIN_USERNAME` / `GARMIN_PASSWORD` / `STRAVA_REFRESH_TOKEN` vars are gone from prod; see `journal/260604-strava-refresh-token-vestigial-audit.md`).
 
 Operator-facing runbook for the fitness pipeline. Covers initial setup, re-auth,
 historical backfill, sync monitoring, and troubleshooting the rough edges that
@@ -47,13 +47,6 @@ fallback.
 | `FITNESS_BACKFILL_START` | both (default `2026-01-01`) | `fitness-backfill` default `--start` |
 | `FITNESS_TRANSIENT_FAILURE_THRESHOLD` | both (default `3`) | W6 fetch service auth-broken trip + backfill streak abort |
 | `FITNESS_HEALTH_BROKEN_DEGRADED_HOURS` | both (default `48`) | `/api/health` downgrade when a source has been broken longer than this |
-
-**Operator note (prod env hygiene).** The legacy `GARMIN_USERNAME` /
-`GARMIN_PASSWORD` env vars are no longer read by any code path. They may
-remain in the prod `.env` during the transition; remove them on the next
-deploy that follows W6. A vestigial `STRAVA_REFRESH_TOKEN` env var (never
-read by the current codebase — predates the `fitness_auth_state` table) is
-also safe to drop at the same time.
 
 See [`configuration.md`](configuration.md#optional--fitness-integration) for
 the canonical reference.
