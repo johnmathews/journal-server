@@ -6,7 +6,7 @@ Auto-skipped when Chroma is unreachable (see
     docker compose -f docker-compose.dev.yml up -d   # Chroma on :8401
     uv run pytest tests/integration
 
-CI sets ``CHROMA_PORT=8000`` explicitly to hit its service container.
+CI sets ``CHROMADB_PORT=8000`` explicitly to hit its service container.
 Local default is 8401 (the dev compose port).
 
 The fixtures use a unique collection name per test so concurrent runs

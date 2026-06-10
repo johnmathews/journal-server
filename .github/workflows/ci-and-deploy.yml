@@ -79,8 +79,8 @@ jobs:
 
       - name: Integration tests (Chroma)
         env:
-          CHROMA_HOST: localhost
-          CHROMA_PORT: "8000"
+          CHROMADB_HOST: localhost
+          CHROMADB_PORT: "8000"
         run: uv run pytest -m integration -v
 
   build-and-push:
