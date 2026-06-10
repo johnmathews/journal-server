@@ -549,7 +549,7 @@ class TestJobRunnerStorylineSubmit:
         runner = _build_minimal_runner(factory, generation=None)
         with pytest.raises(RuntimeError, match="not configured"):
             runner.submit_storyline_generation(1, user_id=1)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
     def test_submit_generation_queues_when_service_present(
         self,
@@ -558,7 +558,7 @@ class TestJobRunnerStorylineSubmit:
         svc = _FakeGenerationService(GenerationResult(storyline_id=7))
         runner = _build_minimal_runner(factory, generation=svc)
         job = runner.submit_storyline_generation(7, user_id=1)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
         # Run completed: storyline_id 7 was passed through
         assert svc.calls == [7]
         finished = runner._jobs.get(job.id)  # type: ignore[attr-defined]
@@ -581,7 +581,7 @@ class TestJobRunnerStorylineSubmit:
             end_date="2099-04-30",
             mode="append",
         )
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         finished = runner._jobs.get(job.id)  # type: ignore[attr-defined]
         assert finished is not None
@@ -607,7 +607,7 @@ class TestJobRunnerStorylineSubmit:
                     9, user_id=1, mode="lolnope",
                 )
         finally:
-            runner.shutdown(wait=True)
+            runner.shutdown(wait=True, cancel_futures=False)
 
     def test_submit_extension_check_refuses_when_classifier_missing(
         self,
@@ -616,7 +616,7 @@ class TestJobRunnerStorylineSubmit:
         runner = _build_minimal_runner(factory, classifier=None)
         with pytest.raises(RuntimeError, match="not configured"):
             runner.submit_storyline_extension_check(1, user_id=1)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
 
 def _build_minimal_runner(

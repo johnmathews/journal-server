@@ -136,7 +136,7 @@ def app_with_storylines(
             "runner": runner,
         }
     finally:
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
         factory.close_current()
 
 
@@ -348,7 +348,7 @@ class TestStorylinesAPI:
 
         # Flush the executor and check the fake was called for both
         # the auto-kicked create job (W7) and the explicit regen.
-        ctx["runner"].shutdown(wait=True)
+        ctx["runner"].shutdown(wait=True, cancel_futures=False)
         assert ctx["gen_service"].calls == [sid, sid]
 
     def test_regenerate_404_on_unknown(

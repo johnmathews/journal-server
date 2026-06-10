@@ -621,15 +621,23 @@ class JobRunner:
         )
         return job
 
-    def shutdown(self, wait: bool = False) -> None:
-        """Stop the executor, cancelling queued-but-not-started tasks.
+    def shutdown(self, wait: bool = False, *, cancel_futures: bool = True) -> None:
+        """Stop the executor.
 
         Call once at server shutdown. Running tasks are allowed to
-        finish their current iteration; queued tasks are cancelled.
+        finish their current iteration; with the default
+        ``cancel_futures=True``, queued-but-not-started tasks are
+        cancelled — their job rows stay ``queued`` and are reconciled
+        as stuck on next boot. Tests that submit work and then want to
+        assert on its outcome must pass ``cancel_futures=False`` so
+        shutdown *drains* the queue instead of racing it: with the
+        default, a submit immediately followed by ``shutdown(wait=True)``
+        can cancel the future before the worker dequeues it on a loaded
+        machine (observed as a CI-only flake, 2026-06-10).
         After `shutdown`, further `submit_*` calls raise
         `RuntimeError` from the underlying executor.
         """
-        self._executor.shutdown(wait=wait, cancel_futures=True)
+        self._executor.shutdown(wait=wait, cancel_futures=cancel_futures)
 
     @property
     def mood_scoring(self) -> MoodScoringService | None:

@@ -92,7 +92,7 @@ def job_runner(
         entry_repository=object(),  # type: ignore[arg-type]
     )
     yield runner
-    runner.shutdown(wait=True)
+    runner.shutdown(wait=True, cancel_futures=False)
 
 
 @pytest.fixture
@@ -141,7 +141,7 @@ def configured_runner(
         backfill_garmin_callable=_bf("garmin"),
     )
     yield runner
-    runner.shutdown(wait=True)
+    runner.shutdown(wait=True, cancel_futures=False)
 
 
 def _make_ctx(

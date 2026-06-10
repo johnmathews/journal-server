@@ -282,7 +282,7 @@ def runner_factory(jobs_repo, threadsafe_factory):
 
     for runner in created:
         with contextlib.suppress(Exception):
-            runner.shutdown(wait=True)
+            runner.shutdown(wait=True, cancel_futures=False)
 
 
 # --------------------------------------------------------------------
@@ -374,7 +374,7 @@ class TestEntityExtractionHappyPath:
         )
         assert job.status == "queued"
 
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         final = jobs_repo.get(job.id)
         assert final is not None
@@ -412,7 +412,7 @@ class TestEntityExtractionHappyPath:
         runner = runner_factory(extraction=extraction)
 
         job = runner.submit_entity_extraction({"entry_id": 42})
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         final = jobs_repo.get(job.id)
         assert final is not None
@@ -444,7 +444,7 @@ class TestMoodBackfillHappyPath:
         job = runner.submit_mood_backfill(
             {"mode": "stale-only", "start_date": "2026-01-01"}
         )
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         final = jobs_repo.get(job.id)
         assert final is not None
@@ -509,7 +509,7 @@ class TestErrorHandling:
         runner._ctx.extraction = good  # noqa: SLF001 — test mid-flight swap
 
         second = runner.submit_entity_extraction({})
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         final_first = jobs_repo.get(failing.id)
         final_second = jobs_repo.get(second.id)
@@ -737,7 +737,7 @@ class TestImageIngestionProgress:
 
         images = [(b"img1", "image/jpeg", "page1.jpg")]
         job = runner.submit_image_ingestion(images, "2026-04-13")
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         final = jobs_repo.get(job.id)
         assert final is not None
@@ -757,7 +757,7 @@ class TestImageIngestionProgress:
             (b"img3", "image/jpeg", "page3.jpg"),
         ]
         job = runner.submit_image_ingestion(images, "2026-04-13")
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         final = jobs_repo.get(job.id)
         assert final is not None
@@ -794,7 +794,7 @@ class TestImageIngestionProgress:
             (b"img2", "image/jpeg", "page2.jpg"),
         ]
         job = runner.submit_image_ingestion(images, "2026-04-13")
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         # Every update should have current <= total
         for _jid, current, total in updates:
@@ -824,7 +824,7 @@ class TestAudioIngestion:
 
         recordings = [(b"audio1", "audio/webm", "rec1.webm")]
         job = runner.submit_audio_ingestion(recordings, "2026-04-14")
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         final = jobs_repo.get(job.id)
         assert final is not None
@@ -846,7 +846,7 @@ class TestAudioIngestion:
             (b"audio2", "audio/webm", "rec2.webm"),
         ]
         job = runner.submit_audio_ingestion(recordings, "2026-04-14")
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         final = jobs_repo.get(job.id)
         assert final is not None
@@ -867,7 +867,7 @@ class TestAudioIngestion:
         recordings = [(b"audio1", "audio/webm", "rec.webm")]
         job = runner.submit_audio_ingestion(recordings, "2026-04-14")
         assert job.type == "ingest_audio"
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
     def test_recording_count_in_params(self, runner_factory, jobs_repo):
         ingestion = FakeIngestionService()
@@ -879,7 +879,7 @@ class TestAudioIngestion:
         ]
         job = runner.submit_audio_ingestion(recordings, "2026-04-14")
         assert job.params["recording_count"] == 2
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
     def test_no_ingestion_service_fails(self, runner_factory, jobs_repo):
         # No ingestion= kwarg → JobRunner gets ingestion_service=None.
@@ -887,7 +887,7 @@ class TestAudioIngestion:
 
         recordings = [(b"audio1", "audio/webm", "rec.webm")]
         job = runner.submit_audio_ingestion(recordings, "2026-04-14")
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         final = jobs_repo.get(job.id)
         assert final is not None
@@ -906,7 +906,7 @@ class TestReprocessEmbeddings:
         runner = runner_factory(ingestion=ingestion)
 
         job = runner.submit_reprocess_embeddings(42)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         final = jobs_repo.get(job.id)
         assert final is not None
@@ -923,7 +923,7 @@ class TestReprocessEmbeddings:
         runner = runner_factory()
 
         job = runner.submit_reprocess_embeddings(1)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         final = jobs_repo.get(job.id)
         assert final is not None
@@ -939,7 +939,7 @@ class TestReprocessEmbeddings:
 class TestShutdown:
     def test_submit_after_shutdown_raises(self, runner_factory):
         runner = runner_factory()
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
         with pytest.raises(RuntimeError):
             runner.submit_entity_extraction({})
 
@@ -1066,7 +1066,7 @@ class TestPipelineNotification:
             recordings, "2026-04-25", user_id=1,
         )
         self._wait_pipeline(jobs_repo, job.id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         # Exactly one success notification for the whole pipeline
         assert len(notif.success_calls) == 1
@@ -1090,7 +1090,7 @@ class TestPipelineNotification:
         images = [(b"img1", "image/jpeg", "page1.jpg")]
         job = runner.submit_image_ingestion(images, "2026-04-25", user_id=1)
         self._wait_pipeline(jobs_repo, job.id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         assert len(notif.success_calls) == 1
         user_id, job_type, result = notif.success_calls[0]
@@ -1104,7 +1104,7 @@ class TestPipelineNotification:
         """Manually triggered batch jobs (no parent_job_id) notify individually."""
         runner, notif = self._make_pipeline_runner(jobs_repo)
         runner.submit_entity_extraction({"entry_id": 1}, user_id=1)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         assert len(notif.success_calls) == 1
         _, job_type, _ = notif.success_calls[0]
@@ -1116,7 +1116,7 @@ class TestPipelineNotification:
         """Manually triggered mood scoring (no parent_job_id) notifies individually."""
         runner, notif = self._make_pipeline_runner(jobs_repo)
         runner.submit_mood_score_entry(1, user_id=1)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         assert len(notif.success_calls) == 1
         _, job_type, _ = notif.success_calls[0]
@@ -1132,7 +1132,7 @@ class TestPipelineNotification:
             recordings, "2026-04-25", user_id=1,
         )
         self._wait_pipeline(jobs_repo, parent.id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         parent_final = jobs_repo.get(parent.id)
         assert parent_final is not None
@@ -1171,7 +1171,7 @@ class TestPipelineNotification:
             recordings, "2026-04-25", user_id=1,
         )
         self._wait_pipeline(jobs_repo, parent.id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         # 1 failure notification for mood scoring
         assert len(notif.failure_calls) == 1
@@ -1210,7 +1210,7 @@ class TestPipelineNotification:
         images = [(b"img1", "image/jpeg", "page1.jpg")]
         parent = runner.submit_image_ingestion(images, "2026-04-25", user_id=1)
         self._wait_pipeline(jobs_repo, parent.id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         # 1 failure notification for entity extraction
         assert len(notif.failure_calls) == 1
@@ -1252,7 +1252,7 @@ class TestPipelineNotification:
             recordings, "2026-04-25", user_id=1,
         )
         self._wait_pipeline(jobs_repo, parent.id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         # 2 failure notifications (one per follow-up)
         assert len(notif.failure_calls) == 2
@@ -1365,7 +1365,7 @@ class TestSaveEntryPipeline:
             entry_id=1, user_id=1,
         )
         self._wait_pipeline(jobs_repo, parent.id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         # Exactly one push, success-flavored, save_entry_pipeline type
         assert len(notif.failure_calls) == 0
@@ -1391,7 +1391,7 @@ class TestSaveEntryPipeline:
             entry_id=1, user_id=1,
         )
         self._wait_pipeline(jobs_repo, parent.id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         # No standalone success and no per-child failure pushes
         assert len(notif.success_calls) == 0
@@ -1421,7 +1421,7 @@ class TestSaveEntryPipeline:
             entry_id=1, user_id=1,
         )
         self._wait_pipeline(jobs_repo, parent.id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         assert len(notif.success_calls) == 0
         assert len(notif.failure_calls) == 0
@@ -1440,7 +1440,7 @@ class TestSaveEntryPipeline:
             entry_id=1, user_id=1, enable_mood_scoring=False,
         )
         self._wait_pipeline(jobs_repo, parent.id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         # Only 2 children
         assert "mood_scoring" not in children
@@ -1461,7 +1461,7 @@ class TestSaveEntryPipeline:
             entry_id=1, user_id=1,
         )
         self._wait_pipeline(jobs_repo, parent.id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         for _key, child_id in children.items():
             child = jobs_repo.get(child_id)
@@ -1498,7 +1498,7 @@ class TestSaveEntryPipeline:
         assert parent_row.result is not None
         assert set(parent_row.result["follow_up_jobs"]) == set(children)
 
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
     def test_existing_new_entry_pipeline_unaffected(
         self, jobs_repo: SQLiteJobRepository,
@@ -1533,7 +1533,7 @@ class TestSaveEntryPipeline:
         assert parent_row is not None
         for fj_id in (parent_row.result or {}).get("follow_up_jobs", {}).values():
             _wait_terminal(jobs_repo, fj_id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         # OLD behavior preserved: per-child failure + success summary
         assert len(notif.failure_calls) == 1
@@ -1579,7 +1579,7 @@ class TestEntityReembed:
         runner = runner_factory(extraction=extraction)
         job = runner.submit_entity_reembed(7, user_id=1)
         _wait_terminal(jobs_repo, job.id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         final = jobs_repo.get(job.id)
         assert final is not None
@@ -1600,7 +1600,7 @@ class TestEntityReembed:
         runner = runner_factory(extraction=extraction)
         job = runner.submit_entity_reembed(99, user_id=1)
         _wait_terminal(jobs_repo, job.id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         final = jobs_repo.get(job.id)
         assert final is not None
@@ -1642,7 +1642,7 @@ class TestEntityReembed:
         runner = runner_factory(extraction=extraction, entity_reembedder=reembedder)
         job = runner.submit_entity_reembed(11, user_id=1)
         _wait_terminal(jobs_repo, job.id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         final = jobs_repo.get(job.id)
         assert final is not None
@@ -1690,7 +1690,7 @@ class TestFitnessSync:
         assert job.type == "fitness_sync_strava"
         assert job.params == {"user_id": 1}
         _wait_terminal(jobs_repo, job.id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         final = jobs_repo.get(job.id)
         assert final is not None
@@ -1723,7 +1723,7 @@ class TestFitnessSync:
         job = runner.submit_fitness_sync_garmin(user_id=1)
         assert job.type == "fitness_sync_garmin"
         _wait_terminal(jobs_repo, job.id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         final = jobs_repo.get(job.id)
         assert final is not None
@@ -1790,7 +1790,7 @@ class TestFitnessBackfill:
             "user_id": 1, "start": "2026-01-01", "end": "2026-02-01",
         }
         _wait_terminal(jobs_repo, job.id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
 
         final = jobs_repo.get(job.id)
         assert final is not None
@@ -1820,7 +1820,7 @@ class TestFitnessBackfill:
         assert job.type == "fitness_backfill_garmin"
         assert job.params == {"user_id": 1, "start": "2026-01-01"}
         _wait_terminal(jobs_repo, job.id)
-        runner.shutdown(wait=True)
+        runner.shutdown(wait=True, cancel_futures=False)
         final = jobs_repo.get(job.id)
         assert final is not None
         assert final.status == "succeeded"
