@@ -50,14 +50,17 @@ def journal_ingest_media_from_url(
     user_id = _user_id(ctx)
     entry_date = date or date_type.today().isoformat()
 
-    if source_type == "image":
-        entry = service.ingest_image_from_url(url, entry_date, media_type, user_id=user_id)
-    elif source_type == "voice":
-        entry = service.ingest_voice_from_url(
-            url, entry_date, media_type, language, user_id=user_id,
-        )
-    else:
-        return f"Invalid source_type '{source_type}'. Must be 'image' or 'voice'."
+    try:
+        if source_type == "image":
+            entry = service.ingest_image_from_url(url, entry_date, media_type, user_id=user_id)
+        elif source_type == "voice":
+            entry = service.ingest_voice_from_url(
+                url, entry_date, media_type, language, user_id=user_id,
+            )
+        else:
+            return f"Invalid source_type '{source_type}'. Must be 'image' or 'voice'."
+    except ValueError as e:
+        return f"Error: {e}"
 
     return (
         f"Entry ingested successfully.\n"
@@ -93,6 +96,7 @@ def journal_ingest_media(
         language: Language code for voice transcription (default "en"). Ignored for images.
     """
     import base64
+    import binascii
     from datetime import date as date_type
 
     log.info(
@@ -101,15 +105,21 @@ def journal_ingest_media(
     )
     service = _get_ingestion(ctx)
     user_id = _user_id(ctx)
-    data = base64.b64decode(data_base64)
+    try:
+        data = base64.b64decode(data_base64)
+    except binascii.Error as e:
+        return f"Error: Invalid base64 data: {e}"
     entry_date = date or date_type.today().isoformat()
 
-    if source_type == "image":
-        entry = service.ingest_image(data, media_type, entry_date, user_id=user_id)
-    elif source_type == "voice":
-        entry = service.ingest_voice(data, media_type, entry_date, language, user_id=user_id)
-    else:
-        return f"Invalid source_type '{source_type}'. Must be 'image' or 'voice'."
+    try:
+        if source_type == "image":
+            entry = service.ingest_image(data, media_type, entry_date, user_id=user_id)
+        elif source_type == "voice":
+            entry = service.ingest_voice(data, media_type, entry_date, language, user_id=user_id)
+        else:
+            return f"Invalid source_type '{source_type}'. Must be 'image' or 'voice'."
+    except ValueError as e:
+        return f"Error: {e}"
 
     return (
         f"Entry ingested successfully.\n"
@@ -188,6 +198,7 @@ def journal_ingest_multi_page(
         date: Date of the journal entry (ISO 8601). Defaults to today.
     """
     import base64
+    import binascii
     from datetime import date as date_type
 
     log.info(
@@ -201,12 +212,18 @@ def journal_ingest_multi_page(
     if len(images_base64) != len(media_types):
         return "Error: images_base64 and media_types must have the same length."
 
-    images = [
-        (base64.b64decode(img), mt)
-        for img, mt in zip(images_base64, media_types, strict=True)
-    ]
+    try:
+        images = [
+            (base64.b64decode(img), mt)
+            for img, mt in zip(images_base64, media_types, strict=True)
+        ]
+    except binascii.Error as e:
+        return f"Error: Invalid base64 data: {e}"
 
-    entry = service.ingest_multi_page_entry(images, entry_date, user_id=user_id)
+    try:
+        entry = service.ingest_multi_page_entry(images, entry_date, user_id=user_id)
+    except ValueError as e:
+        return f"Error: {e}"
 
     return (
         f"Multi-page entry ingested successfully.\n"
