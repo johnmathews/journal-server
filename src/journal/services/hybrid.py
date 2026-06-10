@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
 
 from journal.models import ChunkMatch, SearchResult
-from journal.providers.reranker import RerankCandidate
+from journal.providers.reranker import RerankCandidate, RerankResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -364,9 +364,19 @@ class HybridSearchService:
         # require a stable cross-page ordering the rerank stage cannot
         # promise. Instead we rerank the full fused top-M and slice in
         # Python.
-        reranked = self._reranker.rerank(
-            query, rerank_input, top_k=len(rerank_input)
-        )
+        try:
+            reranked = self._reranker.rerank(
+                query, rerank_input, top_k=len(rerank_input)
+            )
+        except Exception as e:  # noqa: BLE001 — reranker outages must not 500 search
+            log.warning(
+                "Rerank failed — falling back to fused order: %s", e
+            )
+            fused_scores = dict(fused)
+            reranked = [
+                RerankResult(id=c.id, score=fused_scores.get(c.id, 0.0))
+                for c in rerank_input
+            ]
         if not reranked:
             return []
 
@@ -411,15 +421,26 @@ class HybridSearchService:
         bounded by `dense_candidates`) and filter post-hoc against the
         chunk's `entry_date` metadata, which the BM25 path already
         does in SQL anyway.
-        """
-        query_embedding = self._embeddings.embed_query(query)
-        where = {"user_id": user_id} if user_id is not None else None
 
-        raw = self._vector_store.search(
-            query_embedding=query_embedding,
-            limit=self._config.dense_candidates,
-            where=where,
-        )
+        Dense retrieval depends on two external services (the
+        embeddings API and the vector store). Either failing must not
+        take search down — BM25 still works — so any exception here
+        degrades the pipeline to BM25-only with a warning.
+        """
+        try:
+            query_embedding = self._embeddings.embed_query(query)
+            where = {"user_id": user_id} if user_id is not None else None
+
+            raw = self._vector_store.search(
+                query_embedding=query_embedding,
+                limit=self._config.dense_candidates,
+                where=where,
+            )
+        except Exception as e:  # noqa: BLE001 — provider outages must not 500 search
+            log.warning(
+                "Dense retrieval failed — degrading to BM25-only: %s", e
+            )
+            return []
 
         def in_range(metadata: dict) -> bool:
             entry_date = metadata.get("entry_date")

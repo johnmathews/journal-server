@@ -1,5 +1,6 @@
 """Tests for the hybrid search service and RRF fusion."""
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -441,6 +442,75 @@ class TestHybridPipeline:
         snap = stats.snapshot()
         assert "hybrid_search" in snap.by_type
         assert snap.by_type["hybrid_search"].count == 1
+
+
+class TestGracefulDegradation:
+    """Transient provider outages must degrade search, never 500 it.
+
+    The dense leg (embeddings + vector store) and the rerank stage both
+    call external APIs. If either fails, the pipeline should fall back
+    to what it still has — BM25 results, fused order — and log a
+    warning, instead of propagating the exception to the caller.
+    """
+
+    def test_dense_failure_degrades_to_bm25_only(
+        self, repo, vector_store, mock_embeddings, caplog,
+    ) -> None:
+        e_match = repo.create_entry(
+            "2026-03-22", "photo", "Walked through Vienna with Atlas", 5,
+        )
+        repo.create_entry("2026-03-23", "photo", "Stayed home and read", 4)
+        mock_embeddings.embed_query.side_effect = RuntimeError(
+            "embeddings API down"
+        )
+        svc = _make_service(repo, vector_store, mock_embeddings)
+
+        with caplog.at_level(logging.WARNING, logger="journal.services.hybrid"):
+            results = svc.search("Vienna")
+
+        # BM25 still found the entry; no exception escaped.
+        assert [r.entry_id for r in results] == [e_match.id]
+        assert results[0].snippet is not None
+        # Dense contributed nothing.
+        assert results[0].matching_chunks == []
+        assert "degrading to BM25-only" in caplog.text
+
+    def test_reranker_failure_falls_back_to_fused_order(
+        self, repo, vector_store, mock_embeddings, caplog,
+    ) -> None:
+        # e1 outranks e2 in both retrievers, so RRF fuses [e1, e2].
+        e1 = repo.create_entry(
+            "2026-03-22", "photo", "Vienna Vienna Vienna all day", 5,
+        )
+        e2 = repo.create_entry(
+            "2026-03-23", "photo", "Vienna once then other things", 5,
+        )
+        vector_store.add_entry(
+            entry_id=e1.id, chunks=["Vienna Vienna Vienna all day"],
+            embeddings=[[1.0, 0.0, 0.0]],
+            metadata={"entry_date": "2026-03-22"},
+        )
+        vector_store.add_entry(
+            entry_id=e2.id, chunks=["Vienna once then other things"],
+            embeddings=[[0.9, 0.1, 0.0]],
+            metadata={"entry_date": "2026-03-23"},
+        )
+        mock_embeddings.embed_query.return_value = [1.0, 0.0, 0.0]
+
+        class ExplodingReranker:
+            def rerank(self, query, candidates, top_k):
+                raise RuntimeError("reranker API down")
+
+        svc = _make_service(
+            repo, vector_store, mock_embeddings, reranker=ExplodingReranker()
+        )
+        with caplog.at_level(logging.WARNING, logger="journal.services.hybrid"):
+            results = svc.search("Vienna")
+
+        # Fused (RRF) order survives the rerank outage.
+        assert [r.entry_id for r in results] == [e1.id, e2.id]
+        assert results[0].score >= results[1].score
+        assert "falling back to fused order" in caplog.text
 
 
 class TestDenseDateFiltering:

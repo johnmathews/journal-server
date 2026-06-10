@@ -1138,6 +1138,32 @@ class TestSearch:
         assert chunk["char_start"] == 0
         assert chunk["char_end"] == len(entry_text)
 
+    def test_search_embeddings_failure_returns_200_with_bm25_results(
+        self,
+        search_client: tuple[TestClient, object],
+        repo: SQLiteEntryRepository,
+        mock_embeddings: MagicMock,
+    ) -> None:
+        """A transient embeddings-provider outage must degrade search to
+        BM25-only results — 200, not 500."""
+        client, _vector_store = search_client
+        repo.create_entry(
+            "2026-03-22",
+            "photo",
+            "Walked through Vienna with Atlas today.",
+            7,
+        )
+        mock_embeddings.embed_query.side_effect = RuntimeError(
+            "embeddings API down"
+        )
+
+        response = client.get("/api/search?q=Vienna")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["items"]) == 1
+        assert data["items"][0]["entry_date"] == "2026-03-22"
+        assert data["items"][0]["snippet"] is not None
+
 
 class TestDashboardMoodDimensions:
     """T1.3b.vi — GET /api/dashboard/mood-dimensions."""
