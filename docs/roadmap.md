@@ -58,17 +58,18 @@ the top of the linked doc tells you whether it's active, closed, or superseded.
   three-width resize, edit-layout mode, persisted preferences). Also closed the
   tooltip-parity ask (T6) and the Garmin Workouts/Wellness column split (T7). Verified
   post-deploy 2026-05-12. Kept as a record of decisions.
-- [`storylines-plan.md`](./storylines-plan.md) — **server cycle closed 2026-05-12.**
-  W1-W12 shipped (six commits `4b65fbf..885e4dc`); W10 acceptance gate passed on
+- [`archive/storylines-plan.md`](./archive/storylines-plan.md) — **closed 2026-05-12.**
+  Server cycle W1-W12 shipped (six commits `4b65fbf..885e4dc`); W10 acceptance gate passed on
   prod data (Running + Atlas storylines read as faithful, third-person, non-fabricating);
   two production bugs fixed in-line (`2089531` FTS-fallback signature; embedder input cap).
-  Webapp cycle pending as a separate worktree on `webapp/` — see "Webapp cycle handoff"
-  at the bottom of the plan doc for scope.
-- [`storylines-2026-05-mcp-and-append.md`](./storylines-2026-05-mcp-and-append.md) —
-  active follow-up cycle (2026-05-12) covering MCP discoverability (new
+  Webapp cycle and multi-entity follow-up also shipped 2026-05-12. Current state of the feature
+  lives in [`storylines.md`](./storylines.md) (server) and
+  [`../../webapp/docs/storylines.md`](../../webapp/docs/storylines.md).
+- [`archive/storylines-2026-05-mcp-and-append.md`](./archive/storylines-2026-05-mcp-and-append.md) —
+  **closed 2026-05-12.** Follow-up cycle on top of the storylines plan: MCP discoverability (new
   `journal_storylines_guide` + `journal_delete_storyline` tools, rewritten docstrings),
-  append-update mode on regenerate, and auto-kick generation on create. **Multi-entity
-  storylines shipped 2026-05-12** end-to-end (migration 0028 + service + REST/MCP +
+  append-update mode on regenerate, and auto-kick generation on create. Multi-entity
+  storylines shipped 2026-05-12 end-to-end (migration 0028 + service + REST/MCP +
   multi-select webapp picker) and verified in the browser; see
   `journal/260512-multi-entity-storylines.md` (server) and the matching webapp entry.
 - [`code-quality-principles.md`](./code-quality-principles.md) — standing rules referenced

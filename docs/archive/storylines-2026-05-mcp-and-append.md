@@ -1,8 +1,8 @@
 # Storylines — MCP Discoverability + Append Mode (2026-05-12)
 
-**Status:** active reference. **Last updated:** 2026-05-12 (multi-entity follow-up shipped and verified in the webapp). **Supersedes:** none.
-**Related:** [`storylines.md`](./storylines.md) (feature reference),
-[`storylines-plan.md`](./storylines-plan.md) (closed 2026-05-12 server cycle).
+**Status:** closed 2026-05-12. All three threads (MCP discoverability, append-update mode, auto-kick on create) shipped; multi-entity follow-up shipped and verified in the webapp. **Last updated:** 2026-05-12. **Supersedes:** none.
+**Related:** [`../storylines.md`](../storylines.md) (feature reference, still active),
+[`storylines-plan.md`](./storylines-plan.md) (original closed server cycle, archived alongside this doc).
 
 This is a follow-up cycle on top of the closed `storylines-plan.md`, captured
 in its own doc so the original plan stays archived as the record of the spike.

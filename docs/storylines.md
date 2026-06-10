@@ -11,7 +11,7 @@ rendered for each storyline:
 * **Curation panel** — chronologically-ordered verbatim excerpts from journal entries that mention any of the storyline's anchor entities, separated by minimal Haiku-generated transition prose ("Three days later:").
 * **Narrative panel** — a flowing third-person prose narrative grounded via the Anthropic Citations API. Pointers from narrative text back to source entries are parsed by Anthropic from custom-content documents, so they cannot be fabricated.
 
-This document describes how the feature works in code. The design plan and tradeoffs live in [`storylines-plan.md`](./storylines-plan.md).
+This document describes how the feature works in code. The design plan and tradeoffs live in [`archive/storylines-plan.md`](./archive/storylines-plan.md) (closed 2026-05-12); the MCP discoverability + append-mode follow-up cycle is at [`archive/storylines-2026-05-mcp-and-append.md`](./archive/storylines-2026-05-mcp-and-append.md) (closed 2026-05-12).
 
 ## Data model
 
@@ -142,7 +142,8 @@ Real Anthropic API calls are never made in tests — providers accept an injecte
 
 ## Related docs
 
-* [`storylines-plan.md`](./storylines-plan.md) — design plan with decisions and tradeoffs
+* [`archive/storylines-plan.md`](./archive/storylines-plan.md) — original design plan with decisions and tradeoffs (closed 2026-05-12)
+* [`archive/storylines-2026-05-mcp-and-append.md`](./archive/storylines-2026-05-mcp-and-append.md) — MCP discoverability + append-mode follow-up (closed 2026-05-12)
 * [`entity-tracking.md`](./entity-tracking.md) — entity store this feature is anchored on
 * [`mood-scoring.md`](./mood-scoring.md) — precedent for LLM-output baked into service data
 * [`jobs.md`](./jobs.md) — job runner this feature plugs into
