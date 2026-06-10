@@ -174,7 +174,31 @@ class _ImageIngestMixin:
         into segments. The orphan tail above the first delimiter is
         discarded; each remaining segment becomes its own entry. The
         most recently dated entry — typically the new one the user just
-        photographed — is returned.
+        photographed — is returned. Callers that need every entry
+        created from the page (e.g. the image-ingestion job worker,
+        which queues follow-up jobs per entry) should use
+        :meth:`ingest_image_entries` instead.
+        """
+        return self.ingest_image_entries(
+            image_data, media_type, date,
+            skip_mood=skip_mood, user_id=user_id,
+        )[-1]
+
+    def ingest_image_entries(
+        self,
+        image_data: bytes,
+        media_type: str,
+        date: str,
+        *,
+        skip_mood: bool = False,
+        user_id: int = 1,
+    ) -> list[Entry]:
+        """Same as :meth:`ingest_image` but returns ALL created entries.
+
+        The list is in segment order (top of the page first), so the
+        last element is the most recently dated entry — the one
+        :meth:`ingest_image` returns. The common single-entry page
+        yields a one-element list.
         """
         log.info(
             "Ingesting image for date %s (%s, %d bytes)",
@@ -228,11 +252,7 @@ class _ImageIngestMixin:
             )
             created_entries.append(entry)
 
-        # Return the last entry (most recent dated segment) — the one
-        # the user typically intended to capture by photographing the
-        # page. The earlier entries (if any) are persisted independently
-        # and visible in the entries list.
-        return created_entries[-1]
+        return created_entries
 
     def _create_entry_from_image_segment(
         self,

@@ -339,6 +339,11 @@ it runs on the same single-worker executor, so it starts once the ingestion job 
 notification bell automatically re-hydrates its active jobs list when any tracked job reaches terminal state, so
 server-spawned follow-up jobs (like entity extraction after ingestion) appear in the bell without a page refresh.
 
+When a single image segments into multiple entries (see "Multi-Entry Pages" in `architecture.md`), follow-up jobs are
+queued for **every** created entry. The primary (most recently dated) entry keeps the plain `follow_up_jobs` keys
+(`mood_scoring`, `entity_extraction`, …); secondary entries' keys carry an `_entry_<id>` suffix, and the ingestion
+job's result includes `entry_ids` listing all created entries.
+
 For text/file ingestion, both mood scoring and entity extraction are submitted as separate background jobs immediately
 after the entry is created. Both are best-effort — failures are logged but don't fail the ingest response.
 

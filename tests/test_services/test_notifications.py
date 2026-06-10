@@ -475,6 +475,14 @@ class TestBuildSuccessMessage:
         # Bullet-formatted: every line starts with "- "
         assert all(line.startswith("- ") for line in msg.splitlines())
 
+    def test_ingestion_message_with_multiple_entries(self) -> None:
+        """A single image segmented into N entries lists every id."""
+        msg = build_success_message(
+            "ingest_images", {"entry_id": 44, "entry_ids": [42, 43, 44]},
+        )
+        assert "- Created Entries 42, 43, 44" in msg
+        assert "- Created Entry 44" not in msg
+
     def test_ingestion_message_with_pipeline_results(self) -> None:
         """Combined pipeline result includes mood + entity summaries."""
         result = {

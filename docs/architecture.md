@@ -150,7 +150,9 @@ consecutive entries. `ingest_image` then:
 - **Discards the orphan tail** above the first marker (per the project's "discard orphan tail" policy — the tail belongs
   to a previous entry that's already stored elsewhere)
 - Creates one entry per remaining segment, each with its own `source_files` row referencing the shared image hash
-- Returns the most recently dated entry (typically the new one the user just photographed)
+- Returns the most recently dated entry (typically the new one the user just photographed); the image-ingestion job
+  worker uses the sibling `ingest_image_entries` (same behaviour, returns all created entries) so it can queue
+  mood-scoring + entity-extraction follow-up jobs for **every** entry created from the page, not just the returned one
 
 Multi-image uploads (`ingest_multi_page_entry`) do not run segmentation — when a user uploads a batch of images as one
 entry, that intent is honoured. If a page in the batch happens to contain the marker, it survives as literal text in

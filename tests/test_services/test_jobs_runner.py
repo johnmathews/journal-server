@@ -684,6 +684,13 @@ class FakeIngestionService:
         self.ingest_image_calls.append((image_data, media_type, date))
         return self._entry
 
+    def ingest_image_entries(
+        self, image_data: bytes, media_type: str, date: str,
+        *, skip_mood: bool = False, user_id: int = 1,
+    ) -> list[Any]:
+        self.ingest_image_calls.append((image_data, media_type, date))
+        return [self._entry]
+
     def ingest_multi_page_entry(
         self,
         images: list[tuple[bytes, str]],
@@ -808,6 +815,148 @@ class TestImageIngestionProgress:
         assert final is not None
         assert final.progress_current == 2
         assert final.progress_total == 2
+
+
+# --------------------------------------------------------------------
+# Multi-entry segmentation → follow-up jobs per created entry (W27)
+# --------------------------------------------------------------------
+
+
+class TestImageIngestionMultiEntryFollowUps:
+    """When OCR splits one image into N entries, the worker must queue
+    mood-scoring + entity-extraction follow-ups for EVERY created entry,
+    not just the returned (last) one. Closes the deferral documented in
+    ``journal/260603-ocr-multi-entry-segmentation.md``."""
+
+    def _make_runner(
+        self,
+        jobs_repo: SQLiteJobRepository,
+        threadsafe_factory: ConnectionFactory,
+    ) -> tuple[JobRunner, Any, FakeNotificationService]:
+        """JobRunner wired to a REAL IngestionService whose mocked OCR
+        provider returns delimiter-marked text yielding three entries."""
+        from unittest.mock import MagicMock
+
+        from journal.db.repository import SQLiteEntryRepository
+        from journal.providers.ocr import OCRResult
+        from journal.services.chunking import FixedTokenChunker
+        from journal.services.ingestion import IngestionService
+        from journal.services.ingestion.image import ENTRY_DELIMITER
+        from journal.vectorstore.store import InMemoryVectorStore
+
+        repo = SQLiteEntryRepository(threadsafe_factory)
+
+        entry_a = "1 June 2026\n\nFirst entry body."
+        entry_b = "2 June 2026\n\nSecond entry body."
+        entry_c = "3 June 2026\n\nThird entry body."
+        ocr = MagicMock()
+        # Orphan tail (discarded) + three delimiter-marked entries.
+        ocr.extract.return_value = OCRResult(
+            text=(
+                f"…tail of a previous entry.\n\n{ENTRY_DELIMITER}\n\n{entry_a}"
+                f"\n\n{ENTRY_DELIMITER}\n\n{entry_b}"
+                f"\n\n{ENTRY_DELIMITER}\n\n{entry_c}"
+            ),
+            uncertain_spans=[],
+        )
+        embeddings = MagicMock()
+        embeddings.embed_texts.return_value = [[0.1, 0.2, 0.3]]
+
+        ingestion = IngestionService(
+            repository=repo,
+            vector_store=InMemoryVectorStore(),
+            ocr_provider=ocr,
+            transcription_provider=MagicMock(),
+            embeddings_provider=embeddings,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+            preprocess_images=False,
+        )
+        notif = FakeNotificationService()
+        runner = JobRunner(
+            job_repository=jobs_repo,
+            entity_extraction_service=FakeEntityExtractionService(
+                single_result=_make_extraction_result(
+                    1, entities_created=2, mentions_created=4,
+                ),
+            ),
+            mood_backfill_callable=FakeMoodBackfill(),
+            mood_scoring_service=FakeMoodScoringService(scores=7),
+            entry_repository=FakeEntryRepository(),
+            ingestion_service=ingestion,
+            notification_service=notif,  # type: ignore[arg-type]
+        )
+        return runner, repo, notif
+
+    def test_three_entry_page_queues_follow_ups_for_every_entry(
+        self, jobs_repo, threadsafe_factory
+    ) -> None:
+        runner, repo, _ = self._make_runner(jobs_repo, threadsafe_factory)
+
+        images = [(b"page with three entries", "image/jpeg", "page1.jpg")]
+        parent = runner.submit_image_ingestion(images, "2026-06-03", user_id=1)
+        _wait_terminal(jobs_repo, parent.id)
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        # The OCR text yielded three persisted entries.
+        entries = repo.list_entries(limit=10)
+        assert len(entries) == 3
+        entry_ids = {e.id for e in entries}
+
+        # One mood-scoring AND one entity-extraction follow-up per
+        # created entry — not just the last one.
+        mood_jobs, _ = jobs_repo.list_jobs(job_type="mood_score_entry")
+        entity_jobs, _ = jobs_repo.list_jobs(job_type="entity_extraction")
+        assert len(mood_jobs) == 3, (
+            f"expected 3 mood follow-ups, got {len(mood_jobs)} "
+            f"(entry_ids={[j.params.get('entry_id') for j in mood_jobs]})"
+        )
+        assert len(entity_jobs) == 3, (
+            f"expected 3 entity follow-ups, got {len(entity_jobs)} "
+            f"(entry_ids={[j.params.get('entry_id') for j in entity_jobs]})"
+        )
+        assert {j.params["entry_id"] for j in mood_jobs} == entry_ids
+        assert {j.params["entry_id"] for j in entity_jobs} == entry_ids
+
+        # Every follow-up is stitched to the ingestion job so the
+        # combined pipeline notification still fires once at the end.
+        for fj in (*mood_jobs, *entity_jobs):
+            assert fj.params["parent_job_id"] == parent.id
+
+        # The parent result's follow_up_jobs map records all six with
+        # collision-free keys.
+        final = jobs_repo.get(parent.id)
+        assert final is not None and final.status == "succeeded"
+        follow_ups = final.result["follow_up_jobs"]
+        assert len(follow_ups) == 6
+        assert set(follow_ups.values()) == {
+            j.id for j in (*mood_jobs, *entity_jobs)
+        }
+        # Primary (returned, last-dated) entry keeps the unsuffixed keys
+        # so the pipeline notification renders unchanged.
+        assert "mood_scoring" in follow_ups
+        assert "entity_extraction" in follow_ups
+
+    def test_three_entry_page_sends_one_combined_notification(
+        self, jobs_repo, threadsafe_factory
+    ) -> None:
+        """The pipeline notification still fires exactly once, after all
+        six follow-ups finish, and reports every created entry."""
+        runner, repo, notif = self._make_runner(jobs_repo, threadsafe_factory)
+
+        images = [(b"page with three entries", "image/jpeg", "page1.jpg")]
+        parent = runner.submit_image_ingestion(images, "2026-06-03", user_id=1)
+        _wait_terminal(jobs_repo, parent.id)
+        final = jobs_repo.get(parent.id)
+        assert final is not None
+        for fj_id in (final.result or {}).get("follow_up_jobs", {}).values():
+            _wait_terminal(jobs_repo, fj_id)
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        assert len(notif.success_calls) == 1
+        _, job_type, result = notif.success_calls[0]
+        assert job_type == "ingest_images"
+        entry_ids = {e.id for e in repo.list_entries(limit=10)}
+        assert set(result["entry_ids"]) == entry_ids
 
 
 # --------------------------------------------------------------------
