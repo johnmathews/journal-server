@@ -175,6 +175,28 @@ class SQLiteStorylineRepository:
         conn.commit()
         return self.get_storyline(storyline_id, user_id=user_id)
 
+    def update_storyline_name(
+        self, storyline_id: int, name: str, user_id: int,
+    ) -> Storyline | None:
+        """Rename a storyline.
+
+        Returns the updated row, or ``None`` if no storyline with that
+        id belongs to ``user_id``. The name is trimmed before storage,
+        mirroring ``create_storyline``. Panels are untouched — a rename
+        is metadata-only and never triggers a regeneration.
+        """
+        conn = self._conn()
+        cursor = conn.execute(
+            "UPDATE storylines"
+            " SET name = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+            " WHERE id = ? AND user_id = ?",
+            (name.strip(), storyline_id, user_id),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            return None
+        return self.get_storyline(storyline_id, user_id=user_id)
+
     def delete_storyline(self, storyline_id: int, user_id: int) -> bool:
         conn = self._conn()
         cursor = conn.execute(

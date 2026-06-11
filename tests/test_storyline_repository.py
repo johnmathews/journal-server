@@ -264,6 +264,47 @@ class TestStorylineCRUD:
         assert storyline_repo.delete_storyline(s.id, user_id=seed_user) is True
         assert storyline_repo.get_storyline(s.id) is None
 
+    def test_update_storyline_name_renames_and_trims(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        s = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[seed_entity], name="Old name",
+        )
+        updated = storyline_repo.update_storyline_name(
+            s.id, "  New name  ", user_id=seed_user,
+        )
+        assert updated is not None
+        assert updated.name == "New name"
+        # Persisted, not just echoed.
+        refreshed = storyline_repo.get_storyline(s.id, user_id=seed_user)
+        assert refreshed is not None
+        assert refreshed.name == "New name"
+        # updated_at is bumped on rename.
+        assert refreshed.updated_at != ""
+
+    def test_update_storyline_name_only_for_owner(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        s = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[seed_entity], name="Mine",
+        )
+        # Wrong user: no row updated, returns None, name unchanged.
+        assert (
+            storyline_repo.update_storyline_name(
+                s.id, "Hijacked", user_id=seed_user + 999,
+            )
+            is None
+        )
+        refreshed = storyline_repo.get_storyline(s.id)
+        assert refreshed is not None
+        assert refreshed.name == "Mine"
+
     def test_record_generation_complete_updates_timestamp(
         self,
         storyline_repo: SQLiteStorylineRepository,

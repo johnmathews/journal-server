@@ -88,9 +88,10 @@ Read-side (`api/storylines.py`):
 * `GET /api/storylines` — paginated list (standard `{items, total, limit, offset}` envelope), filterable by `status`
 * `GET /api/storylines/{id}` — storyline + both panels as `{panels: {curation: {...}, narrative: {...}}}`
 
-Write-side (`api/ingestion.py`):
+Write-side (`api/storylines_write.py`):
 
 * `POST /api/storylines` — body `{entity_ids: list[int], name, description?, start_date?, end_date?}`. `entity_ids` must have 1..15 entries (server cap = `MAX_ANCHORS`); duplicates are coalesced. 201 on success with `{..., anchors: [{id, canonical_name}, ...], generation_job_id}`, 409 if a storyline with the same name and the exact same anchor set already exists for this user, 400/422 on bad input. The server also auto-kicks generation and surfaces the `generation_job_id` so the client can poll without a second round-trip.
+* `PATCH /api/storylines/{id}` — body `{name: str}`. Updates editable metadata (currently only the title). The name is trimmed; empty after trimming → 400. 200 with the updated storyline summary (`{id, name, anchors, ...}`); 404 if the storyline doesn't belong to the caller. Metadata-only: a rename does **not** touch the stored panels or kick a regeneration, so the curated/narrative text survives.
 * `PUT /api/storylines/{id}/anchors` — body `{entity_ids: list[int]}`. Set-replacement of the storyline's anchors (1..15). 200 with the updated `anchors` list; 404 if the storyline doesn't belong to the caller; 422 on empty/oversized input.
 * `POST /api/storylines/{id}/regenerate` — body is optional `{start_date?, end_date?, mode?}` where `mode ∈ {"replace", "append"}` (default `"replace"`). Append requires `start_date >= storyline.last_generated_at`; 400 on violation. Queues a `storyline_generation` job; 202 with `{"job_id"}`.
 * `DELETE /api/storylines/{id}` — removes the storyline (CASCADE drops its panels and anchors).
