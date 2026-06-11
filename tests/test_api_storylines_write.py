@@ -338,3 +338,97 @@ class TestRegenerateBodyParams:
             json=["nope"],
         )
         assert resp.status_code == 400
+
+
+# ── PATCH /api/storylines/{id} — rename ─────────────────────────────
+
+
+class TestUpdateStoryline:
+    def _create(self, client: TestClient, ctx: dict[str, Any]) -> int:
+        return client.post(
+            "/api/storylines",
+            json={"entity_ids": [ctx["entity_id"]], "name": "Old name"},
+        ).json()["id"]
+
+    def test_rename_updates_name_and_returns_storyline(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        sid = self._create(client, ctx)
+
+        resp = client.patch(
+            f"/api/storylines/{sid}", json={"name": "New name"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["id"] == sid
+        assert body["name"] == "New name"
+        # Anchors are echoed back so the client can refresh the row.
+        assert [a["id"] for a in body["anchors"]] == [ctx["entity_id"]]
+
+        # Persisted: a GET reflects the new name.
+        fetched = client.get(f"/api/storylines/{sid}").json()
+        assert fetched["name"] == "New name"
+
+    def test_rename_trims_whitespace(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        sid = self._create(client, ctx)
+        resp = client.patch(
+            f"/api/storylines/{sid}", json={"name": "   Trimmed   "},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["name"] == "Trimmed"
+
+    def test_rename_does_not_kick_a_job(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        """A rename is metadata-only — it must not regenerate panels."""
+        client, ctx = app_with_storylines
+        sid = self._create(client, ctx)
+        ctx["runner"].shutdown(wait=True, cancel_futures=False)
+        calls_before = list(ctx["gen_service"].calls)
+
+        client.patch(f"/api/storylines/{sid}", json={"name": "Renamed"})
+        assert ctx["gen_service"].calls == calls_before
+
+    def test_empty_name_returns_400(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        sid = self._create(client, ctx)
+        resp = client.patch(f"/api/storylines/{sid}", json={"name": "   "})
+        assert resp.status_code == 400
+        # Unchanged.
+        assert client.get(f"/api/storylines/{sid}").json()["name"] == "Old name"
+
+    def test_missing_name_returns_400(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        sid = self._create(client, ctx)
+        resp = client.patch(f"/api/storylines/{sid}", json={})
+        assert resp.status_code == 400
+
+    def test_non_object_body_returns_400(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        sid = self._create(client, ctx)
+        resp = client.patch(f"/api/storylines/{sid}", json=["nope"])
+        assert resp.status_code == 400
+
+    def test_unknown_storyline_returns_404(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, _ctx = app_with_storylines
+        resp = client.patch("/api/storylines/999999", json={"name": "X"})
+        assert resp.status_code == 404

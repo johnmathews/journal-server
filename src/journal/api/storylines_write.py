@@ -14,6 +14,7 @@ Concretely, this module owns:
 
 - ``POST /api/storylines``                              — create + auto-queue generation
 - ``POST /api/storylines/{storyline_id}/regenerate``    — queue a regeneration job
+- ``PATCH /api/storylines/{storyline_id}``              — update editable metadata (name)
 - ``DELETE /api/storylines/{storyline_id}``             — delete a storyline
 - ``PUT /api/storylines/{storyline_id}/anchors``        — replace the anchor set
 
@@ -299,6 +300,76 @@ def register_storylines_write_routes(
         return JSONResponse(
             {"job_id": job.id, "status": job.status},
             status_code=202,
+        )
+
+    @mcp.custom_route(
+        "/api/storylines/{storyline_id:int}",
+        methods=["PATCH"],
+        name="api_update_storyline",
+    )
+    @handler(services_getter, parse_json="raw")
+    def update_storyline(
+        request: Request, services: ServicesDict, raw: bytes
+    ) -> JSONResponse:
+        """Update a storyline's editable metadata.
+
+        Body: ``{name: str}`` — non-empty after trimming. Currently
+        only the name (title) is editable; a rename is metadata-only
+        and does NOT touch the stored panels or kick a regeneration,
+        so the curated/narrative text is preserved across a rename.
+
+        Returns 200 with the updated storyline summary (id, name,
+        anchors, ...). 404 if the storyline is not found for this user,
+        400 on a malformed body or empty name, 503 if storylines are
+        not wired.
+        """
+        repo = services.get("storyline_repository")
+        if repo is None:
+            return JSONResponse(
+                {"error": "Storylines feature not configured"},
+                status_code=503,
+            )
+        entity_store = services.get("entity_store")
+        user = get_authenticated_user(request)
+        sid = int(request.path_params["storyline_id"])
+        storyline = repo.get_storyline(sid, user_id=user.user_id)
+        if storyline is None:
+            return JSONResponse(
+                {"error": "Storyline not found"}, status_code=404,
+            )
+        # Parse in-body ("raw" mode): the 503/404 checks above must keep
+        # precedence over body-shape 400s.
+        try:
+            body = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "Request body must be a JSON object"},
+                status_code=400,
+            )
+        name = (body.get("name") or "").strip()
+        if not name:
+            return JSONResponse(
+                {"error": "name (non-empty str) is required"},
+                status_code=400,
+            )
+        updated = repo.update_storyline_name(sid, name, user_id=user.user_id)
+        assert updated is not None  # 404 already handled above
+        anchors = _anchors_for(repo, entity_store, sid)
+        log.info("PATCH /api/storylines/%d — name=%r", sid, name)
+        return JSONResponse(
+            {
+                "id": updated.id,
+                "user_id": updated.user_id,
+                "anchors": anchors,
+                "name": updated.name,
+                "description": updated.description,
+                "status": updated.status,
+                "created_at": updated.created_at,
+                "updated_at": updated.updated_at,
+            },
+            status_code=200,
         )
 
     @mcp.custom_route(
