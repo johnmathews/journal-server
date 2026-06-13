@@ -74,6 +74,16 @@ the top of the linked doc tells you whether it's active, closed, or superseded.
   storylines shipped 2026-05-12 end-to-end (migration 0028 + service + REST/MCP +
   multi-select webapp picker) and verified in the browser; see
   `journal/260512-multi-entity-storylines.md` (server) and the matching webapp entry.
+- **Storyline chapters — Phase 1 active (2026-06-13).** Splits a storyline into
+  self-contained, per-window **chapters** (new `storyline_chapters` table between
+  storylines and panels via migration 0030; panels re-keyed to `chapter_id`; anchors stay
+  storyline-level; per-chapter generation; left chapter rail with per-chapter citation
+  numbering). Design + plan live at
+  [`superpowers/specs/2026-06-13-storyline-chapters-design.md`](./superpowers/specs/2026-06-13-storyline-chapters-design.md)
+  and [`superpowers/plans/2026-06-13-storyline-chapters-phase1.md`](./superpowers/plans/2026-06-13-storyline-chapters-phase1.md);
+  shipped via journal-server PR #40 + journal-webapp PR #19. **Phase 2 (deferred, separate
+  spec):** the LLM "suggest a cut" boundary engine, a draggable timeline editor, true
+  incremental append wiring, and removal of the back-compat storyline-level `panels` shim.
 - [`code-quality-principles.md`](./code-quality-principles.md) — standing rules referenced
   by the refactor docs.
 - **SQLite threading refactor — closed 2026-05-11.** All repos use a
