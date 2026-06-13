@@ -74,6 +74,8 @@ class _FakeGenerationService:
         self._result = result
         self.calls: list[int] = []
         self.kwargs: list[dict[str, Any]] = []
+        self.chapter_calls: list[int] = []
+        self.chapter_kwargs: list[dict[str, Any]] = []
 
     def regenerate(
         self,
@@ -82,6 +84,15 @@ class _FakeGenerationService:
     ) -> GenerationResult:
         self.calls.append(storyline_id)
         self.kwargs.append(kwargs)
+        return self._result
+
+    def regenerate_chapter(
+        self,
+        chapter_id: int,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> GenerationResult:
+        self.chapter_calls.append(chapter_id)
+        self.chapter_kwargs.append(kwargs)
         return self._result
 
 
@@ -187,6 +198,31 @@ class TestStorylineGenerationWorker:
         job = jobs.create("storyline_generation", params, user_id=1)
         run_storyline_generation(ctx, job.id, params)
         assert svc.kwargs == [{}]
+
+    def test_chapter_id_routes_to_regenerate_chapter(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        """When the payload carries a chapter_id the worker calls
+        ``regenerate_chapter`` (forwarding only ``mode``) instead of
+        the storyline-level ``regenerate``."""
+        jobs, notifier = job_ctx
+        svc = _FakeGenerationService(GenerationResult(storyline_id=12))
+        ctx = _build_minimal_ctx(jobs, notifier, generation=svc)
+        params = {
+            "storyline_id": 12, "chapter_id": 7,
+            "user_id": 1, "mode": "replace",
+        }
+        job = jobs.create("storyline_generation", params, user_id=1)
+        run_storyline_generation(ctx, job.id, params)
+
+        finished = jobs.get(job.id)
+        assert finished is not None
+        assert finished.status == "succeeded"
+        # Routed to the chapter path, not the storyline path.
+        assert svc.chapter_calls == [7]
+        assert svc.chapter_kwargs == [{"mode": "replace"}]
+        assert svc.calls == []
 
     def test_missing_service_marks_failed(
         self,

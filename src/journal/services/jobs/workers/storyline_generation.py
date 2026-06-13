@@ -25,6 +25,11 @@ def run_storyline_generation(
     YYYY-MM-DD) override the storyline row's date window for this
     run; `mode` is ``"replace"`` (default) or ``"append"``. Date
     strings are parsed at the service boundary, not here.
+
+    When `chapter_id` is present the worker regenerates that specific
+    chapter (its own date window is authoritative, so only `mode` is
+    forwarded); otherwise it regenerates the storyline's open chapter
+    via the back-compat `regenerate(storyline_id)` entry point.
     """
     user_id = params.get("user_id")
     parent_job_id = params.get("parent_job_id")
@@ -47,16 +52,27 @@ def run_storyline_generation(
             return
 
         storyline_id = params["storyline_id"]
-        regenerate_kwargs: dict[str, Any] = {}
-        if "start_date" in params:
-            regenerate_kwargs["start_date"] = params["start_date"]
-        if "end_date" in params:
-            regenerate_kwargs["end_date"] = params["end_date"]
-        if "mode" in params:
-            regenerate_kwargs["mode"] = params["mode"]
-        result = ctx.storyline_generation.regenerate(
-            storyline_id, **regenerate_kwargs,
-        )
+        chapter_id = params.get("chapter_id")
+        if chapter_id is not None:
+            # Chapter-scoped regeneration: the chapter's own window is
+            # authoritative, so only ``mode`` is forwarded.
+            chapter_kwargs: dict[str, Any] = {}
+            if "mode" in params:
+                chapter_kwargs["mode"] = params["mode"]
+            result = ctx.storyline_generation.regenerate_chapter(
+                int(chapter_id), **chapter_kwargs,
+            )
+        else:
+            regenerate_kwargs: dict[str, Any] = {}
+            if "start_date" in params:
+                regenerate_kwargs["start_date"] = params["start_date"]
+            if "end_date" in params:
+                regenerate_kwargs["end_date"] = params["end_date"]
+            if "mode" in params:
+                regenerate_kwargs["mode"] = params["mode"]
+            result = ctx.storyline_generation.regenerate(
+                int(storyline_id), **regenerate_kwargs,
+            )
         ctx.jobs.update_progress(job_id, 1, 1)
 
         summary: dict[str, Any] = {
