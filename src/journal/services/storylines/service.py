@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from journal.services.storylines.segments import (
@@ -129,6 +129,10 @@ class StorylineGenerationService:
         narrator: StorylineNarratorProtocol,
         glue: StorylineGlueProtocol,
         embedder: Callable[[str], list[float]] | None = None,
+        # Currently unused by per-chapter generation (the chapter's own
+        # window is authoritative). Reserved and kept for constructor /
+        # bootstrap compatibility — production bootstrap passes
+        # window_days=...
         window_days: int = DEFAULT_WINDOW_DAYS,
         fts_fallback_threshold: int = DEFAULT_FTS_FALLBACK_THRESHOLD,
     ) -> None:
@@ -210,10 +214,10 @@ class StorylineGenerationService:
         ``last_generated_at`` and the summary embedding are stamped on
         the chapter row, not the storyline.
 
-        Only ``mode="replace"`` is supported here in Phase 1 — the open
-        chapter is rebuilt over its window. Append is handled by
-        :meth:`regenerate` / :meth:`_regenerate_append` for the open
-        chapter.
+        Only ``mode="replace"`` is supported here in Phase 1 — the
+        chapter is rebuilt over its window. Append is available only for
+        the open chapter via ``regenerate(storyline_id, mode="append")``,
+        not per-chapter.
         """
         if mode != "replace":
             raise ValueError(
@@ -376,12 +380,12 @@ class StorylineGenerationService:
         if start_iso is None:
             raise ValueError(
                 "Append mode requires explicit start_date "
-                "and a previously-generated storyline."
+                "and a previously-generated chapter."
             )
         if chapter.last_generated_at is None:
             raise ValueError(
                 "Append mode requires explicit start_date "
-                "and a previously-generated storyline."
+                "and a previously-generated chapter."
             )
         # Compare dates only — last_generated_at is an ISO timestamp.
         try:
@@ -394,7 +398,7 @@ class StorylineGenerationService:
         if last_gen_date is not None and start_date_obj < last_gen_date:
             raise ValueError(
                 "Append mode requires start_date to be on or after "
-                f"the storyline's last generation date "
+                f"the chapter's last generation date "
                 f"({last_gen_date.isoformat()}); got {start_iso}."
             )
 
@@ -562,46 +566,6 @@ class StorylineGenerationService:
         return result
 
     # ── internal ───────────────────────────────────────────────
-
-    def _resolve_date_window(
-        self,
-        storyline: Storyline,
-        *,
-        start_override: str | None = None,
-        end_override: str | None = None,
-    ) -> tuple[str | None, str | None]:
-        """Return (start_date, end_date) ISO strings.
-
-        Resolution order:
-
-        1. Explicit ``start_override``/``end_override`` win whenever
-           supplied (caller already parsed them to ISO).
-        2. Otherwise the storyline row's stored bounds, if either
-           is set.
-        3. Otherwise the default 90-day rolling window.
-
-        Each bound is resolved independently — passing only
-        ``start_override`` leaves the end falling through to the next
-        rule, and vice versa. If only one storyline-row bound is set
-        the other stays None (open range)."""
-        # Either explicit param wins for that side. If both overrides
-        # are None we fall back to the storyline row + default.
-        if start_override is not None or end_override is not None:
-            row_start = storyline.start_date if start_override is None else start_override
-            row_end = storyline.end_date if end_override is None else end_override
-            # If after the per-side merge we still have nothing, fill
-            # in the default 90-day window so the downstream query has
-            # a bounded range.
-            if not row_start and not row_end:
-                end = datetime.utcnow().date()
-                start = end - timedelta(days=self._window_days)
-                return start.isoformat(), end.isoformat()
-            return row_start, row_end
-        if storyline.start_date or storyline.end_date:
-            return storyline.start_date, storyline.end_date
-        end = datetime.utcnow().date()
-        start = end - timedelta(days=self._window_days)
-        return start.isoformat(), end.isoformat()
 
     def _fetch_excerpts(
         self,
