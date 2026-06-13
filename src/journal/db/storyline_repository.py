@@ -17,7 +17,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from journal.models import Storyline, StorylinePanel
+from journal.models import Storyline, StorylineChapter, StorylinePanel
 
 if TYPE_CHECKING:
     import sqlite3
@@ -40,6 +40,24 @@ def _row_to_storyline(row: sqlite3.Row) -> Storyline:
         status=row["status"],
         last_generated_at=row["last_generated_at"],
         last_extension_check_at=row["last_extension_check_at"],
+        summary_embedding=[float(x) for x in summary] if summary else None,
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _row_to_chapter(row: sqlite3.Row) -> StorylineChapter:
+    summary_raw = row["summary_embedding_json"]
+    summary = json.loads(summary_raw) if summary_raw else None
+    return StorylineChapter(
+        id=row["id"],
+        storyline_id=row["storyline_id"],
+        seq=row["seq"],
+        title=row["title"] or "",
+        start_date=row["start_date"],
+        end_date=row["end_date"],
+        state=row["state"],
+        last_generated_at=row["last_generated_at"],
         summary_embedding=[float(x) for x in summary] if summary else None,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -412,3 +430,95 @@ class SQLiteStorylineRepository:
             (storyline_id,),
         ).fetchall()
         return [_row_to_panel(r) for r in rows]
+
+    # ── chapters ─────────────────────────────────────────────────
+
+    def create_chapter(
+        self,
+        storyline_id: int,
+        seq: int,
+        title: str = "",
+        start_date: str | None = None,
+        end_date: str | None = None,
+        state: str = "open",
+    ) -> StorylineChapter:
+        """Create one chapter of a storyline and return it populated."""
+        conn = self._conn()
+        cursor = conn.execute(
+            "INSERT INTO storyline_chapters"
+            " (storyline_id, seq, title, start_date, end_date, state)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (storyline_id, seq, title.strip(), start_date, end_date, state),
+        )
+        conn.commit()
+        chapter_id = cursor.lastrowid
+        assert chapter_id is not None
+        ch = self.get_chapter(chapter_id)
+        assert ch is not None
+        return ch
+
+    def get_chapter(self, chapter_id: int) -> StorylineChapter | None:
+        row = self._conn().execute(
+            "SELECT * FROM storyline_chapters WHERE id = ?", (chapter_id,),
+        ).fetchone()
+        return _row_to_chapter(row) if row else None
+
+    def list_chapters(self, storyline_id: int) -> list[StorylineChapter]:
+        rows = self._conn().execute(
+            "SELECT * FROM storyline_chapters"
+            " WHERE storyline_id = ? ORDER BY seq ASC",
+            (storyline_id,),
+        ).fetchall()
+        return [_row_to_chapter(r) for r in rows]
+
+    def get_open_chapter(self, storyline_id: int) -> StorylineChapter | None:
+        """Return the storyline's single open chapter, or None."""
+        row = self._conn().execute(
+            "SELECT * FROM storyline_chapters"
+            " WHERE storyline_id = ? AND state = 'open'"
+            " ORDER BY seq DESC LIMIT 1",
+            (storyline_id,),
+        ).fetchone()
+        return _row_to_chapter(row) if row else None
+
+    def rename_chapter(
+        self, chapter_id: int, title: str,
+    ) -> StorylineChapter | None:
+        """Rename a chapter; returns the updated row or None if absent."""
+        conn = self._conn()
+        cursor = conn.execute(
+            "UPDATE storyline_chapters"
+            " SET title = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+            " WHERE id = ?",
+            (title.strip(), chapter_id),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            return None
+        return self.get_chapter(chapter_id)
+
+    def record_chapter_generation_complete(self, chapter_id: int) -> None:
+        """Stamp ``last_generated_at`` after a chapter's panels are written."""
+        conn = self._conn()
+        conn.execute(
+            "UPDATE storyline_chapters"
+            " SET last_generated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),"
+            "     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+            " WHERE id = ?",
+            (chapter_id,),
+        )
+        conn.commit()
+
+    def update_chapter_summary_embedding(
+        self, chapter_id: int, embedding: list[float] | None,
+    ) -> None:
+        """Persist (or clear) a chapter's narrative summary embedding."""
+        conn = self._conn()
+        conn.execute(
+            "UPDATE storyline_chapters"
+            " SET summary_embedding_json = ?,"
+            "     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+            " WHERE id = ?",
+            (json.dumps(embedding) if embedding is not None else None, chapter_id),
+        )
+        conn.commit()

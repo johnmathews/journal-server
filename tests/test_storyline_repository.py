@@ -746,3 +746,124 @@ class TestSegments:
     )
     def test_is_valid_segment(self, value: object, expected: bool) -> None:  # noqa: ANN401
         assert is_valid_segment(value) is expected
+
+
+# ── Chapter CRUD ─────────────────────────────────────────────────
+
+
+class TestChapterCRUD:
+    def test_create_and_list_chapters(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        sl = storyline_repo.create_storyline(
+            user_id=seed_user,
+            entity_ids=[seed_entity],
+            name="Run thread",
+            start_date="2026-01-01",
+            end_date="2026-03-01",
+        )
+        # create_storyline does not auto-create a chapter; create it explicitly.
+        ch = storyline_repo.create_chapter(
+            storyline_id=sl.id,
+            seq=1,
+            title="Ch 1",
+            start_date="2026-01-01",
+            end_date="2026-03-01",
+            state="open",
+        )
+        assert ch.seq == 1
+        assert ch.state == "open"
+        assert ch.start_date == "2026-01-01"
+        assert ch.end_date == "2026-03-01"
+        assert ch.created_at != ""
+        chapters = storyline_repo.list_chapters(sl.id)
+        assert [c.id for c in chapters] == [ch.id]
+        open_chapter = storyline_repo.get_open_chapter(sl.id)
+        assert open_chapter is not None
+        assert open_chapter.id == ch.id
+
+    def test_get_open_chapter(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        sl = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[seed_entity], name="X",
+        )
+        # No chapters yet → no open chapter.
+        assert storyline_repo.get_open_chapter(sl.id) is None
+        closed = storyline_repo.create_chapter(
+            storyline_id=sl.id, seq=1, title="Old", state="closed",
+        )
+        # Still no open chapter while only a closed one exists.
+        assert storyline_repo.get_open_chapter(sl.id) is None
+        open_ch = storyline_repo.create_chapter(
+            storyline_id=sl.id, seq=2, title="New", state="open",
+        )
+        got = storyline_repo.get_open_chapter(sl.id)
+        assert got is not None
+        assert got.id == open_ch.id
+        assert got.id != closed.id
+
+    def test_rename_chapter(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        sl = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[seed_entity], name="X",
+        )
+        ch = storyline_repo.create_chapter(storyline_id=sl.id, seq=1, title="Old")
+        updated = storyline_repo.rename_chapter(ch.id, "New Title")
+        assert updated is not None
+        assert updated.title == "New Title"
+        # Unknown chapter id returns None.
+        assert storyline_repo.rename_chapter(999_999, "Nope") is None
+
+    def test_record_chapter_generation_complete(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        sl = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[seed_entity], name="X",
+        )
+        ch = storyline_repo.create_chapter(storyline_id=sl.id, seq=1)
+        assert ch.last_generated_at is None
+        storyline_repo.record_chapter_generation_complete(ch.id)
+        refreshed = storyline_repo.get_chapter(ch.id)
+        assert refreshed is not None
+        assert refreshed.last_generated_at is not None
+
+    def test_update_chapter_summary_embedding(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        sl = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[seed_entity], name="X",
+        )
+        ch = storyline_repo.create_chapter(storyline_id=sl.id, seq=1)
+        assert ch.summary_embedding is None
+        storyline_repo.update_chapter_summary_embedding(ch.id, [0.1, 0.2, 0.3])
+        refreshed = storyline_repo.get_chapter(ch.id)
+        assert refreshed is not None
+        assert refreshed.summary_embedding == [0.1, 0.2, 0.3]
+        # Clearing it back to None.
+        storyline_repo.update_chapter_summary_embedding(ch.id, None)
+        cleared = storyline_repo.get_chapter(ch.id)
+        assert cleared is not None
+        assert cleared.summary_embedding is None
+
+    def test_get_chapter_unknown_returns_none(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+    ) -> None:
+        assert storyline_repo.get_chapter(999_999) is None
