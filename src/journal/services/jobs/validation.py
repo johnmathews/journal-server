@@ -86,6 +86,10 @@ STORYLINE_GENERATION_KEYS: dict[str, type | tuple[type, ...]] = {
     "storyline_id": int,
     "user_id": int,
     "parent_job_id": str,
+    # Optional: regenerate a single chapter rather than the storyline's
+    # open chapter. When present, the worker calls regenerate_chapter and
+    # the chapter's own date window is authoritative.
+    "chapter_id": int,
     # Optional date-window overrides + mode ("replace" | "append").
     # Stored as ISO strings; the service layer parses them.
     "start_date": str,

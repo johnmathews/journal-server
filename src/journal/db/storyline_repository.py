@@ -17,7 +17,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from journal.models import Storyline, StorylinePanel
+from journal.models import Storyline, StorylineChapter, StorylinePanel
 
 if TYPE_CHECKING:
     import sqlite3
@@ -46,12 +46,30 @@ def _row_to_storyline(row: sqlite3.Row) -> Storyline:
     )
 
 
+def _row_to_chapter(row: sqlite3.Row) -> StorylineChapter:
+    summary_raw = row["summary_embedding_json"]
+    summary = json.loads(summary_raw) if summary_raw else None
+    return StorylineChapter(
+        id=row["id"],
+        storyline_id=row["storyline_id"],
+        seq=row["seq"],
+        title=row["title"] or "",
+        start_date=row["start_date"],
+        end_date=row["end_date"],
+        state=row["state"],
+        last_generated_at=row["last_generated_at"],
+        summary_embedding=[float(x) for x in summary] if summary else None,
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
 def _row_to_panel(row: sqlite3.Row) -> StorylinePanel:
     segments_raw = json.loads(row["segments_json"] or "[]")
     source_ids_raw = json.loads(row["source_entry_ids_json"] or "[]")
     return StorylinePanel(
         id=row["id"],
-        storyline_id=row["storyline_id"],
+        chapter_id=row["chapter_id"],
         panel_kind=row["panel_kind"],
         segments=list(segments_raw),
         source_entry_ids=[int(x) for x in source_ids_raw],
@@ -361,7 +379,7 @@ class SQLiteStorylineRepository:
 
     def upsert_panel(
         self,
-        storyline_id: int,
+        chapter_id: int,
         panel_kind: str,
         segments: list[dict[str, Any]],
         source_entry_ids: list[int],
@@ -371,18 +389,18 @@ class SQLiteStorylineRepository:
         conn = self._conn()
         conn.execute(
             "INSERT INTO storyline_panels"
-            " (storyline_id, panel_kind, segments_json,"
+            " (chapter_id, panel_kind, segments_json,"
             "  source_entry_ids_json, citation_count, model_used,"
             "  generated_at)"
             " VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))"
-            " ON CONFLICT(storyline_id, panel_kind) DO UPDATE SET"
+            " ON CONFLICT(chapter_id, panel_kind) DO UPDATE SET"
             "  segments_json = excluded.segments_json,"
             "  source_entry_ids_json = excluded.source_entry_ids_json,"
             "  citation_count = excluded.citation_count,"
             "  model_used = excluded.model_used,"
             "  generated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
             (
-                storyline_id,
+                chapter_id,
                 panel_kind,
                 json.dumps(segments),
                 json.dumps(source_entry_ids),
@@ -391,24 +409,116 @@ class SQLiteStorylineRepository:
             ),
         )
         conn.commit()
-        panel = self.get_panel(storyline_id, panel_kind)
+        panel = self.get_panel(chapter_id, panel_kind)
         assert panel is not None
         return panel
 
     def get_panel(
-        self, storyline_id: int, panel_kind: str,
+        self, chapter_id: int, panel_kind: str,
     ) -> StorylinePanel | None:
         row = self._conn().execute(
             "SELECT * FROM storyline_panels"
-            " WHERE storyline_id = ? AND panel_kind = ?",
-            (storyline_id, panel_kind),
+            " WHERE chapter_id = ? AND panel_kind = ?",
+            (chapter_id, panel_kind),
         ).fetchone()
         return _row_to_panel(row) if row else None
 
-    def list_panels(self, storyline_id: int) -> list[StorylinePanel]:
+    def list_panels(self, chapter_id: int) -> list[StorylinePanel]:
         rows = self._conn().execute(
             "SELECT * FROM storyline_panels"
-            " WHERE storyline_id = ? ORDER BY panel_kind",
-            (storyline_id,),
+            " WHERE chapter_id = ? ORDER BY panel_kind",
+            (chapter_id,),
         ).fetchall()
         return [_row_to_panel(r) for r in rows]
+
+    # ── chapters ─────────────────────────────────────────────────
+
+    def create_chapter(
+        self,
+        storyline_id: int,
+        seq: int,
+        title: str = "",
+        start_date: str | None = None,
+        end_date: str | None = None,
+        state: str = "open",
+    ) -> StorylineChapter:
+        """Create one chapter of a storyline and return it populated."""
+        conn = self._conn()
+        cursor = conn.execute(
+            "INSERT INTO storyline_chapters"
+            " (storyline_id, seq, title, start_date, end_date, state)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (storyline_id, seq, title.strip(), start_date, end_date, state),
+        )
+        conn.commit()
+        chapter_id = cursor.lastrowid
+        assert chapter_id is not None
+        ch = self.get_chapter(chapter_id)
+        assert ch is not None
+        return ch
+
+    def get_chapter(self, chapter_id: int) -> StorylineChapter | None:
+        row = self._conn().execute(
+            "SELECT * FROM storyline_chapters WHERE id = ?", (chapter_id,),
+        ).fetchone()
+        return _row_to_chapter(row) if row else None
+
+    def list_chapters(self, storyline_id: int) -> list[StorylineChapter]:
+        rows = self._conn().execute(
+            "SELECT * FROM storyline_chapters"
+            " WHERE storyline_id = ? ORDER BY seq ASC",
+            (storyline_id,),
+        ).fetchall()
+        return [_row_to_chapter(r) for r in rows]
+
+    def get_open_chapter(self, storyline_id: int) -> StorylineChapter | None:
+        """Return the storyline's single open chapter, or None."""
+        row = self._conn().execute(
+            "SELECT * FROM storyline_chapters"
+            " WHERE storyline_id = ? AND state = 'open'"
+            " ORDER BY seq DESC LIMIT 1",
+            (storyline_id,),
+        ).fetchone()
+        return _row_to_chapter(row) if row else None
+
+    def rename_chapter(
+        self, chapter_id: int, title: str,
+    ) -> StorylineChapter | None:
+        """Rename a chapter; returns the updated row or None if absent."""
+        conn = self._conn()
+        cursor = conn.execute(
+            "UPDATE storyline_chapters"
+            " SET title = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+            " WHERE id = ?",
+            (title.strip(), chapter_id),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            return None
+        return self.get_chapter(chapter_id)
+
+    def record_chapter_generation_complete(self, chapter_id: int) -> None:
+        """Stamp ``last_generated_at`` after a chapter's panels are written."""
+        conn = self._conn()
+        conn.execute(
+            "UPDATE storyline_chapters"
+            " SET last_generated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),"
+            "     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+            " WHERE id = ?",
+            (chapter_id,),
+        )
+        conn.commit()
+
+    def update_chapter_summary_embedding(
+        self, chapter_id: int, embedding: list[float] | None,
+    ) -> None:
+        """Persist (or clear) a chapter's narrative summary embedding."""
+        conn = self._conn()
+        conn.execute(
+            "UPDATE storyline_chapters"
+            " SET summary_embedding_json = ?,"
+            "     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+            " WHERE id = ?",
+            (json.dumps(embedding) if embedding is not None else None, chapter_id),
+        )
+        conn.commit()

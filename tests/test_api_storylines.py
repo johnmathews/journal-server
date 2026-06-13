@@ -140,6 +140,100 @@ def app_with_storylines(
         factory.close_current()
 
 
+@pytest.fixture
+def seed_storyline(
+    app_with_storylines: tuple[TestClient, dict[str, Any]],
+) -> tuple[int, int]:
+    """Create a storyline + its seq-1 open chapter + two panels.
+
+    Returns ``(storyline_id, chapter_id)``. The create route already
+    seeds the open chapter; we look it up and upsert two panels so the
+    chapter has citation counts and renderable content.
+    """
+    _client, ctx = app_with_storylines
+    repo = ctx["repo"]
+    sl = repo.create_storyline(
+        user_id=_TEST_USER_ID, entity_ids=[ctx["entity_id"]],
+        name="Seeded", start_date="2026-01-01", end_date="2026-03-01",
+    )
+    chapter = repo.create_chapter(
+        storyline_id=sl.id, seq=1, title="Chapter 1",
+        start_date="2026-01-01", end_date="2026-03-01", state="open",
+    )
+    repo.upsert_panel(
+        chapter_id=chapter.id, panel_kind="narrative",
+        segments=[{"kind": "text", "text": "prose"}],
+        source_entry_ids=[1], citation_count=2, model_used="m",
+    )
+    repo.upsert_panel(
+        chapter_id=chapter.id, panel_kind="curation",
+        segments=[{"kind": "text", "text": "timeline"}],
+        source_entry_ids=[1], citation_count=3, model_used="m",
+    )
+    return sl.id, chapter.id
+
+
+class TestStorylineChaptersAPI:
+    def test_detail_includes_chapters_and_backcompat_panels(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+        seed_storyline: tuple[int, int],
+    ) -> None:
+        client, _ = app_with_storylines
+        sid, _chapter_id = seed_storyline
+        resp = client.get(f"/api/storylines/{sid}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert isinstance(body["chapters"], list)
+        assert len(body["chapters"]) == 1
+        ch = body["chapters"][0]
+        assert ch["state"] == "open"
+        assert ch["seq"] == 1
+        # citation_count = sum of the chapter's panels (2 + 3).
+        assert ch["citation_count"] == 5
+        # Back-compat: storyline-level panels = the open chapter's panels.
+        assert "panels" in body
+        assert "narrative" in body["panels"]
+        assert "curation" in body["panels"]
+
+    def test_get_single_chapter_returns_panels(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+        seed_storyline: tuple[int, int],
+    ) -> None:
+        client, _ = app_with_storylines
+        sid, chapter_id = seed_storyline
+        resp = client.get(f"/api/storylines/{sid}/chapters/{chapter_id}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["id"] == chapter_id
+        assert body["storyline_id"] == sid
+        assert "panels" in body
+        assert "narrative" in body["panels"]
+        assert body["panels"]["narrative"]["segments"][0]["text"] == "prose"
+
+    def test_get_chapter_404_for_wrong_storyline(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+        seed_storyline: tuple[int, int],
+    ) -> None:
+        client, _ = app_with_storylines
+        _sid, chapter_id = seed_storyline
+        # Right chapter id but a storyline that doesn't own it / 404.
+        resp = client.get(f"/api/storylines/99999/chapters/{chapter_id}")
+        assert resp.status_code == 404
+
+    def test_get_chapter_404_for_unknown_chapter(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+        seed_storyline: tuple[int, int],
+    ) -> None:
+        client, _ = app_with_storylines
+        sid, _chapter_id = seed_storyline
+        resp = client.get(f"/api/storylines/{sid}/chapters/99999")
+        assert resp.status_code == 404
+
+
 class TestStorylinesAPI:
     def test_list_returns_empty_envelope(
         self,
@@ -376,9 +470,10 @@ class TestStorylinesAPI:
         sid = created["id"]
         # Inject a curation panel with entry_date stamped on its
         # citations — emulating what _build_curation_segments now
-        # produces.
+        # produces. Panels are keyed on the open chapter.
+        open_chapter = ctx["repo"].get_open_chapter(sid)
         ctx["repo"].upsert_panel(
-            storyline_id=sid,
+            chapter_id=open_chapter.id,
             panel_kind="curation",
             segments=[
                 {"kind": "text", "text": "It begins on 2026-02-15:"},
@@ -424,8 +519,9 @@ class TestStorylinesAPI:
             json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
         ).json()
         sid = created["id"]
+        open_chapter = ctx["repo"].get_open_chapter(sid)
         ctx["repo"].upsert_panel(
-            storyline_id=sid,
+            chapter_id=open_chapter.id,
             panel_kind="curation",
             segments=[
                 {"kind": "text", "text": "It begins:"},

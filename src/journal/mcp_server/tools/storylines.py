@@ -139,13 +139,22 @@ def journal_get_storyline(
     panels = {p.panel_kind: p for p in repo.list_panels(storyline.id)}
     entity_store = _get_entity_store(ctx)
 
+    chapters = repo.list_chapters(storyline.id)
     lines = [
         f"Storyline {storyline.id}: {storyline.name}",
         f"  anchors: {_format_anchors(repo, entity_store, storyline.id)}",
         f"  status={storyline.status}, "
         f"last_generated_at={storyline.last_generated_at or 'never'}",
-        "",
     ]
+    if chapters:
+        lines.append(f"  chapters ({len(chapters)}):")
+        for ch in chapters:
+            window = f"{ch.start_date or '…'} – {ch.end_date or 'now'}"
+            lines.append(
+                f"    [{ch.id}] seq {ch.seq}: {ch.title or '(untitled)'} "
+                f"({window}) state={ch.state}"
+            )
+    lines.append("")
     for kind in ("curation", "narrative"):
         panel = panels.get(kind)
         lines.append(f"=== Panel: {kind} ===")
@@ -436,6 +445,18 @@ def journal_regenerate_storyline(
             ),
         ),
     ] = 120,
+    chapter_id: Annotated[
+        int | None,
+        Field(
+            description=(
+                "Optional: regenerate a single chapter rather than the "
+                "storyline's open chapter. The chapter's own date window "
+                "is authoritative (replace mode only). Obtain chapter ids "
+                "from journal_get_storyline. Omit to regenerate the open "
+                "chapter."
+            ),
+        ),
+    ] = None,
     ctx: Context = None,  # type: ignore[assignment]
 ) -> str:
     """Regenerate both AI panels (narrative prose + curation timeline) for a storyline.
@@ -446,10 +467,11 @@ def journal_regenerate_storyline(
     the job times out, use ``journal_get_job_status`` with the returned
     job_id to check progress later. Regeneration is idempotent; call it
     whenever you want the panels refreshed with the latest journal
-    entries.
+    entries. Pass ``chapter_id`` to regenerate one specific chapter.
     """
     log.info(
-        "Tool call: journal_regenerate_storyline(id=%d)", storyline_id,
+        "Tool call: journal_regenerate_storyline(id=%d, chapter_id=%s)",
+        storyline_id, chapter_id,
     )
     repo = _get_storyline_repository(ctx)
     if repo is None:
@@ -459,9 +481,19 @@ def journal_regenerate_storyline(
     storyline = repo.get_storyline(storyline_id, user_id=user_id)
     if storyline is None:
         return f"Storyline {storyline_id} not found."
+    submit_kwargs: dict[str, Any] = {"user_id": user_id}
+    if chapter_id is not None:
+        chapter = repo.get_chapter(chapter_id)
+        if chapter is None or chapter.storyline_id != storyline_id:
+            return (
+                f"Chapter {chapter_id} not found on storyline "
+                f"{storyline_id}."
+            )
+        submit_kwargs["chapter_id"] = chapter_id
+        submit_kwargs["mode"] = "replace"
     try:
         job = runner.submit_storyline_generation(
-            storyline_id, user_id=user_id,
+            storyline_id, **submit_kwargs,
         )
     except RuntimeError as exc:
         return f"Cannot regenerate: {exc}"

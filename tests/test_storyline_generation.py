@@ -550,7 +550,12 @@ def seeded_storyline(
     factory: ConnectionFactory,
 ) -> tuple[SQLiteStorylineRepository, SQLiteEntityStore, int, int, int]:
     """Returns (storyline_repo, entity_store, user_id, entity_id, storyline_id)
-    with one Atlas-person entity and two dated mentions."""
+    with one Atlas-person entity and two dated mentions.
+
+    The storyline also gets a single open chapter (seq 1) spanning the
+    same window, so the back-compat ``regenerate(storyline_id)`` entry
+    point can resolve a generation target.
+    """
     conn = factory.get()
     cur = conn.execute(
         "INSERT INTO users (email, password_hash, display_name)"
@@ -588,6 +593,10 @@ def seeded_storyline(
     storyline = repo.create_storyline(
         user_id=user_id, entity_ids=[entity.id], name="Atlas",
         start_date="2026-01-01", end_date="2026-12-31",
+    )
+    repo.create_chapter(
+        storyline_id=storyline.id, seq=1, title="Atlas",
+        start_date="2026-01-01", end_date="2026-12-31", state="open",
     )
     return repo, store, user_id, entity.id, storyline.id
 
@@ -645,15 +654,46 @@ class TestGenerationService:
         assert result.fts_fallback_count == 0
         assert result.narrative_citation_count == 2
         assert glue.calls == 1
-        # Both panels persisted
-        narrative_panel = repo.get_panel(storyline_id, "narrative")
-        curation_panel = repo.get_panel(storyline_id, "curation")
+        # Both panels persisted on the open chapter
+        chapter = repo.get_open_chapter(storyline_id)
+        assert chapter is not None
+        narrative_panel = repo.get_panel(chapter.id, "narrative")
+        curation_panel = repo.get_panel(chapter.id, "curation")
         assert narrative_panel is not None
         assert curation_panel is not None
         # Curation panel: lede + 2 citations + 1 transition
         assert curation_panel.citation_count == 2
-        # last_generated_at recorded
-        refreshed = repo.get_storyline(storyline_id)
+        # last_generated_at recorded on the chapter
+        refreshed = repo.get_chapter(chapter.id)
+        assert refreshed is not None
+        assert refreshed.last_generated_at is not None
+
+    def test_regenerate_chapter_writes_panels_to_chapter(
+        self,
+        seeded_storyline: tuple[Any, Any, int, int, int],
+    ) -> None:
+        """The chapter is the unit of generation: panels are reachable
+        by chapter_id, the chapter's last_generated_at is stamped, and
+        the result still reports the parent storyline_id."""
+        repo, store, _user, _entity, storyline_id = seeded_storyline
+        chapter = repo.get_open_chapter(storyline_id)
+        assert chapter is not None
+        svc = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=_FakeNarrator(segments=[
+                {"kind": "text", "text": "The author writes about his son."},
+                {"kind": "citation", "entry_id": 1, "quote": "Atlas read."},
+            ]),
+            glue=_FakeGlue(),
+        )
+        result = svc.regenerate_chapter(chapter.id)
+        assert result.storyline_id == storyline_id
+        # Panels are reachable by chapter_id.
+        assert repo.get_panel(chapter.id, "narrative") is not None
+        assert repo.get_panel(chapter.id, "curation") is not None
+        refreshed = repo.get_chapter(chapter.id)
         assert refreshed is not None
         assert refreshed.last_generated_at is not None
 
@@ -686,7 +726,9 @@ class TestGenerationService:
             glue=_FakeGlue(),
         )
         svc_good.regenerate(storyline_id)
-        original_panel = repo.get_panel(storyline_id, "narrative")
+        chapter = repo.get_open_chapter(storyline_id)
+        assert chapter is not None
+        original_panel = repo.get_panel(chapter.id, "narrative")
         assert original_panel is not None
         assert len(original_panel.segments) == 2
 
@@ -704,7 +746,7 @@ class TestGenerationService:
         assert result.warnings
         assert any("preserved" in w.lower() for w in result.warnings)
 
-        preserved = repo.get_panel(storyline_id, "narrative")
+        preserved = repo.get_panel(chapter.id, "narrative")
         assert preserved is not None
         # Same segments as before — not wiped.
         assert preserved.segments == original_panel.segments
@@ -731,7 +773,9 @@ class TestGenerationService:
         )
         svc.regenerate(storyline_id)
 
-        curation = repo.get_panel(storyline_id, "curation")
+        chapter = repo.get_open_chapter(storyline_id)
+        assert chapter is not None
+        curation = repo.get_panel(chapter.id, "curation")
         assert curation is not None
         citation_segs = [s for s in curation.segments if s["kind"] == "citation"]
         assert citation_segs, "curation panel should have citation segments"
@@ -839,7 +883,9 @@ class TestGenerationService:
             embedder=embedder,
         )
         svc.regenerate(storyline_id)
-        refreshed = repo.get_storyline(storyline_id)
+        chapter = repo.get_open_chapter(storyline_id)
+        assert chapter is not None
+        refreshed = repo.get_chapter(chapter.id)
         assert refreshed is not None
         assert refreshed.summary_embedding is not None
         assert len(refreshed.summary_embedding) == 3
@@ -868,6 +914,10 @@ class TestGenerationService:
         storyline = repo.create_storyline(
             user_id=user_id, entity_ids=[entity.id], name="Atlas",
             start_date="2030-01-01", end_date="2030-12-31",
+        )
+        repo.create_chapter(
+            storyline_id=storyline.id, seq=1, title="Atlas",
+            start_date="2030-01-01", end_date="2030-12-31", state="open",
         )
         narrator = _FakeNarrator(segments=[])
         glue = _FakeGlue()
@@ -942,6 +992,10 @@ class TestGenerationService:
         storyline = repo.create_storyline(
             user_id=user_id, entity_ids=[entity.id], name="Atlas",
             start_date="2026-01-01", end_date="2026-12-31",
+        )
+        repo.create_chapter(
+            storyline_id=storyline.id, seq=1, title="Atlas",
+            start_date="2026-01-01", end_date="2026-12-31", state="open",
         )
         narrator = _FakeNarrator(segments=[
             {"kind": "text", "text": "Atlas at school."},
@@ -1024,6 +1078,10 @@ class TestGenerationService:
         storyline = repo.create_storyline(
             user_id=user_id, entity_ids=[entity.id], name="Atlas",
             start_date="2026-01-01", end_date="2026-12-31",
+        )
+        repo.create_chapter(
+            storyline_id=storyline.id, seq=1, title="Atlas",
+            start_date="2026-01-01", end_date="2026-12-31", state="open",
         )
         narrator = _FakeNarrator(segments=[
             {"kind": "text", "text": "Atlas's week."},
@@ -1128,6 +1186,14 @@ def _seed_storyline_with_history(
         user_id=user_id, entity_ids=[entity.id], name="Atlas",
         start_date="2099-01-01", end_date="2099-01-31",
     )
+    # Open chapter mirroring the storyline's Jan window. The initial
+    # replace run generates over this window (3 Jan entries); the append
+    # runs fetch by their own explicit start/end dates (Mar/Apr), which
+    # is independent of the chapter window.
+    repo.create_chapter(
+        storyline_id=storyline.id, seq=1, title="Atlas",
+        start_date="2099-01-01", end_date="2099-01-31", state="open",
+    )
     return repo, store, user_id, entity.id, storyline.id
 
 
@@ -1153,8 +1219,10 @@ class TestAppendMode:
             glue=_FakeGlue(),
         )
         svc_initial.regenerate(sid)
-        curation_before = repo.get_panel(sid, "curation")
-        narrative_before = repo.get_panel(sid, "narrative")
+        chapter = repo.get_open_chapter(sid)
+        assert chapter is not None
+        curation_before = repo.get_panel(chapter.id, "curation")
+        narrative_before = repo.get_panel(chapter.id, "narrative")
         assert curation_before is not None
         assert narrative_before is not None
         assert curation_before.citation_count == 3
@@ -1186,8 +1254,8 @@ class TestAppendMode:
         assert result.curation_citation_count == 2
 
         # Panels grew.
-        curation_after = repo.get_panel(sid, "curation")
-        narrative_after = repo.get_panel(sid, "narrative")
+        curation_after = repo.get_panel(chapter.id, "curation")
+        narrative_after = repo.get_panel(chapter.id, "narrative")
         assert curation_after is not None
         assert narrative_after is not None
         assert curation_after.citation_count == 5  # 3 + 2
@@ -1351,17 +1419,19 @@ class TestAppendMode:
         # Append-only marker should NOT have been passed
         assert narrator.last_prior_narrative is None
 
-    def test_date_range_override_on_replace_changes_window(
+    def test_chapter_window_is_authoritative_on_replace(
         self,
         factory: ConnectionFactory,
     ) -> None:
-        """Passing start_date/end_date in replace mode overrides
-        whatever is on the storyline row (which here was Jan)."""
+        """In replace mode the chapter's own date window selects the
+        excerpts — not the storyline row or any caller-supplied
+        override. A March-windowed chapter pulls only the two March
+        entries; a Jan-windowed chapter pulls the three Jan entries."""
         repo, store, _u, _e, sid = _seed_storyline_with_history(
             factory, user_email="override@x.test",
         )
         narrator = _FakeNarrator(segments=[
-            {"kind": "text", "text": "Override window."},
+            {"kind": "text", "text": "Window."},
             {"kind": "citation", "entry_id": 4, "quote": "q"},
         ])
         svc = StorylineGenerationService(
@@ -1371,11 +1441,19 @@ class TestAppendMode:
             narrator=narrator,
             glue=_FakeGlue(),
         )
-        # Without override: 3 entries (Jan). With override: 2 (March).
-        result = svc.regenerate(
-            sid, start_date="2099-03-01", end_date="2099-03-31",
+        # Open chapter (seeded) spans Jan → 3 entries.
+        result_jan = svc.regenerate(sid)
+        assert result_jan.entry_count == 3
+
+        # A second, March-windowed chapter pulls only the 2 March
+        # entries. (The unique-open-chapter index forbids two open
+        # chapters, so this one is closed.)
+        march_chapter = repo.create_chapter(
+            storyline_id=sid, seq=2, title="March",
+            start_date="2099-03-01", end_date="2099-03-31", state="closed",
         )
-        assert result.entry_count == 2
+        result_mar = svc.regenerate_chapter(march_chapter.id)
+        assert result_mar.entry_count == 2
 
     def test_invalid_mode_rejected(
         self,
@@ -1411,7 +1489,9 @@ class TestAppendMode:
             ]),
             glue=_FakeGlue(),
         ).regenerate(sid)
-        before = repo.get_panel(sid, "narrative")
+        chapter = repo.get_open_chapter(sid)
+        assert chapter is not None
+        before = repo.get_panel(chapter.id, "narrative")
         assert before is not None
 
         svc = StorylineGenerationService(
@@ -1430,6 +1510,6 @@ class TestAppendMode:
         )
         assert result.entry_count == 0
         assert result.warnings
-        after = repo.get_panel(sid, "narrative")
+        after = repo.get_panel(chapter.id, "narrative")
         assert after is not None
         assert after.segments == before.segments

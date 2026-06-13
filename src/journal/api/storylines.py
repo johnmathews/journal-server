@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from starlette.requests import Request
 
     from journal.db.storyline_repository import SQLiteStorylineRepository
-    from journal.models import Storyline, StorylinePanel
+    from journal.models import Storyline, StorylineChapter, StorylinePanel
     from journal.service_registry import ServicesDict
 
 log = logging.getLogger(__name__)
@@ -101,11 +101,52 @@ def register_storylines_routes(
         storyline = repo.get_storyline(sid, user_id=user.user_id)
         if storyline is None:
             return JSONResponse({"error": "Storyline not found"}, status_code=404)
-        panels = repo.list_panels(storyline.id)
+        chapters = repo.list_chapters(storyline.id)
+        # Back-compat: storyline-level ``panels`` = the open chapter's
+        # panels, so a not-yet-updated webapp keeps rendering. Removed
+        # once the webapp reads chapters directly.
+        open_chapter = next(
+            (c for c in chapters if c.state == "open"), None,
+        )
+        panels = repo.list_panels(open_chapter.id) if open_chapter else []
         entity_store = services.get("entity_store")
         anchors = _build_anchors(repo, entity_store, storyline.id)
         return JSONResponse({
             **_storyline_to_dict(storyline, anchors),
+            "chapters": [_chapter_to_dict(repo, c) for c in chapters],
+            "panels": {
+                p.panel_kind: _panel_to_dict(p) for p in panels
+            },
+        })
+
+    @mcp.custom_route(
+        "/api/storylines/{storyline_id:int}/chapters/{chapter_id:int}",
+        methods=["GET"], name="api_storyline_chapter_detail",
+    )
+    @handler(services_getter)
+    def storyline_chapter_detail(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
+        repo: SQLiteStorylineRepository | None = services.get(
+            "storyline_repository",
+        )
+        if repo is None:
+            return JSONResponse(
+                {"error": "Storylines feature not configured"},
+                status_code=503,
+            )
+        user = get_authenticated_user(request)
+        sid = int(request.path_params["storyline_id"])
+        cid = int(request.path_params["chapter_id"])
+        storyline = repo.get_storyline(sid, user_id=user.user_id)
+        if storyline is None:
+            return JSONResponse({"error": "Storyline not found"}, status_code=404)
+        chapter = repo.get_chapter(cid)
+        if chapter is None or chapter.storyline_id != sid:
+            return JSONResponse({"error": "Chapter not found"}, status_code=404)
+        panels = repo.list_panels(cid)
+        return JSONResponse({
+            **_chapter_to_dict(repo, chapter),
             "panels": {
                 p.panel_kind: _panel_to_dict(p) for p in panels
             },
@@ -145,6 +186,24 @@ def _storyline_to_dict(
         "last_extension_check_at": s.last_extension_check_at,
         "created_at": s.created_at,
         "updated_at": s.updated_at,
+    }
+
+
+def _chapter_to_dict(
+    repo: SQLiteStorylineRepository, c: StorylineChapter,
+) -> dict[str, Any]:
+    panels = repo.list_panels(c.id)
+    citation_count = sum(p.citation_count for p in panels)
+    return {
+        "id": c.id,
+        "storyline_id": c.storyline_id,
+        "seq": c.seq,
+        "title": c.title,
+        "start_date": c.start_date,
+        "end_date": c.end_date,
+        "state": c.state,
+        "last_generated_at": c.last_generated_at,
+        "citation_count": citation_count,
     }
 
 

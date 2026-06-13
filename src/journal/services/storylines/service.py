@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from journal.services.storylines.segments import (
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from journal.db.repository.protocol import EntryRepository
     from journal.db.storyline_repository import SQLiteStorylineRepository
     from journal.entitystore.protocol import EntityStore
-    from journal.models import DatedEntryExcerpt, Storyline
+    from journal.models import DatedEntryExcerpt, Storyline, StorylineChapter
     from journal.providers.storyline_glue import StorylineGlueProtocol
     from journal.providers.storyline_narrator import StorylineNarratorProtocol
 
@@ -103,6 +103,13 @@ class StorylineGenerationServiceProtocol(Protocol):
         mode: GenerationMode = ...,
     ) -> GenerationResult: ...
 
+    def regenerate_chapter(
+        self,
+        chapter_id: int,
+        *,
+        mode: GenerationMode = ...,
+    ) -> GenerationResult: ...
+
 
 class StorylineGenerationService:
     """Orchestrates one storyline regeneration end-to-end.
@@ -122,6 +129,10 @@ class StorylineGenerationService:
         narrator: StorylineNarratorProtocol,
         glue: StorylineGlueProtocol,
         embedder: Callable[[str], list[float]] | None = None,
+        # Currently unused by per-chapter generation (the chapter's own
+        # window is authoritative). Reserved and kept for constructor /
+        # bootstrap compatibility — production bootstrap passes
+        # window_days=...
         window_days: int = DEFAULT_WINDOW_DAYS,
         fts_fallback_threshold: int = DEFAULT_FTS_FALLBACK_THRESHOLD,
     ) -> None:
@@ -142,45 +153,88 @@ class StorylineGenerationService:
         end_date: date | str | None = None,
         mode: GenerationMode = "replace",
     ) -> GenerationResult:
-        """Regenerate one storyline end-to-end.
+        """Back-compat entry point: regenerate the storyline's open chapter.
+
+        Chapters are the unit of generation; the storyline-level
+        ``regenerate`` resolves the storyline's single **open** chapter
+        and delegates to :meth:`regenerate_chapter`. This preserves the
+        existing job/button behavior for callers that still think in
+        terms of storylines.
 
         ``mode="replace"`` (the default) rebuilds both panels from
-        scratch over the resolved date window.
+        scratch over the chapter's date window. ``mode="append"``
+        requires both ``start_date`` and a previously-generated open
+        chapter; the new excerpts in [start_date, end_date] are appended
+        to the open chapter's existing panels rather than replacing them.
 
-        ``mode="append"`` requires both ``start_date`` and a previously-
-        generated storyline (``last_generated_at`` non-null); the new
-        excerpts in [start_date, end_date] are appended to the
-        existing panels rather than replacing them.
-
-        ``start_date`` and ``end_date`` may be ``datetime.date`` or
-        ISO ``YYYY-MM-DD`` strings; they override whatever is on the
-        storyline row for this call. The append-mode boundary check
-        operates on parsed dates.
+        ``start_date`` and ``end_date`` may be ``datetime.date`` or ISO
+        ``YYYY-MM-DD`` strings. In ``replace`` mode the chapter's own
+        window is authoritative; the overrides are honoured only on the
+        append path (which mirrors the previous behavior and is exercised
+        by the append-mode tests).
         """
         if mode not in ("replace", "append"):
             raise ValueError(
                 f"Invalid mode {mode!r}; expected 'replace' or 'append'"
             )
-        storyline = self._storyline_repository.get_storyline(storyline_id)
-        if storyline is None:
-            raise ValueError(f"Storyline {storyline_id} not found")
-
-        start_iso = _to_iso(start_date)
-        end_iso = _to_iso(end_date)
+        open_chapter = self._storyline_repository.get_open_chapter(storyline_id)
+        if open_chapter is None:
+            # Distinguish "no storyline" from "storyline has no open
+            # chapter" so callers (and tests) get the right error.
+            storyline = self._storyline_repository.get_storyline(storyline_id)
+            if storyline is None:
+                raise ValueError(f"Storyline {storyline_id} not found")
+            raise ValueError(f"Storyline {storyline_id} has no open chapter")
 
         if mode == "append":
+            storyline = self._storyline_repository.get_storyline(storyline_id)
+            if storyline is None:
+                raise ValueError(f"Storyline {storyline_id} not found")
+            start_iso = _to_iso(start_date)
+            end_iso = _to_iso(end_date)
             return self._regenerate_append(
-                storyline, start_iso=start_iso, end_iso=end_iso,
+                storyline, open_chapter,
+                start_iso=start_iso, end_iso=end_iso,
             )
 
-        resolved_start, resolved_end = self._resolve_date_window(
-            storyline, start_override=start_iso, end_override=end_iso,
-        )
+        return self.regenerate_chapter(open_chapter.id, mode=mode)
+
+    def regenerate_chapter(
+        self,
+        chapter_id: int,
+        *,
+        mode: GenerationMode = "replace",
+    ) -> GenerationResult:
+        """Regenerate one chapter's panels end-to-end (the core).
+
+        Resolves the chapter and its parent storyline, uses the
+        **chapter's** ``start_date``/``end_date`` as the generation
+        window (anchors are still storyline-level and resolved via the
+        storyline), and writes both panels keyed on ``chapter_id``.
+        ``last_generated_at`` and the summary embedding are stamped on
+        the chapter row, not the storyline.
+
+        Only ``mode="replace"`` is supported here in Phase 1 — the
+        chapter is rebuilt over its window. Append is available only for
+        the open chapter via ``regenerate(storyline_id, mode="append")``,
+        not per-chapter.
+        """
+        if mode != "replace":
+            raise ValueError(
+                f"regenerate_chapter only supports mode='replace'; got {mode!r}"
+            )
+        chapter = self._storyline_repository.get_chapter(chapter_id)
+        if chapter is None:
+            raise ValueError(f"Chapter {chapter_id} not found")
+        storyline = self._storyline_repository.get_storyline(chapter.storyline_id)
+        if storyline is None:
+            raise ValueError(f"Storyline {chapter.storyline_id} not found")
+
         excerpts, fts_count = self._fetch_excerpts(
-            storyline, start_date=resolved_start, end_date=resolved_end,
+            storyline, start_date=chapter.start_date, end_date=chapter.end_date,
         )
         result = GenerationResult(
-            storyline_id=storyline_id,
+            storyline_id=storyline.id,
             entry_count=len(excerpts),
             entity_mention_count=len(excerpts) - fts_count,
             fts_fallback_count=fts_count,
@@ -192,20 +246,22 @@ class StorylineGenerationService:
                 "Skipping generation."
             )
             log.info(
-                "Storyline %d: no excerpts in window %s..%s; persisting empty panels",
-                storyline_id, resolved_start, resolved_end,
+                "Chapter %d: no excerpts in window %s..%s; persisting empty panels",
+                chapter_id, chapter.start_date, chapter.end_date,
             )
             self._storyline_repository.upsert_panel(
-                storyline_id=storyline_id,
+                chapter_id=chapter_id,
                 panel_kind="curation", segments=[], source_entry_ids=[],
                 citation_count=0, model_used=self._glue.model,
             )
             self._storyline_repository.upsert_panel(
-                storyline_id=storyline_id,
+                chapter_id=chapter_id,
                 panel_kind="narrative", segments=[], source_entry_ids=[],
                 citation_count=0, model_used=self._narrator.model,
             )
-            self._storyline_repository.record_generation_complete(storyline_id)
+            self._storyline_repository.record_chapter_generation_complete(
+                chapter_id,
+            )
             return result
 
         narrative = self._narrator.generate_narrative(
@@ -224,10 +280,10 @@ class StorylineGenerationService:
         # failure as a warning + log line.
         if not narrative.segments:
             log.warning(
-                "Storyline %d: narrator returned empty segments for "
+                "Chapter %d: narrator returned empty segments for "
                 "non-empty corpus (%d excerpts) — preserving existing "
                 "narrative panel rather than overwriting",
-                storyline_id, len(excerpts),
+                chapter_id, len(excerpts),
             )
             result.warnings.append(
                 "Narrative generation produced no segments; "
@@ -235,7 +291,7 @@ class StorylineGenerationService:
             )
         else:
             self._storyline_repository.upsert_panel(
-                storyline_id=storyline_id,
+                chapter_id=chapter_id,
                 panel_kind="narrative",
                 segments=narrative.segments,
                 source_entry_ids=narrative.source_entry_ids,
@@ -248,7 +304,7 @@ class StorylineGenerationService:
         result.curation_citation_count = count_citations(curation_segments)
         result.curation_model = glue.model_used
         self._storyline_repository.upsert_panel(
-            storyline_id=storyline_id,
+            chapter_id=chapter_id,
             panel_kind="curation",
             segments=curation_segments,
             source_entry_ids=collect_source_entry_ids(curation_segments),
@@ -263,21 +319,21 @@ class StorylineGenerationService:
                     embedding = self._embedder(narrative_text)
                 except Exception:  # noqa: BLE001 — embedding is best-effort
                     log.exception(
-                        "Embedder failed for storyline %d; skipping summary embedding",
-                        storyline_id,
+                        "Embedder failed for chapter %d; skipping summary embedding",
+                        chapter_id,
                     )
                     result.warnings.append(
                         "Embedder failed; summary embedding not updated."
                     )
                 else:
-                    self._storyline_repository.update_summary_embedding(
-                        storyline_id, embedding,
+                    self._storyline_repository.update_chapter_summary_embedding(
+                        chapter_id, embedding,
                     )
 
-        self._storyline_repository.record_generation_complete(storyline_id)
+        self._storyline_repository.record_chapter_generation_complete(chapter_id)
         log.info(
-            "Storyline %d regenerated: %d entries, %d narrative citations, %d curation citations",
-            storyline_id, result.entry_count,
+            "Chapter %d regenerated: %d entries, %d narrative citations, %d curation citations",
+            chapter_id, result.entry_count,
             result.narrative_citation_count, result.curation_citation_count,
         )
         return result
@@ -287,14 +343,19 @@ class StorylineGenerationService:
     def _regenerate_append(
         self,
         storyline: Storyline,
+        chapter: StorylineChapter,
         *,
         start_iso: str | None,
         end_iso: str | None,
     ) -> GenerationResult:
         """Append-only-at-end regeneration (decision D2 in the plan).
 
-        Validates that we have an explicit ``start_iso`` AND the
-        storyline has been generated at least once AND
+        Operates on the storyline's **open** chapter: panels, the
+        generation timestamp, and the summary embedding are all keyed
+        on ``chapter.id``.
+
+        Validates that we have an explicit ``start_iso`` AND the open
+        chapter has been generated at least once AND
         ``start_iso >= last_generated_at.date()``. Fetches the
         new-range excerpts only, then:
 
@@ -315,15 +376,16 @@ class StorylineGenerationService:
         this run process".
         """
         storyline_id = storyline.id
+        chapter_id = chapter.id
         if start_iso is None:
             raise ValueError(
                 "Append mode requires explicit start_date "
-                "and a previously-generated storyline."
+                "and a previously-generated chapter."
             )
-        if storyline.last_generated_at is None:
+        if chapter.last_generated_at is None:
             raise ValueError(
                 "Append mode requires explicit start_date "
-                "and a previously-generated storyline."
+                "and a previously-generated chapter."
             )
         # Compare dates only — last_generated_at is an ISO timestamp.
         try:
@@ -332,11 +394,11 @@ class StorylineGenerationService:
             raise ValueError(
                 f"Invalid start_date {start_iso!r}; expected YYYY-MM-DD"
             ) from exc
-        last_gen_date = _last_generated_as_date(storyline.last_generated_at)
+        last_gen_date = _last_generated_as_date(chapter.last_generated_at)
         if last_gen_date is not None and start_date_obj < last_gen_date:
             raise ValueError(
                 "Append mode requires start_date to be on or after "
-                f"the storyline's last generation date "
+                f"the chapter's last generation date "
                 f"({last_gen_date.isoformat()}); got {start_iso}."
             )
 
@@ -355,20 +417,22 @@ class StorylineGenerationService:
                 "preserved."
             )
             log.info(
-                "Storyline %d append-mode: no new excerpts in window %s..%s",
-                storyline_id, start_iso, end_iso,
+                "Chapter %d append-mode: no new excerpts in window %s..%s",
+                chapter_id, start_iso, end_iso,
             )
             # Still record that we attempted a generation — bumps
             # last_generated_at so the next append can pick up where
             # this one left off.
-            self._storyline_repository.record_generation_complete(storyline_id)
+            self._storyline_repository.record_chapter_generation_complete(
+                chapter_id,
+            )
             return result
 
         existing_narrative = self._storyline_repository.get_panel(
-            storyline_id, "narrative",
+            chapter_id, "narrative",
         )
         existing_curation = self._storyline_repository.get_panel(
-            storyline_id, "curation",
+            chapter_id, "curation",
         )
         prior_narrative_text = _join_narrative_text(
             existing_narrative.segments if existing_narrative else []
@@ -386,9 +450,9 @@ class StorylineGenerationService:
 
         if not narrative.segments:
             log.warning(
-                "Storyline %d append: narrator returned empty segments "
+                "Chapter %d append: narrator returned empty segments "
                 "for %d new excerpts — preserving existing narrative panel",
-                storyline_id, len(new_excerpts),
+                chapter_id, len(new_excerpts),
             )
             result.warnings.append(
                 "Narrative continuation produced no segments; "
@@ -416,7 +480,7 @@ class StorylineGenerationService:
                 + narrative.citation_count
             )
             self._storyline_repository.upsert_panel(
-                storyline_id=storyline_id,
+                chapter_id=chapter_id,
                 panel_kind="narrative",
                 segments=merged_narrative_segments,
                 source_entry_ids=merged_source_ids,
@@ -456,7 +520,7 @@ class StorylineGenerationService:
         result.curation_citation_count = count_citations(new_segments)
         result.curation_model = glue.model_used
         self._storyline_repository.upsert_panel(
-            storyline_id=storyline_id,
+            chapter_id=chapter_id,
             panel_kind="curation",
             segments=merged_curation_segments,
             source_entry_ids=collect_source_entry_ids(merged_curation_segments),
@@ -471,7 +535,7 @@ class StorylineGenerationService:
             # continued storyline. _join_narrative_text already
             # caps at 32k chars.
             merged_for_embed = self._storyline_repository.get_panel(
-                storyline_id, "narrative",
+                chapter_id, "narrative",
             )
             narrative_text = _join_narrative_text(
                 merged_for_embed.segments if merged_for_embed else []
@@ -481,67 +545,27 @@ class StorylineGenerationService:
                     embedding = self._embedder(narrative_text)
                 except Exception:  # noqa: BLE001 — embedding is best-effort
                     log.exception(
-                        "Embedder failed for storyline %d (append); skipping",
-                        storyline_id,
+                        "Embedder failed for chapter %d (append); skipping",
+                        chapter_id,
                     )
                     result.warnings.append(
                         "Embedder failed; summary embedding not updated."
                     )
                 else:
-                    self._storyline_repository.update_summary_embedding(
-                        storyline_id, embedding,
+                    self._storyline_repository.update_chapter_summary_embedding(
+                        chapter_id, embedding,
                     )
 
-        self._storyline_repository.record_generation_complete(storyline_id)
+        self._storyline_repository.record_chapter_generation_complete(chapter_id)
         log.info(
-            "Storyline %d appended: %d new entries, %d new narrative citations, "
+            "Chapter %d appended: %d new entries, %d new narrative citations, "
             "%d new curation citations",
-            storyline_id, result.entry_count,
+            chapter_id, result.entry_count,
             result.narrative_citation_count, result.curation_citation_count,
         )
         return result
 
     # ── internal ───────────────────────────────────────────────
-
-    def _resolve_date_window(
-        self,
-        storyline: Storyline,
-        *,
-        start_override: str | None = None,
-        end_override: str | None = None,
-    ) -> tuple[str | None, str | None]:
-        """Return (start_date, end_date) ISO strings.
-
-        Resolution order:
-
-        1. Explicit ``start_override``/``end_override`` win whenever
-           supplied (caller already parsed them to ISO).
-        2. Otherwise the storyline row's stored bounds, if either
-           is set.
-        3. Otherwise the default 90-day rolling window.
-
-        Each bound is resolved independently — passing only
-        ``start_override`` leaves the end falling through to the next
-        rule, and vice versa. If only one storyline-row bound is set
-        the other stays None (open range)."""
-        # Either explicit param wins for that side. If both overrides
-        # are None we fall back to the storyline row + default.
-        if start_override is not None or end_override is not None:
-            row_start = storyline.start_date if start_override is None else start_override
-            row_end = storyline.end_date if end_override is None else end_override
-            # If after the per-side merge we still have nothing, fill
-            # in the default 90-day window so the downstream query has
-            # a bounded range.
-            if not row_start and not row_end:
-                end = datetime.utcnow().date()
-                start = end - timedelta(days=self._window_days)
-                return start.isoformat(), end.isoformat()
-            return row_start, row_end
-        if storyline.start_date or storyline.end_date:
-            return storyline.start_date, storyline.end_date
-        end = datetime.utcnow().date()
-        start = end - timedelta(days=self._window_days)
-        return start.isoformat(), end.isoformat()
 
     def _fetch_excerpts(
         self,

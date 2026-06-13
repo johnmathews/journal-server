@@ -126,6 +126,73 @@ class TestRegenerateStoryline:
             3, user_id=patched_user_id,
         )
 
+    def test_chapter_id_routes_to_chapter_regeneration(
+        self, patched_user_id: int,
+    ) -> None:
+        """Passing chapter_id verifies chapter ownership and forwards
+        chapter_id + replace mode to the job runner."""
+        from journal.mcp_server import journal_regenerate_storyline
+
+        storyline_repo = _storyline_repo_mock()
+        storyline_repo.get_storyline.return_value = _make_storyline(
+            storyline_id=3,
+        )
+        chapter = MagicMock()
+        chapter.id = 88
+        chapter.storyline_id = 3
+        storyline_repo.get_chapter.return_value = chapter
+        job_runner = MagicMock()
+        job_runner.submit_storyline_generation.return_value = _make_job(
+            status="pending", job_id="job-ch",
+        )
+        job_repository = MagicMock()
+        job_repository.get.return_value = _make_job(
+            status="succeeded", job_id="job-ch", result={"entry_count": 1},
+        )
+        ctx = _make_ctx(
+            storyline_repository=storyline_repo,
+            job_runner=job_runner,
+            job_repository=job_repository,
+        )
+
+        out = journal_regenerate_storyline(
+            storyline_id=3, chapter_id=88, ctx=ctx,
+        )
+
+        assert "Regeneration succeeded" in out
+        job_runner.submit_storyline_generation.assert_called_once_with(
+            3, user_id=patched_user_id, chapter_id=88, mode="replace",
+        )
+
+    def test_chapter_id_not_owned_by_storyline_is_rejected(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        """A chapter belonging to a different storyline → friendly
+        message, no submit."""
+        from journal.mcp_server import journal_regenerate_storyline
+
+        storyline_repo = _storyline_repo_mock()
+        storyline_repo.get_storyline.return_value = _make_storyline(
+            storyline_id=3,
+        )
+        other = MagicMock()
+        other.id = 88
+        other.storyline_id = 99  # different storyline
+        storyline_repo.get_chapter.return_value = other
+        job_runner = MagicMock()
+        ctx = _make_ctx(
+            storyline_repository=storyline_repo,
+            job_runner=job_runner,
+            job_repository=MagicMock(),
+        )
+
+        out = journal_regenerate_storyline(
+            storyline_id=3, chapter_id=88, ctx=ctx,
+        )
+
+        assert "not found" in out.lower()
+        job_runner.submit_storyline_generation.assert_not_called()
+
     def test_failed_job_returns_error_message(
         self, patched_user_id: int,  # noqa: ARG002
     ) -> None:
@@ -363,6 +430,40 @@ class TestGetStoryline:
         ctx = _make_ctx(storyline_repository=storyline_repo)
         out = journal_get_storyline(storyline_id=999, ctx=ctx)
         assert "not found" in out.lower()
+
+    def test_get_storyline_renders_chapters(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        """journal_get_storyline lists the storyline's chapters so the
+        caller can target one via journal_regenerate_storyline."""
+        from journal.mcp_server import journal_get_storyline
+
+        storyline_repo = _storyline_repo_mock()
+        storyline_repo.get_storyline.return_value = _make_storyline(
+            storyline_id=7, name="Running",
+        )
+        storyline_repo.list_panels.return_value = []
+        storyline_repo.list_anchors.return_value = []
+        chapter = MagicMock()
+        chapter.id = 31
+        chapter.seq = 1
+        chapter.title = "Early days"
+        chapter.start_date = "2026-01-01"
+        chapter.end_date = "2026-03-01"
+        chapter.state = "open"
+        storyline_repo.list_chapters.return_value = [chapter]
+        entity_store = MagicMock()
+        ctx = _make_ctx(
+            storyline_repository=storyline_repo,
+            entity_store=entity_store,
+        )
+
+        out = journal_get_storyline(storyline_id=7, ctx=ctx)
+
+        assert "chapters" in out
+        assert "[31]" in out
+        assert "Early days" in out
+        assert "state=open" in out
 
 
 # ── journal_create_storyline (W7: auto-kicks generation) ───────

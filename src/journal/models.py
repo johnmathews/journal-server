@@ -462,6 +462,28 @@ class Storyline:
 
 
 @dataclass
+class StorylineChapter:
+    """One time-windowed chapter of a storyline.
+
+    Each chapter owns its two panels and is generated over its own date
+    window. Exactly one chapter per storyline is ``open`` (the live,
+    append-extended chapter); the rest are ``closed`` and stable.
+    """
+
+    id: int
+    storyline_id: int
+    seq: int
+    title: str = ""
+    start_date: str | None = None
+    end_date: str | None = None
+    state: str = "open"
+    last_generated_at: str | None = None
+    summary_embedding: list[float] | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass
 class StorylinePanel:
     """One rendered panel of a storyline (curation or narrative).
 
@@ -472,7 +494,7 @@ class StorylinePanel:
     UI badges ("3 entries cited") without scanning the segments list.
     """
 
-    storyline_id: int
+    chapter_id: int
     panel_kind: str
     segments: list[dict[str, Any]] = field(default_factory=list)
     source_entry_ids: list[int] = field(default_factory=list)
