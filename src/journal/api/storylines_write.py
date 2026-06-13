@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any
 from starlette.responses import JSONResponse
 
 from journal.api._handler import handler
+from journal.api.storylines import _chapter_to_dict
 from journal.auth import get_authenticated_user
 
 if TYPE_CHECKING:
@@ -177,6 +178,14 @@ def register_storylines_write_routes(
             start_date=start_date,
             end_date=end_date,
         )
+        # Seed the storyline's first (open) chapter so the auto-kicked
+        # generation job — which resolves the open chapter — has a
+        # target. Migrated storylines get theirs via migration 0030.
+        repo.create_chapter(
+            storyline_id=storyline.id, seq=1, title=storyline.name,
+            start_date=storyline.start_date, end_date=storyline.end_date,
+            state="open",
+        )
 
         generation_job_id: str | None = None
         job_runner: JobRunner | None = services.get("job_runner")
@@ -301,6 +310,131 @@ def register_storylines_write_routes(
             {"job_id": job.id, "status": job.status},
             status_code=202,
         )
+
+    @mcp.custom_route(
+        "/api/storylines/{storyline_id:int}/chapters/{chapter_id:int}/regenerate",
+        methods=["POST"],
+        name="api_regenerate_storyline_chapter",
+    )
+    @handler(services_getter)
+    def regenerate_storyline_chapter(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
+        """Queue a regeneration job for a single chapter.
+
+        The chapter's own date window is authoritative, so the worker
+        always runs ``mode="replace"`` (``regenerate_chapter`` supports
+        replace only). Returns 202 with ``{"job_id", "status"}``. 404
+        if the chapter doesn't belong to the caller's storyline; 503 if
+        storylines aren't wired.
+        """
+        repo = services.get("storyline_repository")
+        job_runner: JobRunner | None = services.get("job_runner")
+        if repo is None or job_runner is None:
+            return JSONResponse(
+                {"error": "Storylines feature not configured"},
+                status_code=503,
+            )
+        user = get_authenticated_user(request)
+        sid = int(request.path_params["storyline_id"])
+        cid = int(request.path_params["chapter_id"])
+        storyline = repo.get_storyline(sid, user_id=user.user_id)
+        if storyline is None:
+            return JSONResponse(
+                {"error": "Storyline not found"}, status_code=404,
+            )
+        chapter = repo.get_chapter(cid)
+        if chapter is None or chapter.storyline_id != sid:
+            return JSONResponse(
+                {"error": "Chapter not found"}, status_code=404,
+            )
+        try:
+            job = job_runner.submit_storyline_generation(
+                sid, user_id=user.user_id, chapter_id=cid, mode="replace",
+            )
+        except ValueError as e:
+            log.warning(
+                "POST /api/storylines/%d/chapters/%d/regenerate — %s",
+                sid, cid, e,
+            )
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except RuntimeError as e:
+            log.warning(
+                "POST /api/storylines/%d/chapters/%d/regenerate — %s",
+                sid, cid, e,
+            )
+            return JSONResponse({"error": str(e)}, status_code=503)
+        log.info(
+            "POST /api/storylines/%d/chapters/%d/regenerate — queued job %s",
+            sid, cid, job.id,
+        )
+        return JSONResponse(
+            {"job_id": job.id, "status": job.status},
+            status_code=202,
+        )
+
+    @mcp.custom_route(
+        "/api/storylines/{storyline_id:int}/chapters/{chapter_id:int}",
+        methods=["PATCH"],
+        name="api_rename_storyline_chapter",
+    )
+    @handler(services_getter, parse_json="raw")
+    def rename_storyline_chapter(
+        request: Request, services: ServicesDict, raw: bytes
+    ) -> JSONResponse:
+        """Rename a single chapter (metadata-only).
+
+        Body: ``{title: str}`` — non-empty after trimming. Does NOT
+        touch the chapter's panels or kick a regeneration. Returns 200
+        with the chapter dict. 404 if the chapter isn't found for this
+        user, 400 on a malformed body or empty title, 503 if storylines
+        aren't wired.
+        """
+        repo = services.get("storyline_repository")
+        if repo is None:
+            return JSONResponse(
+                {"error": "Storylines feature not configured"},
+                status_code=503,
+            )
+        user = get_authenticated_user(request)
+        sid = int(request.path_params["storyline_id"])
+        cid = int(request.path_params["chapter_id"])
+        storyline = repo.get_storyline(sid, user_id=user.user_id)
+        if storyline is None:
+            return JSONResponse(
+                {"error": "Storyline not found"}, status_code=404,
+            )
+        chapter = repo.get_chapter(cid)
+        if chapter is None or chapter.storyline_id != sid:
+            return JSONResponse(
+                {"error": "Chapter not found"}, status_code=404,
+            )
+        # Parse in-body ("raw" mode): the 503/404 checks above must keep
+        # precedence over body-shape 400s.
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            parsed = {}
+        if not isinstance(parsed, dict):
+            return JSONResponse(
+                {"error": "Request body must be a JSON object"},
+                status_code=400,
+            )
+        title = (parsed.get("title") or "").strip()
+        if not title:
+            return JSONResponse(
+                {"error": "title (non-empty str) is required"},
+                status_code=400,
+            )
+        updated = repo.rename_chapter(cid, title)
+        if updated is None:
+            return JSONResponse(
+                {"error": "Chapter not found"}, status_code=404,
+            )
+        log.info(
+            "PATCH /api/storylines/%d/chapters/%d — title=%r", sid, cid, title,
+        )
+        return JSONResponse(_chapter_to_dict(repo, updated), status_code=200)
 
     @mcp.custom_route(
         "/api/storylines/{storyline_id:int}",

@@ -62,6 +62,8 @@ class _FakeGenerationService:
     def __init__(self) -> None:
         self.calls: list[int] = []
         self.kwargs: list[dict[str, Any]] = []
+        self.chapter_calls: list[int] = []
+        self.chapter_kwargs: list[dict[str, Any]] = []
 
     def regenerate(
         self,
@@ -71,6 +73,15 @@ class _FakeGenerationService:
         self.calls.append(storyline_id)
         self.kwargs.append(kwargs)
         return GenerationResult(storyline_id=storyline_id, entry_count=0)
+
+    def regenerate_chapter(
+        self,
+        chapter_id: int,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> GenerationResult:
+        self.chapter_calls.append(chapter_id)
+        self.chapter_kwargs.append(kwargs)
+        return GenerationResult(storyline_id=0, entry_count=0)
 
 
 @pytest.fixture
@@ -432,3 +443,166 @@ class TestUpdateStoryline:
         client, _ctx = app_with_storylines
         resp = client.patch("/api/storylines/999999", json={"name": "X"})
         assert resp.status_code == 404
+
+
+# ── chapter regenerate + rename ─────────────────────────────────────
+
+
+@pytest.fixture
+def seed_storyline(
+    app_with_storylines: tuple[TestClient, dict[str, Any]],
+) -> tuple[int, int]:
+    """Create a storyline + seq-1 open chapter + two panels.
+
+    Returns ``(storyline_id, chapter_id)``.
+    """
+    _client, ctx = app_with_storylines
+    repo = ctx["repo"]
+    sl = repo.create_storyline(
+        user_id=_TEST_USER_ID, entity_ids=[ctx["entity_id"]],
+        name="Seeded", start_date="2026-01-01", end_date="2026-03-01",
+    )
+    chapter = repo.create_chapter(
+        storyline_id=sl.id, seq=1, title="Chapter 1",
+        start_date="2026-01-01", end_date="2026-03-01", state="open",
+    )
+    repo.upsert_panel(
+        chapter_id=chapter.id, panel_kind="narrative",
+        segments=[{"kind": "text", "text": "prose"}],
+        source_entry_ids=[1], citation_count=2, model_used="m",
+    )
+    repo.upsert_panel(
+        chapter_id=chapter.id, panel_kind="curation",
+        segments=[{"kind": "text", "text": "timeline"}],
+        source_entry_ids=[1], citation_count=3, model_used="m",
+    )
+    return sl.id, chapter.id
+
+
+class TestChapterRegenerate:
+    def test_regenerate_single_chapter_queues_job(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+        seed_storyline: tuple[int, int],
+    ) -> None:
+        client, ctx = app_with_storylines
+        sid, chapter_id = seed_storyline
+        resp = client.post(
+            f"/api/storylines/{sid}/chapters/{chapter_id}/regenerate",
+        )
+        assert resp.status_code == 202
+        body = resp.json()
+        assert "job_id" in body
+
+        # Flush the executor; the worker routes the chapter_id payload to
+        # the fake service's regenerate_chapter (replace-only).
+        ctx["runner"].shutdown(wait=True, cancel_futures=False)
+        assert ctx["gen_service"].chapter_calls == [chapter_id]
+        assert ctx["gen_service"].chapter_kwargs[-1].get("mode") == "replace"
+
+    def test_regenerate_chapter_404_for_wrong_storyline(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+        seed_storyline: tuple[int, int],
+    ) -> None:
+        client, _ctx = app_with_storylines
+        _sid, chapter_id = seed_storyline
+        resp = client.post(
+            f"/api/storylines/99999/chapters/{chapter_id}/regenerate",
+        )
+        assert resp.status_code == 404
+
+    def test_regenerate_chapter_404_for_unknown_chapter(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+        seed_storyline: tuple[int, int],
+    ) -> None:
+        client, _ctx = app_with_storylines
+        sid, _chapter_id = seed_storyline
+        resp = client.post(
+            f"/api/storylines/{sid}/chapters/99999/regenerate",
+        )
+        assert resp.status_code == 404
+
+
+class TestChapterRename:
+    def test_rename_chapter(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+        seed_storyline: tuple[int, int],
+    ) -> None:
+        client, _ctx = app_with_storylines
+        sid, chapter_id = seed_storyline
+        resp = client.patch(
+            f"/api/storylines/{sid}/chapters/{chapter_id}",
+            json={"title": "The Move"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["id"] == chapter_id
+        assert body["title"] == "The Move"
+
+        # Persisted: a GET on the chapter reflects the new title.
+        fetched = client.get(
+            f"/api/storylines/{sid}/chapters/{chapter_id}",
+        ).json()
+        assert fetched["title"] == "The Move"
+
+    def test_rename_chapter_trims_whitespace(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+        seed_storyline: tuple[int, int],
+    ) -> None:
+        client, _ctx = app_with_storylines
+        sid, chapter_id = seed_storyline
+        resp = client.patch(
+            f"/api/storylines/{sid}/chapters/{chapter_id}",
+            json={"title": "   Trimmed   "},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["title"] == "Trimmed"
+
+    def test_rename_chapter_empty_returns_400(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+        seed_storyline: tuple[int, int],
+    ) -> None:
+        client, _ctx = app_with_storylines
+        sid, chapter_id = seed_storyline
+        resp = client.patch(
+            f"/api/storylines/{sid}/chapters/{chapter_id}",
+            json={"title": "   "},
+        )
+        assert resp.status_code == 400
+
+    def test_rename_chapter_404_for_wrong_storyline(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+        seed_storyline: tuple[int, int],
+    ) -> None:
+        client, _ctx = app_with_storylines
+        _sid, chapter_id = seed_storyline
+        resp = client.patch(
+            f"/api/storylines/99999/chapters/{chapter_id}",
+            json={"title": "X"},
+        )
+        assert resp.status_code == 404
+
+
+class TestCreateSeedsChapter:
+    def test_create_seeds_one_open_chapter(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        created = client.post(
+            "/api/storylines",
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
+        ).json()
+        sid = created["id"]
+        chapters = ctx["repo"].list_chapters(sid)
+        assert len(chapters) == 1
+        assert chapters[0].state == "open"
+        assert chapters[0].seq == 1
+        # Exactly one open chapter resolvable.
+        assert ctx["repo"].get_open_chapter(sid) is not None

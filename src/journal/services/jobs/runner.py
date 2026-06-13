@@ -389,6 +389,7 @@ class JobRunner:
         *,
         user_id: int | None = None,
         parent_job_id: str | None = None,
+        chapter_id: int | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
         mode: str | None = None,
@@ -406,6 +407,11 @@ class JobRunner:
         is ``"replace"`` (default) or ``"append"``; append requires
         ``start_date`` to be on or after the storyline's last
         generation date.
+
+        ``chapter_id`` scopes the job to a single chapter: the worker
+        calls ``regenerate_chapter`` (replace-only) and the chapter's
+        own window is authoritative, so ``start_date``/``end_date`` are
+        ignored for chapter-scoped runs.
         """
         if self._ctx.storyline_generation is None:
             raise RuntimeError(
@@ -422,6 +428,8 @@ class JobRunner:
             params["user_id"] = user_id
         if parent_job_id is not None:
             params["parent_job_id"] = parent_job_id
+        if chapter_id is not None:
+            params["chapter_id"] = chapter_id
         if start_date is not None:
             params["start_date"] = start_date
         if end_date is not None:
