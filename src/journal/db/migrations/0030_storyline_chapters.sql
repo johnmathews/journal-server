@@ -4,11 +4,17 @@
 -- storyline_panels. Panels move from referencing storyline_id to
 -- chapter_id. Anchors (storyline_entities) stay storyline-level.
 --
--- Re-runnability: the chapters table uses IF NOT EXISTS; the backfill is
--- NOT EXISTS-guarded; the panel rebuild is wrapped in an explicit
--- transaction so a partial failure rolls back to the pre-migration state
--- (the runner rolls back any open transaction on error). Each existing
--- storyline becomes a single open chapter (seq 1) with no data loss.
+-- Re-runnability is achieved per-step, not by one big transaction. The
+-- chapters-table create (step 1) and the backfill (step 2) run in
+-- executescript's autocommit mode — they are NOT inside the BEGIN;…COMMIT;
+-- below — and are each independently idempotent: CREATE … IF NOT EXISTS for
+-- the table/indexes, and a NOT EXISTS guard on the backfill so re-running
+-- inserts no duplicate chapters. ONLY the panel rebuild (step 3) is wrapped
+-- in the explicit atomic transaction. A partial failure therefore leaves the
+-- idempotent steps 1–2 in place and rolls back just the rebuild (the runner
+-- rolls back the open rebuild transaction on error); a re-run is safe and
+-- completes the remaining work. Each existing storyline becomes a single open
+-- chapter (seq 1) with no data loss.
 --
 -- The runner (db/migrations.py) is forward-only: it skips any migration
 -- whose version is <= PRAGMA user_version, so this file is applied at
