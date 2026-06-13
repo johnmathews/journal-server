@@ -494,7 +494,7 @@ class StorylinePanel:
     UI badges ("3 entries cited") without scanning the segments list.
     """
 
-    storyline_id: int
+    chapter_id: int
     panel_kind: str
     segments: list[dict[str, Any]] = field(default_factory=list)
     source_entry_ids: list[int] = field(default_factory=list)

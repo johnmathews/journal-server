@@ -496,6 +496,7 @@ class TestStorylinePanels:
         s = storyline_repo.create_storyline(
             user_id=seed_user, entity_ids=[seed_entity], name="A",
         )
+        ch = storyline_repo.create_chapter(storyline_id=s.id, seq=1, title="Ch1")
         segs = [
             text_segment("On the 1st:"),
             citation_segment(101, "I ran 5km today"),
@@ -503,14 +504,14 @@ class TestStorylinePanels:
             citation_segment(102, "I ran 8km, felt great"),
         ]
         panel = storyline_repo.upsert_panel(
-            storyline_id=s.id,
+            chapter_id=ch.id,
             panel_kind="curation",
             segments=segs,
             source_entry_ids=[101, 102],
             citation_count=2,
             model_used="claude-haiku-4-5",
         )
-        assert panel.storyline_id == s.id
+        assert panel.chapter_id == ch.id
         assert panel.panel_kind == "curation"
         assert panel.segments == segs
         assert panel.source_entry_ids == [101, 102]
@@ -526,15 +527,16 @@ class TestStorylinePanels:
         s = storyline_repo.create_storyline(
             user_id=seed_user, entity_ids=[seed_entity], name="A",
         )
+        ch = storyline_repo.create_chapter(storyline_id=s.id, seq=1, title="Ch1")
         v1 = [text_segment("First version")]
         v2 = [text_segment("Second version")]
         storyline_repo.upsert_panel(
-            s.id, "narrative", v1, [], 0, "claude-opus-4-7",
+            ch.id, "narrative", v1, [], 0, "claude-opus-4-7",
         )
         storyline_repo.upsert_panel(
-            s.id, "narrative", v2, [], 0, "claude-opus-4-7",
+            ch.id, "narrative", v2, [], 0, "claude-opus-4-7",
         )
-        panel = storyline_repo.get_panel(s.id, "narrative")
+        panel = storyline_repo.get_panel(ch.id, "narrative")
         assert panel is not None
         assert panel.segments == v2
 
@@ -547,11 +549,37 @@ class TestStorylinePanels:
         s = storyline_repo.create_storyline(
             user_id=seed_user, entity_ids=[seed_entity], name="A",
         )
-        storyline_repo.upsert_panel(s.id, "curation", [], [], 0, "haiku")
-        storyline_repo.upsert_panel(s.id, "narrative", [], [], 0, "opus")
-        panels = storyline_repo.list_panels(s.id)
+        ch = storyline_repo.create_chapter(storyline_id=s.id, seq=1, title="Ch1")
+        storyline_repo.upsert_panel(ch.id, "curation", [], [], 0, "haiku")
+        storyline_repo.upsert_panel(ch.id, "narrative", [], [], 0, "opus")
+        panels = storyline_repo.list_panels(ch.id)
         kinds = sorted(p.panel_kind for p in panels)
         assert kinds == ["curation", "narrative"]
+
+    def test_upsert_and_get_panel_by_chapter(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        sl = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[seed_entity], name="X",
+        )
+        ch = storyline_repo.create_chapter(storyline_id=sl.id, seq=1, title="Ch1")
+        panel = storyline_repo.upsert_panel(
+            chapter_id=ch.id,
+            panel_kind="narrative",
+            segments=[{"kind": "text", "text": "hi"}],
+            source_entry_ids=[1],
+            citation_count=0,
+            model_used="m",
+        )
+        assert panel.chapter_id == ch.id
+        got = storyline_repo.get_panel(ch.id, "narrative")
+        assert got is not None and got.segments[0]["text"] == "hi"
+        assert [p.panel_kind for p in storyline_repo.list_panels(ch.id)] == [
+            "narrative"
+        ]
 
     def test_delete_storyline_cascades_to_panels(
         self,
@@ -563,14 +591,17 @@ class TestStorylinePanels:
         s = storyline_repo.create_storyline(
             user_id=seed_user, entity_ids=[seed_entity], name="A",
         )
-        storyline_repo.upsert_panel(s.id, "curation", [], [], 0, "haiku")
+        ch = storyline_repo.create_chapter(storyline_id=s.id, seq=1, title="Ch1")
+        storyline_repo.upsert_panel(ch.id, "curation", [], [], 0, "haiku")
         # FK cascade requires PRAGMA foreign_keys=ON for SQLite. Ensure it.
+        # Deleting the storyline cascades to its chapters, which cascades to
+        # the chapter's panels.
         factory.get().execute("PRAGMA foreign_keys=ON")
         storyline_repo.delete_storyline(s.id, user_id=seed_user)
         row = factory.get().execute(
             "SELECT COUNT(*) AS cnt FROM storyline_panels"
-            " WHERE storyline_id = ?",
-            (s.id,),
+            " WHERE chapter_id = ?",
+            (ch.id,),
         ).fetchone()
         assert int(row["cnt"]) == 0
 

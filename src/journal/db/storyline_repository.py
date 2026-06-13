@@ -69,7 +69,7 @@ def _row_to_panel(row: sqlite3.Row) -> StorylinePanel:
     source_ids_raw = json.loads(row["source_entry_ids_json"] or "[]")
     return StorylinePanel(
         id=row["id"],
-        storyline_id=row["storyline_id"],
+        chapter_id=row["chapter_id"],
         panel_kind=row["panel_kind"],
         segments=list(segments_raw),
         source_entry_ids=[int(x) for x in source_ids_raw],
@@ -379,7 +379,7 @@ class SQLiteStorylineRepository:
 
     def upsert_panel(
         self,
-        storyline_id: int,
+        chapter_id: int,
         panel_kind: str,
         segments: list[dict[str, Any]],
         source_entry_ids: list[int],
@@ -389,18 +389,18 @@ class SQLiteStorylineRepository:
         conn = self._conn()
         conn.execute(
             "INSERT INTO storyline_panels"
-            " (storyline_id, panel_kind, segments_json,"
+            " (chapter_id, panel_kind, segments_json,"
             "  source_entry_ids_json, citation_count, model_used,"
             "  generated_at)"
             " VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))"
-            " ON CONFLICT(storyline_id, panel_kind) DO UPDATE SET"
+            " ON CONFLICT(chapter_id, panel_kind) DO UPDATE SET"
             "  segments_json = excluded.segments_json,"
             "  source_entry_ids_json = excluded.source_entry_ids_json,"
             "  citation_count = excluded.citation_count,"
             "  model_used = excluded.model_used,"
             "  generated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
             (
-                storyline_id,
+                chapter_id,
                 panel_kind,
                 json.dumps(segments),
                 json.dumps(source_entry_ids),
@@ -409,25 +409,25 @@ class SQLiteStorylineRepository:
             ),
         )
         conn.commit()
-        panel = self.get_panel(storyline_id, panel_kind)
+        panel = self.get_panel(chapter_id, panel_kind)
         assert panel is not None
         return panel
 
     def get_panel(
-        self, storyline_id: int, panel_kind: str,
+        self, chapter_id: int, panel_kind: str,
     ) -> StorylinePanel | None:
         row = self._conn().execute(
             "SELECT * FROM storyline_panels"
-            " WHERE storyline_id = ? AND panel_kind = ?",
-            (storyline_id, panel_kind),
+            " WHERE chapter_id = ? AND panel_kind = ?",
+            (chapter_id, panel_kind),
         ).fetchone()
         return _row_to_panel(row) if row else None
 
-    def list_panels(self, storyline_id: int) -> list[StorylinePanel]:
+    def list_panels(self, chapter_id: int) -> list[StorylinePanel]:
         rows = self._conn().execute(
             "SELECT * FROM storyline_panels"
-            " WHERE storyline_id = ? ORDER BY panel_kind",
-            (storyline_id,),
+            " WHERE chapter_id = ? ORDER BY panel_kind",
+            (chapter_id,),
         ).fetchall()
         return [_row_to_panel(r) for r in rows]
 
