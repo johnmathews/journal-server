@@ -33,8 +33,15 @@ exists and is reused unchanged.
 A single daemon thread (`FitnessSyncScheduler`) lives in the long-running Uvicorn
 process, started during `_init_services()` and stopped cleanly on shutdown. Each day at
 17:00 it asks the repository which users have active auth per source and submits sync
-jobs through the existing `JobRunner`. The `JobRunner`'s single worker drains the queue;
-existing per-`(user, source)` dedup (W5) prevents duplicating an in-flight manual sync.
+jobs through the existing `JobRunner`. The `JobRunner`'s single worker drains the queue.
+
+**Collision safety:** `JobRunner.submit_*` is a dumb dispatcher with no submit-time dedup
+(that lives at the endpoint/MCP layer). The scheduler relies instead on the fetch
+service's own in-flight guard: `run_sync` calls `find_running_sync_run` and, if a sync for
+that `(user, source)` is already running (e.g. a concurrent manual sync), returns
+`status="running"` and the worker marks the job succeeded-skipped. So a scheduled job that
+collides with a manual one is a clean no-op, not a double-fetch. Given the once-daily
+cadence, this is sufficient — no endpoint-style dedup is added to the scheduler.
 
 ```
 Uvicorn process
@@ -58,8 +65,11 @@ New repository method. One SQL query against `fitness_auth_state` returning dist
 - `auth_status != 'broken'`
 - credentials are present, mirroring the per-source `_has_credentials` rule used by the
   fetch services:
-  - **strava:** `access_token IS NOT NULL OR refresh_token IS NOT NULL`
-  - **garmin:** `json_extract(extra_state_json, '$.tokens_blob') IS NOT NULL`
+  - **strava:** `access_token IS NOT NULL AND access_token != ''` (mirrors
+    `bool(auth.access_token)` — Strava's base `_has_credentials`; refresh_token is *not*
+    part of the check)
+  - **garmin:** `json_extract(extra_state_json, '$.tokens_blob') IS NOT NULL AND
+    json_extract(extra_state_json, '$.tokens_blob') != ''`
 
 The per-source credential predicate intentionally duplicates the fetch services'
 `_has_credentials` logic in SQL. A unit test asserts the two agree on representative
@@ -96,10 +106,11 @@ Thread a `quiet_success: bool` flag through the sync job params:
   transient failures, and successful runs with ≥1 new activity notify as today.
 - Manual syncs (REST/MCP) pass nothing → flag defaults `False` → today's behavior unchanged.
 
-**Dependency / risk:** this requires `FitnessSyncResult` (or the worker) to expose a count
-of newly-ingested activities. If no such count is available, fall back to
-**notify-on-failure-only** for scheduled syncs (still silent on success) and note the
-limitation in the implementation. Confirm during implementation.
+**New-data signal (verified):** `FitnessSyncResult.rows_fetched` is the count of rows the
+provider returned this run. On an incremental daily sync (window = since last watermark),
+`rows_fetched == 0` means nothing new arrived. The worker keys quiet-success suppression on
+`fetch_result.rows_fetched == 0`. (The fallback risk noted earlier is resolved — the count
+exists, so no notify-on-failure-only fallback is needed.)
 
 ### 4. Bootstrap & shutdown wiring
 
