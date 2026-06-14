@@ -1,5 +1,7 @@
 # Daily Fitness Auto-Sync Implementation Plan
 
+**Status:** completed 2026-06-14 — all 9 tasks shipped, merged to `main`, deployed to prod. (One known deviation from this plan, discovered at deploy time: the prod VM container runs CEST/UTC+2, not UTC, so 17:00 fires at 5pm local — the design intent. Docs/code comments were corrected accordingly.)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Automatically sync each user's connected fitness sources (Strava and/or Garmin) once per day at 17:00 server-local time, via an in-process daemon thread, skipping users with broken/absent credentials and staying quiet on no-op runs.

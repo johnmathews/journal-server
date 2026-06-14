@@ -1,7 +1,7 @@
 # Daily Fitness Auto-Sync — Design
 
 **Date:** 2026-06-14
-**Status:** approved (design); implementation pending
+**Status:** shipped 2026-06-14 — implemented (9 TDD tasks), merged to `main`, and deployed to the prod `media` VM. See [the plan](../plans/2026-06-14-daily-fitness-autosync.md) and `journal/260614-daily-fitness-autosync.md`.
 **Scope:** `server/` (Python backend)
 
 ## Goal
