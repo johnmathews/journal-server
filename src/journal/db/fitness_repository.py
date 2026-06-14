@@ -213,6 +213,38 @@ class FitnessRepository:
         ).fetchone()
         return row["auth_status"] if row else None
 
+    def list_users_with_active_auth(self, *, source: str) -> list[int]:
+        """User IDs that have working credentials for ``source``.
+
+        Mirrors the fetch services' ``_has_credentials`` rule so the daily
+        scheduler (services/fitness/scheduler.py) only enqueues syncs that
+        can actually run:
+
+        - strava: non-empty ``access_token`` (``bool(auth.access_token)``)
+        - garmin: non-empty ``tokens_blob`` in ``extra_state_json``
+
+        Rows with ``auth_status = 'broken'`` are excluded for both sources.
+        Returns user IDs in ascending order (deterministic for tests).
+        """
+        if source == "strava":
+            cred_clause = "access_token IS NOT NULL AND access_token != ''"
+        elif source == "garmin":
+            cred_clause = (
+                "json_extract(extra_state_json, '$.tokens_blob') IS NOT NULL "
+                "AND json_extract(extra_state_json, '$.tokens_blob') != ''"
+            )
+        else:
+            raise ValueError(f"Unknown fitness source: {source!r}")
+
+        conn = self._conn()
+        rows = conn.execute(
+            f"SELECT DISTINCT user_id FROM fitness_auth_state "  # noqa: S608
+            f"WHERE source = ? AND auth_status != 'broken' AND {cred_clause} "
+            f"ORDER BY user_id",
+            (source,),
+        ).fetchall()
+        return [row["user_id"] for row in rows]
+
     def upsert_auth_state(self, state: FitnessAuthState) -> None:
         """Insert or update one auth-state row. Always sets
         ``updated_at`` to now (per schema §4 — app-managed)."""
