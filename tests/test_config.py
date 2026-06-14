@@ -361,3 +361,13 @@ class TestFitnessConfig:
         monkeypatch.setenv("FITNESS_TRANSIENT_FAILURE_THRESHOLD", "0")
         with pytest.raises(ValueError, match="FITNESS_TRANSIENT_FAILURE_THRESHOLD"):
             Config()
+
+
+def test_fitness_sync_enabled_defaults_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FITNESS_SYNC_ENABLED", raising=False)
+    assert Config().fitness_sync_enabled is True
+
+
+def test_fitness_sync_enabled_respects_env_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FITNESS_SYNC_ENABLED", "false")
+    assert Config().fitness_sync_enabled is False
