@@ -84,6 +84,36 @@ Public exposure is via a Cloudflare Tunnel running on a separate tailnet host
 config and credentials live on that host — not on `media` — so an outage of the
 cloudflared host takes down public access even when `media` itself is healthy.
 
+**Canonical public hostname:** `https://journal.itsa-pizza.com`. The webapp is served
+same-origin (relative `/api`), so the only places the public hostname appears are the
+Cloudflare tunnel ingress and four env vars in `/srv/media/.env` (see below).
+
+### Renaming the public hostname
+
+The app hardcodes no domain — a rename is Cloudflare + `.env` + Strava, in this order:
+
+1. **Cloudflare** (Zero Trust → Networks → Tunnels → the tunnel → Public Hostnames):
+   point the new hostname at `http://media:8402`. This auto-creates the proxied DNS
+   record in the (already-onboarded) Cloudflare zone. Remove the old public-hostname
+   route after cutover.
+2. **`/srv/media/.env`** — set all four to the new origin, then redeploy:
+   - `APP_BASE_URL=https://journal.itsa-pizza.com` (email verification / reset links)
+   - `API_CORS_ORIGINS=https://journal.itsa-pizza.com` (REST CORS allow-list)
+   - `MCP_ALLOWED_HOSTS=…,journal.itsa-pizza.com` (Host-header / DNS-rebinding allow-list)
+   - `STRAVA_REDIRECT_URI=https://journal.itsa-pizza.com/strava/callback` (OAuth return)
+
+   ```bash
+   ssh media && cd /srv/media
+   # edit .env (the four vars above)
+   docker compose up -d journal-server journal-webapp
+   ```
+3. **Strava** (developer dashboard → the app → *Authorization Callback Domain*): set it to
+   `journal.itsa-pizza.com` (Strava stores only the bare domain). Without this the SPA
+   connect flow returns a `redirect_uri` mismatch.
+4. **Verify:** load the new host; a fresh register/reset email links to the new domain; run
+   the Strava connect flow end-to-end (Settings · Fitness → Connect Strava → returns to
+   `/strava/callback` → connected).
+
 ## Operational commands
 
 Runbook-style snippets. All assume the operator has SSH access to `media` and Docker
