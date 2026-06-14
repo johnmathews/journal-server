@@ -1908,6 +1908,72 @@ class TestFitnessSync:
         with pytest.raises(ValueError, match="user_id"):
             runner.submit_fitness_sync_strava(user_id="42")  # type: ignore[arg-type]
 
+    def test_submit_strava_passes_quiet_success(
+        self, runner_factory, jobs_repo,
+    ) -> None:
+        from journal.services.fitness.fetch import FitnessSyncResult
+        from journal.services.fitness.normalize import NormalizeResult
+
+        def fake_fetch(**_kw: Any) -> FitnessSyncResult:
+            return FitnessSyncResult(
+                status="success", run_id=1, rows_fetched=0, rows_normalized=0,
+            )
+
+        def fake_norm(**_kw: Any) -> NormalizeResult:
+            return NormalizeResult(source="strava", rows_normalized=0, drift_count=0)
+
+        runner = runner_factory(
+            fetch_strava_callable=fake_fetch,
+            normalize_strava_callable=fake_norm,
+        )
+        job = runner.submit_fitness_sync_strava(user_id=1, quiet_success=True)
+        assert job.params == {"user_id": 1, "quiet_success": True}
+        runner.shutdown(wait=True, cancel_futures=False)
+
+    def test_submit_strava_quiet_success_defaults_false(
+        self, runner_factory, jobs_repo,
+    ) -> None:
+        from journal.services.fitness.fetch import FitnessSyncResult
+        from journal.services.fitness.normalize import NormalizeResult
+
+        def fake_fetch(**_kw: Any) -> FitnessSyncResult:
+            return FitnessSyncResult(
+                status="success", run_id=1, rows_fetched=0, rows_normalized=0,
+            )
+
+        def fake_norm(**_kw: Any) -> NormalizeResult:
+            return NormalizeResult(source="strava", rows_normalized=0, drift_count=0)
+
+        runner = runner_factory(
+            fetch_strava_callable=fake_fetch,
+            normalize_strava_callable=fake_norm,
+        )
+        job = runner.submit_fitness_sync_strava(user_id=1)
+        assert job.params == {"user_id": 1}
+        runner.shutdown(wait=True, cancel_futures=False)
+
+    def test_submit_garmin_passes_quiet_success(
+        self, runner_factory, jobs_repo,
+    ) -> None:
+        from journal.services.fitness.fetch import FitnessSyncResult
+        from journal.services.fitness.normalize import NormalizeResult
+
+        def fake_fetch(**_kw: Any) -> FitnessSyncResult:
+            return FitnessSyncResult(
+                status="success", run_id=2, rows_fetched=0, rows_normalized=0,
+            )
+
+        def fake_norm(**_kw: Any) -> NormalizeResult:
+            return NormalizeResult(source="garmin", rows_normalized=0, drift_count=0)
+
+        runner = runner_factory(
+            fetch_garmin_callable=fake_fetch,
+            normalize_garmin_callable=fake_norm,
+        )
+        job = runner.submit_fitness_sync_garmin(user_id=1, quiet_success=True)
+        assert job.params == {"user_id": 1, "quiet_success": True}
+        runner.shutdown(wait=True, cancel_futures=False)
+
 
 class TestFitnessBackfill:
     """W5 — ``submit_fitness_backfill_strava`` / ``submit_fitness_backfill_garmin``

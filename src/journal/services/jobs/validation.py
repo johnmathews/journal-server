@@ -67,6 +67,9 @@ ENTITY_REEMBED_KEYS: dict[str, type | tuple[type, ...]] = {
 # only legal param is the user_id of the row owner.
 FITNESS_SYNC_KEYS: dict[str, type | tuple[type, ...]] = {
     "user_id": int,
+    # Optional: scheduled (daily) syncs set this True so the worker stays
+    # quiet on a success that fetched zero new rows. Manual syncs omit it.
+    "quiet_success": bool,
 }
 
 # Fitness backfill (W5) wraps services/fitness/backfill.py — same
