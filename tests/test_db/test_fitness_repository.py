@@ -822,3 +822,17 @@ def test_credential_rule_matches_has_credentials(
     # This is exactly Strava's base _has_credentials rule (fetch.py:299):
     assert bool(state.access_token) is True
     assert 1 in repo.list_users_with_active_auth(source="strava")
+
+    # Garmin's override is the unusual rule (fetch.py:425) — guard it too:
+    # _has_credentials = bool(auth.extra_state and extra_state["tokens_blob"]).
+    db_conn.execute(
+        "INSERT INTO fitness_auth_state (user_id, source, extra_state_json, auth_status) "
+        "VALUES (1, 'garmin', '{\"tokens_blob\": \"blob\"}', 'ok')",
+    )
+    db_conn.commit()
+    garmin_state = repo.get_auth_state(user_id=1, source="garmin")
+    assert garmin_state is not None
+    assert bool(
+        garmin_state.extra_state and garmin_state.extra_state.get("tokens_blob")
+    ) is True
+    assert 1 in repo.list_users_with_active_auth(source="garmin")
