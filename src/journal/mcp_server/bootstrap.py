@@ -665,7 +665,8 @@ def _init_services() -> dict:
     log.info("  Health poller started (interval=300s)")
 
     # Fitness sync scheduler — daemon thread that enqueues per-user
-    # Strava/Garmin syncs once a day at 17:00 server-local (UTC in Docker).
+    # Strava/Garmin syncs once a day at 17:00 server-process-local time
+    # (the prod media VM runs CEST/UTC+2, i.e. 5pm local — not 17:00 UTC).
     from journal.services.fitness.scheduler import FitnessSyncScheduler
 
     fitness_sync_scheduler = FitnessSyncScheduler(

@@ -431,10 +431,12 @@ The server runs a `FitnessSyncScheduler` daemon thread
 (`services/fitness/scheduler.py`) that enqueues an incremental sync for every
 user with working credentials once per day.
 
-**When it fires.** The scheduler wakes at **17:00 server-process local time**.
-The production container defaults to UTC, so in practice this is 17:00 UTC —
-but if a `TZ` environment variable is set on the container, the fire time
-follows that timezone instead. If the server is down at 17:00, that day's run
+**When it fires.** The scheduler wakes at **17:00 server-process local time**
+(`datetime.now()` inside the container). The production `media` VM's container
+inherits the host timezone (no `TZ` is set), which is **CEST (UTC+2)** as of
+2026-06-14 — so it fires at **17:00 CEST = 5pm local European time (15:00
+UTC)**, *not* 17:00 UTC. If the host/container timezone ever changes (or `TZ`
+is set explicitly), the fire time follows it. If the server is down at 17:00, that day's run
 is skipped; the next day's incremental sync pulls from each source's
 existing watermark, so at most one day of activity data is delayed.
 

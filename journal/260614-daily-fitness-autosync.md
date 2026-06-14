@@ -13,11 +13,15 @@ The tradeoff is that a down server misses its daily run, but incremental syncs
 recover naturally from the existing watermarks.
 
 **17:00 server-local time.** Late afternoon was chosen so a full day of
-activities is available when the sync fires. Because the production container
-runs UTC by default the effective wall-clock time is 17:00 UTC, but the
-implementation uses `datetime.now()` (naive) rather than hard-coding UTC —
-if `TZ` is set on the container the fire time follows it. The doc and code
-both call this out explicitly.
+activities is available when the sync fires. The implementation uses
+`datetime.now()` (naive) — the container's local clock. **Deploy-day
+correction (2026-06-14):** the prod `media` VM container has no `TZ` set and
+inherits the host timezone, which is **CEST (UTC+2)**, not UTC. So the
+effective fire time is **17:00 CEST = 5pm local European time (15:00 UTC)** —
+which matches the "5pm" intent (5pm *local*), but is NOT 17:00 UTC as the
+initial spec/docs assumed. The docs, spec, and code comments were corrected to
+state CEST/local rather than UTC. Confirmed live via the boot log line
+`Fitness sync scheduler started (fires daily at 17:00)`.
 
 **Skip broken credentials, don't abort the run.** `list_users_with_active_auth`
 excludes any `fitness_auth_state` row with `auth_status = 'broken'` or an

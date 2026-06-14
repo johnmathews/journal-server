@@ -7,7 +7,9 @@
 ## Goal
 
 Automatically refresh each user's fitness data once per day at **17:00 server-local
-time** (UTC in Docker). For every user, sync whichever sources they have working
+time** (the container's local clock — currently CEST/UTC+2 on the prod `media` VM, i.e.
+5pm local European time, *not* 17:00 UTC; verified 2026-06-14). For every user, sync
+whichever sources they have working
 credentials for:
 
 - only Strava configured → sync Strava only
@@ -23,7 +25,7 @@ exists and is reused unchanged.
 | Question | Decision |
 |----------|----------|
 | Trigger mechanism | **In-process scheduler** — a daemon thread inside the running server, modeled on the existing `HealthPoller`. Runs only while the server is up. |
-| Timezone | **17:00 server-local** (UTC in Docker). No env knob for the time. |
+| Timezone | **17:00 server-local** — the container's local clock. On the prod `media` VM this is CEST/UTC+2 (= 5pm local, 15:00 UTC), not UTC; verified 2026-06-14. No env knob for the time. |
 | Broken/expired auth | **Skip.** Only enqueue sources whose credentials are present and `auth_status != 'broken'`. |
 | Notifications | **Only on failure / new data.** A successful run that ingested zero new activities is silent; auth failures and runs with new activities still notify. |
 | Missed runs (server down at 17:00) | **No catch-up.** Sleep to the next 17:00. The next run is incremental and pulls the backlog since the last successful sync, so little data is lost. |
