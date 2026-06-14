@@ -199,6 +199,7 @@ fallback). A user without a `fitness_auth_state` row produces a clean
 | `FITNESS_BACKFILL_START`                | `2026-01-01`                           | Default `--start` for `journal fitness-backfill` when no flag is passed. Activities and daily wellness rows from before this date are not retroactively pulled even if they exist upstream. |
 | `FITNESS_TRANSIENT_FAILURE_THRESHOLD`   | `3`                                    | Number of consecutive transient failures before W6 transitions a source to `auth_status="broken"`. Also the streak ceiling backfill aborts at. Must be ≥ 1.  |
 | `FITNESS_HEALTH_BROKEN_DEGRADED_HOURS`  | `48`                                   | Hours a source can be `auth_status="broken"` before `/api/health` downgrades the overall `status` to `degraded`. Must be ≥ 1.                                |
+| `FITNESS_SYNC_ENABLED`                  | `true`                                 | When `true`, start the in-process `FitnessSyncScheduler` daemon thread that enqueues per-user incremental syncs once daily at 17:00 server-local time. Set to `0`, `false`, `no`, or `off` to disable. See [`fitness-operations.md` §4](fitness-operations.md#daily-auto-sync). |
 
 
 ## Runtime-toggleable settings

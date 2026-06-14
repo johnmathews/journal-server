@@ -425,9 +425,50 @@ exposes the same operation via `POST /api/fitness/sync/{source}` and the
 [`jobs.md`](jobs.md#fitness_sync_strava--fitness_sync_garmin) for the
 HTTP / job shapes.
 
-There is no built-in scheduler today. Production-side scheduling is operator
-choice: cron on the host, an external scheduler hitting the REST endpoint, or
-a webapp-driven sync button.
+### Daily auto-sync
+
+The server runs a `FitnessSyncScheduler` daemon thread
+(`services/fitness/scheduler.py`) that enqueues an incremental sync for every
+user with working credentials once per day.
+
+**When it fires.** The scheduler wakes at **17:00 server-process local time**.
+The production container defaults to UTC, so in practice this is 17:00 UTC —
+but if a `TZ` environment variable is set on the container, the fire time
+follows that timezone instead. If the server is down at 17:00, that day's run
+is skipped; the next day's incremental sync pulls from each source's
+existing watermark, so at most one day of activity data is delayed.
+
+**Which users and sources.** For each source (`strava`, `garmin`) the
+scheduler calls `FitnessRepository.list_users_with_active_auth(source)` and
+submits an incremental sync for every returned user ID. That query returns
+users whose `fitness_auth_state` row has `auth_status != 'broken'` and a
+present credential (Strava: non-empty `access_token`; Garmin: non-empty
+`tokens_blob` in `extra_state_json`). A user with only Strava connected gets
+only a Strava sync; both connected gets both; neither connected (or
+`auth_status='broken'` for that source) is skipped entirely.
+
+**Quiet notifications.** Scheduled syncs are submitted with
+`quiet_success=True`. A run that fetches zero new rows produces no Pushover
+notification. Runs that import new data, and auth failures, still notify.
+Manual syncs triggered via the REST API or MCP tools are unaffected — they
+always notify on success.
+
+**Collision safety.** There is no submit-time dedup in the scheduler. If a
+manual sync for the same `(user, source)` pair is already running when the
+daily fire occurs, the fetch service's in-flight guard (`find_running_sync_run`)
+makes the queued job a clean no-op: status transitions `running` → succeeded,
+no data is duplicated.
+
+**Error isolation.** A failure listing one source's users, or submitting for
+one user, is logged and skipped without aborting the rest of the run.
+
+**Lifecycle.** The scheduler is started in `mcp_server/bootstrap.py` (right
+after the `HealthPoller`) and stopped in the `_shutdown_job_runner` atexit
+hook. Controlled by the `FITNESS_SYNC_ENABLED` env var (default `true`); set
+it to a falsey value (`0`, `false`, `no`, `off`) to disable entirely without
+restarting. See [`configuration.md`](configuration.md#optional--fitness-integration)
+and the design rationale in
+[`docs/superpowers/specs/2026-06-14-daily-fitness-auto-sync-design.md`](superpowers/specs/2026-06-14-daily-fitness-auto-sync-design.md).
 
 ---
 
