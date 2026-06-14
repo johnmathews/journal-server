@@ -65,7 +65,12 @@ def run_fitness_sync_garmin(
             "normalize": asdict(normalize_result),
         }
         ctx.jobs.mark_succeeded(job_id, result)
-        ctx.notifier.notify_success(user_id, "fitness_sync_garmin", result)
+        # Scheduled (quiet_success) syncs stay silent on a no-op run — a
+        # successful fetch that returned zero new rows. Auth/transient
+        # failures notify above; manual syncs always notify here.
+        quiet = bool(params.get("quiet_success")) and fetch_result.rows_fetched == 0
+        if not quiet:
+            ctx.notifier.notify_success(user_id, "fitness_sync_garmin", result)
     except Exception as exc:  # noqa: BLE001 — terminal-state guard
         log.exception("Garmin fitness sync job %s failed", job_id)
         try:

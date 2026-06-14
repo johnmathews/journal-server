@@ -495,6 +495,14 @@ class Config:
             os.environ.get("FITNESS_HEALTH_BROKEN_DEGRADED_HOURS", "48"),
         ),
     )
+    # Daily fitness auto-sync scheduler (services/fitness/scheduler.py).
+    # When true (default), a daemon thread enqueues per-user Strava/Garmin
+    # syncs once a day at 17:00 server-local time. Set false to disable.
+    fitness_sync_enabled: bool = field(
+        default_factory=lambda: os.environ.get(
+            "FITNESS_SYNC_ENABLED", "true"
+        ).lower() in ("1", "true", "yes", "on")
+    )
 
     def __post_init__(self) -> None:
         valid_providers = {"openai", "gemini"}

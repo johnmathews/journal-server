@@ -664,6 +664,19 @@ def _init_services() -> dict:
     health_poller.start()
     log.info("  Health poller started (interval=300s)")
 
+    # Fitness sync scheduler — daemon thread that enqueues per-user
+    # Strava/Garmin syncs once a day at 17:00 server-local (UTC in Docker).
+    from journal.services.fitness.scheduler import FitnessSyncScheduler
+
+    fitness_sync_scheduler = FitnessSyncScheduler(
+        job_runner=job_runner,
+        fitness_repo=fitness_repo,
+        enabled=config.fitness_sync_enabled,
+    )
+    fitness_sync_scheduler.start()
+    if config.fitness_sync_enabled:
+        log.info("  Fitness sync scheduler started (daily at 17:00 server-local)")
+
     # Shutdown hook — FastMCP's lifespan is per-session, not
     # per-process, so `atexit` is the honest hook here. `wait=False`
     # so an unresponsive job cannot block process exit; the
@@ -675,6 +688,7 @@ def _init_services() -> dict:
         # `log.info` here reliably triggers a spurious "I/O on
         # closed file" print from the stdlib logging handler. The
         # JobRunner already logs its own shutdown lifecycle.
+        fitness_sync_scheduler.stop()
         health_poller.stop()
         job_runner.shutdown(wait=False)
 

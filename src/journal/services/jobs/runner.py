@@ -536,13 +536,18 @@ class JobRunner:
         self._executor.submit(run_audio_ingestion, self._ctx, job.id, params)
         return job
 
-    def submit_fitness_sync_strava(self, *, user_id: int) -> Job:
+    def submit_fitness_sync_strava(
+        self, *, user_id: int, quiet_success: bool = False,
+    ) -> Job:
         """Queue a Strava fitness sync (fetch + normalize end-to-end).
 
         Raises ``RuntimeError`` if the runner was constructed without a
         Strava fetch + normalize pair — the worker has nothing to call
         in that case, so we fail at submit time rather than queueing a
         row that's guaranteed to fail.
+
+        ``quiet_success`` (set by the daily scheduler) makes the worker
+        suppress the success notification when the run fetched no new rows.
         """
         if self._ctx.fetch_strava is None or self._ctx.normalize_strava is None:
             raise RuntimeError(
@@ -551,15 +556,22 @@ class JobRunner:
                 "passed to JobRunner)",
             )
         params: dict[str, Any] = {"user_id": user_id}
+        if quiet_success:
+            params["quiet_success"] = True
         validate_params(params, FITNESS_SYNC_KEYS, job_type="fitness_sync_strava")
         job = self._jobs.create("fitness_sync_strava", params, user_id=user_id)
         self._executor.submit(run_fitness_sync_strava, self._ctx, job.id, params)
         return job
 
-    def submit_fitness_sync_garmin(self, *, user_id: int) -> Job:
+    def submit_fitness_sync_garmin(
+        self, *, user_id: int, quiet_success: bool = False,
+    ) -> Job:
         """Queue a Garmin fitness sync (fetch + normalize end-to-end).
 
         Same configuration gate as ``submit_fitness_sync_strava``.
+
+        ``quiet_success`` (set by the daily scheduler) makes the worker
+        suppress the success notification when the run fetched no new rows.
         """
         if self._ctx.fetch_garmin is None or self._ctx.normalize_garmin is None:
             raise RuntimeError(
@@ -568,6 +580,8 @@ class JobRunner:
                 "passed to JobRunner)",
             )
         params: dict[str, Any] = {"user_id": user_id}
+        if quiet_success:
+            params["quiet_success"] = True
         validate_params(params, FITNESS_SYNC_KEYS, job_type="fitness_sync_garmin")
         job = self._jobs.create("fitness_sync_garmin", params, user_id=user_id)
         self._executor.submit(run_fitness_sync_garmin, self._ctx, job.id, params)

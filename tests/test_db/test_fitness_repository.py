@@ -736,3 +736,103 @@ class TestFactoryPathSemantics:
         t.join()
         runs = repo_via_factory.list_recent_sync_runs(user_id=1, source="garmin")
         assert len(runs) == 2
+
+
+# ── list_users_with_active_auth ──────────────────────────────────────
+
+
+def _seed_extra_users(conn: sqlite3.Connection) -> None:
+    """Seed users 2-5 (user 1 is already seeded by the repo fixture)."""
+    for n in range(2, 6):
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO users
+                (id, email, password_hash, display_name, email_verified, is_admin)
+            VALUES (?, ?, 'x', ?, 1, 0)
+            """,
+            (n, f"u{n}@example.com", f"u{n}"),
+        )
+    conn.commit()
+
+
+def test_list_users_with_active_auth_returns_only_valid_rows(
+    repo: FitnessRepository,
+    db_conn: sqlite3.Connection,
+) -> None:
+    _seed_extra_users(db_conn)
+
+    # Strava rows
+    db_conn.execute(
+        "INSERT INTO fitness_auth_state (user_id, source, access_token, auth_status) "
+        "VALUES (1, 'strava', 'tok-1', 'ok')",          # valid
+    )
+    db_conn.execute(
+        "INSERT INTO fitness_auth_state (user_id, source, access_token, auth_status) "
+        "VALUES (2, 'strava', 'tok-2', 'broken')",       # excluded: broken
+    )
+    db_conn.execute(
+        "INSERT INTO fitness_auth_state (user_id, source, access_token, auth_status) "
+        "VALUES (3, 'strava', '', 'ok')",                 # excluded: empty token
+    )
+    db_conn.execute(
+        "INSERT INTO fitness_auth_state (user_id, source, access_token, auth_status) "
+        "VALUES (4, 'strava', NULL, 'unknown')",          # excluded: NULL token
+    )
+
+    # Garmin rows
+    db_conn.execute(
+        "INSERT INTO fitness_auth_state (user_id, source, extra_state_json, auth_status) "
+        "VALUES (1, 'garmin', '{\"tokens_blob\":\"blob-1\"}', 'ok')",   # valid
+    )
+    db_conn.execute(
+        "INSERT INTO fitness_auth_state (user_id, source, extra_state_json, auth_status) "
+        "VALUES (5, 'garmin', '{\"tokens_blob\":\"\"}', 'ok')",          # excluded: empty blob
+    )
+    db_conn.execute(
+        "INSERT INTO fitness_auth_state (user_id, source, extra_state_json, auth_status) "
+        "VALUES (2, 'garmin', '{}', 'unknown')",                         # excluded: missing key
+    )
+    db_conn.commit()
+
+    assert repo.list_users_with_active_auth(source="strava") == [1]
+    assert repo.list_users_with_active_auth(source="garmin") == [1]
+
+
+def test_list_users_with_active_auth_empty_when_none(
+    repo: FitnessRepository,
+) -> None:
+    # No auth rows inserted — should return empty list.
+    assert repo.list_users_with_active_auth(source="strava") == []
+
+
+def test_credential_rule_matches_has_credentials(
+    repo: FitnessRepository,
+    db_conn: sqlite3.Connection,
+) -> None:
+    """Drift guard: if someone changes Strava's _has_credentials rule in the
+    fetch service but not the SQL clause (or vice-versa), this test fails."""
+    db_conn.execute(
+        "INSERT INTO fitness_auth_state (user_id, source, access_token, auth_status) "
+        "VALUES (1, 'strava', 'tok', 'ok')",
+    )
+    db_conn.commit()
+
+    state = repo.get_auth_state(user_id=1, source="strava")
+    assert state is not None
+    # This is exactly Strava's base _has_credentials rule (fetch.py:299):
+    assert bool(state.access_token) is True
+    assert 1 in repo.list_users_with_active_auth(source="strava")
+
+    # Garmin's override is the unusual rule (fetch.py:425) — guard it too:
+    # _has_credentials = bool(auth.extra_state and extra_state["tokens_blob"]).
+    db_conn.execute(
+        "INSERT INTO fitness_auth_state (user_id, source, extra_state_json, auth_status) "
+        "VALUES (1, 'garmin', '{\"tokens_blob\": \"blob\"}', 'ok')",
+    )
+    db_conn.commit()
+    garmin_state = repo.get_auth_state(user_id=1, source="garmin")
+    assert garmin_state is not None
+    assert bool(
+        garmin_state.extra_state and garmin_state.extra_state.get("tokens_blob")
+    ) is True
+    assert 1 in repo.list_users_with_active_auth(source="garmin")
