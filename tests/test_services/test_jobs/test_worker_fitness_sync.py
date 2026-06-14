@@ -265,6 +265,69 @@ class TestRunFitnessSyncStrava:
         assert call.args[0] == 11
         assert call.args[1] == "fitness_sync_strava"
 
+    def test_quiet_success_suppresses_notify_when_no_new_rows(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        notifications = MagicMock()
+        fetch = _Recorder(FitnessSyncResult(
+            status="success", run_id=1, rows_fetched=0, rows_normalized=0,
+        ))
+        norm = _Recorder(NormalizeResult(
+            source="strava", rows_normalized=0, drift_count=0,
+        ))
+        ctx = _make_ctx(
+            jobs_repo=jobs_repo, fetch_strava=fetch, normalize_strava=norm,
+            notifications=notifications,
+        )
+
+        job = jobs_repo.create("fitness_sync_strava", {"user_id": 1, "quiet_success": True})
+        run_fitness_sync_strava(ctx, job.id, {"user_id": 1, "quiet_success": True})
+
+        assert notifications.notify_job_success.call_count == 0
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "succeeded"
+
+    def test_quiet_success_still_notifies_when_new_rows(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        notifications = MagicMock()
+        fetch = _Recorder(FitnessSyncResult(
+            status="success", run_id=1, rows_fetched=3, rows_normalized=0,
+        ))
+        norm = _Recorder(NormalizeResult(
+            source="strava", rows_normalized=3, drift_count=0,
+        ))
+        ctx = _make_ctx(
+            jobs_repo=jobs_repo, fetch_strava=fetch, normalize_strava=norm,
+            notifications=notifications,
+        )
+
+        job = jobs_repo.create("fitness_sync_strava", {"user_id": 1, "quiet_success": True})
+        run_fitness_sync_strava(ctx, job.id, {"user_id": 1, "quiet_success": True})
+
+        assert notifications.notify_job_success.call_count == 1
+
+    def test_manual_success_always_notifies_even_with_no_new_rows(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        notifications = MagicMock()
+        fetch = _Recorder(FitnessSyncResult(
+            status="success", run_id=1, rows_fetched=0, rows_normalized=0,
+        ))
+        norm = _Recorder(NormalizeResult(
+            source="strava", rows_normalized=0, drift_count=0,
+        ))
+        ctx = _make_ctx(
+            jobs_repo=jobs_repo, fetch_strava=fetch, normalize_strava=norm,
+            notifications=notifications,
+        )
+
+        job = jobs_repo.create("fitness_sync_strava", {"user_id": 1})
+        run_fitness_sync_strava(ctx, job.id, {"user_id": 1})
+
+        assert notifications.notify_job_success.call_count == 1
+
 
 # ── Garmin ──────────────────────────────────────────────────────────
 
@@ -416,6 +479,69 @@ class TestRunFitnessSyncGarmin:
         call = notifications.notify_job_success.call_args
         assert call.args[0] == 22
         assert call.args[1] == "fitness_sync_garmin"
+
+    def test_quiet_success_suppresses_notify_when_no_new_rows(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        notifications = MagicMock()
+        fetch = _Recorder(FitnessSyncResult(
+            status="success", run_id=1, rows_fetched=0, rows_normalized=0,
+        ))
+        norm = _Recorder(NormalizeResult(
+            source="garmin", rows_normalized=0, drift_count=0,
+        ))
+        ctx = _make_ctx(
+            jobs_repo=jobs_repo, fetch_garmin=fetch, normalize_garmin=norm,
+            notifications=notifications,
+        )
+
+        job = jobs_repo.create("fitness_sync_garmin", {"user_id": 1, "quiet_success": True})
+        run_fitness_sync_garmin(ctx, job.id, {"user_id": 1, "quiet_success": True})
+
+        assert notifications.notify_job_success.call_count == 0
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "succeeded"
+
+    def test_quiet_success_still_notifies_when_new_rows(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        notifications = MagicMock()
+        fetch = _Recorder(FitnessSyncResult(
+            status="success", run_id=1, rows_fetched=3, rows_normalized=0,
+        ))
+        norm = _Recorder(NormalizeResult(
+            source="garmin", rows_normalized=3, drift_count=0,
+        ))
+        ctx = _make_ctx(
+            jobs_repo=jobs_repo, fetch_garmin=fetch, normalize_garmin=norm,
+            notifications=notifications,
+        )
+
+        job = jobs_repo.create("fitness_sync_garmin", {"user_id": 1, "quiet_success": True})
+        run_fitness_sync_garmin(ctx, job.id, {"user_id": 1, "quiet_success": True})
+
+        assert notifications.notify_job_success.call_count == 1
+
+    def test_manual_success_always_notifies_even_with_no_new_rows(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        notifications = MagicMock()
+        fetch = _Recorder(FitnessSyncResult(
+            status="success", run_id=1, rows_fetched=0, rows_normalized=0,
+        ))
+        norm = _Recorder(NormalizeResult(
+            source="garmin", rows_normalized=0, drift_count=0,
+        ))
+        ctx = _make_ctx(
+            jobs_repo=jobs_repo, fetch_garmin=fetch, normalize_garmin=norm,
+            notifications=notifications,
+        )
+
+        job = jobs_repo.create("fitness_sync_garmin", {"user_id": 1})
+        run_fitness_sync_garmin(ctx, job.id, {"user_id": 1})
+
+        assert notifications.notify_job_success.call_count == 1
 
 
 # ── W11: auth_status='broken' is written on a provider 401 ──────────
