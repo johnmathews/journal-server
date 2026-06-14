@@ -55,7 +55,7 @@ this is set to `true`.
    {
      "mcpServers": {
        "journal": {
-         "url": "https://journal.example.com/mcp",
+         "url": "https://journal.itsa-pizza.com/mcp",
          "headers": {
            "Authorization": "Bearer jnl_..."
          }
