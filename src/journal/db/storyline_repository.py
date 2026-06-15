@@ -116,7 +116,12 @@ class SQLiteStorylineRepository:
 
         Two-pass via a negative offset so we never collide with the
         UNIQUE(storyline_id, seq) index mid-update.
+
+        For negative ``delta``, any row(s) whose seq would be overwritten
+        must already be deleted before calling — callers delete or merge
+        those rows first, then call this method to resequence the tail.
         """
+        assert delta != 0
         conn.execute(
             "UPDATE storyline_chapters SET seq = -(seq + ?)"
             " WHERE storyline_id = ? AND seq >= ?",
