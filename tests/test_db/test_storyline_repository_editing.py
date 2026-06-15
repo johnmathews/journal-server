@@ -127,6 +127,58 @@ def test_shift_seqs_zero_delta_raises(
         repo._shift_seqs(conn, storyline.id, from_seq=1, delta=0)
 
 
+# ── split_chapter ────────────────────────────────────────────────
+
+
+def test_split_closed_chapter_yields_two_contiguous_closed(
+    repo: SQLiteStorylineRepository, storyline: Storyline
+) -> None:
+    ch = repo.create_chapter(storyline.id, seq=1, title="All",
+                             start_date="2026-01-01", end_date="2026-06-30",
+                             state="closed")
+    left, right = repo.split_chapter(ch.id, "2026-04-01")
+    assert (left.start_date, left.end_date) == ("2026-01-01", "2026-03-31")
+    assert (right.start_date, right.end_date) == ("2026-04-01", "2026-06-30")
+    assert left.seq == 1 and right.seq == 2
+    assert left.state == "closed" and right.state == "closed"
+
+
+def test_split_open_chapter_keeps_right_half_open(
+    repo: SQLiteStorylineRepository, storyline: Storyline
+) -> None:
+    ch = repo.create_chapter(storyline.id, seq=1, title="Live",
+                             start_date="2026-01-01", end_date=None, state="open")
+    left, right = repo.split_chapter(ch.id, "2026-04-01")
+    assert left.state == "closed" and left.end_date == "2026-03-31"
+    assert right.state == "open" and right.end_date is None
+    opens = [c for c in repo.list_chapters(storyline.id) if c.state == "open"]
+    assert len(opens) == 1 and opens[0].id == right.id
+
+
+def test_split_shifts_later_chapters_up(
+    repo: SQLiteStorylineRepository, storyline: Storyline
+) -> None:
+    a = repo.create_chapter(storyline.id, seq=1, title="A", start_date="2026-01-01",
+                            end_date="2026-06-30", state="closed")
+    repo.create_chapter(storyline.id, seq=2, title="B", start_date="2026-07-01",
+                        end_date=None, state="open")
+    repo.split_chapter(a.id, "2026-04-01")
+    seqs = {c.title: c.seq for c in repo.list_chapters(storyline.id)}
+    assert seqs["A"] == 1
+    assert seqs["B"] == 3
+
+
+def test_split_rejects_date_outside_window(
+    repo: SQLiteStorylineRepository, storyline: Storyline
+) -> None:
+    ch = repo.create_chapter(storyline.id, seq=1, title="X", start_date="2026-01-01",
+                             end_date="2026-06-30", state="closed")
+    with pytest.raises(ValueError):
+        repo.split_chapter(ch.id, "2026-01-01")
+    with pytest.raises(ValueError):
+        repo.split_chapter(ch.id, "2026-07-01")
+
+
 def test_shift_seqs_only_affects_target_storyline(
     factory: ConnectionFactory,
     repo: SQLiteStorylineRepository,

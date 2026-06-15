@@ -562,3 +562,49 @@ class SQLiteStorylineRepository:
             (json.dumps(embedding) if embedding is not None else None, chapter_id),
         )
         conn.commit()
+
+    def split_chapter(
+        self, chapter_id: int, date: str,
+    ) -> tuple[StorylineChapter, StorylineChapter]:
+        """Split a chapter at ``date`` into a left + right pair.
+
+        Left keeps the existing row (same seq, same start) with
+        ``end_date = _day_before(date)``; right is a new row at ``seq+1``
+        with ``start_date = date`` and the original ``end_date``.
+
+        If the source was ``open``, left becomes ``closed`` and right
+        stays ``open``; otherwise both are ``closed``.
+
+        ``date`` must satisfy ``start_date < date`` and, when the source
+        has an end, ``date <= end_date``.
+        """
+        conn = self._conn()
+        src = self.get_chapter(chapter_id)
+        if src is None:
+            raise ValueError(f"Chapter {chapter_id} not found")
+        if src.start_date is not None and date <= src.start_date:
+            raise ValueError("split date must be after the chapter start")
+        if src.end_date is not None and date > src.end_date:
+            raise ValueError("split date must be on or before the chapter end")
+        right_state = "open" if src.state == "open" else "closed"
+        try:
+            self._shift_seqs(conn, src.storyline_id, src.seq + 1, 1)
+            conn.execute(
+                "UPDATE storyline_chapters SET end_date = ?, state = 'closed',"
+                " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?",
+                (_day_before(date), chapter_id),
+            )
+            cursor = conn.execute(
+                "INSERT INTO storyline_chapters"
+                " (storyline_id, seq, title, start_date, end_date, state)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (src.storyline_id, src.seq + 1, "", date, src.end_date, right_state),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        left = self.get_chapter(chapter_id)
+        right = self.get_chapter(cursor.lastrowid)
+        assert left is not None and right is not None
+        return left, right
