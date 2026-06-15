@@ -344,3 +344,44 @@ def test_merge_rejects_missing_chapter(
                             start_date="2026-01-01", end_date=None, state="open")
     with pytest.raises(ValueError):
         repo.merge_chapters([a.id, 999999])
+
+
+# ── add_chapter ───────────────────────────────────────────────────
+
+
+def test_add_new_latest_closes_open_and_opens_fresh(
+    repo: SQLiteStorylineRepository, storyline: Storyline
+) -> None:
+    old = repo.create_chapter(storyline.id, seq=1, title="Old",
+                              start_date="2026-01-01", end_date=None, state="open")
+    new = repo.add_chapter(storyline.id, start_date="2026-04-01")
+    closed = repo.get_chapter(old.id)
+    assert closed is not None
+    assert closed.state == "closed" and closed.end_date == "2026-03-31"
+    assert new.state == "open" and new.start_date == "2026-04-01"
+    assert new.end_date is None and new.seq == 2
+    opens = [c for c in repo.list_chapters(storyline.id) if c.state == "open"]
+    assert len(opens) == 1 and opens[0].id == new.id
+
+
+def test_add_ranged_into_gap_is_closed_and_ordered(
+    repo: SQLiteStorylineRepository, storyline: Storyline
+) -> None:
+    repo.create_chapter(storyline.id, seq=1, title="A", start_date="2026-01-01",
+                        end_date="2026-03-31", state="closed")
+    repo.create_chapter(storyline.id, seq=2, title="B", start_date="2026-07-01",
+                        end_date=None, state="open")
+    added = repo.add_chapter(storyline.id, start_date="2026-04-01", end_date="2026-05-31")
+    assert added.state == "closed"
+    assert added.seq == 2
+    titles = [c.title for c in repo.list_chapters(storyline.id)]
+    assert titles == ["A", "", "B"]
+
+
+def test_add_ranged_rejects_overlap(
+    repo: SQLiteStorylineRepository, storyline: Storyline
+) -> None:
+    repo.create_chapter(storyline.id, seq=1, title="A", start_date="2026-01-01",
+                        end_date="2026-06-30", state="closed")
+    with pytest.raises(ValueError):
+        repo.add_chapter(storyline.id, start_date="2026-03-01", end_date="2026-09-30")

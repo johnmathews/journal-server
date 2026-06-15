@@ -616,6 +616,87 @@ class SQLiteStorylineRepository:
         assert merged is not None
         return merged
 
+    def add_chapter(
+        self,
+        storyline_id: int,
+        start_date: str,
+        end_date: str | None = None,
+    ) -> StorylineChapter:
+        """Add a chapter: new-latest (end_date None) or ranged (end_date set).
+
+        New-latest flavor:
+            Close the current open chapter at _day_before(start_date) and
+            append a new open chapter [start_date, NULL) at max(seq)+1.
+            Requires start_date strictly after the open chapter's start_date
+            (if an open chapter exists).
+
+        Ranged flavor:
+            Insert a closed chapter [start_date, end_date] into a free range.
+            Rejects if the new chapter overlaps any existing chapter (open
+            chapter's end treated as +infinity). seq is assigned by date order;
+            later chapters shift up by 1.
+        """
+        conn = self._conn()
+        existing = self.list_chapters(storyline_id)
+        if end_date is None:
+            open_ch = self.get_open_chapter(storyline_id)
+            if (
+                open_ch is not None
+                and open_ch.start_date is not None
+                and start_date <= open_ch.start_date
+            ):
+                raise ValueError(
+                    "new chapter must start after the current open chapter"
+                )
+            new_seq = max((c.seq for c in existing), default=0) + 1
+            try:
+                if open_ch is not None:
+                    conn.execute(
+                        "UPDATE storyline_chapters"
+                        " SET end_date = ?, state = 'closed',"
+                        " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+                        " WHERE id = ?",
+                        (_day_before(start_date), open_ch.id),
+                    )
+                cursor = conn.execute(
+                    "INSERT INTO storyline_chapters"
+                    " (storyline_id, seq, title, start_date, end_date, state)"
+                    " VALUES (?, ?, '', ?, NULL, 'open')",
+                    (storyline_id, new_seq, start_date),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            ch = self.get_chapter(cursor.lastrowid)
+            assert ch is not None
+            return ch
+        # Ranged flavor
+        if end_date < start_date:
+            raise ValueError("end_date must be on or after start_date")
+        for c in existing:
+            c_end = c.end_date if c.end_date is not None else "9999-12-31"
+            c_start = c.start_date if c.start_date is not None else "0000-01-01"
+            if start_date <= c_end and end_date >= c_start:
+                raise ValueError("new chapter overlaps an existing chapter")
+        later = [c for c in existing if (c.start_date or "9999-12-31") > end_date]
+        insert_seq = min((c.seq for c in later), default=len(existing) + 1)
+        try:
+            self._shift_seqs(conn, storyline_id, insert_seq, 1)
+            cursor = conn.execute(
+                "INSERT INTO storyline_chapters"
+                " (storyline_id, seq, title, start_date, end_date, state)"
+                " VALUES (?, ?, '', ?, ?, 'closed')",
+                (storyline_id, insert_seq, start_date, end_date),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        ch = self.get_chapter(cursor.lastrowid)
+        assert ch is not None
+        return ch
+
     def split_chapter(
         self, chapter_id: int, date: str,
     ) -> tuple[StorylineChapter, StorylineChapter]:
