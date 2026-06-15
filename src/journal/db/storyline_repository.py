@@ -745,7 +745,9 @@ class SQLiteStorylineRepository:
             raise ValueError(f"Chapter {chapter_id} not found")
         if target.state == "open" and end_date is not None:
             raise ValueError("the open chapter's end cannot be set")
-        if start_date is not None and end_date is not None and end_date < start_date:
+        eff_start = start_date if start_date is not None else target.start_date
+        eff_end = end_date if end_date is not None else target.end_date
+        if eff_start is not None and eff_end is not None and eff_end < eff_start:
             raise ValueError("end_date must be on or after start_date")
         chapters = self.list_chapters(target.storyline_id)
         idx = next(i for i, c in enumerate(chapters) if c.id == chapter_id)

@@ -478,3 +478,13 @@ def test_update_window_rejects_overlap(
     with pytest.raises(ValueError):
         repo.update_chapter_window(b.id, start_date="2026-04-01",
                                    end_date="2026-08-01", allow_gap=True)
+
+
+def test_update_window_rejects_reversed_against_existing_start(repo, storyline):
+    a = repo.create_chapter(storyline.id, seq=1, title="A", state="closed",
+                            start_date="2026-05-01", end_date="2026-06-30")
+    repo.create_chapter(storyline.id, seq=2, title="B", state="open",
+                        start_date="2026-07-01", end_date=None)
+    # Only end_date passed, earlier than A's existing start -> must reject.
+    with pytest.raises(ValueError):
+        repo.update_chapter_window(a.id, start_date=None, end_date="2026-01-01")
