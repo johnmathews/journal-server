@@ -424,3 +424,57 @@ def test_add_ranged_at_tail_when_no_later_chapters(
                         start_date="2026-01-01", end_date="2026-03-31")
     added = repo.add_chapter(storyline.id, start_date="2026-04-01", end_date="2026-05-31")
     assert added.seq == 2 and added.state == "closed"
+
+
+# ── update_chapter_window ─────────────────────────────────────────
+
+
+def test_update_window_ripples_previous_neighbor_end(
+    repo: SQLiteStorylineRepository, storyline: Storyline,
+) -> None:
+    a = repo.create_chapter(storyline.id, seq=1, title="A", start_date="2026-01-01",
+                            end_date="2026-03-31", state="closed")
+    b = repo.create_chapter(storyline.id, seq=2, title="B", start_date="2026-04-01",
+                            end_date=None, state="open")
+    changed = repo.update_chapter_window(b.id, start_date="2026-05-01", end_date=None)
+    ids = {c.id: c for c in changed}
+    assert ids[b.id].start_date == "2026-05-01"
+    assert ids[a.id].end_date == "2026-04-30"
+
+
+def test_update_window_allow_gap_leaves_neighbor(
+    repo: SQLiteStorylineRepository, storyline: Storyline,
+) -> None:
+    a = repo.create_chapter(storyline.id, seq=1, title="A", start_date="2026-01-01",
+                            end_date="2026-03-31", state="closed")
+    b = repo.create_chapter(storyline.id, seq=2, title="B", start_date="2026-04-01",
+                            end_date=None, state="open")
+    changed = repo.update_chapter_window(b.id, start_date="2026-05-01",
+                                         end_date=None, allow_gap=True)
+    assert repo.get_chapter(a.id).end_date == "2026-03-31"
+    assert {c.id for c in changed} == {b.id}
+
+
+def test_update_window_rejects_end_on_open_chapter(
+    repo: SQLiteStorylineRepository, storyline: Storyline,
+) -> None:
+    b = repo.create_chapter(storyline.id, seq=1, title="B", start_date="2026-04-01",
+                            end_date=None, state="open")
+    with pytest.raises(ValueError):
+        repo.update_chapter_window(b.id, start_date="2026-04-01", end_date="2026-06-30")
+
+
+def test_update_window_rejects_overlap(
+    repo: SQLiteStorylineRepository, storyline: Storyline,
+) -> None:
+    repo.create_chapter(storyline.id, seq=1, title="A", start_date="2026-01-01",
+                        end_date="2026-03-31", state="closed")
+    b = repo.create_chapter(storyline.id, seq=2, title="B", start_date="2026-04-01",
+                            end_date="2026-06-30", state="closed")
+    repo.create_chapter(storyline.id, seq=3, title="C", start_date="2026-07-01",
+                        end_date=None, state="open")
+    # Move B's end into C's range with allow_gap so the next-neighbor ripple
+    # is suppressed, forcing an overlap that must be rejected.
+    with pytest.raises(ValueError):
+        repo.update_chapter_window(b.id, start_date="2026-04-01",
+                                   end_date="2026-08-01", allow_gap=True)

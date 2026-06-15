@@ -699,6 +699,88 @@ class SQLiteStorylineRepository:
         assert ch is not None
         return ch
 
+    def _assert_no_overlap(
+        self, storyline_id: int, conn: sqlite3.Connection,
+    ) -> None:
+        """Raise ValueError if any two chapters' windows overlap."""
+        rows = conn.execute(
+            "SELECT start_date, end_date FROM storyline_chapters"
+            " WHERE storyline_id = ? ORDER BY seq ASC",
+            (storyline_id,),
+        ).fetchall()
+        prev_end: str | None = None
+        for r in rows:
+            start = r["start_date"] or "0000-01-01"
+            if prev_end is not None and start <= prev_end:
+                raise ValueError("chapter windows overlap")
+            prev_end = r["end_date"] or "9999-12-31"
+
+    def update_chapter_window(
+        self,
+        chapter_id: int,
+        start_date: str | None,
+        end_date: str | None,
+        allow_gap: bool = False,
+    ) -> list[StorylineChapter]:
+        """Move a chapter's boundaries, rippling neighbors by default.
+
+        By default, the shared edge of the touching neighbor ripples to
+        stay contiguous: changing a chapter's ``start`` sets the previous
+        chapter's ``end`` to ``_day_before(new_start)``; changing a
+        chapter's ``end`` sets the next chapter's ``start`` to
+        ``_day_after(new_end)``.  With ``allow_gap=True`` neighbors are
+        left alone (a gap is allowed).
+
+        Raises ``ValueError`` if:
+        - the chapter is not found,
+        - ``end_date`` is set for an open chapter,
+        - ``end_date < start_date``, or
+        - any two chapters overlap after applying the change.
+
+        Returns the list of chapters that changed (the edited one plus any
+        rippled neighbor).
+        """
+        target = self.get_chapter(chapter_id)
+        if target is None:
+            raise ValueError(f"Chapter {chapter_id} not found")
+        if target.state == "open" and end_date is not None:
+            raise ValueError("the open chapter's end cannot be set")
+        if start_date is not None and end_date is not None and end_date < start_date:
+            raise ValueError("end_date must be on or after start_date")
+        chapters = self.list_chapters(target.storyline_id)
+        idx = next(i for i, c in enumerate(chapters) if c.id == chapter_id)
+        changed_ids: set[int] = {chapter_id}
+        conn = self._conn()
+        try:
+            conn.execute(
+                "UPDATE storyline_chapters SET start_date = ?, end_date = ?,"
+                " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?",
+                (start_date, end_date, chapter_id),
+            )
+            if not allow_gap:
+                if start_date is not None and idx > 0:
+                    prev = chapters[idx - 1]
+                    conn.execute(
+                        "UPDATE storyline_chapters SET end_date = ?,"
+                        " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?",
+                        (_day_before(start_date), prev.id),
+                    )
+                    changed_ids.add(prev.id)
+                if end_date is not None and idx < len(chapters) - 1:
+                    nxt = chapters[idx + 1]
+                    conn.execute(
+                        "UPDATE storyline_chapters SET start_date = ?,"
+                        " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?",
+                        (_day_after(end_date), nxt.id),
+                    )
+                    changed_ids.add(nxt.id)
+            self._assert_no_overlap(target.storyline_id, conn)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return [c for c in self.list_chapters(target.storyline_id) if c.id in changed_ids]
+
     def split_chapter(
         self, chapter_id: int, date: str,
     ) -> tuple[StorylineChapter, StorylineChapter]:
