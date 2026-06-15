@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import date as _date
+from datetime import timedelta as _timedelta
 from typing import TYPE_CHECKING, Any
 
 from journal.models import Storyline, StorylineChapter, StorylinePanel
@@ -25,6 +27,16 @@ if TYPE_CHECKING:
     from journal.db.factory import ConnectionFactory
 
 log = logging.getLogger(__name__)
+
+
+def _day_before(iso: str) -> str:
+    """ISO day immediately before ``iso`` (inclusive-window math)."""
+    return (_date.fromisoformat(iso) - _timedelta(days=1)).isoformat()
+
+
+def _day_after(iso: str) -> str:
+    """ISO day immediately after ``iso`` (inclusive-window math)."""
+    return (_date.fromisoformat(iso) + _timedelta(days=1)).isoformat()
 
 
 def _row_to_storyline(row: sqlite3.Row) -> Storyline:
@@ -92,6 +104,29 @@ class SQLiteStorylineRepository:
 
     def _conn(self) -> sqlite3.Connection:
         return self._factory.get()
+
+    def _shift_seqs(
+        self,
+        conn: sqlite3.Connection,
+        storyline_id: int,
+        from_seq: int,
+        delta: int,
+    ) -> None:
+        """Shift seq by ``delta`` for chapters with seq >= ``from_seq``.
+
+        Two-pass via a negative offset so we never collide with the
+        UNIQUE(storyline_id, seq) index mid-update.
+        """
+        conn.execute(
+            "UPDATE storyline_chapters SET seq = -(seq + ?)"
+            " WHERE storyline_id = ? AND seq >= ?",
+            (delta, storyline_id, from_seq),
+        )
+        conn.execute(
+            "UPDATE storyline_chapters SET seq = -seq"
+            " WHERE storyline_id = ? AND seq < 0",
+            (storyline_id,),
+        )
 
     # ── storylines ──────────────────────────────────────────────
 
