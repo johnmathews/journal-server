@@ -283,3 +283,64 @@ def test_merge_rejects_non_adjacent(repo: SQLiteStorylineRepository, storyline: 
         repo.merge_chapters([a.id, c.id])
     with pytest.raises(ValueError):
         repo.merge_chapters([a.id])
+
+
+def _make_storyline(
+    factory: ConnectionFactory,
+    repo: SQLiteStorylineRepository,
+    email: str,
+    entity_name: str = "Cycling",
+) -> Storyline:
+    """Helper: insert a user + entity and return a fresh storyline anchored on it."""
+    conn = factory.get()
+    cursor = conn.execute(
+        "INSERT INTO users (email, password_hash, display_name) VALUES (?, ?, ?)",
+        (email, "x", email),
+    )
+    conn.commit()
+    user_id = cursor.lastrowid
+    assert user_id is not None
+
+    store = SQLiteEntityStore(factory)
+    entity = store.create_entity(
+        entity_type="activity",
+        canonical_name=entity_name,
+        description=f"The activity of {entity_name.lower()}",
+        first_seen="2026-01-01",
+        user_id=user_id,
+    )
+    return repo.create_storyline(
+        user_id=user_id,
+        entity_ids=[entity.id],
+        name=f"{entity_name} Storyline",
+    )
+
+
+def test_merge_rejects_different_storylines(
+    factory: ConnectionFactory,
+    repo: SQLiteStorylineRepository,
+    storyline: Storyline,
+) -> None:
+    """Chapters from two different storylines must not be merged."""
+    other = _make_storyline(factory, repo, "other_merge@example.com", "Swimming")
+
+    ch_s1 = repo.create_chapter(storyline.id, seq=1, title="S1-A",
+                                 start_date="2026-01-01", end_date="2026-03-31",
+                                 state="closed")
+    ch_s2 = repo.create_chapter(other.id, seq=1, title="S2-A",
+                                 start_date="2026-01-01", end_date="2026-03-31",
+                                 state="closed")
+
+    with pytest.raises(ValueError):
+        repo.merge_chapters([ch_s1.id, ch_s2.id])
+
+
+def test_merge_rejects_missing_chapter(
+    repo: SQLiteStorylineRepository,
+    storyline: Storyline,
+) -> None:
+    """Passing a chapter id that doesn't exist must raise ValueError."""
+    a = repo.create_chapter(storyline.id, seq=1, title="A",
+                            start_date="2026-01-01", end_date=None, state="open")
+    with pytest.raises(ValueError):
+        repo.merge_chapters([a.id, 999999])

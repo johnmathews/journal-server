@@ -592,9 +592,8 @@ class SQLiteStorylineRepository:
         starts = [c.start_date for c in chapters if c.start_date is not None]
         is_open = any(c.state == "open" for c in chapters)
         new_start = min(starts) if starts else None
-        new_end = None if is_open else max(
-            c.end_date for c in chapters if c.end_date is not None
-        )
+        ends = [c.end_date for c in chapters if c.end_date is not None]
+        new_end = None if is_open else (max(ends) if ends else None)
         new_state = "open" if is_open else "closed"
         conn = self._conn()
         try:
