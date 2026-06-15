@@ -563,6 +563,60 @@ class SQLiteStorylineRepository:
         )
         conn.commit()
 
+    def merge_chapters(self, chapter_ids: list[int]) -> StorylineChapter:
+        """Merge a contiguous run of chapters into the lowest-seq one.
+
+        The survivor is the lowest-seq row; its window becomes
+        ``start = min(start)``, ``end = max(end)`` (NULL if any input was
+        open); state is ``open`` if any input was open, else ``closed``.
+        The survivor's title is kept. Non-survivor rows are deleted, then
+        the tail (chapters after the run) is shifted DOWN by
+        ``len(ids) - 1``.
+
+        Raises ``ValueError`` for fewer than 2 ids, non-contiguous seqs,
+        chapters belonging to different storylines, or missing chapters.
+        """
+        if len(chapter_ids) < 2:
+            raise ValueError("merge requires at least two chapters")
+        chapters = [self.get_chapter(cid) for cid in chapter_ids]
+        if any(c is None for c in chapters):
+            raise ValueError("one or more chapters not found")
+        chapters = sorted(chapters, key=lambda c: c.seq)  # type: ignore[union-attr]
+        sid = chapters[0].storyline_id
+        if any(c.storyline_id != sid for c in chapters):
+            raise ValueError("chapters belong to different storylines")
+        seqs = [c.seq for c in chapters]
+        if seqs != list(range(seqs[0], seqs[0] + len(seqs))):
+            raise ValueError("chapters to merge must be adjacent (contiguous seq)")
+        survivor = chapters[0]
+        starts = [c.start_date for c in chapters if c.start_date is not None]
+        is_open = any(c.state == "open" for c in chapters)
+        new_start = min(starts) if starts else None
+        new_end = None if is_open else max(
+            c.end_date for c in chapters if c.end_date is not None
+        )
+        new_state = "open" if is_open else "closed"
+        conn = self._conn()
+        try:
+            # Delete non-survivors first so the partial unique index
+            # (at most one open chapter per storyline) is never violated
+            # when we set the survivor's state to 'open'.
+            for c in chapters[1:]:
+                conn.execute("DELETE FROM storyline_chapters WHERE id = ?", (c.id,))
+            conn.execute(
+                "UPDATE storyline_chapters SET start_date = ?, end_date = ?, state = ?,"
+                " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?",
+                (new_start, new_end, new_state, survivor.id),
+            )
+            self._shift_seqs(conn, sid, chapters[-1].seq + 1, -(len(chapters) - 1))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        merged = self.get_chapter(survivor.id)
+        assert merged is not None
+        return merged
+
     def split_chapter(
         self, chapter_id: int, date: str,
     ) -> tuple[StorylineChapter, StorylineChapter]:

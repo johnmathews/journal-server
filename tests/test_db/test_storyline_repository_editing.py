@@ -232,3 +232,54 @@ def test_shift_seqs_only_affects_target_storyline(
     # Other storyline: untouched
     other_seqs = {c.title: c.seq for c in repo.list_chapters(other_storyline.id)}
     assert other_seqs == {"X": 1}
+
+
+# ── merge_chapters ────────────────────────────────────────────────
+
+
+def test_merge_adjacent_unions_window(
+    repo: SQLiteStorylineRepository, storyline: Storyline
+) -> None:
+    a = repo.create_chapter(storyline.id, seq=1, title="A", start_date="2026-01-01",
+                            end_date="2026-03-31", state="closed")
+    b = repo.create_chapter(storyline.id, seq=2, title="B", start_date="2026-04-01",
+                            end_date="2026-06-30", state="closed")
+    merged = repo.merge_chapters([a.id, b.id])
+    assert merged.id == a.id
+    assert (merged.start_date, merged.end_date) == ("2026-01-01", "2026-06-30")
+    assert merged.state == "closed"
+    assert len(repo.list_chapters(storyline.id)) == 1
+
+
+def test_merge_with_open_stays_open(repo: SQLiteStorylineRepository, storyline: Storyline) -> None:
+    a = repo.create_chapter(storyline.id, seq=1, title="A", start_date="2026-01-01",
+                            end_date="2026-03-31", state="closed")
+    b = repo.create_chapter(storyline.id, seq=2, title="B", start_date="2026-04-01",
+                            end_date=None, state="open")
+    merged = repo.merge_chapters([a.id, b.id])
+    assert merged.state == "open" and merged.end_date is None
+
+
+def test_merge_shifts_tail_down(repo: SQLiteStorylineRepository, storyline: Storyline) -> None:
+    a = repo.create_chapter(storyline.id, seq=1, title="A", start_date="2026-01-01",
+                            end_date="2026-03-31", state="closed")
+    b = repo.create_chapter(storyline.id, seq=2, title="B", start_date="2026-04-01",
+                            end_date="2026-06-30", state="closed")
+    repo.create_chapter(storyline.id, seq=3, title="C", start_date="2026-07-01",
+                        end_date=None, state="open")
+    repo.merge_chapters([a.id, b.id])
+    seqs = {ch.title: ch.seq for ch in repo.list_chapters(storyline.id)}
+    assert seqs["A"] == 1 and seqs["C"] == 2
+
+
+def test_merge_rejects_non_adjacent(repo: SQLiteStorylineRepository, storyline: Storyline) -> None:
+    a = repo.create_chapter(storyline.id, seq=1, title="A", start_date="2026-01-01",
+                            end_date="2026-03-31", state="closed")
+    repo.create_chapter(storyline.id, seq=2, title="B", start_date="2026-04-01",
+                        end_date="2026-06-30", state="closed")
+    c = repo.create_chapter(storyline.id, seq=3, title="C", start_date="2026-07-01",
+                            end_date=None, state="open")
+    with pytest.raises(ValueError):
+        repo.merge_chapters([a.id, c.id])
+    with pytest.raises(ValueError):
+        repo.merge_chapters([a.id])
