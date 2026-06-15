@@ -51,6 +51,31 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def _enqueue_chapter_regens(
+    job_runner,
+    storyline_id: int,
+    user_id: int,
+    chapters: list,
+) -> list[str]:
+    """Queue one generation job per affected chapter; return job ids.
+
+    Closed chapters regenerate with ``mode="replace"``; the open chapter
+    omits ``mode`` so the worker's default append/replace behaviour applies
+    (mirrors the per-chapter regenerate route).
+    """
+    job_ids: list[str] = []
+    for ch in chapters:
+        kwargs: dict[str, Any] = {"user_id": user_id, "chapter_id": ch.id}
+        if ch.state != "open":
+            kwargs["mode"] = "replace"
+        try:
+            job = job_runner.submit_storyline_generation(storyline_id, **kwargs)
+            job_ids.append(job.id)
+        except (ValueError, RuntimeError) as exc:
+            log.warning("could not queue regen for chapter %d: %s", ch.id, exc)
+    return job_ids
+
+
 def _anchors_for(repo, entity_store, storyline_id: int) -> list[dict[str, Any]]:
     """Build the ``anchors`` field for an API response.
 
