@@ -559,6 +559,124 @@ def register_storylines_write_routes(
         return JSONResponse({"deleted": True}, status_code=200)
 
     @mcp.custom_route(
+        "/api/storylines/{storyline_id:int}/chapters",
+        methods=["POST"],
+        name="api_add_storyline_chapter",
+    )
+    @handler(services_getter, parse_json="raw")
+    def add_storyline_chapter(
+        request: Request, services: ServicesDict, raw: bytes
+    ) -> JSONResponse:
+        """Add a chapter to an existing storyline.
+
+        Body: ``{start_date: ISO, end_date?: ISO}``.
+        New-latest flavor (no end_date): closes the current open chapter and
+        appends a new open chapter. Ranged flavor (end_date present): inserts a
+        closed chapter into a free date window.
+
+        Returns 201 with ``{"chapter": ..., "job_ids": [...]}``. 503 if
+        storylines are not wired; 404 if the storyline is not found for this
+        user; 400 on missing/invalid body or if the repo rejects the window.
+        """
+        repo = services.get("storyline_repository")
+        job_runner = services.get("job_runner")
+        if repo is None or job_runner is None:
+            return JSONResponse(
+                {"error": "Storylines feature not configured"}, status_code=503,
+            )
+        user = get_authenticated_user(request)
+        sid = int(request.path_params["storyline_id"])
+        if repo.get_storyline(sid, user_id=user.user_id) is None:
+            return JSONResponse({"error": "Storyline not found"}, status_code=404)
+        try:
+            body = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        if not isinstance(body, dict) or not isinstance(body.get("start_date"), str):
+            return JSONResponse(
+                {"error": "start_date (ISO str) is required"}, status_code=400,
+            )
+        end_date = body.get("end_date")
+        if end_date is not None and not isinstance(end_date, str):
+            return JSONResponse(
+                {"error": "end_date must be a string"}, status_code=400,
+            )
+        try:
+            chapter = repo.add_chapter(sid, body["start_date"], end_date)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        job_ids = _enqueue_chapter_regens(job_runner, sid, user.user_id, [chapter])
+        log.info("POST /api/storylines/%d/chapters — added chapter %d", sid, chapter.id)
+        return JSONResponse(
+            {"chapter": _chapter_to_dict(repo, chapter), "job_ids": job_ids},
+            status_code=201,
+        )
+
+    @mcp.custom_route(
+        "/api/storylines/{storyline_id:int}/chapters/{chapter_id:int}/split",
+        methods=["POST"],
+        name="api_split_storyline_chapter",
+    )
+    @handler(services_getter, parse_json="raw")
+    def split_storyline_chapter(
+        request: Request, services: ServicesDict, raw: bytes
+    ) -> JSONResponse:
+        """Split a chapter into two at a given date.
+
+        Body: ``{date: ISO}``.  Left half keeps the original row with
+        ``end_date = day_before(date)``; right half is a new row starting at
+        ``date``. Both halves are enqueued for regeneration.
+
+        Returns 200 with ``{"chapters": [left, right], "job_ids": [...]}``.
+        503 if storylines are not wired; 404 if the storyline or chapter are
+        not found for this user; 400 on missing/invalid body or if the repo
+        rejects the split date (out of window, etc.).
+        """
+        repo = services.get("storyline_repository")
+        job_runner = services.get("job_runner")
+        if repo is None or job_runner is None:
+            return JSONResponse(
+                {"error": "Storylines feature not configured"}, status_code=503,
+            )
+        user = get_authenticated_user(request)
+        sid = int(request.path_params["storyline_id"])
+        cid = int(request.path_params["chapter_id"])
+        if repo.get_storyline(sid, user_id=user.user_id) is None:
+            return JSONResponse({"error": "Storyline not found"}, status_code=404)
+        chapter = repo.get_chapter(cid)
+        if chapter is None or chapter.storyline_id != sid:
+            return JSONResponse({"error": "Chapter not found"}, status_code=404)
+        try:
+            body = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        if not isinstance(body, dict) or not isinstance(body.get("date"), str):
+            return JSONResponse(
+                {"error": "date (ISO str) is required"}, status_code=400,
+            )
+        try:
+            left, right = repo.split_chapter(cid, body["date"])
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        job_ids = _enqueue_chapter_regens(
+            job_runner, sid, user.user_id, [left, right],
+        )
+        log.info(
+            "POST /api/storylines/%d/chapters/%d/split @ %s",
+            sid, cid, body["date"],
+        )
+        return JSONResponse(
+            {
+                "chapters": [
+                    _chapter_to_dict(repo, left),
+                    _chapter_to_dict(repo, right),
+                ],
+                "job_ids": job_ids,
+            },
+            status_code=200,
+        )
+
+    @mcp.custom_route(
         "/api/storylines/{storyline_id:int}/anchors",
         methods=["PUT"],
         name="api_set_storyline_anchors",
