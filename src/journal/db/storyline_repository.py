@@ -679,7 +679,9 @@ class SQLiteStorylineRepository:
             c_start = c.start_date if c.start_date is not None else "0000-01-01"
             if start_date <= c_end and end_date >= c_start:
                 raise ValueError("new chapter overlaps an existing chapter")
-        later = [c for c in existing if (c.start_date or "9999-12-31") > end_date]
+        # NULL start == open-start (−∞): such a chapter is never "later" than
+        # the new range, matching the overlap check's −∞ treatment above.
+        later = [c for c in existing if (c.start_date or "0000-01-01") > end_date]
         insert_seq = min((c.seq for c in later), default=len(existing) + 1)
         try:
             self._shift_seqs(conn, storyline_id, insert_seq, 1)

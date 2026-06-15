@@ -385,3 +385,42 @@ def test_add_ranged_rejects_overlap(
                         end_date="2026-06-30", state="closed")
     with pytest.raises(ValueError):
         repo.add_chapter(storyline.id, start_date="2026-03-01", end_date="2026-09-30")
+
+
+def test_add_ranged_rejects_end_before_start(
+    repo: SQLiteStorylineRepository, storyline: Storyline
+) -> None:
+    with pytest.raises(ValueError):
+        repo.add_chapter(storyline.id, start_date="2026-05-01", end_date="2026-04-01")
+
+
+def test_add_new_latest_rejects_start_not_after_open(
+    repo: SQLiteStorylineRepository, storyline: Storyline
+) -> None:
+    repo.create_chapter(storyline.id, seq=1, title="Open", state="open",
+                        start_date="2026-04-01", end_date=None)
+    with pytest.raises(ValueError):
+        repo.add_chapter(storyline.id, start_date="2026-04-01")  # equal == rejected
+
+
+def test_add_ranged_rejects_touching_boundary(
+    repo: SQLiteStorylineRepository, storyline: Storyline
+) -> None:
+    repo.create_chapter(storyline.id, seq=1, title="A", state="closed",
+                        start_date="2026-01-01", end_date="2026-03-31")
+    repo.create_chapter(storyline.id, seq=2, title="B", state="open",
+                        start_date="2026-07-01", end_date=None)
+    with pytest.raises(ValueError):
+        # touches A's end exactly -> overlap
+        repo.add_chapter(storyline.id, start_date="2026-03-31", end_date="2026-05-31")
+
+
+def test_add_ranged_at_tail_when_no_later_chapters(
+    repo: SQLiteStorylineRepository, storyline: Storyline
+) -> None:
+    # Only a closed chapter; add a ranged closed chapter after it.
+    # No open chapter means no +∞ end, so there's nothing "later" than the new range.
+    repo.create_chapter(storyline.id, seq=1, title="A", state="closed",
+                        start_date="2026-01-01", end_date="2026-03-31")
+    added = repo.add_chapter(storyline.id, start_date="2026-04-01", end_date="2026-05-31")
+    assert added.seq == 2 and added.state == "closed"
