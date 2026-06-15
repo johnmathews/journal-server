@@ -609,6 +609,7 @@ def _init_services() -> dict:
             embedder=lambda text: embeddings.embed_texts([text])[0],
             window_days=config.storyline_default_window_days,
             fts_fallback_threshold=config.storyline_fts_fallback_threshold,
+            max_chapter_words=config.storyline_chapter_max_words,
         )
         storyline_extension_classifier = StorylineExtensionClassifier(
             entity_store=entity_store,

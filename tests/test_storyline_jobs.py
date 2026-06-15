@@ -76,6 +76,8 @@ class _FakeGenerationService:
         self.kwargs: list[dict[str, Any]] = []
         self.chapter_calls: list[int] = []
         self.chapter_kwargs: list[dict[str, Any]] = []
+        self.resegment_calls: list[int] = []
+        self.resegment_kwargs: list[dict[str, Any]] = []
 
     def regenerate(
         self,
@@ -93,6 +95,15 @@ class _FakeGenerationService:
     ) -> GenerationResult:
         self.chapter_calls.append(chapter_id)
         self.chapter_kwargs.append(kwargs)
+        return self._result
+
+    def resegment_storyline(
+        self,
+        storyline_id: int,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> GenerationResult:
+        self.resegment_calls.append(storyline_id)
+        self.resegment_kwargs.append(kwargs)
         return self._result
 
 
@@ -222,6 +233,113 @@ class TestStorylineGenerationWorker:
         # Routed to the chapter path, not the storyline path.
         assert svc.chapter_calls == [7]
         assert svc.chapter_kwargs == [{"mode": "replace"}]
+        assert svc.calls == []
+
+    def test_resegment_routes_to_resegment_storyline(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        """W4: when the payload carries ``resegment`` the worker calls
+        ``resegment_storyline`` (forwarding ``override_locked``) instead
+        of the storyline-level ``regenerate``."""
+        jobs, notifier = job_ctx
+        svc = _FakeGenerationService(GenerationResult(
+            storyline_id=13, chapter_count=4,
+        ))
+        ctx = _build_minimal_ctx(jobs, notifier, generation=svc)
+        params = {
+            "storyline_id": 13,
+            "user_id": 1,
+            "resegment": True,
+            "override_locked": True,
+        }
+        job = jobs.create("storyline_generation", params, user_id=1)
+        run_storyline_generation(ctx, job.id, params)
+
+        finished = jobs.get(job.id)
+        assert finished is not None
+        assert finished.status == "succeeded"
+        # Routed to resegment, not regenerate / regenerate_chapter.
+        assert svc.resegment_calls == [13]
+        assert svc.resegment_kwargs == [{"override_locked": True}]
+        assert svc.calls == []
+        assert svc.chapter_calls == []
+        # chapter_count surfaces in the summary.
+        assert finished.result is not None
+        assert finished.result["chapter_count"] == 4
+
+    def test_resegment_defaults_override_locked_false(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        """``resegment`` without ``override_locked`` forwards
+        ``override_locked=False``."""
+        jobs, notifier = job_ctx
+        svc = _FakeGenerationService(GenerationResult(storyline_id=14))
+        ctx = _build_minimal_ctx(jobs, notifier, generation=svc)
+        params = {"storyline_id": 14, "user_id": 1, "resegment": True}
+        job = jobs.create("storyline_generation", params, user_id=1)
+        run_storyline_generation(ctx, job.id, params)
+
+        assert svc.resegment_calls == [14]
+        assert svc.resegment_kwargs == [{"override_locked": False}]
+        assert svc.calls == []
+
+    def test_no_resegment_still_calls_regenerate(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        """Default path (no ``resegment`` key) is byte-for-byte the old
+        behavior: ``regenerate`` is called, ``resegment_storyline`` is
+        never touched."""
+        jobs, notifier = job_ctx
+        svc = _FakeGenerationService(GenerationResult(storyline_id=15))
+        ctx = _build_minimal_ctx(jobs, notifier, generation=svc)
+        params = {"storyline_id": 15, "user_id": 1}
+        job = jobs.create("storyline_generation", params, user_id=1)
+        run_storyline_generation(ctx, job.id, params)
+
+        assert svc.calls == [15]
+        assert svc.resegment_calls == []
+
+    def test_auto_split_forwarded_to_regenerate(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        """W5: when the payload carries ``auto_split`` the worker forwards
+        ``auto_split=True`` into ``service.regenerate`` (storyline-level
+        path only)."""
+        jobs, notifier = job_ctx
+        svc = _FakeGenerationService(GenerationResult(storyline_id=16))
+        ctx = _build_minimal_ctx(jobs, notifier, generation=svc)
+        params = {"storyline_id": 16, "user_id": 1, "auto_split": True}
+        job = jobs.create("storyline_generation", params, user_id=1)
+        run_storyline_generation(ctx, job.id, params)
+
+        assert svc.calls == [16]
+        assert svc.kwargs == [{"auto_split": True}]
+        assert svc.resegment_calls == []
+        assert svc.chapter_calls == []
+
+    def test_auto_split_ignored_on_chapter_path(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        """``auto_split`` is only meaningful for the storyline-level
+        default path. A chapter-scoped run ignores it (no error, not
+        forwarded)."""
+        jobs, notifier = job_ctx
+        svc = _FakeGenerationService(GenerationResult(storyline_id=17))
+        ctx = _build_minimal_ctx(jobs, notifier, generation=svc)
+        params = {
+            "storyline_id": 17, "chapter_id": 3,
+            "user_id": 1, "auto_split": True,
+        }
+        job = jobs.create("storyline_generation", params, user_id=1)
+        run_storyline_generation(ctx, job.id, params)
+
+        assert svc.chapter_calls == [3]
+        assert svc.chapter_kwargs == [{}]
         assert svc.calls == []
 
     def test_missing_service_marks_failed(
@@ -521,6 +639,43 @@ class TestExtensionCheckWorker:
         decisions = sorted(c["decision"] for c in classifications)
         assert decisions == ["maybe", "no", "yes"]
 
+    def test_yes_decisions_queue_regenerations_with_auto_split(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        """W5: the ingest path opts into auto-split — the extension-check
+        worker queues regenerations with ``auto_split=True`` so an
+        over-budget open chapter is re-segmented automatically."""
+        jobs, notifier = job_ctx
+        classifier = _FakeClassifier({
+            42: [
+                ExtensionResult(
+                    storyline_id=1, decision="yes",
+                    reasoning="ok", stage="entity_overlap",
+                ),
+            ],
+        })
+        ctx = _build_minimal_ctx(jobs, notifier, classifier=classifier)
+        regen_kwargs: list[dict[str, Any]] = []
+
+        def fake_regen(storyline_id: int, **kwargs: Any) -> Any:  # noqa: ANN401, ARG001
+            regen_kwargs.append(kwargs)
+            return type("J", (), {"id": "regen"})()
+
+        job = jobs.create(
+            "storyline_extension_check",
+            {"entry_id": 42, "user_id": 1}, user_id=1,
+        )
+        run_storyline_extension_check(
+            ctx, job.id,
+            {"entry_id": 42, "user_id": 1},
+            fake_regen,
+        )
+
+        assert len(regen_kwargs) == 1
+        assert regen_kwargs[0].get("auto_split") is True
+        assert regen_kwargs[0].get("user_id") == 1
+
     def test_missing_classifier_marks_failed(
         self,
         job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
@@ -641,6 +796,110 @@ class TestJobRunnerStorylineSubmit:
             with pytest.raises(ValueError, match="Invalid mode"):
                 runner.submit_storyline_generation(
                     9, user_id=1, mode="lolnope",
+                )
+        finally:
+            runner.shutdown(wait=True, cancel_futures=False)
+
+    def test_submit_resegment_persists_params_and_worker_resegments(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        """W4: ``resegment=True`` (plus ``override_locked=True``) is
+        persisted into the job params and the worker re-segments."""
+        svc = _FakeGenerationService(GenerationResult(storyline_id=20))
+        runner = _build_minimal_runner(factory, generation=svc)
+        job = runner.submit_storyline_generation(
+            20, user_id=1, resegment=True, override_locked=True,
+        )
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        finished = runner._jobs.get(job.id)  # type: ignore[attr-defined]
+        assert finished is not None
+        assert finished.params["resegment"] is True
+        assert finished.params["override_locked"] is True
+        assert svc.resegment_calls == [20]
+        assert svc.resegment_kwargs == [{"override_locked": True}]
+        assert svc.calls == []
+
+    def test_submit_resegment_false_omits_params(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        """The default (no resegment) keeps the params dict clean — no
+        ``resegment``/``override_locked`` keys leak in — and calls
+        regenerate."""
+        svc = _FakeGenerationService(GenerationResult(storyline_id=21))
+        runner = _build_minimal_runner(factory, generation=svc)
+        job = runner.submit_storyline_generation(21, user_id=1)
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        finished = runner._jobs.get(job.id)  # type: ignore[attr-defined]
+        assert finished is not None
+        assert "resegment" not in finished.params
+        assert "override_locked" not in finished.params
+        assert svc.calls == [21]
+        assert svc.resegment_calls == []
+
+    def test_submit_generation_auto_split_persists_param_and_forwards(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        """W5: ``submit_storyline_generation(auto_split=True)`` stores
+        ``auto_split`` in the job params and the worker forwards it into
+        ``regenerate``."""
+        svc = _FakeGenerationService(GenerationResult(storyline_id=24))
+        runner = _build_minimal_runner(factory, generation=svc)
+        job = runner.submit_storyline_generation(24, user_id=1, auto_split=True)
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        finished = runner._jobs.get(job.id)  # type: ignore[attr-defined]
+        assert finished is not None
+        assert finished.params["auto_split"] is True
+        assert svc.calls == [24]
+        assert svc.kwargs == [{"auto_split": True}]
+
+    def test_submit_generation_auto_split_false_omits_param(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        """The default (no ``auto_split``) keeps the params dict clean and
+        forwards no ``auto_split`` kwarg — manual refresh stays opt-out."""
+        svc = _FakeGenerationService(GenerationResult(storyline_id=25))
+        runner = _build_minimal_runner(factory, generation=svc)
+        job = runner.submit_storyline_generation(25, user_id=1)
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        finished = runner._jobs.get(job.id)  # type: ignore[attr-defined]
+        assert finished is not None
+        assert "auto_split" not in finished.params
+        assert svc.kwargs == [{}]
+
+    def test_submit_resegment_with_chapter_id_raises(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        """A chapter-scoped run cannot re-segment the whole storyline."""
+        svc = _FakeGenerationService(GenerationResult(storyline_id=22))
+        runner = _build_minimal_runner(factory, generation=svc)
+        try:
+            with pytest.raises(ValueError, match="resegment"):
+                runner.submit_storyline_generation(
+                    22, user_id=1, chapter_id=5, resegment=True,
+                )
+        finally:
+            runner.shutdown(wait=True, cancel_futures=False)
+
+    def test_submit_resegment_with_append_mode_raises(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        """resegment is incompatible with append mode."""
+        svc = _FakeGenerationService(GenerationResult(storyline_id=23))
+        runner = _build_minimal_runner(factory, generation=svc)
+        try:
+            with pytest.raises(ValueError, match="resegment"):
+                runner.submit_storyline_generation(
+                    23, user_id=1, mode="append", resegment=True,
                 )
         finally:
             runner.shutdown(wait=True, cancel_futures=False)

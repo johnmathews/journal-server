@@ -74,6 +74,9 @@ def run_storyline_extension_check(
                     submit_regenerate(
                         r.storyline_id,
                         user_id=user_id,
+                        # Ingest path opts into auto-split: an over-budget
+                        # open chapter is re-segmented automatically (W5).
+                        auto_split=True,
                     )
                     regenerated_storyline_ids.append(r.storyline_id)
                 except Exception:  # noqa: BLE001 — log + continue

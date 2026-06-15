@@ -397,6 +397,25 @@ class Config:
             os.environ.get("STORYLINE_FTS_FALLBACK_THRESHOLD", "3")
         )
     )
+    # Auto-split chapter sizing, in words of narrative prose. The
+    # segmenter aims for ``target`` words per chapter and only carves a
+    # new boundary when doing so keeps both sides within
+    # ``[min, max]``. See docs/storyline-chapters-design.md.
+    storyline_chapter_target_words: int = field(
+        default_factory=lambda: int(
+            os.environ.get("STORYLINE_CHAPTER_TARGET_WORDS", "210")
+        )
+    )
+    storyline_chapter_min_words: int = field(
+        default_factory=lambda: int(
+            os.environ.get("STORYLINE_CHAPTER_MIN_WORDS", "180")
+        )
+    )
+    storyline_chapter_max_words: int = field(
+        default_factory=lambda: int(
+            os.environ.get("STORYLINE_CHAPTER_MAX_WORDS", "240")
+        )
+    )
 
     # Entity extraction
     entity_extraction_model: str = "claude-opus-4-6"

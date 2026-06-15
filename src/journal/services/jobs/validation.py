@@ -98,6 +98,18 @@ STORYLINE_GENERATION_KEYS: dict[str, type | tuple[type, ...]] = {
     "start_date": str,
     "end_date": str,
     "mode": str,
+    # Optional two-mode regenerate (W4). When ``resegment`` is True the
+    # worker re-carves the storyline into titled word-sized chapters via
+    # ``resegment_storyline`` instead of refreshing the open chapter.
+    # ``override_locked`` is only meaningful with ``resegment=True``.
+    "resegment": bool,
+    "override_locked": bool,
+    # Optional ingest-time auto-split (W5). When True the worker forwards
+    # ``auto_split=True`` into ``regenerate`` so an over-budget open
+    # chapter is re-segmented automatically. Only meaningful on the
+    # storyline-level default path; ignored with ``chapter_id`` /
+    # ``resegment``.
+    "auto_split": bool,
 }
 
 STORYLINE_GENERATION_MODES = frozenset({"replace", "append"})

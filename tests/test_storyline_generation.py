@@ -35,6 +35,7 @@ from journal.providers.storyline_narrator import (
     _parse_narrative_response,
 )
 from journal.services.storylines.service import (
+    GenerationResult,
     StorylineGenerationService,
     _extract_snippet,
 )
@@ -1195,6 +1196,206 @@ def _seed_storyline_with_history(
         start_date="2099-01-01", end_date="2099-01-31", state="open",
     )
     return repo, store, user_id, entity.id, storyline.id
+
+
+class TestAutoSplitOnRegenerate:
+    """W5: ingest-time auto-split.
+
+    ``regenerate(..., auto_split=True)`` first refreshes the open
+    chapter as usual, then — only on the ingest path — re-segments the
+    storyline when the freshly-written open chapter's narrative now
+    exceeds ``max_chapter_words``. A manual refresh
+    (``auto_split=False``, the default) never re-segments, even when the
+    narrative is over budget. ``resegment_storyline`` itself never sets
+    ``auto_split`` (it doesn't call ``regenerate``), so the split fires
+    at most once per regenerate — no recursion.
+    """
+
+    @staticmethod
+    def _narrator_with_words(n_words: int) -> _FakeNarrator:
+        """A narrator whose narrative panel has ``n_words`` prose words
+        (so the open chapter's cached ``narrative_word_count`` lands at
+        exactly ``n_words`` after the regenerate)."""
+        text = " ".join("word" for _ in range(n_words))
+        return _FakeNarrator(segments=[
+            {"kind": "text", "text": text},
+            {"kind": "citation", "entry_id": 1, "quote": "Atlas read."},
+        ])
+
+    def test_auto_split_resegments_when_over_budget(
+        self,
+        seeded_storyline: tuple[Any, Any, int, int, int],
+    ) -> None:
+        repo, store, _user, _entity, storyline_id = seeded_storyline
+        svc = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=self._narrator_with_words(300),
+            glue=_FakeGlue(),
+            max_chapter_words=240,
+        )
+        calls: list[tuple[int, dict[str, Any]]] = []
+        sentinel = GenerationResult(storyline_id=storyline_id, chapter_count=9)
+
+        def spy_resegment(sid: int, **kwargs: Any) -> GenerationResult:  # noqa: ANN401
+            calls.append((sid, kwargs))
+            return sentinel
+
+        svc.resegment_storyline = spy_resegment  # type: ignore[method-assign]
+
+        result = svc.regenerate(storyline_id, auto_split=True)
+
+        # resegment fired exactly once, on this storyline, and its
+        # result is returned (not the regenerate result).
+        assert calls == [(storyline_id, {})]
+        assert result is sentinel
+
+    def test_auto_split_skips_when_under_budget(
+        self,
+        seeded_storyline: tuple[Any, Any, int, int, int],
+    ) -> None:
+        repo, store, _user, _entity, storyline_id = seeded_storyline
+        svc = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=self._narrator_with_words(10),
+            glue=_FakeGlue(),
+            max_chapter_words=240,
+        )
+        calls: list[int] = []
+        svc.resegment_storyline = (  # type: ignore[method-assign]
+            lambda sid, **_k: calls.append(sid)  # type: ignore[func-returns-value]
+        )
+
+        result = svc.regenerate(storyline_id, auto_split=True)
+
+        assert calls == []
+        # Normal regenerate result is returned untouched.
+        assert result.storyline_id == storyline_id
+        assert result.entry_count == 2
+
+    def test_auto_split_false_never_resegments_even_over_budget(
+        self,
+        seeded_storyline: tuple[Any, Any, int, int, int],
+    ) -> None:
+        repo, store, _user, _entity, storyline_id = seeded_storyline
+        svc = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=self._narrator_with_words(300),
+            glue=_FakeGlue(),
+            max_chapter_words=240,
+        )
+        calls: list[int] = []
+        svc.resegment_storyline = (  # type: ignore[method-assign]
+            lambda sid, **_k: calls.append(sid)  # type: ignore[func-returns-value]
+        )
+
+        # Default (auto_split=False) — manual refresh stays opt-out.
+        result = svc.regenerate(storyline_id)
+        assert calls == []
+        assert result.storyline_id == storyline_id
+
+        # Explicit auto_split=False is identical.
+        result2 = svc.regenerate(storyline_id, auto_split=False)
+        assert calls == []
+        assert result2.storyline_id == storyline_id
+
+    def test_auto_split_at_threshold_is_not_over_budget(
+        self,
+        seeded_storyline: tuple[Any, Any, int, int, int],
+    ) -> None:
+        """The ceiling is strict ``>``: exactly ``max_chapter_words`` does
+        NOT trigger a split (only strictly over)."""
+        repo, store, _user, _entity, storyline_id = seeded_storyline
+        svc = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=self._narrator_with_words(240),
+            glue=_FakeGlue(),
+            max_chapter_words=240,
+        )
+        calls: list[int] = []
+        svc.resegment_storyline = (  # type: ignore[method-assign]
+            lambda sid, **_k: calls.append(sid)  # type: ignore[func-returns-value]
+        )
+
+        svc.regenerate(storyline_id, auto_split=True)
+        assert calls == []
+
+    def test_resegment_path_does_not_set_auto_split(
+        self,
+        seeded_storyline: tuple[Any, Any, int, int, int],
+    ) -> None:
+        """Loop safety: the real ``resegment_storyline`` never calls back
+        into ``regenerate`` with ``auto_split=True`` (it doesn't call
+        ``regenerate`` at all), so the auto-split can never recurse. We
+        spy on ``regenerate`` and confirm a real resegment never invokes
+        it."""
+        from journal.providers.storyline_narrator import (
+            NarrativeSection,
+            SectionedNarrativeResult,
+        )
+
+        repo, store, _user, _entity, storyline_id = seeded_storyline
+
+        class _SectionedNarrator(_FakeNarrator):
+            model = "claude-opus-4-7-fake"
+
+            def generate_sectioned_narrative(
+                self,
+                excerpts: list[DatedEntryExcerpt],
+                storyline_name: str,  # noqa: ARG002
+                storyline_description: str = "",  # noqa: ARG002
+            ) -> SectionedNarrativeResult:
+                sections = [
+                    NarrativeSection(
+                        title="Sec",
+                        segments=[
+                            {
+                                "kind": "citation",
+                                "entry_id": ex.entry_id,
+                                "quote": ex.final_text[:40],
+                                "entry_date": str(ex.entry_date),
+                            }
+                            for ex in excerpts
+                        ],
+                        source_entry_ids=[ex.entry_id for ex in excerpts],
+                        citation_count=len(excerpts),
+                        word_count=4,
+                    )
+                ]
+                return SectionedNarrativeResult(
+                    sections=sections, model_used=self.model,
+                )
+
+        narrator = _SectionedNarrator(segments=[
+            {"kind": "text", "text": "prose"},
+            {"kind": "citation", "entry_id": 1, "quote": "Atlas read."},
+        ])
+        svc = StorylineGenerationService(
+            entity_store=store,
+            entry_repository=_FakeEntryRepo(),
+            storyline_repository=repo,
+            narrator=narrator,
+            glue=_FakeGlue(),
+            max_chapter_words=240,
+        )
+        regen_calls: list[Any] = []
+        real_regenerate = svc.regenerate
+
+        def spy_regenerate(*args: Any, **kwargs: Any) -> GenerationResult:  # noqa: ANN401
+            regen_calls.append((args, kwargs))
+            return real_regenerate(*args, **kwargs)
+
+        svc.regenerate = spy_regenerate  # type: ignore[method-assign]
+        svc.resegment_storyline(storyline_id)
+        # resegment never re-enters regenerate.
+        assert regen_calls == []
 
 
 class TestAppendMode:

@@ -479,6 +479,9 @@ class StorylineChapter:
     state: str = "open"
     last_generated_at: str | None = None
     summary_embedding: list[float] | None = None
+    title_locked: bool = False
+    boundary_locked: bool = False
+    narrative_word_count: int = 0
     created_at: str = ""
     updated_at: str = ""
 

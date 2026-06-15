@@ -26,9 +26,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
+from journal.db.storyline_repository import ChapterSpec
 from journal.services.storylines.segments import (
     SEGMENT_KIND_CITATION,
     SEGMENT_KIND_TEXT,
@@ -61,6 +62,14 @@ DEFAULT_WINDOW_DAYS = 90
 # trigger on sparse threads.
 DEFAULT_FTS_FALLBACK_THRESHOLD = 3
 
+# Ingest-time auto-split ceiling (W5). When the ingest path regenerates a
+# storyline's open chapter and its narrative now exceeds this many words,
+# the storyline is automatically re-segmented. Mirrors
+# ``config.storyline_chapter_max_words`` (the bootstrap passes that in);
+# this module-level default lets tests construct the service without
+# config.
+DEFAULT_MAX_CHAPTER_WORDS = 240
+
 # Soft cap on anchors per storyline. Enforced at the service boundary
 # (``create_storyline`` / ``set_anchors`` go through validation that
 # raises ``ValueError`` when this is exceeded). Routes / MCP tools
@@ -86,7 +95,39 @@ class GenerationResult:
     curation_citation_count: int = 0
     narrative_model: str = ""
     curation_model: str = ""
+    chapter_count: int = 0
     warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _Span:
+    """An unlocked run of consecutive chapters to be re-carved.
+
+    ``first_idx``/``last_idx`` index into the storyline's seq-ordered
+    chapter list. ``span_start``/``span_end`` are the resolved date
+    window; ``span_end`` is None when the span includes the open chapter.
+    """
+
+    first_idx: int
+    last_idx: int
+    span_start: str | None
+    span_end: str | None
+
+
+@dataclass
+class _SectionPlan:
+    """A planned replacement chapter derived from one narrator section."""
+
+    title: str
+    start_date: str | None
+    end_date: str | None
+    state: str
+    excerpts: list[DatedEntryExcerpt]
+    segments: list[dict[str, Any]]
+    source_entry_ids: list[int]
+    citation_count: int
+    model_used: str
+    title_locked: bool
 
 
 GenerationMode = Literal["replace", "append"]
@@ -101,6 +142,7 @@ class StorylineGenerationServiceProtocol(Protocol):
         start_date: date | str | None = ...,
         end_date: date | str | None = ...,
         mode: GenerationMode = ...,
+        auto_split: bool = ...,
     ) -> GenerationResult: ...
 
     def regenerate_chapter(
@@ -108,6 +150,13 @@ class StorylineGenerationServiceProtocol(Protocol):
         chapter_id: int,
         *,
         mode: GenerationMode = ...,
+    ) -> GenerationResult: ...
+
+    def resegment_storyline(
+        self,
+        storyline_id: int,
+        *,
+        override_locked: bool = ...,
     ) -> GenerationResult: ...
 
 
@@ -135,6 +184,7 @@ class StorylineGenerationService:
         # window_days=...
         window_days: int = DEFAULT_WINDOW_DAYS,
         fts_fallback_threshold: int = DEFAULT_FTS_FALLBACK_THRESHOLD,
+        max_chapter_words: int = DEFAULT_MAX_CHAPTER_WORDS,
     ) -> None:
         self._entity_store = entity_store
         self._entry_repository = entry_repository
@@ -144,6 +194,7 @@ class StorylineGenerationService:
         self._embedder = embedder
         self._window_days = window_days
         self._fts_fallback_threshold = fts_fallback_threshold
+        self._max_chapter_words = max_chapter_words
 
     def regenerate(
         self,
@@ -152,6 +203,7 @@ class StorylineGenerationService:
         start_date: date | str | None = None,
         end_date: date | str | None = None,
         mode: GenerationMode = "replace",
+        auto_split: bool = False,
     ) -> GenerationResult:
         """Back-compat entry point: regenerate the storyline's open chapter.
 
@@ -172,6 +224,18 @@ class StorylineGenerationService:
         window is authoritative; the overrides are honoured only on the
         append path (which mirrors the previous behavior and is exercised
         by the append-mode tests).
+
+        ``auto_split`` is the ingest-time auto-split gate (W5). It is
+        honoured ONLY on the default ``mode="replace"`` open-chapter path
+        — the path the ingest extension-check hook uses. After the normal
+        regenerate, if the (now-refreshed) open chapter's
+        ``narrative_word_count`` strictly exceeds ``max_chapter_words``,
+        the storyline is re-segmented via :meth:`resegment_storyline` and
+        THAT result is returned. Manual "refresh" callers (REST/MCP) leave
+        ``auto_split`` False, so re-segmentation stays opt-in for them.
+        ``resegment_storyline`` does not call ``regenerate``, so the split
+        fires at most once — no recursion. ``auto_split`` is ignored in
+        ``mode="append"`` (append never crosses the open chapter boundary).
         """
         if mode not in ("replace", "append"):
             raise ValueError(
@@ -197,7 +261,28 @@ class StorylineGenerationService:
                 start_iso=start_iso, end_iso=end_iso,
             )
 
-        return self.regenerate_chapter(open_chapter.id, mode=mode)
+        result = self.regenerate_chapter(open_chapter.id, mode=mode)
+
+        # Ingest-time auto-split (W5). Only the ingest path passes
+        # auto_split=True. After refreshing the open chapter, read its
+        # cached narrative word count back; if it now exceeds the chapter
+        # ceiling, re-segment the storyline and return that result.
+        # resegment_storyline never calls regenerate, so this fires at
+        # most once (no recursion).
+        if auto_split:
+            refreshed = self._storyline_repository.get_open_chapter(storyline_id)
+            if (
+                refreshed is not None
+                and refreshed.narrative_word_count > self._max_chapter_words
+            ):
+                log.info(
+                    "Storyline %d open chapter narrative %d words > %d ceiling; "
+                    "auto-splitting via resegment",
+                    storyline_id, refreshed.narrative_word_count,
+                    self._max_chapter_words,
+                )
+                return self.resegment_storyline(storyline_id)
+        return result
 
     def regenerate_chapter(
         self,
@@ -269,16 +354,56 @@ class StorylineGenerationService:
             storyline_name=storyline.name,
             storyline_description=storyline.description,
         )
-        result.narrative_citation_count = narrative.citation_count
-        result.narrative_model = narrative.model_used
-        # Guard against silently wiping a previously good narrative.
-        # The narrator catches API errors internally and returns an
-        # empty NarrativeResult, so a single transient Anthropic
-        # failure used to overwrite the persisted panel with zero
-        # segments. When the corpus is non-empty but the narrator came
-        # back empty, leave the existing panel alone and surface the
-        # failure as a warning + log line.
-        if not narrative.segments:
+        self._write_chapter_panels(
+            chapter_id,
+            excerpts,
+            narrative_segments=narrative.segments,
+            narrative_source_ids=narrative.source_entry_ids,
+            narrative_citation_count=narrative.citation_count,
+            narrative_model=narrative.model_used,
+            result=result,
+        )
+        log.info(
+            "Chapter %d regenerated: %d entries, %d narrative citations, %d curation citations",
+            chapter_id, result.entry_count,
+            result.narrative_citation_count, result.curation_citation_count,
+        )
+        return result
+
+    def _write_chapter_panels(
+        self,
+        chapter_id: int,
+        excerpts: list[DatedEntryExcerpt],
+        narrative_segments: list[dict[str, Any]],
+        narrative_source_ids: list[int],
+        narrative_citation_count: int,
+        narrative_model: str,
+        *,
+        result: GenerationResult,
+    ) -> None:
+        """Write both panels for one chapter from a narrative result.
+
+        Shared by ``regenerate_chapter`` (one flat narrative) and
+        ``resegment_storyline`` (one section per chapter). Given a
+        chapter id, its excerpts, and the narrative segments to persist,
+        this:
+
+        * upserts the narrative panel, guarding against silently wiping a
+          previously-good narrative when ``narrative_segments`` is empty
+          (the narrator catches its own API errors and returns empty);
+        * builds the curation panel via the glue provider's transitions
+          and upserts it;
+        * caches ``narrative_word_count`` from the narrative text
+          segments (same whitespace-split count W2 uses);
+        * refreshes the chapter's summary embedding (best-effort); and
+        * stamps ``last_generated_at``.
+
+        Stats are accumulated onto ``result`` (so a multi-chapter caller
+        aggregates across chapters).
+        """
+        result.narrative_citation_count += narrative_citation_count
+        result.narrative_model = narrative_model
+        if not narrative_segments:
             log.warning(
                 "Chapter %d: narrator returned empty segments for "
                 "non-empty corpus (%d excerpts) — preserving existing "
@@ -293,27 +418,33 @@ class StorylineGenerationService:
             self._storyline_repository.upsert_panel(
                 chapter_id=chapter_id,
                 panel_kind="narrative",
-                segments=narrative.segments,
-                source_entry_ids=narrative.source_entry_ids,
-                citation_count=narrative.citation_count,
-                model_used=narrative.model_used,
+                segments=narrative_segments,
+                source_entry_ids=narrative_source_ids,
+                citation_count=narrative_citation_count,
+                model_used=narrative_model,
             )
 
         glue = self._glue.generate_transitions(excerpts)
         curation_segments = _build_curation_segments(excerpts, glue.transitions)
-        result.curation_citation_count = count_citations(curation_segments)
+        result.curation_citation_count += count_citations(curation_segments)
         result.curation_model = glue.model_used
         self._storyline_repository.upsert_panel(
             chapter_id=chapter_id,
             panel_kind="curation",
             segments=curation_segments,
             source_entry_ids=collect_source_entry_ids(curation_segments),
-            citation_count=result.curation_citation_count,
+            citation_count=count_citations(curation_segments),
             model_used=glue.model_used,
         )
 
+        # Cache the narrative word count (text segments only — same
+        # whitespace-split count W2's _finalize_section uses).
+        self._storyline_repository.set_chapter_word_count(
+            chapter_id, _count_narrative_words(narrative_segments),
+        )
+
         if self._embedder is not None:
-            narrative_text = _join_narrative_text(narrative.segments)
+            narrative_text = _join_narrative_text(narrative_segments)
             if narrative_text.strip():
                 try:
                     embedding = self._embedder(narrative_text)
@@ -331,12 +462,284 @@ class StorylineGenerationService:
                     )
 
         self._storyline_repository.record_chapter_generation_complete(chapter_id)
+
+    def _write_empty_chapter_panels(self, chapter_id: int) -> None:
+        """Persist empty curation + narrative panels for an empty chapter.
+
+        Used when a span has no excerpts so the rebuilt chapter still has
+        well-formed (empty) panels rather than none. Mirrors the
+        empty-corpus branch of :meth:`regenerate_chapter`.
+        """
+        self._storyline_repository.upsert_panel(
+            chapter_id=chapter_id,
+            panel_kind="curation", segments=[], source_entry_ids=[],
+            citation_count=0, model_used=self._glue.model,
+        )
+        self._storyline_repository.upsert_panel(
+            chapter_id=chapter_id,
+            panel_kind="narrative", segments=[], source_entry_ids=[],
+            citation_count=0, model_used=self._narrator.model,
+        )
+        self._storyline_repository.set_chapter_word_count(chapter_id, 0)
+        self._storyline_repository.record_chapter_generation_complete(chapter_id)
+
+    # ── re-segmentation ─────────────────────────────────────────
+
+    def resegment_storyline(
+        self,
+        storyline_id: int,
+        *,
+        override_locked: bool = False,
+    ) -> GenerationResult:
+        """Re-carve a storyline into titled, word-sized chapters.
+
+        The storyline's chapters tile its timeline contiguously, with
+        exactly one ``open`` chapter (``end_date=NULL``). This method
+        re-derives chapter boundaries from a single sectioning-narrator
+        call per *unlocked span*, then atomically rebuilds the chapter
+        rows and writes panels for each new chapter.
+
+        ``boundary_locked`` chapters are fixed anchors: their id, window,
+        title, and panels survive untouched, and they split the timeline
+        into the maximal runs of consecutive non-locked chapters that
+        form the unlocked spans. With ``override_locked=True`` the entire
+        timeline is treated as ONE unlocked span (locks ignored), so a
+        re-carve can cross hand-painted boundaries.
+
+        On a transient narrator failure (zero sections) for a span, that
+        span's existing chapters + panels are left intact and a warning
+        is recorded — we never wipe good data on a flaky API call.
+        """
+        storyline = self._storyline_repository.get_storyline(storyline_id)
+        if storyline is None:
+            raise ValueError(f"Storyline {storyline_id} not found")
+
+        chapters = self._storyline_repository.list_chapters(storyline_id)
+        result = GenerationResult(storyline_id=storyline_id)
+        if not chapters:
+            result.warnings.append("Storyline has no chapters; nothing to do.")
+            return result
+
+        spans = self._compute_unlocked_spans(chapters, override_locked)
+
+        # Build the full desired chapter list in date order. ``plans`` is a
+        # list of either ("preserve", StorylineChapter) for boundary_locked
+        # anchors, or ("new", _SectionPlan) for a freshly-derived chapter.
+        plans: list[tuple[str, Any]] = []
+        # Map chapter index → span (so we can interleave preserved anchors).
+        span_by_first_idx = {s.first_idx: s for s in spans}
+        idx = 0
+        while idx < len(chapters):
+            if idx in span_by_first_idx:
+                span = span_by_first_idx[idx]
+                section_plans = self._plan_span(storyline, span, chapters, result)
+                if section_plans is None:
+                    # Narrator failure: preserve the span's existing
+                    # chapters untouched (treat each as a preserve plan).
+                    for ci in range(span.first_idx, span.last_idx + 1):
+                        plans.append(("preserve", chapters[ci]))
+                else:
+                    for sp in section_plans:
+                        plans.append(("new", sp))
+                idx = span.last_idx + 1
+            else:
+                # A boundary_locked anchor (not part of any unlocked span).
+                plans.append(("preserve", chapters[idx]))
+                idx += 1
+
+        specs = _plans_to_specs(plans)
+        rebuilt = self._storyline_repository.rebuild_chapters(storyline_id, specs)
+        result.chapter_count = len(rebuilt)
+
+        # Write panels for the NEW chapters (preserved ones keep theirs).
+        # rebuilt is in seq order, which matches the plans order.
+        for chapter, (kind, payload) in zip(rebuilt, plans, strict=True):
+            if kind != "new":
+                continue
+            section_plan: _SectionPlan = payload
+            if not section_plan.excerpts:
+                # Empty span chapter: persist empty panels (mirror the
+                # empty-corpus branch of regenerate_chapter). The
+                # narrative guard in _write_chapter_panels would otherwise
+                # skip writing — but here there is nothing to preserve.
+                self._write_empty_chapter_panels(chapter.id)
+                continue
+            self._write_chapter_panels(
+                chapter.id,
+                section_plan.excerpts,
+                narrative_segments=section_plan.segments,
+                narrative_source_ids=section_plan.source_entry_ids,
+                narrative_citation_count=section_plan.citation_count,
+                narrative_model=section_plan.model_used,
+                result=result,
+            )
+
         log.info(
-            "Chapter %d regenerated: %d entries, %d narrative citations, %d curation citations",
-            chapter_id, result.entry_count,
-            result.narrative_citation_count, result.curation_citation_count,
+            "Storyline %d resegmented: %d chapters (override_locked=%s)",
+            storyline_id, result.chapter_count, override_locked,
         )
         return result
+
+    def _compute_unlocked_spans(
+        self,
+        chapters: list[StorylineChapter],
+        override_locked: bool,
+    ) -> list[_Span]:
+        """Return the maximal runs of consecutive non-boundary_locked
+        chapters. With ``override_locked`` the whole list is one span.
+
+        Each span carries the chapter index range plus the resolved
+        ``[span_start, span_end]`` date window (``span_end`` is None when
+        the span includes the open chapter)."""
+        if override_locked:
+            first, last = chapters[0], chapters[-1]
+            return [
+                _Span(
+                    first_idx=0,
+                    last_idx=len(chapters) - 1,
+                    span_start=first.start_date,
+                    span_end=last.end_date,
+                )
+            ]
+        spans: list[_Span] = []
+        run_start: int | None = None
+        for i, ch in enumerate(chapters):
+            if not ch.boundary_locked:
+                if run_start is None:
+                    run_start = i
+            else:
+                if run_start is not None:
+                    spans.append(
+                        _Span(
+                            first_idx=run_start,
+                            last_idx=i - 1,
+                            span_start=chapters[run_start].start_date,
+                            span_end=chapters[i - 1].end_date,
+                        )
+                    )
+                    run_start = None
+        if run_start is not None:
+            spans.append(
+                _Span(
+                    first_idx=run_start,
+                    last_idx=len(chapters) - 1,
+                    span_start=chapters[run_start].start_date,
+                    span_end=chapters[-1].end_date,
+                )
+            )
+        return spans
+
+    def _plan_span(
+        self,
+        storyline: Storyline,
+        span: _Span,
+        chapters: list[StorylineChapter],
+        result: GenerationResult,
+    ) -> list[_SectionPlan] | None:
+        """Build the replacement chapter plans for one unlocked span.
+
+        Returns ``None`` to signal "preserve the span untouched" (narrator
+        returned zero sections — a transient failure we must not let wipe
+        good data). Returns a list of one-or-more :class:`_SectionPlan` to
+        replace the span otherwise; an empty corpus yields a single empty
+        chapter covering the whole span.
+        """
+        excerpts, fts_count = self._fetch_excerpts(
+            storyline, start_date=span.span_start, end_date=span.span_end,
+        )
+        result.entry_count += len(excerpts)
+        result.entity_mention_count += len(excerpts) - fts_count
+        result.fts_fallback_count += fts_count
+
+        if not excerpts:
+            # Empty span → one empty chapter over the whole span. Mirrors
+            # the empty-corpus path in regenerate_chapter (empty panels).
+            return [
+                _SectionPlan(
+                    title="",
+                    start_date=span.span_start,
+                    end_date=span.span_end,
+                    state="open" if span.span_end is None else "closed",
+                    excerpts=[],
+                    segments=[],
+                    source_entry_ids=[],
+                    citation_count=0,
+                    model_used=self._narrator.model,
+                    title_locked=False,
+                )
+            ]
+
+        sectioned = self._narrator.generate_sectioned_narrative(
+            excerpts, storyline.name, storyline.description,
+        )
+        if not sectioned.sections:
+            log.warning(
+                "Storyline %d span [%s..%s]: sectioned narrator returned zero "
+                "sections for %d excerpts — preserving existing chapters",
+                storyline.id, span.span_start, span.span_end, len(excerpts),
+            )
+            result.warnings.append(
+                "Sectioning produced no sections; existing chapters in this "
+                "span were preserved."
+            )
+            return None
+
+        # Map entry_id → entry_date for window derivation off citations.
+        date_by_entry: dict[int, str] = {
+            ex.entry_id: str(ex.entry_date) for ex in excerpts
+        }
+        windows = _derive_section_windows(
+            sectioned.sections,
+            date_by_entry,
+            span_start=span.span_start,
+            span_end=span.span_end,
+        )
+
+        # Carry forward any title_locked chapters that previously lived in
+        # this span, so a new section that majority-overlaps one inherits
+        # its locked title.
+        locked_titles = [
+            chapters[ci]
+            for ci in range(span.first_idx, span.last_idx + 1)
+            if chapters[ci].title_locked
+        ]
+
+        plans: list[_SectionPlan] = []
+        last_index = len(sectioned.sections) - 1
+        for i, (section, (win_start, win_end)) in enumerate(
+            zip(sectioned.sections, windows, strict=True)
+        ):
+            title = section.title
+            title_locked = False
+            inherited = _find_locked_title(locked_titles, win_start, win_end)
+            if inherited is not None:
+                title = inherited
+                title_locked = True
+            # A None win_start means "no lower bound" (the span itself
+            # had no start_date) — include from the beginning rather than
+            # silently dropping every excerpt for this section.
+            section_excerpts = [
+                ex
+                for ex in excerpts
+                if (win_start is None or str(ex.entry_date) >= win_start)
+                and (win_end is None or str(ex.entry_date) <= win_end)
+            ]
+            plans.append(
+                _SectionPlan(
+                    title=title,
+                    start_date=win_start,
+                    end_date=win_end,
+                    state="open" if (i == last_index and span.span_end is None)
+                    else "closed",
+                    excerpts=section_excerpts,
+                    segments=section.segments,
+                    source_entry_ids=section.source_entry_ids,
+                    citation_count=section.citation_count,
+                    model_used=sectioned.model_used,
+                    title_locked=title_locked,
+                )
+            )
+        return plans
 
     # ── append mode ────────────────────────────────────────────
 
@@ -669,6 +1072,180 @@ class StorylineGenerationService:
                 )
             )
         return fallback
+
+
+def _count_narrative_words(segments: list[dict[str, Any]]) -> int:
+    """Whitespace-split word count of a narrative's text segments.
+
+    Citation ``quote`` text is excluded — this mirrors W2's per-section
+    ``_finalize_section`` word count so the cached
+    ``narrative_word_count`` is comparable to the narrator's band logic.
+    """
+    return sum(
+        len((seg.get("text") or "").split())
+        for seg in segments
+        if seg.get("kind") == SEGMENT_KIND_TEXT
+    )
+
+
+def _add_days(iso: str, days: int) -> str:
+    """ISO day ``days`` after ``iso`` (mirrors the repository's day math)."""
+    return (date.fromisoformat(iso) + timedelta(days=days)).isoformat()
+
+
+def _derive_section_windows(
+    sections: list[Any],
+    date_by_entry: dict[int, str],
+    *,
+    span_start: str | None,
+    span_end: str | None,
+) -> list[tuple[str | None, str | None]]:
+    """Derive each section's [start, end] window, clamped to tile the span.
+
+    Step 1 — raw windows from citations: a section's raw start/end is the
+    min/max ``entry_date`` over its citation segments. A section with NO
+    citations inherits a degenerate single-day window at the previous
+    section's end + 1 day (rare — the prompt asks the model to cite every
+    section; this just keeps the tiling monotonic when it doesn't).
+
+    Step 2 — clamp to tile the span contiguously and non-overlapping:
+    the first section's start is forced to ``span_start``; each subsequent
+    section's start is the day after the previous section's end; the last
+    section's end is ``span_end`` (None when the span is the open one).
+    Section ends are bumped forward when needed so windows stay monotonic
+    and never collapse below their start.
+    """
+    # Step 1: raw per-section windows from citation dates.
+    raw: list[tuple[str | None, str | None]] = []
+    prev_end: str | None = span_start
+    for section in sections:
+        cited_dates = [
+            date_by_entry[seg["entry_id"]]
+            for seg in section.segments
+            if seg.get("kind") == SEGMENT_KIND_CITATION
+            and seg.get("entry_id") in date_by_entry
+        ]
+        if cited_dates:
+            raw_start = min(cited_dates)
+            raw_end = max(cited_dates)
+        else:
+            # Citation-less section: degenerate single day at prev_end + 1.
+            anchor = _add_days(prev_end, 1) if prev_end else span_start
+            raw_start = anchor
+            raw_end = anchor
+        raw.append((raw_start, raw_end))
+        prev_end = raw_end
+
+    # Step 2: clamp to tile the span.
+    n = len(sections)
+    out: list[tuple[str | None, str | None]] = []
+    cursor: str | None = span_start
+    for i in range(n):
+        start = cursor if cursor is not None else raw[i][0]
+        if i == n - 1:
+            end = span_end
+        else:
+            end = raw[i][1]
+            # Keep monotonic: end must be >= start.
+            if end is not None and start is not None and end < start:
+                end = start
+            # When the span is bounded, a non-last section must not
+            # consume the days the remaining sections (and the final
+            # section's span_end) need. Cap this end at span_end minus
+            # one day per still-to-come section, so the windows tile
+            # without inverting (start > end). The previous code clamped
+            # to span_end itself, which left the next section starting
+            # the day AFTER span_end — producing inverted windows.
+            if span_end is not None:
+                max_end = _add_days(span_end, -(n - 1 - i))
+                if end is None or end > max_end:
+                    end = max_end
+                if start is not None and end < start:
+                    # Pathological: more sections than days in the span.
+                    # rebuild_chapters rejects any inverted spec, turning
+                    # this into a loud failure rather than silent corruption.
+                    end = start
+        out.append((start, end))
+        cursor = _add_days(end, 1) if end is not None else None
+    return out
+
+
+def _overlap_days(
+    a_start: str | None,
+    a_end: str | None,
+    b_start: str | None,
+    b_end: str | None,
+) -> int:
+    """Inclusive overlap in days between [a_start, a_end] and [b_start,
+    b_end]. None bounds are treated as ±infinity for the purpose of the
+    overlap (an open end extends far into the future)."""
+    lo = max(a_start or "0000-01-01", b_start or "0000-01-01")
+    hi = min(a_end or "9999-12-31", b_end or "9999-12-31")
+    if hi < lo:
+        return 0
+    return (date.fromisoformat(hi) - date.fromisoformat(lo)).days + 1
+
+
+def _span_days(start: str | None, end: str | None) -> int:
+    """Inclusive day length of a window; large finite number for open."""
+    s = start or "0000-01-01"
+    e = end or "9999-12-31"
+    return (date.fromisoformat(e) - date.fromisoformat(s)).days + 1
+
+
+def _find_locked_title(
+    locked_chapters: list[Any],
+    win_start: str | None,
+    win_end: str | None,
+) -> str | None:
+    """Return a locked title to inherit if a previously title_locked
+    chapter's window overlaps ``[win_start, win_end]`` by a MAJORITY of
+    the new window's days. Returns the best match's title, else None."""
+    best_title: str | None = None
+    best_overlap = 0
+    new_len = _span_days(win_start, win_end)
+    for ch in locked_chapters:
+        overlap = _overlap_days(
+            win_start, win_end, ch.start_date, ch.end_date,
+        )
+        if overlap * 2 > new_len and overlap > best_overlap:
+            best_overlap = overlap
+            best_title = ch.title
+    return best_title
+
+
+def _plans_to_specs(plans: list[tuple[str, Any]]) -> list[ChapterSpec]:
+    """Translate the service's plan list into repository ``ChapterSpec``s.
+
+    Preserve plans carry the existing chapter id; new plans carry the
+    INSERT column values. The state on each spec is its desired final
+    state — the repository defers the single ``open`` promotion to the
+    last statement, so only the final-in-time plan should be 'open'.
+    """
+    specs: list[ChapterSpec] = []
+    for kind, payload in plans:
+        if kind == "preserve":
+            chapter = payload
+            specs.append(
+                ChapterSpec(
+                    preserve_id=chapter.id,
+                    state=chapter.state,
+                )
+            )
+        else:
+            plan: _SectionPlan = payload
+            specs.append(
+                ChapterSpec(
+                    state=plan.state,
+                    title=plan.title,
+                    start_date=plan.start_date,
+                    end_date=plan.end_date,
+                    title_locked=plan.title_locked,
+                    boundary_locked=False,
+                    narrative_word_count=0,
+                )
+            )
+    return specs
 
 
 def _build_curation_segments(

@@ -64,6 +64,8 @@ class _FakeGenerationService:
         self.kwargs: list[dict[str, Any]] = []
         self.chapter_calls: list[int] = []
         self.chapter_kwargs: list[dict[str, Any]] = []
+        self.resegment_calls: list[int] = []
+        self.resegment_kwargs: list[dict[str, Any]] = []
 
     def regenerate(
         self,
@@ -82,6 +84,15 @@ class _FakeGenerationService:
         self.chapter_calls.append(chapter_id)
         self.chapter_kwargs.append(kwargs)
         return GenerationResult(storyline_id=0, entry_count=0)
+
+    def resegment_storyline(
+        self,
+        storyline_id: int,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> GenerationResult:
+        self.resegment_calls.append(storyline_id)
+        self.resegment_kwargs.append(kwargs)
+        return GenerationResult(storyline_id=storyline_id, entry_count=0)
 
 
 @pytest.fixture
@@ -347,6 +358,93 @@ class TestRegenerateBodyParams:
         resp = client.post(
             f"/api/storylines/{sid}/regenerate",
             json=["nope"],
+        )
+        assert resp.status_code == 400
+
+    def test_resegment_true_queues_job_with_flag(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        """W4: ``{"resegment": true}`` queues a job whose worker
+        re-segments the storyline."""
+        client, ctx = app_with_storylines
+        created = client.post(
+            "/api/storylines",
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
+        ).json()
+        sid = created["id"]
+
+        resp = client.post(
+            f"/api/storylines/{sid}/regenerate",
+            json={"resegment": True},
+        )
+        assert resp.status_code == 202
+        # The stored job row carries the flag.
+        job = ctx["job_repo"].get(resp.json()["job_id"])
+        assert job is not None
+        assert job.params.get("resegment") is True
+
+        ctx["runner"].shutdown(wait=True, cancel_futures=False)
+        # Worker re-segmented rather than calling the open-chapter refresh.
+        assert ctx["gen_service"].resegment_calls == [sid]
+        assert ctx["gen_service"].resegment_kwargs[-1] == {
+            "override_locked": False,
+        }
+
+    def test_resegment_with_override_locked_forwarded(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        created = client.post(
+            "/api/storylines",
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
+        ).json()
+        sid = created["id"]
+
+        resp = client.post(
+            f"/api/storylines/{sid}/regenerate",
+            json={"resegment": True, "override_locked": True},
+        )
+        assert resp.status_code == 202
+        ctx["runner"].shutdown(wait=True, cancel_futures=False)
+        assert ctx["gen_service"].resegment_calls == [sid]
+        assert ctx["gen_service"].resegment_kwargs[-1] == {
+            "override_locked": True,
+        }
+
+    def test_resegment_wrong_type_returns_400(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        """A non-bool ``resegment`` (e.g. the string "yes") is a 400."""
+        client, ctx = app_with_storylines
+        created = client.post(
+            "/api/storylines",
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
+        ).json()
+        sid = created["id"]
+
+        resp = client.post(
+            f"/api/storylines/{sid}/regenerate",
+            json={"resegment": "yes"},
+        )
+        assert resp.status_code == 400
+
+    def test_override_locked_wrong_type_returns_400(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        created = client.post(
+            "/api/storylines",
+            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
+        ).json()
+        sid = created["id"]
+
+        resp = client.post(
+            f"/api/storylines/{sid}/regenerate",
+            json={"resegment": True, "override_locked": "nope"},
         )
         assert resp.status_code == 400
 

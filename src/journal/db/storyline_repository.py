@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import date as _date
 from datetime import timedelta as _timedelta
 from typing import TYPE_CHECKING, Any
@@ -27,6 +28,44 @@ if TYPE_CHECKING:
     from journal.db.factory import ConnectionFactory
 
 log = logging.getLogger(__name__)
+
+
+# Offset applied to existing seqs during an atomic rebuild so the final
+# 1..N assignment can never collide with a still-present old seq. The
+# rebuild only ever holds a handful of chapters, so 100000 is comfortably
+# above any real seq.
+_REBUILD_SEQ_OFFSET = 100_000
+
+
+@dataclass
+class ChapterSpec:
+    """One desired chapter in an atomic :meth:`rebuild_chapters` call.
+
+    Two flavors, discriminated by ``preserve_id``:
+
+    * **preserve** — ``preserve_id`` is the id of an existing chapter row
+      to keep untouched (row + its panels survive). Only its ``seq`` and
+      ``state`` are re-derived during the rebuild. Used for
+      ``boundary_locked`` anchor chapters.
+    * **new** — ``preserve_id is None``; the spec carries the column
+      values to INSERT a fresh chapter (``title``, ``start_date``,
+      ``end_date``, ``title_locked``, ``boundary_locked``,
+      ``narrative_word_count``). The caller writes panels afterward.
+
+    ``state`` is the desired final state; the rebuilder enforces the
+    single-open invariant by deferring the lone ``open`` assignment to
+    the very last statement, so callers may pass ``state='open'`` on the
+    final-in-time spec freely.
+    """
+
+    state: str = "closed"
+    preserve_id: int | None = None
+    title: str = ""
+    start_date: str | None = None
+    end_date: str | None = None
+    title_locked: bool = False
+    boundary_locked: bool = False
+    narrative_word_count: int = 0
 
 
 def _day_before(iso: str) -> str:
@@ -71,6 +110,9 @@ def _row_to_chapter(row: sqlite3.Row) -> StorylineChapter:
         state=row["state"],
         last_generated_at=row["last_generated_at"],
         summary_embedding=[float(x) for x in summary] if summary else None,
+        title_locked=bool(row["title_locked"]),
+        boundary_locked=bool(row["boundary_locked"]),
+        narrative_word_count=int(row["narrative_word_count"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -528,7 +570,8 @@ class SQLiteStorylineRepository:
         conn = self._conn()
         cursor = conn.execute(
             "UPDATE storyline_chapters"
-            " SET title = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+            " SET title = ?, title_locked = 1,"
+            "     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
             " WHERE id = ?",
             (title.strip(), chapter_id),
         )
@@ -560,6 +603,18 @@ class SQLiteStorylineRepository:
             "     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
             " WHERE id = ?",
             (json.dumps(embedding) if embedding is not None else None, chapter_id),
+        )
+        conn.commit()
+
+    def set_chapter_word_count(self, chapter_id: int, count: int) -> None:
+        """Persist the cached narrative word count for a chapter."""
+        conn = self._conn()
+        conn.execute(
+            "UPDATE storyline_chapters"
+            " SET narrative_word_count = ?,"
+            "     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+            " WHERE id = ?",
+            (int(count), chapter_id),
         )
         conn.commit()
 
@@ -660,8 +715,9 @@ class SQLiteStorylineRepository:
                     )
                 cursor = conn.execute(
                     "INSERT INTO storyline_chapters"
-                    " (storyline_id, seq, title, start_date, end_date, state)"
-                    " VALUES (?, ?, '', ?, NULL, 'open')",
+                    " (storyline_id, seq, title, start_date, end_date, state,"
+                    "  boundary_locked)"
+                    " VALUES (?, ?, '', ?, NULL, 'open', 1)",
                     (storyline_id, new_seq, start_date),
                 )
                 conn.commit()
@@ -687,8 +743,9 @@ class SQLiteStorylineRepository:
             self._shift_seqs(conn, storyline_id, insert_seq, 1)
             cursor = conn.execute(
                 "INSERT INTO storyline_chapters"
-                " (storyline_id, seq, title, start_date, end_date, state)"
-                " VALUES (?, ?, '', ?, ?, 'closed')",
+                " (storyline_id, seq, title, start_date, end_date, state,"
+                "  boundary_locked)"
+                " VALUES (?, ?, '', ?, ?, 'closed', 1)",
                 (storyline_id, insert_seq, start_date, end_date),
             )
             conn.commit()
@@ -756,6 +813,7 @@ class SQLiteStorylineRepository:
         try:
             conn.execute(
                 "UPDATE storyline_chapters SET start_date = ?, end_date = ?,"
+                " boundary_locked = 1,"
                 " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?",
                 (start_date, end_date, chapter_id),
             )
@@ -887,13 +945,15 @@ class SQLiteStorylineRepository:
             self._shift_seqs(conn, src.storyline_id, src.seq + 1, 1)
             conn.execute(
                 "UPDATE storyline_chapters SET end_date = ?, state = 'closed',"
+                " boundary_locked = 1,"
                 " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?",
                 (_day_before(date), chapter_id),
             )
             cursor = conn.execute(
                 "INSERT INTO storyline_chapters"
-                " (storyline_id, seq, title, start_date, end_date, state)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
+                " (storyline_id, seq, title, start_date, end_date, state,"
+                "  boundary_locked)"
+                " VALUES (?, ?, ?, ?, ?, ?, 1)",
                 (src.storyline_id, src.seq + 1, "", date, src.end_date, right_state),
             )
             conn.commit()
@@ -904,3 +964,126 @@ class SQLiteStorylineRepository:
         right = self.get_chapter(cursor.lastrowid)
         assert left is not None and right is not None
         return left, right
+
+    def rebuild_chapters(
+        self, storyline_id: int, specs: list[ChapterSpec],
+    ) -> list[StorylineChapter]:
+        """Atomically replace a storyline's chapter set with ``specs``.
+
+        ``specs`` is the complete, date-ordered desired chapter list. Each
+        spec is either a *preserve* (an existing chapter id whose row +
+        panels survive) or a *new* (a fresh INSERT). Final ``seq`` values
+        are assigned 1..N in list order, so the caller must pass specs in
+        the order they should tile the timeline.
+
+        Atomicity + invariant handling — the whole rebuild runs in ONE
+        transaction and is ordered so SQLite's per-statement unique-index
+        checks are NEVER transiently violated:
+
+        1. **Force every existing row of this storyline to ``state =
+           'closed'``.** Zero open chapters is allowed by the partial
+           unique index ``idx_storyline_chapters_one_open``; this clears
+           the way to reshuffle without two rows momentarily both 'open'.
+        2. **Offset every existing seq by ``_REBUILD_SEQ_OFFSET``.** Moves
+           all current rows out of the 1..N target range so neither the
+           preserved-row UPDATEs nor the new-row INSERTs collide with a
+           stale ``UNIQUE(storyline_id, seq)`` value.
+        3. **DELETE the existing rows that are NOT preserved.** Their
+           panels cascade away (they are regenerated by the caller).
+        4. **Place each spec at its final seq** (1..N): preserved rows via
+           UPDATE (seq + window/title metadata left as-is except seq), new
+           rows via INSERT — all still ``state = 'closed'``.
+        5. **Promote exactly the final-in-order chapter to ``open``** as
+           the LAST statement, iff that spec's desired state is 'open'.
+           Doing this last guarantees the single-open index sees zero→one
+           open, never two.
+
+        Returns the resulting chapters in seq order so the service can
+        write panels for the new ones.
+        """
+        preserve_ids = {s.preserve_id for s in specs if s.preserve_id is not None}
+        existing = self.list_chapters(storyline_id)
+        existing_ids = {c.id for c in existing}
+        for pid in preserve_ids:
+            if pid not in existing_ids:
+                raise ValueError(
+                    f"rebuild_chapters: preserve id {pid} not in storyline "
+                    f"{storyline_id}"
+                )
+        # Defence-in-depth: never commit an inverted window. A spec with
+        # end_date < start_date would corrupt the chapter set silently
+        # (the index/seq invariants would still hold). Reject it loudly so
+        # a window-derivation bug surfaces as a failed job, not bad data.
+        for i, s in enumerate(specs):
+            if (
+                s.start_date is not None
+                and s.end_date is not None
+                and s.end_date < s.start_date
+            ):
+                raise ValueError(
+                    f"rebuild_chapters: spec {i} has end_date "
+                    f"{s.end_date!r} < start_date {s.start_date!r}"
+                )
+
+        conn = self._conn()
+        try:
+            # 1. Zero out open state (zero-open is allowed by the index).
+            conn.execute(
+                "UPDATE storyline_chapters SET state = 'closed'"
+                " WHERE storyline_id = ?",
+                (storyline_id,),
+            )
+            # 2. Offset existing seqs out of the target range.
+            conn.execute(
+                "UPDATE storyline_chapters SET seq = seq + ?"
+                " WHERE storyline_id = ?",
+                (_REBUILD_SEQ_OFFSET, storyline_id),
+            )
+            # 3. Delete the rows we are not preserving.
+            for c in existing:
+                if c.id not in preserve_ids:
+                    conn.execute(
+                        "DELETE FROM storyline_chapters WHERE id = ?", (c.id,),
+                    )
+            # 4. Place every spec at its final seq, all closed for now.
+            placed_ids: list[int] = []
+            for final_seq, spec in enumerate(specs, start=1):
+                if spec.preserve_id is not None:
+                    conn.execute(
+                        "UPDATE storyline_chapters SET seq = ?, state = 'closed',"
+                        " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+                        " WHERE id = ?",
+                        (final_seq, spec.preserve_id),
+                    )
+                    placed_ids.append(spec.preserve_id)
+                else:
+                    cursor = conn.execute(
+                        "INSERT INTO storyline_chapters"
+                        " (storyline_id, seq, title, start_date, end_date,"
+                        "  state, title_locked, boundary_locked,"
+                        "  narrative_word_count)"
+                        " VALUES (?, ?, ?, ?, ?, 'closed', ?, ?, ?)",
+                        (
+                            storyline_id, final_seq, spec.title.strip(),
+                            spec.start_date, spec.end_date,
+                            1 if spec.title_locked else 0,
+                            1 if spec.boundary_locked else 0,
+                            int(spec.narrative_word_count),
+                        ),
+                    )
+                    new_id = cursor.lastrowid
+                    assert new_id is not None
+                    placed_ids.append(new_id)
+            # 5. Promote exactly the final chapter to open, last of all.
+            if specs and specs[-1].state == "open":
+                conn.execute(
+                    "UPDATE storyline_chapters SET state = 'open',"
+                    " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+                    " WHERE id = ?",
+                    (placed_ids[-1],),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return self.list_chapters(storyline_id)

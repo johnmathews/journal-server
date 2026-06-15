@@ -898,3 +898,117 @@ class TestChapterCRUD:
         storyline_repo: SQLiteStorylineRepository,
     ) -> None:
         assert storyline_repo.get_chapter(999_999) is None
+
+
+class TestChapterSectioning:
+    """W1: title/boundary locks + cached narrative word count."""
+
+    def _storyline(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+    ) -> int:
+        sl = storyline_repo.create_storyline(
+            user_id=seed_user, entity_ids=[seed_entity], name="X",
+        )
+        return sl.id
+
+    def test_new_fields_default_false_and_zero(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        sid = self._storyline(storyline_repo, seed_user, seed_entity)
+        # A plain create_chapter is NOT a hand-paint, so it does not lock
+        # the boundary — only the dedicated "add chapter" op does.
+        ch = storyline_repo.create_chapter(storyline_id=sid, seq=1)
+        assert ch.title_locked is False
+        assert ch.boundary_locked is False
+        assert ch.narrative_word_count == 0
+        refreshed = storyline_repo.get_chapter(ch.id)
+        assert refreshed is not None
+        assert refreshed.title_locked is False
+        assert refreshed.boundary_locked is False
+        assert refreshed.narrative_word_count == 0
+
+    def test_rename_chapter_sets_title_locked(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        sid = self._storyline(storyline_repo, seed_user, seed_entity)
+        ch = storyline_repo.create_chapter(storyline_id=sid, seq=1, title="Old")
+        assert ch.title_locked is False
+        updated = storyline_repo.rename_chapter(ch.id, "New Title")
+        assert updated is not None
+        assert updated.title == "New Title"
+        assert updated.title_locked is True
+
+    def test_add_chapter_sets_boundary_locked(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        sid = self._storyline(storyline_repo, seed_user, seed_entity)
+        # Seed an open chapter, then hand-paint a later one via add_chapter.
+        storyline_repo.create_chapter(
+            storyline_id=sid, seq=1, start_date="2026-01-01", state="open",
+        )
+        added = storyline_repo.add_chapter(sid, start_date="2026-02-01")
+        assert added.boundary_locked is True
+
+    def test_split_chapter_locks_both_boundaries(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        sid = self._storyline(storyline_repo, seed_user, seed_entity)
+        ch = storyline_repo.create_chapter(
+            storyline_id=sid,
+            seq=1,
+            start_date="2026-01-01",
+            end_date="2026-03-01",
+            state="closed",
+        )
+        left, right = storyline_repo.split_chapter(ch.id, "2026-02-01")
+        assert left.boundary_locked is True
+        assert right.boundary_locked is True
+
+    def test_update_chapter_window_locks_boundary(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        sid = self._storyline(storyline_repo, seed_user, seed_entity)
+        ch = storyline_repo.create_chapter(
+            storyline_id=sid,
+            seq=1,
+            start_date="2026-01-01",
+            end_date="2026-03-01",
+            state="closed",
+        )
+        changed = storyline_repo.update_chapter_window(
+            ch.id, start_date="2026-01-05", end_date="2026-03-01",
+        )
+        edited = next(c for c in changed if c.id == ch.id)
+        assert edited.boundary_locked is True
+
+    def test_set_chapter_word_count_persists(
+        self,
+        storyline_repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        sid = self._storyline(storyline_repo, seed_user, seed_entity)
+        ch = storyline_repo.create_chapter(storyline_id=sid, seq=1)
+        assert ch.narrative_word_count == 0
+        storyline_repo.set_chapter_word_count(ch.id, 212)
+        refreshed = storyline_repo.get_chapter(ch.id)
+        assert refreshed is not None
+        assert refreshed.narrative_word_count == 212

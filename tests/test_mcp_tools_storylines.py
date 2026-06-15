@@ -193,6 +193,92 @@ class TestRegenerateStoryline:
         assert "not found" in out.lower()
         job_runner.submit_storyline_generation.assert_not_called()
 
+    def test_resegment_forwards_flags_to_runner(
+        self, patched_user_id: int,
+    ) -> None:
+        """W4: resegment + override_locked are forwarded into the
+        submit kwargs."""
+        from journal.mcp_server import journal_regenerate_storyline
+
+        storyline_repo = _storyline_repo_mock()
+        storyline_repo.get_storyline.return_value = _make_storyline()
+        job_runner = MagicMock()
+        job_runner.submit_storyline_generation.return_value = _make_job(
+            status="pending", job_id="job-rs",
+        )
+        job_repository = MagicMock()
+        job_repository.get.return_value = _make_job(
+            status="succeeded", job_id="job-rs", result={"entry_count": 1},
+        )
+        ctx = _make_ctx(
+            storyline_repository=storyline_repo,
+            job_runner=job_runner,
+            job_repository=job_repository,
+        )
+
+        out = journal_regenerate_storyline(
+            storyline_id=3, resegment=True, override_locked=True, ctx=ctx,
+        )
+
+        assert "Regeneration succeeded" in out
+        job_runner.submit_storyline_generation.assert_called_once_with(
+            3, user_id=patched_user_id, resegment=True, override_locked=True,
+        )
+
+    def test_resegment_default_flags_not_forwarded(
+        self, patched_user_id: int,
+    ) -> None:
+        """When resegment is left default-False the flags are omitted so
+        the runner sees exactly the legacy refresh call."""
+        from journal.mcp_server import journal_regenerate_storyline
+
+        storyline_repo = _storyline_repo_mock()
+        storyline_repo.get_storyline.return_value = _make_storyline()
+        job_runner = MagicMock()
+        job_runner.submit_storyline_generation.return_value = _make_job(
+            status="pending", job_id="job-plain",
+        )
+        job_repository = MagicMock()
+        job_repository.get.return_value = _make_job(
+            status="succeeded", job_id="job-plain", result={"entry_count": 1},
+        )
+        ctx = _make_ctx(
+            storyline_repository=storyline_repo,
+            job_runner=job_runner,
+            job_repository=job_repository,
+        )
+
+        journal_regenerate_storyline(storyline_id=3, ctx=ctx)
+
+        job_runner.submit_storyline_generation.assert_called_once_with(
+            3, user_id=patched_user_id,
+        )
+
+    def test_chapter_id_with_resegment_is_rejected(
+        self, patched_user_id: int,  # noqa: ARG002
+    ) -> None:
+        """chapter_id and resegment are mutually exclusive — friendly
+        error, no submit."""
+        from journal.mcp_server import journal_regenerate_storyline
+
+        storyline_repo = _storyline_repo_mock()
+        storyline_repo.get_storyline.return_value = _make_storyline(
+            storyline_id=3,
+        )
+        job_runner = MagicMock()
+        ctx = _make_ctx(
+            storyline_repository=storyline_repo,
+            job_runner=job_runner,
+            job_repository=MagicMock(),
+        )
+
+        out = journal_regenerate_storyline(
+            storyline_id=3, chapter_id=88, resegment=True, ctx=ctx,
+        )
+
+        assert "resegment" in out.lower()
+        job_runner.submit_storyline_generation.assert_not_called()
+
     def test_failed_job_returns_error_message(
         self, patched_user_id: int,  # noqa: ARG002
     ) -> None:

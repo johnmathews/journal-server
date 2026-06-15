@@ -319,6 +319,21 @@ def register_storylines_write_routes(
                     status_code=400,
                 )
             submit_kwargs[key] = value
+        # Optional two-mode regenerate (W4): ``resegment`` re-carves the
+        # storyline into titled word-sized chapters; ``override_locked``
+        # (only meaningful with resegment) lets it cross hand-painted
+        # boundaries. Both default False — an empty body is the legacy
+        # open-chapter refresh.
+        for key in ("resegment", "override_locked"):
+            if key not in body:
+                continue
+            value = body[key]
+            if not isinstance(value, bool):
+                return JSONResponse(
+                    {"error": f"{key} must be a boolean"},
+                    status_code=400,
+                )
+            submit_kwargs[key] = value
 
         try:
             job = job_runner.submit_storyline_generation(sid, **submit_kwargs)

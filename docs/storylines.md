@@ -82,6 +82,13 @@ sub-ranges. `storyline_chapters` columns:
 * `last_generated_at` — per-chapter observability timestamp.
 * `summary_embedding_json` — per-chapter narrative embedding (moved down from
   the storyline row in 0030).
+* `title_locked` — `1` once the user manually renames the chapter. Re-segment
+  (below) never overwrites a locked title. Added in **migration 0031**.
+* `boundary_locked` — `1` once the user hand-paints the window (creates, splits,
+  or date-edits the chapter). Re-segment never carves into a hand-painted
+  chapter; it only re-sections the unlocked spans around it. Added in **0031**.
+* `narrative_word_count` — cached word count of the chapter's narrative prose,
+  used to size chapters and to fire the ingest-time auto-split. Added in **0031**.
 
 **Migration 0030** (`0030_storyline_chapters.sql`) creates the table and
 re-keys `storyline_panels` from `storyline_id` to `chapter_id`. For each
@@ -115,6 +122,35 @@ These invariants are enforced by every structural edit:
 
 Re-sequencing during split and delete runs inside a single transaction using a temporary negative-offset pass to avoid UNIQUE constraint collisions.
 
+### Sectioned (word-sized) chapters
+
+Chapters can be **automatically carved** into titled, ~200-word units instead of
+being painted by hand. This is **re-segmentation** and it is opt-in / triggered,
+never the default refresh:
+
+- The narrator's `generate_sectioned_narrative` produces an ordered list of
+  titled `## `-delimited sections — each a coherent topic, aiming for ~200 words
+  (soft band 180–240; semantic coherence wins over hitting the count).
+- Each section's date window is **derived** from the min/max `entry_date` of its
+  citations, then clamped so the resulting chapters tile the span contiguously.
+  Sections are chronological, so they map cleanly onto the existing
+  open/closed/contiguous-window model.
+- `resegment_storyline(storyline_id, override_locked=False)` runs one narrator
+  call **per unlocked span** (the maximal runs of non-`boundary_locked`
+  chapters), then rebuilds the chapter rows atomically. `boundary_locked`
+  chapters are preserved untouched (id, window, title, panels); a new section
+  inherits a `title_locked` title when its window overlaps a locked chapter by a
+  majority of days. `override_locked=True` ignores the locks and re-carves the
+  whole timeline.
+- The atomic rebuild (`SQLiteStorylineRepository.rebuild_chapters`) avoids
+  transient invariant violations: close all rows, offset their `seq` out of the
+  target range, delete the non-preserved rows, place every spec at its final
+  `seq` (all closed), then promote exactly the final chapter to `open` as the
+  last statement — so the single-open partial index only ever sees zero→one open.
+
+Word count is a **soft** target: out-of-band sections are logged but never
+rejected, and there is no word-count badge in the UI.
+
 ## Generation pipeline
 
 Generation is **per chapter**. `regenerate_chapter(chapter_id, mode="replace")`
@@ -128,7 +164,14 @@ storyline-level anchors, writes both panels keyed on `chapter_id`, and stamps
 storyline's single **open** chapter (raising if there is none) and delegates to
 `regenerate_chapter`. The open chapter still supports `mode="append"` for
 incremental growth as new entries arrive; closed chapters are `replace`-only.
-The steps below describe a single chapter's generation:
+This is the **refresh** path — it rebuilds existing chapters' panels over their
+current windows and changes no boundaries, titles, or chapter count.
+`resegment_storyline` (see *Sectioned chapters* above) is the separate,
+opt-in **re-carve** path. `regenerate(..., auto_split=True)` — set only by the
+ingest hook — re-checks the open chapter's `narrative_word_count` after a
+refresh and triggers a one-shot `resegment_storyline` when it exceeds
+`STORYLINE_CHAPTER_MAX_WORDS` (resegment never calls back into regenerate, so
+there is no loop). The steps below describe a single chapter's generation:
 
 1. Resolve the chapter and its parent storyline; resolve the (start_date, end_date) window (the chapter's own bounds, or the default 90-day window when null).
 2. Resolve the anchor set via `SQLiteStorylineRepository.list_anchors(storyline_id)` (sorted by `entity_id` ASC for determinism). Fetch dated entity excerpts per anchor via `SQLiteEntityStore.get_dated_entity_excerpts`. Union across anchors, deduplicate on `entry_id` (an entry that mentions multiple anchors contributes one excerpt, not N), sort by `entry_date` ASC.
@@ -159,7 +202,7 @@ The classifier records `last_extension_check_at` on every storyline it inspects,
 The `run_storyline_extension_check` worker:
 
 * Calls the classifier
-* For each `yes` decision, queues a `storyline_generation` job via `JobRunner.submit_storyline_generation`
+* For each `yes` decision, queues a `storyline_generation` job via `JobRunner.submit_storyline_generation` **with `auto_split=True`**, so a growing open chapter that crosses `STORYLINE_CHAPTER_MAX_WORDS` is automatically re-segmented (hand-painted chapters stay put — the ingest path never sets `override_locked`)
 * Records the classifications (including reasoning) on the job's result blob
 * Notifies only on failure (per-ingestion success notifications would be noisy)
 
@@ -176,7 +219,7 @@ Write-side (`api/storylines_write.py`):
 * `POST /api/storylines` — body `{entity_ids: list[int], name, description?, start_date?, end_date?}`. `entity_ids` must have 1..15 entries (server cap = `MAX_ANCHORS`); duplicates are coalesced. 201 on success with `{..., anchors: [{id, canonical_name}, ...], generation_job_id}`, 409 if a storyline with the same name and the exact same anchor set already exists for this user, 400/422 on bad input. The server also auto-kicks generation and surfaces the `generation_job_id` so the client can poll without a second round-trip. **It also seeds a seq-1 open chapter** (title = the storyline name) so the auto-kicked job has a chapter to write panels into.
 * `PATCH /api/storylines/{id}` — body `{name: str}`. Updates editable metadata (currently only the title). The name is trimmed; empty after trimming → 400. 200 with the updated storyline summary (`{id, name, anchors, ...}`); 404 if the storyline doesn't belong to the caller. Metadata-only: a rename does **not** touch the stored panels or kick a regeneration, so the curated/narrative text survives.
 * `PUT /api/storylines/{id}/anchors` — body `{entity_ids: list[int]}`. Set-replacement of the storyline's anchors (1..15). 200 with the updated `anchors` list; 404 if the storyline doesn't belong to the caller; 422 on empty/oversized input.
-* `POST /api/storylines/{id}/regenerate` — body is optional `{start_date?, end_date?, mode?}` where `mode ∈ {"replace", "append"}` (default `"replace"`). Redefined for chapters: this regenerates the storyline's **open** chapter (the service resolves it). Append requires `start_date >= last_generated_at`; 400 on violation. Queues a `storyline_generation` job; 202 with `{"job_id"}`. Back-compat for the current detail view's Regenerate button.
+* `POST /api/storylines/{id}/regenerate` — body is optional `{start_date?, end_date?, mode?, resegment?, override_locked?}`. By default (no `resegment`) `mode ∈ {"replace", "append"}` (default `"replace"`) regenerates the storyline's **open** chapter (the service resolves it); append requires `start_date >= last_generated_at` (400 on violation). With **`resegment: true`** the storyline is re-carved into titled word-sized chapters (`resegment` is incompatible with `mode="append"`); **`override_locked: true`** (only with `resegment`) additionally re-carves across hand-painted chapters. Non-boolean `resegment`/`override_locked` → 400. Queues a `storyline_generation` job; 202 with `{"job_id"}`.
 * `POST /api/storylines/{id}/chapters/{cid}/regenerate` — regenerate a **single** chapter. Always `mode="replace"` (the chapter's own window is authoritative). Queues a `storyline_generation` job with the `chapter_id`; 202 with `{"job_id"}`. 404 if the chapter doesn't belong to the storyline.
 * `PATCH /api/storylines/{id}/chapters/{cid}` — two modes depending on the body:
   * **Rename-only** (back-compat): body `{title: str}`. Metadata-only — no panel change, no regeneration. 200 with the flat chapter dict. 400 on empty/malformed title.
@@ -203,7 +246,7 @@ In `mcp_server/tools/storylines.py`:
 * `journal_get_storyline` — detail view with both panels printed inline (`readOnlyHint`). Also lists the storyline's chapters (id, seq, title, date range, state) so a client can pick a `chapter_id` to regenerate.
 * `journal_create_storyline` — seed a storyline; takes `entity_ids: list[int]` (1..15). Refuses with a 409-equivalent message if a storyline with the same name and the exact same anchor set already exists. Auto-kicks generation and polls until the job reaches a terminal state (default 120s), falling back to a "still running, job id …" message on timeout.
 * `journal_set_storyline_anchors` — set-replacement of an existing storyline's anchors. Takes `entity_ids: list[int]` (1..15). Sibling of the REST `PUT /api/storylines/{id}/anchors`.
-* `journal_regenerate_storyline` — queues a regeneration job (`idempotentHint`). Accepts optional `start_date`, `end_date`, and `mode` (`replace` / `append`). Also accepts an optional **`chapter_id`** to regenerate one specific chapter (the chapter's own window is authoritative, replace mode); without it, the storyline's open chapter is regenerated. Polls until terminal (default 120s).
+* `journal_regenerate_storyline` — queues a regeneration job (`idempotentHint`). Accepts optional `start_date`, `end_date`, and `mode` (`replace` / `append`). Also accepts an optional **`chapter_id`** to regenerate one specific chapter (the chapter's own window is authoritative, replace mode); without it, the storyline's open chapter is regenerated. Pass **`resegment=True`** to re-carve the storyline into titled ~200-word chapters (mutually exclusive with `chapter_id`), and **`override_locked=True`** (only with `resegment`) to also re-carve across hand-painted chapters. Polls until terminal (default 120s).
 * `journal_delete_storyline` — removes the storyline (`destructiveHint`). Cascades to panels and anchors.
 
 **Chapter editing tools** (Phase A — mirrors the five new REST endpoints):
@@ -229,6 +272,9 @@ All env vars are optional; defaults make the feature work out of the box once `A
 | `STORYLINE_EXTENSION_DECIDER_MODEL`      | `claude-haiku-4-5`    | Model for the extension classifier's decider stage   |
 | `STORYLINE_DEFAULT_WINDOW_DAYS`          | `90`                  | Default window when storyline has no explicit bounds |
 | `STORYLINE_FTS_FALLBACK_THRESHOLD`       | `3`                   | Below this many entity mentions, FTS fallback fires  |
+| `STORYLINE_CHAPTER_TARGET_WORDS`         | `210`                 | Target narrative words per sectioned chapter         |
+| `STORYLINE_CHAPTER_MIN_WORDS`            | `180`                 | Soft lower bound; out-of-band sections are logged    |
+| `STORYLINE_CHAPTER_MAX_WORDS`            | `240`                 | Soft upper bound; also the ingest auto-split trigger |
 
 ## Providers
 

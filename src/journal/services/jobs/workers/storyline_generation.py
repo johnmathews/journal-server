@@ -28,8 +28,14 @@ def run_storyline_generation(
 
     When `chapter_id` is present the worker regenerates that specific
     chapter (its own date window is authoritative, so only `mode` is
-    forwarded); otherwise it regenerates the storyline's open chapter
-    via the back-compat `regenerate(storyline_id)` entry point.
+    forwarded); otherwise, at the storyline level, a truthy `resegment`
+    re-carves the storyline into titled word-sized chapters via
+    `resegment_storyline(..., override_locked=...)`, while the default
+    refreshes the open chapter via the back-compat
+    `regenerate(storyline_id)` entry point. On that default path a truthy
+    `auto_split` is forwarded as `regenerate(..., auto_split=True)` so an
+    over-budget open chapter is re-segmented automatically (ingest path
+    only); it is ignored on the chapter and resegment branches.
     """
     user_id = params.get("user_id")
     parent_job_id = params.get("parent_job_id")
@@ -62,6 +68,16 @@ def run_storyline_generation(
             result = ctx.storyline_generation.regenerate_chapter(
                 int(chapter_id), **chapter_kwargs,
             )
+        elif params.get("resegment"):
+            # Storyline-level re-segmentation: re-carve the whole
+            # storyline into titled word-sized chapters. ``start_date``/
+            # ``end_date``/``mode`` are not meaningful here (the service
+            # derives boundaries itself), so only ``override_locked`` is
+            # forwarded.
+            result = ctx.storyline_generation.resegment_storyline(
+                int(storyline_id),
+                override_locked=bool(params.get("override_locked")),
+            )
         else:
             regenerate_kwargs: dict[str, Any] = {}
             if "start_date" in params:
@@ -70,6 +86,8 @@ def run_storyline_generation(
                 regenerate_kwargs["end_date"] = params["end_date"]
             if "mode" in params:
                 regenerate_kwargs["mode"] = params["mode"]
+            if params.get("auto_split"):
+                regenerate_kwargs["auto_split"] = True
             result = ctx.storyline_generation.regenerate(
                 int(storyline_id), **regenerate_kwargs,
             )
@@ -85,6 +103,8 @@ def run_storyline_generation(
             "narrative_model": result.narrative_model,
             "curation_model": result.curation_model,
         }
+        if getattr(result, "chapter_count", 0):
+            summary["chapter_count"] = result.chapter_count
         if result.warnings:
             summary["warnings"] = result.warnings
         ctx.jobs.mark_succeeded(job_id, summary)

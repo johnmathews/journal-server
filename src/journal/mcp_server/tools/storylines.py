@@ -457,6 +457,28 @@ def journal_regenerate_storyline(
             ),
         ),
     ] = None,
+    resegment: Annotated[
+        bool,
+        Field(
+            description=(
+                "Re-carve the storyline into titled ~200-word chapters "
+                "(re-segmentation) instead of refreshing the open "
+                "chapter's panels over its current window. Storyline-level "
+                "only — mutually exclusive with chapter_id. Default False."
+            ),
+        ),
+    ] = False,
+    override_locked: Annotated[
+        bool,
+        Field(
+            description=(
+                "Only with resegment=True: also re-carve across your "
+                "hand-painted (locked) chapter boundaries, treating the "
+                "whole timeline as one span. Ignored when resegment is "
+                "False. Default False."
+            ),
+        ),
+    ] = False,
     ctx: Context = None,  # type: ignore[assignment]
 ) -> str:
     """Regenerate both AI panels (narrative prose + curation timeline) for a storyline.
@@ -467,15 +489,26 @@ def journal_regenerate_storyline(
     the job times out, use ``journal_get_job_status`` with the returned
     job_id to check progress later. Regeneration is idempotent; call it
     whenever you want the panels refreshed with the latest journal
-    entries. Pass ``chapter_id`` to regenerate one specific chapter.
+    entries. Pass ``chapter_id`` to regenerate one specific chapter, or
+    ``resegment=True`` to re-carve the whole storyline into titled
+    word-sized chapters (optionally with ``override_locked=True`` to
+    cross hand-painted chapter boundaries).
     """
     log.info(
-        "Tool call: journal_regenerate_storyline(id=%d, chapter_id=%s)",
-        storyline_id, chapter_id,
+        "Tool call: journal_regenerate_storyline(id=%d, chapter_id=%s, "
+        "resegment=%s, override_locked=%s)",
+        storyline_id, chapter_id, resegment, override_locked,
     )
     repo = _get_storyline_repository(ctx)
     if repo is None:
         return "Storylines feature is not configured on this server."
+    if chapter_id is not None and resegment:
+        return (
+            "chapter_id and resegment are mutually exclusive: a "
+            "chapter-scoped regeneration cannot re-segment the storyline. "
+            "Omit chapter_id to re-segment, or omit resegment to "
+            "regenerate a single chapter."
+        )
     runner = _get_job_runner(ctx)
     user_id = _user_id(ctx)
     storyline = repo.get_storyline(storyline_id, user_id=user_id)
@@ -491,6 +524,9 @@ def journal_regenerate_storyline(
             )
         submit_kwargs["chapter_id"] = chapter_id
         submit_kwargs["mode"] = "replace"
+    if resegment:
+        submit_kwargs["resegment"] = True
+        submit_kwargs["override_locked"] = override_locked
     try:
         job = runner.submit_storyline_generation(
             storyline_id, **submit_kwargs,

@@ -393,6 +393,9 @@ class JobRunner:
         start_date: str | None = None,
         end_date: str | None = None,
         mode: str | None = None,
+        resegment: bool = False,
+        override_locked: bool = False,
+        auto_split: bool = False,
     ) -> Job:
         """Queue a storyline regeneration job.
 
@@ -412,6 +415,23 @@ class JobRunner:
         calls ``regenerate_chapter`` (replace-only) and the chapter's
         own window is authoritative, so ``start_date``/``end_date`` are
         ignored for chapter-scoped runs.
+
+        ``resegment`` (storyline-level only) re-carves the storyline
+        into titled, word-sized chapters via ``resegment_storyline``
+        instead of refreshing the open chapter. ``override_locked`` is
+        only meaningful with ``resegment=True``; it lets the re-carve
+        cross hand-painted (boundary-locked) chapter boundaries. Both
+        default False, preserving the legacy refresh behavior.
+        ``resegment`` is incompatible with ``chapter_id`` (a
+        chapter-scoped run can't re-segment) and with ``mode="append"``.
+
+        ``auto_split`` (storyline-level default path only) is the
+        ingest-time auto-split flag (W5): when True the worker forwards it
+        into ``regenerate`` so an over-budget open chapter is
+        automatically re-segmented after the refresh. The ingest
+        extension-check hook sets this; manual refreshes leave it False so
+        re-segmentation stays opt-in. It is ignored when combined with
+        ``chapter_id`` or ``resegment`` (those paths don't read it).
         """
         if self._ctx.storyline_generation is None:
             raise RuntimeError(
@@ -422,6 +442,16 @@ class JobRunner:
             raise ValueError(
                 f"Invalid mode {mode!r}; expected one of "
                 f"{sorted(STORYLINE_GENERATION_MODES)}"
+            )
+        if resegment and chapter_id is not None:
+            raise ValueError(
+                "resegment is incompatible with chapter_id: a "
+                "chapter-scoped run cannot re-segment the storyline."
+            )
+        if resegment and mode == "append":
+            raise ValueError(
+                "resegment is incompatible with mode='append': "
+                "re-segmentation always rebuilds the chapter set."
             )
         params: dict[str, Any] = {"storyline_id": storyline_id}
         if user_id is not None:
@@ -436,6 +466,12 @@ class JobRunner:
             params["end_date"] = end_date
         if mode is not None:
             params["mode"] = mode
+        if resegment:
+            params["resegment"] = True
+        if override_locked:
+            params["override_locked"] = True
+        if auto_split:
+            params["auto_split"] = True
         validate_params(
             params, STORYLINE_GENERATION_KEYS, job_type="storyline_generation",
         )
