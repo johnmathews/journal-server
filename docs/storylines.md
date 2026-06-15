@@ -1,8 +1,8 @@
 # Storylines
 
-**Status:** active reference. Last updated 2026-06-13 (Phase 1 of storyline
-chapters shipped server-side: chapters data model, per-chapter generation, and
-the chapter-aware API/MCP surface).
+**Status:** active reference. Last updated 2026-06-15 (Phase A of chapter
+editing shipped: add, split, merge, update window, delete; 5 new REST endpoints
++ 5 MCP tools).
 
 A storyline is a synthesized cross-entry narrative anchored on one or
 more entities. Multi-entity anchors are an equal-weight set: an entry
@@ -97,10 +97,23 @@ atomic transaction, so a partial failure rolls back just the rebuild and a
 re-run completes cleanly.
 
 New chapters are seeded on `POST /api/storylines` (a seq-1 open chapter is
-created so the auto-kicked generation job has a chapter to write into). Phase 1
-ships **reading + per-chapter generation**; cutting a storyline into multiple
-chapters (the "suggest a cut" boundary engine + draggable timeline editor) is
-Phase 2 — see the [spec](./superpowers/specs/2026-06-13-storyline-chapters-design.md).
+created so the auto-kicked generation job has a chapter to write into). Phase A
+(manual editing) ships with the chapter-editing feature; the LLM suggestion
+engine + draggable timeline editor (Phase B) is deferred — see the
+[chapter-editing design spec](./superpowers/specs/2026-06-15-storyline-chapter-editing-design.md).
+
+### Chapter editing invariants
+
+These invariants are enforced by every structural edit:
+
+- `seq` is 1-based and contiguous within a storyline; `seq` order equals date order.
+- Exactly one chapter has `state = 'open'` (enforced by a partial unique index); it is the highest-`seq` chapter and has `end_date IS NULL`.
+- Closed chapters have both `start_date` and `end_date` set.
+- Dates are inclusive `YYYY-MM-DD` days. Adjacent closed chapters are contiguous when `chapter[n].end_date == chapter[n+1].start_date - 1 day`.
+- By default the chapter set is gapless and non-overlapping. `allow_gap = true` on an edit/delete permits a gap; overlaps are rejected unconditionally.
+- Every structural edit automatically enqueues per-chapter regeneration jobs for each affected chapter.
+
+Re-sequencing during split and delete runs inside a single transaction using a temporary negative-offset pass to avoid UNIQUE constraint collisions.
 
 ## Generation pipeline
 
@@ -165,7 +178,18 @@ Write-side (`api/storylines_write.py`):
 * `PUT /api/storylines/{id}/anchors` — body `{entity_ids: list[int]}`. Set-replacement of the storyline's anchors (1..15). 200 with the updated `anchors` list; 404 if the storyline doesn't belong to the caller; 422 on empty/oversized input.
 * `POST /api/storylines/{id}/regenerate` — body is optional `{start_date?, end_date?, mode?}` where `mode ∈ {"replace", "append"}` (default `"replace"`). Redefined for chapters: this regenerates the storyline's **open** chapter (the service resolves it). Append requires `start_date >= last_generated_at`; 400 on violation. Queues a `storyline_generation` job; 202 with `{"job_id"}`. Back-compat for the current detail view's Regenerate button.
 * `POST /api/storylines/{id}/chapters/{cid}/regenerate` — regenerate a **single** chapter. Always `mode="replace"` (the chapter's own window is authoritative). Queues a `storyline_generation` job with the `chapter_id`; 202 with `{"job_id"}`. 404 if the chapter doesn't belong to the storyline.
-* `PATCH /api/storylines/{id}/chapters/{cid}` — body `{title: str}`. Renames a chapter (metadata-only — does **not** touch panels or kick a regeneration). 200 with the chapter dict; 400 on empty/malformed title; 404 if the chapter isn't found for this storyline/user.
+* `PATCH /api/storylines/{id}/chapters/{cid}` — two modes depending on the body:
+  * **Rename-only** (back-compat): body `{title: str}`. Metadata-only — no panel change, no regeneration. 200 with the flat chapter dict. 400 on empty/malformed title.
+  * **Date-edit** (new): body `{start_date?: ISO, end_date?: ISO, allow_gap?: bool}` (with optional `title`). Ripples the shared edge of the adjacent neighbor to stay contiguous unless `allow_gap=true`. Returns 200 with `{"chapters": [<affected...>], "job_ids": [...]}`. Overlaps always rejected; open chapter's `end_date` cannot be set. 400 on invalid values.
+  * Both `title` and date fields may be combined; rename executes first, window update follows.
+  * 404 if the chapter isn't found for this storyline/user. 503 if storylines aren't wired.
+* `POST /api/storylines/{id}/chapters` — add a chapter. Body `{start_date: ISO, end_date?: ISO}`.
+  * **New-latest flavor** (omit `end_date`): closes the current open chapter at `start_date - 1` and opens a new chapter `[start_date, NULL)` as the new highest `seq`. Both the closed former-open chapter and the new chapter regenerate.
+  * **Ranged flavor** (`end_date` present): inserts a closed chapter into a currently-uncovered date range. The range must not overlap an existing chapter. The new chapter regenerates.
+  * Returns 201 with `{"chapter": <chapter dict>, "job_ids": [...]}`. 400 on missing/invalid body or if the repo rejects the window (overlap, etc.). 404 if the storyline isn't found for this user. 503 if storylines aren't wired.
+* `POST /api/storylines/{id}/chapters/{cid}/split` — body `{date: ISO}`. Splits the chapter into two contiguous halves: left `[start, date-1]` closed, right `[date, end]` (open if source was open). Later chapters shift `seq` up by one. Both halves enqueued for regeneration. Returns 200 with `{"chapters": [left, right], "job_ids": [...]}`. 400 if `date` is outside the chapter window or body is missing. 404 if storyline or chapter not found. 503 if not wired.
+* `POST /api/storylines/{id}/chapters/merge` — body `{chapter_ids: list[int]}` (at least 2 IDs). The IDs must be adjacent (contiguous `seq` run) and all belong to this storyline. Produces one chapter spanning the union of their windows, keeping the lowest `seq` and earliest title. Result is `open` if any input was open. Tail chapters shift `seq` down. Returns 200 with `{"chapter": <merged chapter dict>, "job_ids": [...]}`. 400 if `chapter_ids` invalid or non-contiguous. 404 if storyline or any chapter not owned by caller. 503 if not wired.
+* `DELETE /api/storylines/{id}/chapters/{cid}` — optional body `{allow_gap?: bool}`. By default absorbs the deleted range into the previous neighbor (extends its `end_date`; promotes it to `open` if the deleted chapter was `open`). With `allow_gap=true` the range is left empty. Rejects deleting the only chapter. Returns 200 with `{"deleted": true, "job_ids": [...]}`. 400 if attempting to delete the last chapter. 404 if storyline or chapter not found. 503 if not wired.
 * `DELETE /api/storylines/{id}` — removes the storyline (CASCADE drops its chapters, panels, and anchors).
 
 All routes return 503 when the storylines feature is not configured on this server (missing `ANTHROPIC_API_KEY`).
@@ -181,6 +205,14 @@ In `mcp_server/tools/storylines.py`:
 * `journal_set_storyline_anchors` — set-replacement of an existing storyline's anchors. Takes `entity_ids: list[int]` (1..15). Sibling of the REST `PUT /api/storylines/{id}/anchors`.
 * `journal_regenerate_storyline` — queues a regeneration job (`idempotentHint`). Accepts optional `start_date`, `end_date`, and `mode` (`replace` / `append`). Also accepts an optional **`chapter_id`** to regenerate one specific chapter (the chapter's own window is authoritative, replace mode); without it, the storyline's open chapter is regenerated. Polls until terminal (default 120s).
 * `journal_delete_storyline` — removes the storyline (`destructiveHint`). Cascades to panels and anchors.
+
+**Chapter editing tools** (Phase A — mirrors the five new REST endpoints):
+
+* `journal_add_storyline_chapter(storyline_id, start_date, end_date=None)` — adds a chapter. Omit `end_date` for a new-latest open chapter; supply it for a closed ranged chapter. Auto-queues regeneration for the new chapter.
+* `journal_split_storyline_chapter(storyline_id, chapter_id, date)` — splits the chapter at `date`. Left half ends the day before `date`; right half starts on `date`. If the source was open, the right half stays open. Regeneration queued for both halves.
+* `journal_merge_storyline_chapters(storyline_id, chapter_ids)` — merges adjacent chapters into one (contiguous `seq` run, at least 2 IDs). Result is open if any input was open. Regeneration queued for the merged chapter.
+* `journal_update_storyline_chapter(storyline_id, chapter_id, title=None, start_date=None, end_date=None, allow_gap=False)` — rename-only if only `title` is supplied (no regeneration); window update (with optional rename) if any date arg is supplied. Ripples the adjacent neighbor unless `allow_gap=True`. Regeneration queued when the window changes.
+* `journal_delete_storyline_chapter(storyline_id, chapter_id, allow_gap=False)` — removes a chapter (`destructiveHint`). By default the previous neighbor absorbs the deleted range. With `allow_gap=True` the range is left empty. Regeneration queued for affected neighbors.
 
 Each tool returns an actionable string when the storylines feature isn't configured. MCP clients (Nanoclaw, Claude Code, etc.) can use these tools to seed and read storylines without a webapp.
 
@@ -209,14 +241,16 @@ All env vars are optional; defaults make the feature work out of the box once `A
 * `tests/test_migration_0030_chapters.py` — the 0030 rebuild on prod-shaped state: fresh DB, backfill of one open chapter per storyline, panel re-key onto `chapter_id`, forward-only re-run no-op, and prod data anomalies (NULL dates, 0/1 panels, archived storylines).
 * `tests/test_storyline_jobs.py` — worker + classifier + decider + JobRunner integration, including append-mode param plumbing.
 * `tests/test_api_storylines.py` + `tests/test_api_storylines_write.py` — REST endpoints with TestClient: multi-anchor create, `anchors` in responses, `chapters[]` + back-compat `panels` shim on detail, single-chapter `GET`/regenerate/rename routes, `PUT /anchors` success / 404 / empty-rejection, regenerate body variants, `mode=append` validation.
-* `tests/test_mcp_tools_storylines.py` — `TestStorylinesGuide`, `TestDeleteStoryline`, `TestSetStorylineAnchors`, `TestCreateStoryline` (timeout fallback, not-configured, soft-fail), plus chapter listing in `journal_get_storyline` and the `chapter_id` param on `journal_regenerate_storyline` (including the cross-storyline chapter 404 path).
+* `tests/test_mcp_tools_storylines.py` — `TestStorylinesGuide`, `TestDeleteStoryline`, `TestSetStorylineAnchors`, `TestCreateStoryline` (timeout fallback, not-configured, soft-fail), plus chapter listing in `journal_get_storyline` and the `chapter_id` param on `journal_regenerate_storyline` (including the cross-storyline chapter 404 path). Phase A tools covered by `TestAddChapter`, `TestSplitChapter`, `TestMergeChapters`, `TestUpdateChapter`, `TestDeleteChapter`.
 * Migration: `TestStorylineEntitiesMigration` covers the 0028 rebuild — fresh DB, prod-shaped backfill, dirty-fixture re-run, cascade delete, PK duplicate rejection, user_version check.
 
 Real Anthropic API calls are never made in tests — providers accept an injected `client=` to receive a fake.
 
 ## Related docs
 
-* [`superpowers/specs/2026-06-13-storyline-chapters-design.md`](./superpowers/specs/2026-06-13-storyline-chapters-design.md) — chapters design + locked decisions + Phase 2 deferral (active)
+* [`superpowers/specs/2026-06-15-storyline-chapter-editing-design.md`](./superpowers/specs/2026-06-15-storyline-chapter-editing-design.md) — Phase A chapter-editing design: locked decisions, operation semantics, API surface (active)
+* [`superpowers/plans/2026-06-15-storyline-chapter-editing.md`](./superpowers/plans/2026-06-15-storyline-chapter-editing.md) — Phase A implementation plan
+* [`superpowers/specs/2026-06-13-storyline-chapters-design.md`](./superpowers/specs/2026-06-13-storyline-chapters-design.md) — Phase 1 chapters design + locked decisions + Phase B deferral (active)
 * [`superpowers/plans/2026-06-13-storyline-chapters-phase1.md`](./superpowers/plans/2026-06-13-storyline-chapters-phase1.md) — Phase 1 task-by-task implementation plan
 * [`archive/storylines-plan.md`](./archive/storylines-plan.md) — original design plan with decisions and tradeoffs (closed 2026-05-12)
 * [`archive/storylines-2026-05-mcp-and-append.md`](./archive/storylines-2026-05-mcp-and-append.md) — MCP discoverability + append-mode follow-up (closed 2026-05-12)
