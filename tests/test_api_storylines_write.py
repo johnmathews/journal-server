@@ -875,3 +875,309 @@ class TestSplitChapter:
             json={"date": "2027-01-01"},
         )
         assert resp.status_code == 400
+
+
+# ── POST /api/storylines/{id}/chapters/merge ───────────────────────
+
+
+class TestMergeChapters:
+    """Tests for POST /api/storylines/{storyline_id}/chapters/merge."""
+
+    def _seed(
+        self, ctx: dict[str, Any],
+    ) -> tuple[int, int, int]:
+        """Seed a storyline with two adjacent closed chapters.
+
+        Returns (storyline_id, chapter_id_1, chapter_id_2) where chapters
+        are seq=1 [2026-01-01..2026-03-31] and seq=2 [2026-04-01..2026-06-30].
+        """
+        repo: SQLiteStorylineRepository = ctx["repo"]
+        sl = repo.create_storyline(
+            user_id=_TEST_USER_ID,
+            entity_ids=[ctx["entity_id"]],
+            name="Merge Test",
+            start_date="2026-01-01",
+            end_date="2026-06-30",
+        )
+        ch1 = repo.create_chapter(
+            storyline_id=sl.id, seq=1, title="Q1",
+            start_date="2026-01-01", end_date="2026-03-31", state="closed",
+        )
+        ch2 = repo.create_chapter(
+            storyline_id=sl.id, seq=2, title="Q2",
+            start_date="2026-04-01", end_date="2026-06-30", state="closed",
+        )
+        return sl.id, ch1.id, ch2.id
+
+    def test_merge_two_chapters_returns_200_with_merged(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        """Merging two adjacent closed chapters returns 200, merged chapter dict, one job."""
+        client, ctx = app_with_storylines
+        sid, cid1, cid2 = self._seed(ctx)
+
+        resp = client.post(
+            f"/api/storylines/{sid}/chapters/merge",
+            json={"chapter_ids": [cid1, cid2]},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "chapter" in body
+        assert "job_ids" in body
+        chapter = body["chapter"]
+        # The merged chapter should span both original windows.
+        assert chapter["start_date"] == "2026-01-01"
+        assert chapter["end_date"] == "2026-06-30"
+        # The survivor is the lowest-id row.
+        assert chapter["id"] == cid1
+        assert isinstance(body["job_ids"], list)
+        assert len(body["job_ids"]) == 1
+
+    def test_merge_fewer_than_two_ids_returns_400(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        """chapter_ids with only one element → 400."""
+        client, ctx = app_with_storylines
+        sid, cid1, _cid2 = self._seed(ctx)
+
+        resp = client.post(
+            f"/api/storylines/{sid}/chapters/merge",
+            json={"chapter_ids": [cid1]},
+        )
+        assert resp.status_code == 400
+
+    def test_merge_non_list_ids_returns_400(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        """chapter_ids that is not a list → 400."""
+        client, ctx = app_with_storylines
+        sid, _cid1, _cid2 = self._seed(ctx)
+
+        resp = client.post(
+            f"/api/storylines/{sid}/chapters/merge",
+            json={"chapter_ids": "all"},
+        )
+        assert resp.status_code == 400
+
+    def test_merge_chapter_from_different_storyline_returns_404(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        """A chapter_id that belongs to a different storyline → 404."""
+        client, ctx = app_with_storylines
+        repo: SQLiteStorylineRepository = ctx["repo"]
+        sid, cid1, cid2 = self._seed(ctx)
+        # Create a second storyline with its own chapter.
+        sl2 = repo.create_storyline(
+            user_id=_TEST_USER_ID,
+            entity_ids=[ctx["entity_id"]],
+            name="Other Story",
+            start_date="2026-01-01",
+        )
+        other_ch = repo.create_chapter(
+            storyline_id=sl2.id, seq=1, title="Ch1",
+            start_date="2026-01-01", end_date=None, state="open",
+        )
+        # Try to merge cid1 with a chapter from the other storyline under sid.
+        resp = client.post(
+            f"/api/storylines/{sid}/chapters/merge",
+            json={"chapter_ids": [cid1, other_ch.id]},
+        )
+        assert resp.status_code == 404
+
+    def test_merge_unknown_storyline_returns_404(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        """Unknown storyline → 404."""
+        client, _ctx = app_with_storylines
+        resp = client.post(
+            "/api/storylines/99999/chapters/merge",
+            json={"chapter_ids": [1, 2]},
+        )
+        assert resp.status_code == 404
+
+
+# ── DELETE /api/storylines/{id}/chapters/{cid} ────────────────────
+
+
+class TestDeleteChapter:
+    """Tests for DELETE /api/storylines/{storyline_id}/chapters/{chapter_id}."""
+
+    def _seed(
+        self, ctx: dict[str, Any],
+    ) -> tuple[int, int, int, int]:
+        """Seed a storyline with 3 chapters (seq 1, 2, 3).
+
+        Returns (storyline_id, ch1_id, ch2_id, ch3_id).  ch3 is open.
+        """
+        repo: SQLiteStorylineRepository = ctx["repo"]
+        sl = repo.create_storyline(
+            user_id=_TEST_USER_ID,
+            entity_ids=[ctx["entity_id"]],
+            name="Delete Test",
+            start_date="2026-01-01",
+        )
+        ch1 = repo.create_chapter(
+            storyline_id=sl.id, seq=1, title="Ch1",
+            start_date="2026-01-01", end_date="2026-03-31", state="closed",
+        )
+        ch2 = repo.create_chapter(
+            storyline_id=sl.id, seq=2, title="Ch2",
+            start_date="2026-04-01", end_date="2026-06-30", state="closed",
+        )
+        ch3 = repo.create_chapter(
+            storyline_id=sl.id, seq=3, title="Ch3",
+            start_date="2026-07-01", end_date=None, state="open",
+        )
+        return sl.id, ch1.id, ch2.id, ch3.id
+
+    def test_delete_middle_chapter_returns_200(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        """Deleting the middle chapter returns 200 with deleted=True and job_ids."""
+        client, ctx = app_with_storylines
+        sid, _ch1, ch2, _ch3 = self._seed(ctx)
+
+        resp = client.delete(f"/api/storylines/{sid}/chapters/{ch2}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["deleted"] is True
+        assert isinstance(body["job_ids"], list)
+
+    def test_delete_only_chapter_returns_400(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        """Deleting the only chapter of a storyline → repo ValueError → 400."""
+        client, ctx = app_with_storylines
+        repo: SQLiteStorylineRepository = ctx["repo"]
+        sl = repo.create_storyline(
+            user_id=_TEST_USER_ID,
+            entity_ids=[ctx["entity_id"]],
+            name="Solo Story",
+            start_date="2026-01-01",
+        )
+        ch = repo.create_chapter(
+            storyline_id=sl.id, seq=1, title="Only",
+            start_date="2026-01-01", end_date=None, state="open",
+        )
+        resp = client.delete(f"/api/storylines/{sl.id}/chapters/{ch.id}")
+        assert resp.status_code == 400
+
+    def test_delete_chapter_from_wrong_storyline_returns_404(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        """Chapter that belongs to a different storyline → 404."""
+        client, ctx = app_with_storylines
+        sid, _ch1, ch2, _ch3 = self._seed(ctx)
+        # Create a second storyline and use its id with ch2 from the first.
+        repo: SQLiteStorylineRepository = ctx["repo"]
+        sl2 = repo.create_storyline(
+            user_id=_TEST_USER_ID,
+            entity_ids=[ctx["entity_id"]],
+            name="Other",
+            start_date="2026-01-01",
+        )
+        resp = client.delete(f"/api/storylines/{sl2.id}/chapters/{ch2}")
+        assert resp.status_code == 404
+
+    def test_delete_unknown_storyline_returns_404(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        """Unknown storyline → 404."""
+        client, _ctx = app_with_storylines
+        resp = client.delete("/api/storylines/99999/chapters/1")
+        assert resp.status_code == 404
+
+
+# ── PATCH /api/storylines/{id}/chapters/{cid} — date editing ──────
+
+
+class TestChapterDateEdit:
+    """Tests for PATCH .../chapters/{cid} with date fields (9c extension)."""
+
+    def _seed_two_closed(
+        self, ctx: dict[str, Any],
+    ) -> tuple[int, int, int]:
+        """Seed a storyline with two adjacent closed chapters.
+
+        Returns (storyline_id, ch1_id, ch2_id).
+        """
+        repo: SQLiteStorylineRepository = ctx["repo"]
+        sl = repo.create_storyline(
+            user_id=_TEST_USER_ID,
+            entity_ids=[ctx["entity_id"]],
+            name="Date Edit Test",
+            start_date="2026-01-01",
+            end_date="2026-06-30",
+        )
+        ch1 = repo.create_chapter(
+            storyline_id=sl.id, seq=1, title="H1",
+            start_date="2026-01-01", end_date="2026-03-31", state="closed",
+        )
+        ch2 = repo.create_chapter(
+            storyline_id=sl.id, seq=2, title="H2",
+            start_date="2026-04-01", end_date="2026-06-30", state="closed",
+        )
+        return sl.id, ch1.id, ch2.id
+
+    def test_patch_start_date_returns_200_with_chapters_list(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        """PATCH with start_date → 200 with 'chapters' list and 'job_ids'."""
+        client, ctx = app_with_storylines
+        sid, _ch1, ch2 = self._seed_two_closed(ctx)
+
+        resp = client.patch(
+            f"/api/storylines/{sid}/chapters/{ch2}",
+            json={"start_date": "2026-05-01"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "chapters" in body
+        assert "job_ids" in body
+        assert isinstance(body["chapters"], list)
+        assert len(body["chapters"]) >= 1
+        assert isinstance(body["job_ids"], list)
+
+    def test_patch_title_still_returns_flat_chapter_dict(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        """PATCH with only 'title' returns the old flat chapter dict (back-compat)."""
+        client, ctx = app_with_storylines
+        sid, _ch1, ch2 = self._seed_two_closed(ctx)
+
+        resp = client.patch(
+            f"/api/storylines/{sid}/chapters/{ch2}",
+            json={"title": "Renamed H2"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        # Old shape: flat chapter dict — must have 'id' and 'title' at top level,
+        # NOT wrapped in a 'chapters' key.
+        assert body.get("id") == ch2
+        assert body.get("title") == "Renamed H2"
+        assert "chapters" not in body
+
+    def test_patch_no_fields_returns_400(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        """PATCH with empty body (no title, no date fields) → 400."""
+        client, ctx = app_with_storylines
+        sid, _ch1, ch2 = self._seed_two_closed(ctx)
+
+        resp = client.patch(
+            f"/api/storylines/{sid}/chapters/{ch2}",
+            json={},
+        )
+        assert resp.status_code == 400

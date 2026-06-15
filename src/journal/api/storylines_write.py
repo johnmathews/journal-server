@@ -12,11 +12,16 @@ override, not a new deviation category.
 
 Concretely, this module owns:
 
-- ``POST /api/storylines``                              — create + auto-queue generation
-- ``POST /api/storylines/{storyline_id}/regenerate``    — queue a regeneration job
-- ``PATCH /api/storylines/{storyline_id}``              — update editable metadata (name)
-- ``DELETE /api/storylines/{storyline_id}``             — delete a storyline
-- ``PUT /api/storylines/{storyline_id}/anchors``        — replace the anchor set
+- ``POST /api/storylines``                                      — create + auto-queue generation
+- ``POST /api/storylines/{storyline_id}/regenerate``            — queue a regeneration job
+- ``PATCH /api/storylines/{storyline_id}``                      — update editable metadata (name)
+- ``DELETE /api/storylines/{storyline_id}``                     — delete a storyline
+- ``PUT /api/storylines/{storyline_id}/anchors``                — replace the anchor set
+- ``POST /api/storylines/{storyline_id}/chapters``              — add a chapter
+- ``POST /api/storylines/{storyline_id}/chapters/merge``        — merge chapters
+- ``DELETE /api/storylines/{storyline_id}/chapters/{cid}``      — delete a chapter
+- ``PATCH /api/storylines/{storyline_id}/chapters/{cid}``       — rename or edit date window
+- ``POST /api/storylines/{storyline_id}/chapters/{cid}/split``  — split a chapter at a date
 
 Read routes (``GET /api/storylines*``) live in ``api/storylines.py`` per
 the default URL-resource rule.
@@ -407,13 +412,24 @@ def register_storylines_write_routes(
     def rename_storyline_chapter(
         request: Request, services: ServicesDict, raw: bytes
     ) -> JSONResponse:
-        """Rename a single chapter (metadata-only).
+        """Edit a single chapter's title and/or date window.
 
-        Body: ``{title: str}`` — non-empty after trimming. Does NOT
-        touch the chapter's panels or kick a regeneration. Returns 200
-        with the chapter dict. 404 if the chapter isn't found for this
-        user, 400 on a malformed body or empty title, 503 if storylines
-        aren't wired.
+        Body: ``{title?: str, start_date?: ISO, end_date?: ISO,
+        allow_gap?: bool}``.
+
+        Rename-only (back-compat): supply ``title`` without any date fields.
+        Returns 200 with the flat chapter dict.
+
+        Date-edit path: supply ``start_date`` and/or ``end_date`` (with
+        optional ``allow_gap``). Ripples the shared edge of adjacent chapters
+        unless ``allow_gap`` is true. Returns 200 with
+        ``{"chapters": [affected...], "job_ids": [...]}``.
+
+        Both title and date fields may be combined; the title rename executes
+        first and the date edit follows.
+
+        Returns 404 if the chapter isn't found for this user, 400 on a
+        malformed body or invalid values, 503 if storylines aren't wired.
         """
         repo = services.get("storyline_repository")
         if repo is None:
@@ -445,21 +461,48 @@ def register_storylines_write_routes(
                 {"error": "Request body must be a JSON object"},
                 status_code=400,
             )
-        title = (parsed.get("title") or "").strip()
-        if not title:
+        title_raw = parsed.get("title")
+        has_dates = "start_date" in parsed or "end_date" in parsed
+        # Rename-only path (back-compat): title present, no date fields.
+        if title_raw is not None and not has_dates:
+            title = (title_raw or "").strip()
+            if not title:
+                return JSONResponse(
+                    {"error": "title (non-empty str) is required"},
+                    status_code=400,
+                )
+            updated = repo.rename_chapter(cid, title)
+            if updated is None:
+                return JSONResponse(
+                    {"error": "Chapter not found"}, status_code=404,
+                )
+            log.info(
+                "PATCH /api/storylines/%d/chapters/%d — title=%r", sid, cid, title,
+            )
+            return JSONResponse(_chapter_to_dict(repo, updated), status_code=200)
+        if not has_dates:
             return JSONResponse(
-                {"error": "title (non-empty str) is required"},
+                {"error": "provide title and/or start_date/end_date"},
                 status_code=400,
             )
-        updated = repo.rename_chapter(cid, title)
-        if updated is None:
-            return JSONResponse(
-                {"error": "Chapter not found"}, status_code=404,
-            )
-        log.info(
-            "PATCH /api/storylines/%d/chapters/%d — title=%r", sid, cid, title,
+        job_runner = services.get("job_runner")
+        start_date = parsed.get("start_date", chapter.start_date)
+        end_date = parsed.get("end_date", chapter.end_date)
+        allow_gap = bool(parsed.get("allow_gap"))
+        try:
+            changed = repo.update_chapter_window(cid, start_date, end_date, allow_gap=allow_gap)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        job_ids = (
+            _enqueue_chapter_regens(job_runner, sid, user.user_id, changed)
+            if job_runner is not None
+            else []
         )
-        return JSONResponse(_chapter_to_dict(repo, updated), status_code=200)
+        log.info("PATCH /api/storylines/%d/chapters/%d — window edit", sid, cid)
+        return JSONResponse(
+            {"chapters": [_chapter_to_dict(repo, c) for c in changed], "job_ids": job_ids},
+            status_code=200,
+        )
 
     @mcp.custom_route(
         "/api/storylines/{storyline_id:int}",
@@ -675,6 +718,111 @@ def register_storylines_write_routes(
             },
             status_code=200,
         )
+
+    @mcp.custom_route(
+        "/api/storylines/{storyline_id:int}/chapters/merge",
+        methods=["POST"],
+        name="api_merge_storyline_chapters",
+    )
+    @handler(services_getter, parse_json="raw")
+    def merge_storyline_chapters(
+        request: Request, services: ServicesDict, raw: bytes
+    ) -> JSONResponse:
+        """Merge a contiguous run of chapters into a single chapter.
+
+        Body: ``{chapter_ids: list[int]}`` — at least 2 ids belonging to
+        this storyline. The survivor is the lowest-seq row; its window spans
+        the full range of the merged set. Returns 200 with
+        ``{"chapter": ..., "job_ids": [...]}``.  503 if storylines are not
+        wired; 404 if the storyline or any chapter isn't owned by the caller;
+        400 if chapter_ids is invalid or the repo rejects the merge (e.g.
+        non-contiguous).
+        """
+        repo = services.get("storyline_repository")
+        job_runner = services.get("job_runner")
+        if repo is None or job_runner is None:
+            return JSONResponse(
+                {"error": "Storylines feature not configured"}, status_code=503,
+            )
+        user = get_authenticated_user(request)
+        sid = int(request.path_params["storyline_id"])
+        if repo.get_storyline(sid, user_id=user.user_id) is None:
+            return JSONResponse({"error": "Storyline not found"}, status_code=404)
+        try:
+            body = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        ids = body.get("chapter_ids") if isinstance(body, dict) else None
+        if not isinstance(ids, list) or len(ids) < 2 or not all(isinstance(i, int) for i in ids):
+            return JSONResponse(
+                {"error": "chapter_ids must be a list of >= 2 integers"}, status_code=400,
+            )
+        for i in ids:
+            ch = repo.get_chapter(i)
+            if ch is None or ch.storyline_id != sid:
+                return JSONResponse({"error": "Chapter not found"}, status_code=404)
+        try:
+            merged = repo.merge_chapters(ids)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        job_ids = _enqueue_chapter_regens(job_runner, sid, user.user_id, [merged])
+        log.info("POST /api/storylines/%d/chapters/merge — ids=%s", sid, ids)
+        return JSONResponse(
+            {"chapter": _chapter_to_dict(repo, merged), "job_ids": job_ids},
+            status_code=200,
+        )
+
+    @mcp.custom_route(
+        "/api/storylines/{storyline_id:int}/chapters/{chapter_id:int}",
+        methods=["DELETE"],
+        name="api_delete_storyline_chapter",
+    )
+    @handler(services_getter, parse_json="raw")
+    def delete_storyline_chapter(
+        request: Request, services: ServicesDict, raw: bytes
+    ) -> JSONResponse:
+        """Delete a chapter, absorbing its range into a neighbor by default.
+
+        Optional body: ``{allow_gap?: bool}``. With ``allow_gap=True`` the
+        neighboring chapters are not adjusted (a gap is left). With
+        ``allow_gap=False`` (the default), the shared edge of a neighbor is
+        extended to cover the deleted chapter's window.
+
+        Returns 200 with ``{"deleted": True, "job_ids": [...]}`` — the
+        affected neighboring chapters are enqueued for regeneration.  503 if
+        storylines are not wired; 404 if the storyline or chapter isn't
+        owned by the caller; 400 if the repo rejects the deletion (e.g.
+        deleting the only chapter).
+        """
+        repo = services.get("storyline_repository")
+        job_runner = services.get("job_runner")
+        if repo is None or job_runner is None:
+            return JSONResponse(
+                {"error": "Storylines feature not configured"}, status_code=503,
+            )
+        user = get_authenticated_user(request)
+        sid = int(request.path_params["storyline_id"])
+        cid = int(request.path_params["chapter_id"])
+        if repo.get_storyline(sid, user_id=user.user_id) is None:
+            return JSONResponse({"error": "Storyline not found"}, status_code=404)
+        chapter = repo.get_chapter(cid)
+        if chapter is None or chapter.storyline_id != sid:
+            return JSONResponse({"error": "Chapter not found"}, status_code=404)
+        try:
+            body = json.loads(raw) if raw else {}
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        allow_gap = bool(body.get("allow_gap")) if isinstance(body, dict) else False
+        try:
+            affected_ids = repo.delete_chapter(cid, allow_gap=allow_gap)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        affected = [c for c in repo.list_chapters(sid) if c.id in affected_ids]
+        job_ids = _enqueue_chapter_regens(job_runner, sid, user.user_id, affected)
+        log.info(
+            "DELETE /api/storylines/%d/chapters/%d (allow_gap=%s)", sid, cid, allow_gap,
+        )
+        return JSONResponse({"deleted": True, "job_ids": job_ids}, status_code=200)
 
     @mcp.custom_route(
         "/api/storylines/{storyline_id:int}/anchors",
