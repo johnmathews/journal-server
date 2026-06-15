@@ -612,6 +612,419 @@ def journal_storylines_guide(
     return _STORYLINES_GUIDE
 
 
+def _enqueue_chapter_regen(
+    ctx: Any,
+    storyline_id: int,
+    chapter_id: int,
+    end_date: str | None,
+) -> str:
+    """Queue regeneration for a chapter; return a note about it.
+
+    Uses replace mode for closed chapters (end_date set), omits mode
+    for open chapters (end_date None). If the runner is unavailable,
+    returns a note but does not raise.
+    """
+    runner = _get_job_runner(ctx)
+    user_id = _user_id(ctx)
+    kwargs: dict[str, Any] = {
+        "user_id": user_id,
+        "chapter_id": chapter_id,
+    }
+    if end_date is not None:
+        kwargs["mode"] = "replace"
+    try:
+        runner.submit_storyline_generation(storyline_id, **kwargs)
+        return "Regeneration queued."
+    except Exception:  # noqa: BLE001
+        return (
+            "Note: regeneration could not be queued — call "
+            f"journal_regenerate_storyline({storyline_id}) manually."
+        )
+
+
+@mcp.tool()
+def journal_add_storyline_chapter(
+    storyline_id: Annotated[
+        int,
+        Field(
+            description=(
+                "The integer id of the storyline to add a chapter to. "
+                "Obtain from journal_list_storylines."
+            ),
+        ),
+    ],
+    start_date: Annotated[
+        str,
+        Field(
+            description=(
+                "ISO date (YYYY-MM-DD) for the chapter's start date."
+            ),
+        ),
+    ],
+    end_date: Annotated[
+        str | None,
+        Field(
+            description=(
+                "ISO date (YYYY-MM-DD) for the chapter's end date. "
+                "Omit (None) to create an open chapter."
+            ),
+        ),
+    ] = None,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> str:
+    """Add a new chapter to an existing storyline.
+
+    The chapter will be positioned after any existing chapters. Pass
+    ``start_date`` (required) and optionally ``end_date``; omitting
+    ``end_date`` creates an open chapter. The repo enforces that
+    chapters do not overlap; a ``ValueError`` is surfaced as a
+    human-readable error message. After creation, regeneration of the
+    new chapter is queued automatically.
+    """
+    log.info(
+        "Tool call: journal_add_storyline_chapter"
+        "(storyline_id=%d, start_date=%s, end_date=%s)",
+        storyline_id, start_date, end_date,
+    )
+    repo = _get_storyline_repository(ctx)
+    if repo is None:
+        return "Storylines feature is not configured on this server."
+    user_id = _user_id(ctx)
+    storyline = repo.get_storyline(storyline_id, user_id=user_id)
+    if storyline is None:
+        return f"Storyline {storyline_id} not found."
+    try:
+        chapter = repo.add_chapter(storyline_id, start_date, end_date)
+    except ValueError as exc:
+        return f"Could not add chapter: {exc}"
+    regen_note = _enqueue_chapter_regen(
+        ctx, storyline_id, chapter.id, chapter.end_date,
+    )
+    window = f"{chapter.start_date} – {chapter.end_date or 'now'}"
+    return (
+        f"Added chapter [{chapter.id}] to storyline {storyline_id} "
+        f"({window}). {regen_note}"
+    )
+
+
+@mcp.tool()
+def journal_split_storyline_chapter(
+    storyline_id: Annotated[
+        int,
+        Field(
+            description=(
+                "The integer id of the storyline. Obtain from "
+                "journal_list_storylines."
+            ),
+        ),
+    ],
+    chapter_id: Annotated[
+        int,
+        Field(
+            description=(
+                "The integer id of the chapter to split. Obtain from "
+                "journal_get_storyline."
+            ),
+        ),
+    ],
+    date: Annotated[
+        str,
+        Field(
+            description=(
+                "ISO date (YYYY-MM-DD) at which to split. The left half "
+                "ends the day before this date; the right half starts on "
+                "this date. Must be strictly after the chapter's "
+                "start_date."
+            ),
+        ),
+    ],
+    ctx: Context = None,  # type: ignore[assignment]
+) -> str:
+    """Split an existing chapter into two at a given date.
+
+    The original chapter is replaced by two new chapters: the left half
+    covers the original start up to (but not including) ``date``; the
+    right half covers ``date`` onwards. Regeneration is queued for both
+    halves automatically.
+    """
+    log.info(
+        "Tool call: journal_split_storyline_chapter"
+        "(storyline_id=%d, chapter_id=%d, date=%s)",
+        storyline_id, chapter_id, date,
+    )
+    repo = _get_storyline_repository(ctx)
+    if repo is None:
+        return "Storylines feature is not configured on this server."
+    user_id = _user_id(ctx)
+    storyline = repo.get_storyline(storyline_id, user_id=user_id)
+    if storyline is None:
+        return f"Storyline {storyline_id} not found."
+    chapter = repo.get_chapter(chapter_id)
+    if chapter is None or chapter.storyline_id != storyline_id:
+        return f"Chapter {chapter_id} not found on storyline {storyline_id}."
+    try:
+        left, right = repo.split_chapter(chapter_id, date)
+    except ValueError as exc:
+        return f"Could not split chapter: {exc}"
+    _enqueue_chapter_regen(ctx, storyline_id, left.id, left.end_date)
+    _enqueue_chapter_regen(ctx, storyline_id, right.id, right.end_date)
+    return (
+        f"Split chapter {chapter_id} into [{left.id}] "
+        f"({left.start_date} – {left.end_date or 'now'}) and "
+        f"[{right.id}] ({right.start_date} – {right.end_date or 'now'}). "
+        "Regeneration queued for both."
+    )
+
+
+@mcp.tool()
+def journal_merge_storyline_chapters(
+    storyline_id: Annotated[
+        int,
+        Field(
+            description=(
+                "The integer id of the storyline. Obtain from "
+                "journal_list_storylines."
+            ),
+        ),
+    ],
+    chapter_ids: Annotated[
+        list[int],
+        Field(
+            description=(
+                "List of chapter ids to merge (must be adjacent/contiguous). "
+                "Obtain from journal_get_storyline."
+            ),
+        ),
+    ],
+    ctx: Context = None,  # type: ignore[assignment]
+) -> str:
+    """Merge two or more adjacent chapters into a single chapter.
+
+    All supplied ``chapter_ids`` must belong to the same storyline and
+    must be contiguous (no gaps in seq). The repo enforces adjacency; a
+    ``ValueError`` is surfaced as a human-readable error message.
+    Regeneration is queued for the merged chapter automatically.
+    """
+    log.info(
+        "Tool call: journal_merge_storyline_chapters"
+        "(storyline_id=%d, chapter_ids=%s)",
+        storyline_id, chapter_ids,
+    )
+    repo = _get_storyline_repository(ctx)
+    if repo is None:
+        return "Storylines feature is not configured on this server."
+    user_id = _user_id(ctx)
+    storyline = repo.get_storyline(storyline_id, user_id=user_id)
+    if storyline is None:
+        return f"Storyline {storyline_id} not found."
+    for cid in chapter_ids:
+        ch = repo.get_chapter(cid)
+        if ch is None or ch.storyline_id != storyline_id:
+            return f"Chapter {cid} not found on storyline {storyline_id}."
+    try:
+        merged = repo.merge_chapters(chapter_ids)
+    except ValueError as exc:
+        return f"Could not merge chapters: {exc}"
+    _enqueue_chapter_regen(ctx, storyline_id, merged.id, merged.end_date)
+    return (
+        f"Merged {len(chapter_ids)} chapters into [{merged.id}] "
+        f"({merged.start_date} – {merged.end_date or 'now'}) "
+        f"on storyline {storyline_id}. Regeneration queued."
+    )
+
+
+@mcp.tool()
+def journal_update_storyline_chapter(
+    storyline_id: Annotated[
+        int,
+        Field(
+            description=(
+                "The integer id of the storyline. Obtain from "
+                "journal_list_storylines."
+            ),
+        ),
+    ],
+    chapter_id: Annotated[
+        int,
+        Field(
+            description=(
+                "The integer id of the chapter to update. Obtain from "
+                "journal_get_storyline."
+            ),
+        ),
+    ],
+    title: Annotated[
+        str | None,
+        Field(
+            description=(
+                "New title for the chapter. If this is the only change "
+                "(both start_date and end_date are omitted), only "
+                "rename_chapter is called and regeneration is not queued."
+            ),
+        ),
+    ] = None,
+    start_date: Annotated[
+        str | None,
+        Field(
+            description=(
+                "New ISO start date (YYYY-MM-DD) for the chapter. "
+                "Defaults to the existing start_date when omitted."
+            ),
+        ),
+    ] = None,
+    end_date: Annotated[
+        str | None,
+        Field(
+            description=(
+                "New ISO end date (YYYY-MM-DD) for the chapter. "
+                "Defaults to the existing end_date when omitted."
+            ),
+        ),
+    ] = None,
+    allow_gap: Annotated[
+        bool,
+        Field(
+            description=(
+                "When True, permit a gap to form between this chapter "
+                "and its neighbours after the window shift. Default False."
+            ),
+        ),
+    ] = False,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> str:
+    """Update a chapter's title and/or date window.
+
+    If only ``title`` is provided (both date arguments are None), the
+    chapter is renamed without queuing regeneration. If either
+    ``start_date`` or ``end_date`` is provided, ``update_chapter_window``
+    is called — missing date args default to the chapter's current values.
+    Regeneration is queued automatically when the window changes.
+    """
+    log.info(
+        "Tool call: journal_update_storyline_chapter"
+        "(storyline_id=%d, chapter_id=%d, title=%s, start_date=%s, end_date=%s)",
+        storyline_id, chapter_id, title, start_date, end_date,
+    )
+    repo = _get_storyline_repository(ctx)
+    if repo is None:
+        return "Storylines feature is not configured on this server."
+    user_id = _user_id(ctx)
+    storyline = repo.get_storyline(storyline_id, user_id=user_id)
+    if storyline is None:
+        return f"Storyline {storyline_id} not found."
+    chapter = repo.get_chapter(chapter_id)
+    if chapter is None or chapter.storyline_id != storyline_id:
+        return f"Chapter {chapter_id} not found on storyline {storyline_id}."
+
+    rename_note = ""
+    window_changed = start_date is not None or end_date is not None
+
+    if title is not None and not window_changed:
+        # Rename-only path
+        try:
+            repo.rename_chapter(chapter_id, title)
+        except ValueError as exc:
+            return f"Could not rename chapter: {exc}"
+        return (
+            f"Renamed chapter [{chapter_id}] to {title!r} "
+            f"on storyline {storyline_id}."
+        )
+
+    if title is not None:
+        # Rename as part of a window update
+        try:
+            repo.rename_chapter(chapter_id, title)
+            rename_note = f" Title updated to {title!r}."
+        except ValueError as exc:
+            return f"Could not rename chapter: {exc}"
+
+    # Window update path
+    effective_start = start_date if start_date is not None else chapter.start_date
+    effective_end = end_date if end_date is not None else chapter.end_date
+    try:
+        affected = repo.update_chapter_window(
+            chapter_id, effective_start, effective_end, allow_gap=allow_gap,
+        )
+    except ValueError as exc:
+        return f"Could not update chapter window: {exc}"
+
+    # Determine the final end_date for regen mode selection
+    updated = next((c for c in affected if c.id == chapter_id), None)
+    final_end = updated.end_date if updated is not None else effective_end
+    regen_note = _enqueue_chapter_regen(ctx, storyline_id, chapter_id, final_end)
+    return (
+        f"Updated chapter [{chapter_id}] on storyline {storyline_id}."
+        f"{rename_note} {regen_note}"
+    )
+
+
+@mcp.tool(annotations={"destructiveHint": True})
+def journal_delete_storyline_chapter(
+    storyline_id: Annotated[
+        int,
+        Field(
+            description=(
+                "The integer id of the storyline. Obtain from "
+                "journal_list_storylines."
+            ),
+        ),
+    ],
+    chapter_id: Annotated[
+        int,
+        Field(
+            description=(
+                "The integer id of the chapter to delete. Obtain from "
+                "journal_get_storyline."
+            ),
+        ),
+    ],
+    allow_gap: Annotated[
+        bool,
+        Field(
+            description=(
+                "When True, permit a gap to form in the storyline after "
+                "deletion. Default False (the adjacent chapter's window "
+                "is extended to fill the gap)."
+            ),
+        ),
+    ] = False,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> str:
+    """Delete a chapter from a storyline.
+
+    The adjacent chapter (if any) may have its date window adjusted to
+    fill the gap created by the deletion. Pass ``allow_gap=True`` to
+    skip that adjustment. Regeneration is queued for any affected
+    neighbour chapters. This action cannot be undone.
+    """
+    log.info(
+        "Tool call: journal_delete_storyline_chapter"
+        "(storyline_id=%d, chapter_id=%d, allow_gap=%s)",
+        storyline_id, chapter_id, allow_gap,
+    )
+    repo = _get_storyline_repository(ctx)
+    if repo is None:
+        return "Storylines feature is not configured on this server."
+    user_id = _user_id(ctx)
+    storyline = repo.get_storyline(storyline_id, user_id=user_id)
+    if storyline is None:
+        return f"Storyline {storyline_id} not found."
+    chapter = repo.get_chapter(chapter_id)
+    if chapter is None or chapter.storyline_id != storyline_id:
+        return f"Chapter {chapter_id} not found on storyline {storyline_id}."
+    try:
+        affected_ids = repo.delete_chapter(chapter_id, allow_gap=allow_gap)
+    except ValueError as exc:
+        return f"Could not delete chapter: {exc}"
+    for affected_id in affected_ids:
+        neighbour = repo.get_chapter(affected_id)
+        end = neighbour.end_date if neighbour is not None else None
+        _enqueue_chapter_regen(ctx, storyline_id, affected_id, end)
+    return (
+        f"Deleted chapter [{chapter_id}] from storyline {storyline_id}."
+    )
+
+
 @mcp.tool(annotations={"destructiveHint": True})
 def journal_delete_storyline(
     storyline_id: Annotated[

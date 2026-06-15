@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import date as _date
+from datetime import timedelta as _timedelta
 from typing import TYPE_CHECKING, Any
 
 from journal.models import Storyline, StorylineChapter, StorylinePanel
@@ -25,6 +27,16 @@ if TYPE_CHECKING:
     from journal.db.factory import ConnectionFactory
 
 log = logging.getLogger(__name__)
+
+
+def _day_before(iso: str) -> str:
+    """ISO day immediately before ``iso`` (inclusive-window math)."""
+    return (_date.fromisoformat(iso) - _timedelta(days=1)).isoformat()
+
+
+def _day_after(iso: str) -> str:
+    """ISO day immediately after ``iso`` (inclusive-window math)."""
+    return (_date.fromisoformat(iso) + _timedelta(days=1)).isoformat()
 
 
 def _row_to_storyline(row: sqlite3.Row) -> Storyline:
@@ -92,6 +104,34 @@ class SQLiteStorylineRepository:
 
     def _conn(self) -> sqlite3.Connection:
         return self._factory.get()
+
+    def _shift_seqs(
+        self,
+        conn: sqlite3.Connection,
+        storyline_id: int,
+        from_seq: int,
+        delta: int,
+    ) -> None:
+        """Shift seq by ``delta`` for chapters with seq >= ``from_seq``.
+
+        Two-pass via a negative offset so we never collide with the
+        UNIQUE(storyline_id, seq) index mid-update.
+
+        For negative ``delta``, any row(s) whose seq would be overwritten
+        must already be deleted before calling — callers delete or merge
+        those rows first, then call this method to resequence the tail.
+        """
+        assert delta != 0
+        conn.execute(
+            "UPDATE storyline_chapters SET seq = -(seq + ?)"
+            " WHERE storyline_id = ? AND seq >= ?",
+            (delta, storyline_id, from_seq),
+        )
+        conn.execute(
+            "UPDATE storyline_chapters SET seq = -seq"
+            " WHERE storyline_id = ? AND seq < 0",
+            (storyline_id,),
+        )
 
     # ── storylines ──────────────────────────────────────────────
 
@@ -522,3 +562,345 @@ class SQLiteStorylineRepository:
             (json.dumps(embedding) if embedding is not None else None, chapter_id),
         )
         conn.commit()
+
+    def merge_chapters(self, chapter_ids: list[int]) -> StorylineChapter:
+        """Merge a contiguous run of chapters into the lowest-seq one.
+
+        The survivor is the lowest-seq row; its window becomes
+        ``start = min(start)``, ``end = max(end)`` (NULL if any input was
+        open); state is ``open`` if any input was open, else ``closed``.
+        The survivor's title is kept. Non-survivor rows are deleted, then
+        the tail (chapters after the run) is shifted DOWN by
+        ``len(ids) - 1``.
+
+        Raises ``ValueError`` for fewer than 2 ids, non-contiguous seqs,
+        chapters belonging to different storylines, or missing chapters.
+        """
+        if len(chapter_ids) < 2:
+            raise ValueError("merge requires at least two chapters")
+        chapters = [self.get_chapter(cid) for cid in chapter_ids]
+        if any(c is None for c in chapters):
+            raise ValueError("one or more chapters not found")
+        chapters = sorted(chapters, key=lambda c: c.seq)  # type: ignore[union-attr]
+        sid = chapters[0].storyline_id
+        if any(c.storyline_id != sid for c in chapters):
+            raise ValueError("chapters belong to different storylines")
+        seqs = [c.seq for c in chapters]
+        if seqs != list(range(seqs[0], seqs[0] + len(seqs))):
+            raise ValueError("chapters to merge must be adjacent (contiguous seq)")
+        survivor = chapters[0]
+        starts = [c.start_date for c in chapters if c.start_date is not None]
+        is_open = any(c.state == "open" for c in chapters)
+        new_start = min(starts) if starts else None
+        ends = [c.end_date for c in chapters if c.end_date is not None]
+        new_end = None if is_open else (max(ends) if ends else None)
+        new_state = "open" if is_open else "closed"
+        conn = self._conn()
+        try:
+            # Delete non-survivors first so the partial unique index
+            # (at most one open chapter per storyline) is never violated
+            # when we set the survivor's state to 'open'.
+            for c in chapters[1:]:
+                conn.execute("DELETE FROM storyline_chapters WHERE id = ?", (c.id,))
+            conn.execute(
+                "UPDATE storyline_chapters SET start_date = ?, end_date = ?, state = ?,"
+                " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?",
+                (new_start, new_end, new_state, survivor.id),
+            )
+            self._shift_seqs(conn, sid, chapters[-1].seq + 1, -(len(chapters) - 1))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        merged = self.get_chapter(survivor.id)
+        assert merged is not None
+        return merged
+
+    def add_chapter(
+        self,
+        storyline_id: int,
+        start_date: str,
+        end_date: str | None = None,
+    ) -> StorylineChapter:
+        """Add a chapter: new-latest (end_date None) or ranged (end_date set).
+
+        New-latest flavor:
+            Close the current open chapter at _day_before(start_date) and
+            append a new open chapter [start_date, NULL) at max(seq)+1.
+            Requires start_date strictly after the open chapter's start_date
+            (if an open chapter exists).
+
+        Ranged flavor:
+            Insert a closed chapter [start_date, end_date] into a free range.
+            Rejects if the new chapter overlaps any existing chapter (open
+            chapter's end treated as +infinity). seq is assigned by date order;
+            later chapters shift up by 1.
+        """
+        conn = self._conn()
+        existing = self.list_chapters(storyline_id)
+        if end_date is None:
+            open_ch = self.get_open_chapter(storyline_id)
+            if (
+                open_ch is not None
+                and open_ch.start_date is not None
+                and start_date <= open_ch.start_date
+            ):
+                raise ValueError(
+                    "new chapter must start after the current open chapter"
+                )
+            new_seq = max((c.seq for c in existing), default=0) + 1
+            try:
+                if open_ch is not None:
+                    conn.execute(
+                        "UPDATE storyline_chapters"
+                        " SET end_date = ?, state = 'closed',"
+                        " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+                        " WHERE id = ?",
+                        (_day_before(start_date), open_ch.id),
+                    )
+                cursor = conn.execute(
+                    "INSERT INTO storyline_chapters"
+                    " (storyline_id, seq, title, start_date, end_date, state)"
+                    " VALUES (?, ?, '', ?, NULL, 'open')",
+                    (storyline_id, new_seq, start_date),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            ch = self.get_chapter(cursor.lastrowid)
+            assert ch is not None
+            return ch
+        # Ranged flavor
+        if end_date < start_date:
+            raise ValueError("end_date must be on or after start_date")
+        for c in existing:
+            c_end = c.end_date if c.end_date is not None else "9999-12-31"
+            c_start = c.start_date if c.start_date is not None else "0000-01-01"
+            if start_date <= c_end and end_date >= c_start:
+                raise ValueError("new chapter overlaps an existing chapter")
+        # NULL start == open-start (−∞): such a chapter is never "later" than
+        # the new range, matching the overlap check's −∞ treatment above.
+        later = [c for c in existing if (c.start_date or "0000-01-01") > end_date]
+        insert_seq = min((c.seq for c in later), default=len(existing) + 1)
+        try:
+            self._shift_seqs(conn, storyline_id, insert_seq, 1)
+            cursor = conn.execute(
+                "INSERT INTO storyline_chapters"
+                " (storyline_id, seq, title, start_date, end_date, state)"
+                " VALUES (?, ?, '', ?, ?, 'closed')",
+                (storyline_id, insert_seq, start_date, end_date),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        ch = self.get_chapter(cursor.lastrowid)
+        assert ch is not None
+        return ch
+
+    def _assert_no_overlap(
+        self, storyline_id: int, conn: sqlite3.Connection,
+    ) -> None:
+        """Raise ValueError if any two chapters' windows overlap."""
+        rows = conn.execute(
+            "SELECT start_date, end_date FROM storyline_chapters"
+            " WHERE storyline_id = ? ORDER BY seq ASC",
+            (storyline_id,),
+        ).fetchall()
+        prev_end: str | None = None
+        for r in rows:
+            start = r["start_date"] or "0000-01-01"
+            if prev_end is not None and start <= prev_end:
+                raise ValueError("chapter windows overlap")
+            prev_end = r["end_date"] or "9999-12-31"
+
+    def update_chapter_window(
+        self,
+        chapter_id: int,
+        start_date: str | None,
+        end_date: str | None,
+        allow_gap: bool = False,
+    ) -> list[StorylineChapter]:
+        """Move a chapter's boundaries, rippling neighbors by default.
+
+        By default, the shared edge of the touching neighbor ripples to
+        stay contiguous: changing a chapter's ``start`` sets the previous
+        chapter's ``end`` to ``_day_before(new_start)``; changing a
+        chapter's ``end`` sets the next chapter's ``start`` to
+        ``_day_after(new_end)``.  With ``allow_gap=True`` neighbors are
+        left alone (a gap is allowed).
+
+        Raises ``ValueError`` if:
+        - the chapter is not found,
+        - ``end_date`` is set for an open chapter,
+        - ``end_date < start_date``, or
+        - any two chapters overlap after applying the change.
+
+        Returns the list of chapters that changed (the edited one plus any
+        rippled neighbor).
+        """
+        target = self.get_chapter(chapter_id)
+        if target is None:
+            raise ValueError(f"Chapter {chapter_id} not found")
+        if target.state == "open" and end_date is not None:
+            raise ValueError("the open chapter's end cannot be set")
+        eff_start = start_date if start_date is not None else target.start_date
+        eff_end = end_date if end_date is not None else target.end_date
+        if eff_start is not None and eff_end is not None and eff_end < eff_start:
+            raise ValueError("end_date must be on or after start_date")
+        chapters = self.list_chapters(target.storyline_id)
+        idx = next(i for i, c in enumerate(chapters) if c.id == chapter_id)
+        changed_ids: set[int] = {chapter_id}
+        conn = self._conn()
+        try:
+            conn.execute(
+                "UPDATE storyline_chapters SET start_date = ?, end_date = ?,"
+                " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?",
+                (start_date, end_date, chapter_id),
+            )
+            if not allow_gap:
+                if start_date is not None and idx > 0:
+                    prev = chapters[idx - 1]
+                    conn.execute(
+                        "UPDATE storyline_chapters SET end_date = ?,"
+                        " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?",
+                        (_day_before(start_date), prev.id),
+                    )
+                    changed_ids.add(prev.id)
+                if end_date is not None and idx < len(chapters) - 1:
+                    nxt = chapters[idx + 1]
+                    conn.execute(
+                        "UPDATE storyline_chapters SET start_date = ?,"
+                        " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?",
+                        (_day_after(end_date), nxt.id),
+                    )
+                    changed_ids.add(nxt.id)
+            self._assert_no_overlap(target.storyline_id, conn)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return [c for c in self.list_chapters(target.storyline_id) if c.id in changed_ids]
+
+    def delete_chapter(
+        self, chapter_id: int, allow_gap: bool = False,
+    ) -> list[int]:
+        """Delete a chapter; absorb its range into a neighbor by default.
+
+        Raises ``ValueError`` if the chapter is not found or is the storyline's
+        only chapter.
+
+        Default (``allow_gap=False``):
+        - If there is a previous neighbor, it absorbs the deleted chapter's
+          window.  If the deleted chapter was ``open``, the previous neighbor is
+          promoted to ``open`` (``end_date → NULL``, ``state → 'open'``);
+          otherwise the previous neighbor's ``end_date`` extends to the deleted
+          chapter's ``end_date``.
+        - If there is NO previous neighbor (deleting the first chapter), the
+          next neighbor's ``start_date`` extends back to the deleted chapter's
+          ``start_date``.
+        - Returns the list of chapter ids whose windows changed.
+
+        With ``allow_gap=True`` no neighbor is modified; returns ``[]``.
+
+        Ordering invariant: the target row is DELETED first, then the neighbor
+        UPDATE runs (so promoting a neighbor to ``open`` never collides with the
+        still-present open row), then ``_shift_seqs`` resequences the tail
+        (negative delta is safe because the target is already gone).
+        """
+        target = self.get_chapter(chapter_id)
+        if target is None:
+            raise ValueError(f"Chapter {chapter_id} not found")
+        chapters = self.list_chapters(target.storyline_id)
+        if len(chapters) == 1:
+            raise ValueError("cannot delete a storyline's only chapter")
+        idx = next(i for i, c in enumerate(chapters) if c.id == chapter_id)
+        affected: list[int] = []
+        conn = self._conn()
+        try:
+            conn.execute(
+                "DELETE FROM storyline_chapters WHERE id = ?", (chapter_id,),
+            )
+            if not allow_gap:
+                if idx > 0:
+                    prev = chapters[idx - 1]
+                    if target.state == "open":
+                        conn.execute(
+                            "UPDATE storyline_chapters"
+                            " SET end_date = NULL, state = 'open',"
+                            " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+                            " WHERE id = ?",
+                            (prev.id,),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE storyline_chapters"
+                            " SET end_date = ?,"
+                            " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+                            " WHERE id = ?",
+                            (target.end_date, prev.id),
+                        )
+                    affected.append(prev.id)
+                else:
+                    nxt = chapters[idx + 1]
+                    conn.execute(
+                        "UPDATE storyline_chapters"
+                        " SET start_date = ?,"
+                        " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+                        " WHERE id = ?",
+                        (target.start_date, nxt.id),
+                    )
+                    affected.append(nxt.id)
+            self._shift_seqs(conn, target.storyline_id, target.seq + 1, -1)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return affected
+
+    def split_chapter(
+        self, chapter_id: int, date: str,
+    ) -> tuple[StorylineChapter, StorylineChapter]:
+        """Split a chapter at ``date`` into a left + right pair.
+
+        Left keeps the existing row (same seq, same start) with
+        ``end_date = _day_before(date)``; right is a new row at ``seq+1``
+        with ``start_date = date`` and the original ``end_date``.
+
+        If the source was ``open``, left becomes ``closed`` and right
+        stays ``open``; otherwise both are ``closed``.
+
+        ``date`` must satisfy ``start_date < date`` and, when the source
+        has an end, ``date <= end_date``.
+        """
+        conn = self._conn()
+        src = self.get_chapter(chapter_id)
+        if src is None:
+            raise ValueError(f"Chapter {chapter_id} not found")
+        if src.start_date is not None and date <= src.start_date:
+            raise ValueError("split date must be after the chapter start")
+        if src.end_date is not None and date > src.end_date:
+            raise ValueError("split date must be on or before the chapter end")
+        right_state = "open" if src.state == "open" else "closed"
+        try:
+            self._shift_seqs(conn, src.storyline_id, src.seq + 1, 1)
+            conn.execute(
+                "UPDATE storyline_chapters SET end_date = ?, state = 'closed',"
+                " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?",
+                (_day_before(date), chapter_id),
+            )
+            cursor = conn.execute(
+                "INSERT INTO storyline_chapters"
+                " (storyline_id, seq, title, start_date, end_date, state)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (src.storyline_id, src.seq + 1, "", date, src.end_date, right_state),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        left = self.get_chapter(chapter_id)
+        right = self.get_chapter(cursor.lastrowid)
+        assert left is not None and right is not None
+        return left, right
