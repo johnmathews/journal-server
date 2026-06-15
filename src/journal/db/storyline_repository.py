@@ -783,6 +783,82 @@ class SQLiteStorylineRepository:
             raise
         return [c for c in self.list_chapters(target.storyline_id) if c.id in changed_ids]
 
+    def delete_chapter(
+        self, chapter_id: int, allow_gap: bool = False,
+    ) -> list[int]:
+        """Delete a chapter; absorb its range into a neighbor by default.
+
+        Raises ``ValueError`` if the chapter is not found or is the storyline's
+        only chapter.
+
+        Default (``allow_gap=False``):
+        - If there is a previous neighbor, it absorbs the deleted chapter's
+          window.  If the deleted chapter was ``open``, the previous neighbor is
+          promoted to ``open`` (``end_date → NULL``, ``state → 'open'``);
+          otherwise the previous neighbor's ``end_date`` extends to the deleted
+          chapter's ``end_date``.
+        - If there is NO previous neighbor (deleting the first chapter), the
+          next neighbor's ``start_date`` extends back to the deleted chapter's
+          ``start_date``.
+        - Returns the list of chapter ids whose windows changed.
+
+        With ``allow_gap=True`` no neighbor is modified; returns ``[]``.
+
+        Ordering invariant: the target row is DELETED first, then the neighbor
+        UPDATE runs (so promoting a neighbor to ``open`` never collides with the
+        still-present open row), then ``_shift_seqs`` resequences the tail
+        (negative delta is safe because the target is already gone).
+        """
+        target = self.get_chapter(chapter_id)
+        if target is None:
+            raise ValueError(f"Chapter {chapter_id} not found")
+        chapters = self.list_chapters(target.storyline_id)
+        if len(chapters) == 1:
+            raise ValueError("cannot delete a storyline's only chapter")
+        idx = next(i for i, c in enumerate(chapters) if c.id == chapter_id)
+        affected: list[int] = []
+        conn = self._conn()
+        try:
+            conn.execute(
+                "DELETE FROM storyline_chapters WHERE id = ?", (chapter_id,),
+            )
+            if not allow_gap:
+                if idx > 0:
+                    prev = chapters[idx - 1]
+                    if target.state == "open":
+                        conn.execute(
+                            "UPDATE storyline_chapters"
+                            " SET end_date = NULL, state = 'open',"
+                            " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+                            " WHERE id = ?",
+                            (prev.id,),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE storyline_chapters"
+                            " SET end_date = ?,"
+                            " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+                            " WHERE id = ?",
+                            (target.end_date, prev.id),
+                        )
+                    affected.append(prev.id)
+                else:
+                    nxt = chapters[idx + 1]
+                    conn.execute(
+                        "UPDATE storyline_chapters"
+                        " SET start_date = ?,"
+                        " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+                        " WHERE id = ?",
+                        (target.start_date, nxt.id),
+                    )
+                    affected.append(nxt.id)
+            self._shift_seqs(conn, target.storyline_id, target.seq + 1, -1)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return affected
+
     def split_chapter(
         self, chapter_id: int, date: str,
     ) -> tuple[StorylineChapter, StorylineChapter]:

@@ -488,3 +488,60 @@ def test_update_window_rejects_reversed_against_existing_start(repo, storyline):
     # Only end_date passed, earlier than A's existing start -> must reject.
     with pytest.raises(ValueError):
         repo.update_chapter_window(a.id, start_date=None, end_date="2026-01-01")
+
+
+# ── delete_chapter ────────────────────────────────────────────────
+
+
+def test_delete_absorbs_into_previous(repo, storyline):
+    a = repo.create_chapter(storyline.id, seq=1, title="A", start_date="2026-01-01",
+                            end_date="2026-03-31", state="closed")
+    b = repo.create_chapter(storyline.id, seq=2, title="B", start_date="2026-04-01",
+                            end_date="2026-06-30", state="closed")
+    repo.create_chapter(storyline.id, seq=3, title="C", start_date="2026-07-01",
+                        end_date=None, state="open")
+    affected = repo.delete_chapter(b.id)
+    assert repo.get_chapter(b.id) is None
+    assert repo.get_chapter(a.id).end_date == "2026-06-30"
+    assert affected == [a.id]
+    seqs = {ch.title: ch.seq for ch in repo.list_chapters(storyline.id)}
+    assert seqs == {"A": 1, "C": 2}
+
+
+def test_delete_open_promotes_previous(repo, storyline):
+    a = repo.create_chapter(storyline.id, seq=1, title="A", start_date="2026-01-01",
+                            end_date="2026-03-31", state="closed")
+    b = repo.create_chapter(storyline.id, seq=2, title="B", start_date="2026-04-01",
+                            end_date=None, state="open")
+    repo.delete_chapter(b.id)
+    promoted = repo.get_chapter(a.id)
+    assert promoted.state == "open" and promoted.end_date is None
+
+
+def test_delete_first_extends_next_start(repo, storyline):
+    a = repo.create_chapter(storyline.id, seq=1, title="A", start_date="2026-01-01",
+                            end_date="2026-03-31", state="closed")
+    b = repo.create_chapter(storyline.id, seq=2, title="B", start_date="2026-04-01",
+                            end_date=None, state="open")
+    affected = repo.delete_chapter(a.id)
+    assert repo.get_chapter(b.id).start_date == "2026-01-01"
+    assert affected == [b.id]
+
+
+def test_delete_allow_gap_leaves_neighbors(repo, storyline):
+    a = repo.create_chapter(storyline.id, seq=1, title="A", start_date="2026-01-01",
+                            end_date="2026-03-31", state="closed")
+    b = repo.create_chapter(storyline.id, seq=2, title="B", start_date="2026-04-01",
+                            end_date="2026-06-30", state="closed")
+    repo.create_chapter(storyline.id, seq=3, title="C", start_date="2026-07-01",
+                        end_date=None, state="open")
+    affected = repo.delete_chapter(b.id, allow_gap=True)
+    assert repo.get_chapter(a.id).end_date == "2026-03-31"
+    assert affected == []
+
+
+def test_delete_last_chapter_rejected(repo, storyline):
+    only = repo.create_chapter(storyline.id, seq=1, title="Only", start_date="2026-01-01",
+                               end_date=None, state="open")
+    with pytest.raises(ValueError):
+        repo.delete_chapter(only.id)
