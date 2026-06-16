@@ -141,7 +141,18 @@ class AnthropicAnswerer:
             response = self._client.messages.create(
                 model=self._model,
                 max_tokens=self._max_tokens,
-                system=_SYSTEM_PROMPT,
+                # Anthropic silently ignores cache_control on system blocks
+                # below ~1024 tokens (2048 for Sonnet/Opus). The prompt is
+                # under that threshold, so caching is currently a no-op —
+                # cache_control is set anyway for forward compatibility and
+                # mirrors the pattern used in reranker.py.
+                system=[
+                    {
+                        "type": "text",
+                        "text": _SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
                 messages=[{"role": "user", "content": user_message}],
             )
         except anthropic.APIError as e:
@@ -159,11 +170,14 @@ class AnthropicAnswerer:
             raise AnswerUnavailable("malformed answerer output")
 
         valid_ids = {p.entry_id for p in passages}
-        cited = [
-            int(eid)
-            for eid in parsed["cited_entry_ids"]
-            if isinstance(eid, int) and eid in valid_ids
-        ]
+        cited: list[int] = []
+        for eid in parsed["cited_entry_ids"]:
+            try:
+                eid_int = int(eid)
+            except (TypeError, ValueError):
+                continue
+            if eid_int in valid_ids:
+                cited.append(eid_int)
         return AnswerResult(
             answer=str(parsed["answer"]),
             answered=bool(parsed["answered"]),

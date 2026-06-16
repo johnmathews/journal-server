@@ -83,6 +83,18 @@ def test_noop_answerer_is_not_answered():
     assert result.cited_entry_ids == []
 
 
+def test_empty_passages_returns_no_match():
+    result = _answerer().answer("q", [])
+    assert result.answered is False
+    assert result.answer == NO_MATCH_MESSAGE
+
+
+def test_string_entry_ids_are_coerced():
+    raw = '{"answer": "ok", "answered": true, "cited_entry_ids": ["42", 7]}'
+    result = _answerer(raw=raw).answer("q", PASSAGES)
+    assert result.cited_entry_ids == [42, 7]
+
+
 def test_build_answerer_selects_adapter():
     assert isinstance(build_answerer("none"), NoopAnswerer)
     assert isinstance(
