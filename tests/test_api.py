@@ -1231,6 +1231,14 @@ class TestSearchAnswer:
         assert resp.status_code == 502
         assert resp.json()["error"] == "answer_unavailable"
 
+    def test_answer_not_configured_returns_503(
+        self, client: TestClient, services: dict
+    ) -> None:
+        services.pop("answer", None)
+        resp = client.post("/api/search/answer", json={"q": "anything"})
+        assert resp.status_code == 503
+        assert resp.json()["error"] == "answer_unavailable"
+
 
 class TestDashboardMoodDimensions:
     """T1.3b.vi — GET /api/dashboard/mood-dimensions."""
