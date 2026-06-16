@@ -29,11 +29,13 @@ from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
 from journal.entitystore.store import SQLiteEntityStore
 from journal.logging import setup_logging
+from journal.providers.answerer import build_answerer
 from journal.providers.embeddings import OpenAIEmbeddingsProvider
 from journal.providers.extraction import AnthropicExtractionProvider
 from journal.providers.ocr import build_ocr_provider
 from journal.providers.reranker import build_reranker
 from journal.providers.transcription import build_transcription_provider
+from journal.services.answer import AnswerService
 from journal.services.backfill import backfill_mood_scores
 from journal.services.chunking import build_chunker
 from journal.services.entity_extraction import EntityExtractionService
@@ -290,6 +292,16 @@ def _init_services() -> dict:
         config.hybrid_reranker,
         anthropic_api_key=config.anthropic_api_key,
         model=config.reranker_model,
+    )
+    answerer = build_answerer(
+        config.answer_provider,
+        anthropic_api_key=config.anthropic_api_key,
+        model=config.answer_model,
+    )
+    log.info(
+        "  Answerer: provider=%s (%s)",
+        config.answer_provider,
+        config.answer_model if config.answer_provider != "none" else "n/a",
     )
     log.info(
         "  Providers: OCR=%s%s (%s), transcription=%s, embeddings=%s, "
@@ -728,21 +740,29 @@ def _init_services() -> dict:
     else:
         log.info("  Email service disabled (SMTP credentials not configured)")
 
+    query_service = QueryService(
+        repository=repo,
+        vector_store=vector_store,
+        embeddings_provider=embeddings,
+        stats=stats_collector,
+        reranker=reranker,
+        hybrid_config=HybridConfig(
+            bm25_candidates=config.hybrid_bm25_candidates,
+            dense_candidates=config.hybrid_dense_candidates,
+            fusion_top_m=config.hybrid_fusion_top_m,
+            rrf_k=config.hybrid_rrf_k,
+        ),
+    )
+    answer_service = AnswerService(
+        query_service,
+        answerer,
+        model=config.answer_model,
+        context_entries=config.answer_context_entries,
+    )
     _services = {
         "ingestion": ingestion_service,
-        "query": QueryService(
-            repository=repo,
-            vector_store=vector_store,
-            embeddings_provider=embeddings,
-            stats=stats_collector,
-            reranker=reranker,
-            hybrid_config=HybridConfig(
-                bm25_candidates=config.hybrid_bm25_candidates,
-                dense_candidates=config.hybrid_dense_candidates,
-                fusion_top_m=config.hybrid_fusion_top_m,
-                rrf_k=config.hybrid_rrf_k,
-            ),
-        ),
+        "query": query_service,
+        "answer": answer_service,
         "entity_store": entity_store,
         "entity_casing_exceptions": entity_casing_exceptions,
         "entity_extraction": entity_extraction_service,
