@@ -16,6 +16,7 @@ from starlette.responses import JSONResponse
 from journal.api._handler import handler
 from journal.api._shared import _search_result_dict
 from journal.auth import get_authenticated_user
+from journal.providers.answerer import AnswerUnavailable
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -151,5 +152,76 @@ def register_search_routes(
                 "sort": sort,
                 "reranker": reranker_name,
                 "items": [_search_result_dict(r) for r in results],
+            }
+        )
+
+    @mcp.custom_route(
+        "/api/search/answer", methods=["POST"], name="api_search_answer"
+    )
+    @handler(services_getter, parse_json=True)
+    def search_answer(
+        request: Request, services: ServicesDict, body: dict
+    ) -> JSONResponse:
+        """Synthesize a grounded, cited answer to a question.
+
+        Body: ``{q: str, start_date?: ISO, end_date?: ISO}``. Reuses the
+        hybrid search top-N as grounding, then asks the configured
+        answerer for a strictly-grounded answer. Returns
+        ``{question, answer, answered, citations[], model}``. ``answered``
+        is false (with a fixed message) when the journal doesn't cover the
+        question. 400 ``missing_query`` if ``q`` is empty; 502
+        ``answer_unavailable`` if synthesis fails; 503 if not wired.
+        """
+        answer_svc = services.get("answer")
+        if answer_svc is None:
+            return JSONResponse(
+                {
+                    "error": "answer_unavailable",
+                    "message": "Answer synthesis is not configured.",
+                },
+                status_code=503,
+            )
+
+        user = get_authenticated_user(request)
+        user_id = user.user_id
+
+        q = (body.get("q") or "").strip()
+        if not q:
+            return JSONResponse(
+                {"error": "missing_query", "message": "'q' field is required"},
+                status_code=400,
+            )
+
+        start_date = body.get("start_date")
+        end_date = body.get("end_date")
+
+        try:
+            result = answer_svc.answer_question(
+                q, start_date=start_date, end_date=end_date, user_id=user_id
+            )
+        except AnswerUnavailable as e:
+            log.info("POST /api/search/answer — answer unavailable for %r: %s", q, e)
+            return JSONResponse(
+                {
+                    "error": "answer_unavailable",
+                    "message": "Could not generate an answer right now.",
+                },
+                status_code=502,
+            )
+
+        return JSONResponse(
+            {
+                "question": result.question,
+                "answer": result.answer,
+                "answered": result.answered,
+                "citations": [
+                    {
+                        "entry_id": c.entry_id,
+                        "entry_date": c.entry_date,
+                        "snippet": c.snippet,
+                    }
+                    for c in result.citations
+                ],
+                "model": result.model,
             }
         )

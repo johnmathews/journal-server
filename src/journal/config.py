@@ -366,6 +366,21 @@ class Config:
         default_factory=lambda: os.environ.get("RERANKER_MODEL", "claude-haiku-4-5")
     )
 
+    # ── Answer synthesis (POST /api/search/answer) ──────────────────
+    # `anthropic` enables grounded answer synthesis over the hybrid
+    # search top-N; `none` disables it (the endpoint returns an
+    # answered=false "disabled" payload). `answer_context_entries` is
+    # how many retrieved entries are fed to the answerer as grounding.
+    answer_provider: str = field(
+        default_factory=lambda: os.environ.get("ANSWER_PROVIDER", "anthropic")
+    )
+    answer_model: str = field(
+        default_factory=lambda: os.environ.get("ANSWER_MODEL", "claude-sonnet-4-6")
+    )
+    answer_context_entries: int = field(
+        default_factory=lambda: int(os.environ.get("ANSWER_CONTEXT_ENTRIES", "8"))
+    )
+
     # Storylines (docs/storylines-plan.md)
     storyline_narrator_model: str = field(
         default_factory=lambda: os.environ.get(

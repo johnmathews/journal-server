@@ -1183,6 +1183,63 @@ class TestSearch:
         assert data["items"][0]["snippet"] is not None
 
 
+class TestSearchAnswer:
+    """POST /api/search/answer — grounded answer synthesis."""
+
+    def test_answer_returns_synthesized_payload(
+        self, client: TestClient, services: dict
+    ) -> None:
+        from journal.services.answer import AnswerCitation, AnswerResponse
+
+        class _FakeAnswer:
+            def answer_question(self, question, start_date=None, end_date=None, user_id=None):
+                return AnswerResponse(
+                    question=question,
+                    answer="Your back pain began on 2026-02-14.",
+                    answered=True,
+                    citations=[AnswerCitation(42, "2026-02-14", "lower back hurting")],
+                    model="claude-sonnet-4-6",
+                )
+
+        services["answer"] = _FakeAnswer()
+        resp = client.post("/api/search/answer", json={"q": "when did my back start hurting?"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["answered"] is True
+        assert body["citations"][0]["entry_id"] == 42
+        assert body["model"] == "claude-sonnet-4-6"
+
+    def test_answer_missing_query_returns_400(
+        self, client: TestClient, services: dict
+    ) -> None:
+        services["answer"] = object()
+        resp = client.post("/api/search/answer", json={"q": "   "})
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "missing_query"
+
+    def test_answer_unavailable_returns_502(
+        self, client: TestClient, services: dict
+    ) -> None:
+        from journal.providers.answerer import AnswerUnavailable
+
+        class _Boom:
+            def answer_question(self, *a, **k):
+                raise AnswerUnavailable("boom")
+
+        services["answer"] = _Boom()
+        resp = client.post("/api/search/answer", json={"q": "anything?"})
+        assert resp.status_code == 502
+        assert resp.json()["error"] == "answer_unavailable"
+
+    def test_answer_not_configured_returns_503(
+        self, client: TestClient, services: dict
+    ) -> None:
+        services.pop("answer", None)
+        resp = client.post("/api/search/answer", json={"q": "anything"})
+        assert resp.status_code == 503
+        assert resp.json()["error"] == "answer_unavailable"
+
+
 class TestDashboardMoodDimensions:
     """T1.3b.vi — GET /api/dashboard/mood-dimensions."""
 

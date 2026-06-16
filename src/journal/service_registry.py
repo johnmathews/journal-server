@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from journal.db.storyline_repository import SQLiteStorylineRepository
     from journal.db.user_repository import SQLiteUserRepository
     from journal.entitystore.store import SQLiteEntityStore
+    from journal.services.answer import AnswerService
     from journal.services.auth import AuthService
     from journal.services.email import EmailService
     from journal.services.entity_extraction import EntityExtractionService
@@ -51,6 +52,7 @@ class ServicesDict(TypedDict, total=False):
     # Core pipeline services
     ingestion: IngestionService
     query: QueryService
+    answer: AnswerService
     entity_store: SQLiteEntityStore
     entity_casing_exceptions: dict[str, str]
     entity_extraction: EntityExtractionService
