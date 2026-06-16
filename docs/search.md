@@ -246,3 +246,42 @@ paging through results does not re-run the BM25/dense/RRF/rerank pipeline. See `
   `date_desc`, or `date_asc`.
 - `503 Server not initialized` — service registry is missing,
   typically during a startup race or test setup error.
+
+## Answer synthesis (opt-in)
+
+`POST /api/search/answer` synthesizes a short, grounded, cited answer to a
+natural-language question. It is opt-in — the webapp only calls it when the
+user clicks "Answer this", so the per-query LLM cost is never paid on a plain
+search.
+
+**Body:** `{q: str, start_date?: ISO, end_date?: ISO}` (same bearer auth as
+`/api/search`).
+
+**Flow:** reuse the hybrid search top-`ANSWER_CONTEXT_ENTRIES` (default 8) as
+grounding → ask the answerer (`claude-sonnet-4-6`, adaptive thinking) for a
+strictly-grounded JSON answer → resolve cited ids back to entries.
+
+**Grounding contract:** the answerer may only use the supplied passages. If
+they don't cover the question it returns `answered: false` with the fixed
+message *"I couldn't find anything about that in your journal."* — it never
+guesses.
+
+**Response:**
+
+```json
+{
+  "question": "when did my back start hurting?",
+  "answer": "Your back pain first appears on 2026-02-14 …",
+  "answered": true,
+  "citations": [{"entry_id": 42, "entry_date": "2026-02-14", "snippet": "…"}],
+  "model": "claude-sonnet-4-6"
+}
+```
+
+**Config:** `ANSWER_PROVIDER` (`anthropic`|`none`, default `anthropic`),
+`ANSWER_MODEL` (default `claude-sonnet-4-6`), `ANSWER_CONTEXT_ENTRIES`
+(default 8).
+
+**Errors:** `400 missing_query`; `502 answer_unavailable` (synthesis failed —
+the client should fall back to the results list); `503` if synthesis is not
+wired.
