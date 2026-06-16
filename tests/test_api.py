@@ -1031,15 +1031,30 @@ class TestSearch:
         assert response.status_code == 200
         assert response.json()["items"] == []
 
-    def test_search_malformed_fts_query_returns_400(
+    def test_search_punctuation_query_does_not_error(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        """FTS5 parse errors in the BM25 retriever must surface as a
-        400, not a 500."""
-        repo.create_entry("2026-03-22", "photo", "Anything at all", 3)
+        """Punctuation in a query is sanitised before reaching FTS5, so
+        it never surfaces an FTS5 syntax error.
+
+        Natural-language questions ("when did my back start hurting?")
+        and stray operator characters (a lone double-quote) used to
+        raise ``sqlite3.OperationalError`` → 400 ``invalid_query``. The
+        query is now tokenised and quoted, so a content-bearing question
+        returns 200 with matching results and an all-punctuation query
+        returns 200 with no results."""
+        repo.create_entry(
+            "2026-03-22", "photo", "My back started hurting after the gym", 5
+        )
+
+        # A natural-language question with a trailing '?' must succeed.
+        response = client.get("/api/search?q=when+did+my+back+start+hurting%3F")
+        assert response.status_code == 200
+
+        # A bare operator character is inert, not a 400.
         response = client.get('/api/search?q="')
-        assert response.status_code == 400
-        assert response.json()["error"] == "invalid_query"
+        assert response.status_code == 200
+        assert response.json()["items"] == []
 
     def test_search_limit_clamped(
         self, client: TestClient, repo: SQLiteEntryRepository

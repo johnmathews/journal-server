@@ -175,6 +175,66 @@ class TestFTSSnippets:
         )
 
 
+class TestFTSPunctuation:
+    """Free-form queries with punctuation must never raise FTS5 errors.
+
+    User search text is natural language ("when did my back start
+    hurting?"). FTS5's MATCH grammar treats ``?``, quotes, hyphens,
+    parentheses, ``:``, ``*`` and the bare booleans ``AND/OR/NOT`` as
+    query operators, so passing the raw query straight to MATCH used to
+    raise ``sqlite3.OperationalError: fts5: syntax error near "?"``. The
+    repository now tokenises the query and wraps each token as a literal
+    phrase so punctuation is inert and content words still match.
+    """
+
+    def test_search_text_question_mark_does_not_raise(self, repo):
+        repo.create_entry(
+            "2026-03-22", "photo", "My back started hurting after the gym", 5
+        )
+        # The trailing '?' previously raised: fts5 syntax error near "?".
+        results = repo.search_text("back hurting?")
+        assert any("back" in r.raw_text for r in results)
+
+    def test_search_text_with_snippets_question_mark_does_not_raise(self, repo):
+        repo.create_entry(
+            "2026-03-22", "photo", "My back started hurting after the gym", 5
+        )
+        results = repo.search_text_with_snippets("back hurting?")
+        assert len(results) == 1
+
+    def test_count_text_matches_question_mark_does_not_raise(self, repo):
+        repo.create_entry("2026-03-22", "photo", "My back hurts", 3)
+        assert repo.count_text_matches("back?") == 1
+
+    def test_assorted_fts5_operators_are_inert(self, repo):
+        # Characters that are FTS5 operators must be treated as literal
+        # text rather than syntax — none of these may raise.
+        repo.create_entry("2026-03-22", "photo", "Met Robyn at the cafe", 4)
+        for q in [
+            'Robyn"',
+            "Robyn (cafe)",
+            "Robyn - cafe",
+            "cafe:",
+            "AND OR NOT",
+            "Robyn*",
+            "what did I do? (anything)",
+        ]:
+            repo.search_text(q)  # must not raise
+
+    def test_embedded_quote_still_matches_content_word(self, repo):
+        repo.create_entry("2026-03-22", "photo", "Met Robyn at the cafe", 4)
+        # A stray double-quote must be escaped, not treated as a phrase
+        # delimiter, and the content word must still match.
+        results = repo.search_text('Robyn"')
+        assert len(results) == 1
+
+    def test_all_punctuation_query_returns_empty(self, repo):
+        repo.create_entry("2026-03-22", "photo", "Something here", 3)
+        assert repo.search_text("???") == []
+        assert repo.search_text_with_snippets("?!") == []
+        assert repo.count_text_matches("...") == 0
+
+
 class TestWritingFrequency:
     """T1.3a.i — get_writing_frequency across the four granularities."""
 

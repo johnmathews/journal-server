@@ -10,8 +10,48 @@ appropriate connection — thread-local on the factory path, the
 shared connection on the legacy path.
 """
 
+import re
+
 from journal.db.repository.protocol import _row_to_entry
 from journal.models import Entry
+
+# Matches a single word character (letter/digit/underscore), Unicode-aware.
+# Used to decide whether a whitespace token carries any searchable content.
+_WORD_RE = re.compile(r"\w", re.UNICODE)
+
+
+def _to_fts_match_query(query: str) -> str | None:
+    """Turn free-form user text into a safe FTS5 ``MATCH`` expression.
+
+    Search queries are natural language ("when did my back start
+    hurting?"). FTS5's MATCH grammar treats ``?``, double quotes,
+    ``-``, ``:``, ``*``, ``(`` / ``)`` and the bare booleans
+    ``AND`` / ``OR`` / ``NOT`` as operators, so handing the raw query
+    to MATCH raises ``sqlite3.OperationalError`` on anything that isn't
+    plain barewords.
+
+    We tokenise on whitespace, drop tokens with no word characters
+    (pure punctuation like a lone ``?``), and wrap each remaining token
+    in double quotes — escaping any embedded quote by doubling it — so
+    every token is matched as a literal phrase and nothing is parsed as
+    an operator. Tokens are space-joined, which FTS5 reads as implicit
+    AND, preserving the previous bareword semantics for ordinary
+    keyword queries.
+
+    Returns ``None`` when the query has no searchable tokens (e.g. it
+    was all punctuation); callers short-circuit to an empty result set
+    rather than passing an empty MATCH string to FTS5 (which would
+    itself be a syntax error).
+    """
+    tokens: list[str] = []
+    for raw in query.split():
+        if not _WORD_RE.search(raw):
+            continue
+        escaped = raw.replace('"', '""')
+        tokens.append(f'"{escaped}"')
+    if not tokens:
+        return None
+    return " ".join(tokens)
 
 
 class _SearchMixin:
@@ -21,12 +61,15 @@ class _SearchMixin:
         self, query: str, start_date: str | None = None, end_date: str | None = None,
         user_id: int | None = None,
     ) -> list[Entry]:
+        match = _to_fts_match_query(query)
+        if match is None:
+            return []
         sql = """
             SELECT e.* FROM entries_fts
             JOIN entries e ON e.id = entries_fts.rowid
             WHERE entries_fts MATCH ?
         """
-        params: list[str | int] = [query]
+        params: list[str | int] = [match]
         if user_id is not None:
             sql += " AND e.user_id = ?"
             params.append(user_id)
@@ -63,6 +106,9 @@ class _SearchMixin:
         Results are ordered by FTS5's `rank` (best match first) and
         paginated via `limit` / `offset`.
         """
+        match = _to_fts_match_query(query)
+        if match is None:
+            return []
         sql = """
             SELECT
                 e.*,
@@ -71,7 +117,7 @@ class _SearchMixin:
             JOIN entries e ON e.id = entries_fts.rowid
             WHERE entries_fts MATCH ?
         """
-        params: list[str | int] = [query]
+        params: list[str | int] = [match]
         if user_id is not None:
             sql += " AND e.user_id = ?"
             params.append(user_id)
@@ -94,12 +140,15 @@ class _SearchMixin:
         end_date: str | None = None,
         user_id: int | None = None,
     ) -> int:
+        match = _to_fts_match_query(query)
+        if match is None:
+            return 0
         sql = """
             SELECT COUNT(*) AS cnt FROM entries_fts
             JOIN entries e ON e.id = entries_fts.rowid
             WHERE entries_fts MATCH ?
         """
-        params: list[str | int] = [query]
+        params: list[str | int] = [match]
         if user_id is not None:
             sql += " AND e.user_id = ?"
             params.append(user_id)

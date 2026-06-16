@@ -143,7 +143,7 @@ rerank.
 
 | Parameter    | Required | Default      | Description                                                                                                                                                          |
 | ------------ | -------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `q`          | yes      |              | Search query. Must be non-empty after stripping whitespace. Returns `400 missing_query` otherwise.                                                                   |
+| `q`          | yes      |              | Search query. Must be non-empty after stripping whitespace. Returns `400 missing_query` otherwise. Treated as free-form natural language — see "Query sanitisation" below; punctuation never errors.                                                                   |
 | `start_date` | no       |              | ISO date (`YYYY-MM-DD`) lower bound (inclusive) on `entry_date`.                                                                                                     |
 | `end_date`   | no       |              | ISO date upper bound (inclusive).                                                                                                                                    |
 | `limit`      | no       | `10`         | Page size. Range `1..50`. Out-of-range returns `400 invalid_query`.                                                                                                  |
@@ -151,6 +151,33 @@ rerank.
 | `sort`       | no       | `relevance`  | One of `relevance`, `date_desc`, `date_asc`. `relevance` returns the post-rerank order; `date_*` re-orders the same candidate list by entry date. Anything else returns `400 invalid_sort`. |
 
 The `mode` parameter was retired when hybrid shipped; passing it returns `400 mode_removed`.
+
+### Query sanitisation
+
+`q` is free-form natural language ("when did my back start hurting?"),
+but SQLite FTS5's `MATCH` grammar treats `?`, double quotes, `-`, `:`,
+`*`, `(` / `)` and the bare booleans `AND` / `OR` / `NOT` as operators.
+Passing the raw query to `MATCH` raised `sqlite3.OperationalError` on
+anything that wasn't plain barewords — most visibly any question ending
+in `?`.
+
+The BM25 retriever now sanitises the query before it reaches FTS5
+(`db/repository/search.py::_to_fts_match_query`): the query is tokenised
+on whitespace, tokens with no word characters (a lone `?`, `--`) are
+dropped, and each remaining token is wrapped as a quoted literal phrase
+(embedded quotes escaped by doubling). Tokens are space-joined, which
+FTS5 reads as implicit AND, so ordinary keyword queries behave as before.
+
+Consequences:
+
+- Punctuation is inert: no query can produce an FTS5 syntax error.
+- A query with no word characters at all (e.g. `???`) yields no BM25
+  hits; the dense retriever still runs, so the request still returns 200.
+- Raw FTS5 operators are no longer honoured on the BM25 side — `vienna OR
+  atlas` searches for the literal words `vienna`, `OR`, `atlas` rather
+  than running a boolean OR, and `atl*` no longer prefix-matches. The
+  web search box never advertised this syntax; the dense retriever and
+  reranker carry semantic intent regardless.
 
 ### Result cache
 
@@ -210,9 +237,11 @@ paging through results does not re-run the BM25/dense/RRF/rerank pipeline. See `
 - `400 missing_query` — `q` parameter missing or whitespace-only.
 - `400 mode_removed` — client passed `mode=`. The parameter was
   retired when hybrid shipped; drop it.
-- `400 invalid_query` — FTS5 parse error on the BM25 retriever
-  (unterminated quote, bare boolean operator, etc.) or out-of-range
-  `limit`. The error message echoes the underlying parse error.
+- `400 invalid_query` — defensive fallback if the BM25 retriever ever
+  raises `sqlite3.OperationalError`. In practice the query is now
+  sanitised before it reaches FTS5 (see "Query sanitisation"), so
+  punctuation no longer triggers this — it remains only as a safety net
+  that turns an unexpected FTS5 error into a 400 rather than a 500.
 - `400 invalid_sort` — `sort` was something other than `relevance`,
   `date_desc`, or `date_asc`.
 - `503 Server not initialized` — service registry is missing,
