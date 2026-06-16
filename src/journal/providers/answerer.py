@@ -141,6 +141,7 @@ class AnthropicAnswerer:
             response = self._client.messages.create(
                 model=self._model,
                 max_tokens=self._max_tokens,
+                thinking={"type": "adaptive"},
                 # Anthropic silently ignores cache_control on system blocks
                 # below ~1024 tokens (2048 for Sonnet/Opus). The prompt is
                 # under that threshold, so caching is currently a no-op —
