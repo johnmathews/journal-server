@@ -371,3 +371,22 @@ def test_fitness_sync_enabled_defaults_true(monkeypatch: pytest.MonkeyPatch) -> 
 def test_fitness_sync_enabled_respects_env_false(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FITNESS_SYNC_ENABLED", "false")
     assert Config().fitness_sync_enabled is False
+
+
+def test_answer_config_defaults(monkeypatch):
+    for var in ("ANSWER_PROVIDER", "ANSWER_MODEL", "ANSWER_CONTEXT_ENTRIES"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = Config()
+    assert cfg.answer_provider == "anthropic"
+    assert cfg.answer_model == "claude-sonnet-4-6"
+    assert cfg.answer_context_entries == 8
+
+
+def test_answer_config_from_env(monkeypatch):
+    monkeypatch.setenv("ANSWER_PROVIDER", "none")
+    monkeypatch.setenv("ANSWER_MODEL", "claude-haiku-4-5")
+    monkeypatch.setenv("ANSWER_CONTEXT_ENTRIES", "5")
+    cfg = Config()
+    assert cfg.answer_provider == "none"
+    assert cfg.answer_model == "claude-haiku-4-5"
+    assert cfg.answer_context_entries == 5
