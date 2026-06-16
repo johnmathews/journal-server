@@ -60,8 +60,14 @@ def test_builds_passages_and_resolves_citations():
     )
     resp = svc.answer_question("when did my back start hurting?")
 
-    assert svc._query.calls[0]["query"] == "when did my back start hurting?"
-    assert svc._query.calls[0]["limit"] == 8
+    assert svc._query.calls[0] == {
+        "query": "when did my back start hurting?",
+        "start_date": None,
+        "end_date": None,
+        "limit": 8,
+        "offset": 0,
+        "user_id": None,
+    }
     assert [p.entry_id for p in answerer.passages] == [42, 7]
     assert resp.answered is True
     assert len(resp.citations) == 1
@@ -69,3 +75,20 @@ def test_builds_passages_and_resolves_citations():
     assert resp.citations[0].entry_date == "2026-02-14"
     assert "back" in resp.citations[0].snippet.lower()
     assert resp.model == "claude-sonnet-4-6"
+
+
+def test_forwards_date_and_user_filters():
+    results = [_result(1, "2026-02-14", "back")]
+    answerer = _FakeAnswerer(AnswerResult("ok", True, [1]))
+    svc = AnswerService(_FakeQuery(results), answerer, model="m", context_entries=3)
+    svc.answer_question(
+        "q?", start_date="2026-01-01", end_date="2026-03-01", user_id=99
+    )
+    assert svc._query.calls[0] == {
+        "query": "q?",
+        "start_date": "2026-01-01",
+        "end_date": "2026-03-01",
+        "limit": 3,
+        "offset": 0,
+        "user_id": 99,
+    }
