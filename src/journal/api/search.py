@@ -214,6 +214,7 @@ def register_search_routes(
                 "question": result.question,
                 "answer": result.answer,
                 "answered": result.answered,
+                "is_question": result.is_question,
                 "citations": [
                     {
                         "entry_id": c.entry_id,

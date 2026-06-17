@@ -29,6 +29,16 @@ class _FakeAnswerer:
         return self._result
 
 
+class _FakeClassifier:
+    def __init__(self, verdict: bool):
+        self._verdict = verdict
+        self.queries: list[str] = []
+
+    def is_question(self, query: str) -> bool:
+        self.queries.append(query)
+        return self._verdict
+
+
 def _result(entry_id: int, date: str, text: str) -> SearchResult:
     return SearchResult(
         entry_id=entry_id, entry_date=date, text=text, score=1.0,
@@ -36,10 +46,31 @@ def _result(entry_id: int, date: str, text: str) -> SearchResult:
     )
 
 
+def _service(query, answerer, *, is_question=True, **kwargs):
+    return AnswerService(
+        query, answerer, _FakeClassifier(is_question),
+        model=kwargs.pop("model", "claude-sonnet-4-6"), **kwargs,
+    )
+
+
+def test_non_question_short_circuits_without_retrieval_or_answerer():
+    answerer = _FakeAnswerer(AnswerResult("should not be used", True, [1]))
+    query = _FakeQuery([_result(1, "2026-02-14", "back")])
+    svc = _service(query, answerer, is_question=False)
+    resp = svc.answer_question("vienna atlas")
+    assert resp.is_question is False
+    assert resp.answered is False
+    assert resp.answer == ""
+    assert resp.citations == []
+    assert query.calls == []  # retrieval never ran
+    assert answerer.passages is None  # answerer never called
+
+
 def test_no_results_short_circuits_without_calling_answerer():
     answerer = _FakeAnswerer(AnswerResult("should not be used", True, [1]))
-    svc = AnswerService(_FakeQuery([]), answerer, model="claude-sonnet-4-6")
+    svc = _service(_FakeQuery([]), answerer)
     resp = svc.answer_question("anything?")
+    assert resp.is_question is True
     assert resp.answered is False
     assert resp.answer == NO_MATCH_MESSAGE
     assert resp.citations == []
@@ -54,10 +85,7 @@ def test_builds_passages_and_resolves_citations():
     answerer = _FakeAnswerer(
         AnswerResult("Your back pain began on 2026-02-14.", True, [42])
     )
-    svc = AnswerService(
-        _FakeQuery(results), answerer, model="claude-sonnet-4-6",
-        context_entries=8,
-    )
+    svc = _service(_FakeQuery(results), answerer, context_entries=8)
     resp = svc.answer_question("when did my back start hurting?")
 
     assert svc._query.calls[0] == {
@@ -69,6 +97,7 @@ def test_builds_passages_and_resolves_citations():
         "user_id": None,
     }
     assert [p.entry_id for p in answerer.passages] == [42, 7]
+    assert resp.is_question is True
     assert resp.answered is True
     assert len(resp.citations) == 1
     assert resp.citations[0].entry_id == 42
@@ -80,7 +109,7 @@ def test_builds_passages_and_resolves_citations():
 def test_forwards_date_and_user_filters():
     results = [_result(1, "2026-02-14", "back")]
     answerer = _FakeAnswerer(AnswerResult("ok", True, [1]))
-    svc = AnswerService(_FakeQuery(results), answerer, model="m", context_entries=3)
+    svc = _service(_FakeQuery(results), answerer, model="m", context_entries=3)
     svc.answer_question(
         "q?", start_date="2026-01-01", end_date="2026-03-01", user_id=99
     )

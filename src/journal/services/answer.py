@@ -19,6 +19,7 @@ from journal.providers.answerer import NO_MATCH_MESSAGE, AnswerPassage
 
 if TYPE_CHECKING:
     from journal.providers.answerer import Answerer
+    from journal.providers.query_classifier import QueryClassifier
     from journal.services.query import QueryService
 
 #: Length of the citation preview snippet (chars of the entry text).
@@ -39,6 +40,10 @@ class AnswerResponse:
     answered: bool
     citations: list[AnswerCitation]
     model: str
+    #: True when the query was classified as an answerable question.
+    #: False means it was a plain keyword/entity search — no synthesis
+    #: was attempted, `answer` is empty, and the client shows no answer.
+    is_question: bool
 
 
 class AnswerService:
@@ -46,6 +51,7 @@ class AnswerService:
         self,
         query_service: QueryService,
         answerer: Answerer,
+        classifier: QueryClassifier,
         *,
         model: str,
         context_entries: int = 8,
@@ -53,6 +59,7 @@ class AnswerService:
     ) -> None:
         self._query = query_service
         self._answerer = answerer
+        self._classifier = classifier
         self._model = model
         self._context_entries = context_entries
         self._passage_chars = passage_chars
@@ -64,6 +71,18 @@ class AnswerService:
         end_date: str | None = None,
         user_id: int | None = None,
     ) -> AnswerResponse:
+        # Cheap intent gate first: a plain keyword/entity search never
+        # pays for retrieval + synthesis here.
+        if not self._classifier.is_question(question):
+            return AnswerResponse(
+                question=question,
+                answer="",
+                answered=False,
+                citations=[],
+                model=self._model,
+                is_question=False,
+            )
+
         results = self._query.search_entries(
             query=question,
             start_date=start_date,
@@ -79,6 +98,7 @@ class AnswerService:
                 answered=False,
                 citations=[],
                 model=self._model,
+                is_question=True,
             )
 
         passages = [
@@ -107,4 +127,5 @@ class AnswerService:
             answered=result.answered,
             citations=citations,
             model=self._model,
+            is_question=True,
         )
