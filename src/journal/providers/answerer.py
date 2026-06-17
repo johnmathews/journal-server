@@ -54,6 +54,14 @@ class AnswerResult:
     cited_entry_ids: list[int] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class ConversationTurn:
+    """One turn of a conversation handed to the multi-turn answerer."""
+
+    role: str       # "user" | "assistant"
+    content: str
+
+
 class AnswerUnavailable(Exception):  # noqa: N818
     """Raised when a grounded answer could not be produced.
 
@@ -71,6 +79,12 @@ class Answerer(Protocol):
         self, question: str, passages: list[AnswerPassage]
     ) -> AnswerResult: ...
 
+    def continue_conversation(
+        self,
+        history: list[ConversationTurn],
+        passages: list[AnswerPassage],
+    ) -> AnswerResult: ...
+
 
 class NoopAnswerer:
     """Identity answerer — always reports it could not answer.
@@ -81,6 +95,17 @@ class NoopAnswerer:
 
     def answer(
         self, question: str, passages: list[AnswerPassage]
+    ) -> AnswerResult:
+        return AnswerResult(
+            answer="Answer synthesis is disabled.",
+            answered=False,
+            cited_entry_ids=[],
+        )
+
+    def continue_conversation(
+        self,
+        history: list[ConversationTurn],
+        passages: list[AnswerPassage],
     ) -> AnswerResult:
         return AnswerResult(
             answer="Answer synthesis is disabled.",
@@ -109,6 +134,30 @@ _SYSTEM_PROMPT = (
     "- If the passages do not contain enough to answer, set "
     '"answered": false and "answer": "' + NO_MATCH_MESSAGE + '" and leave '
     "`cited_entry_ids` empty. Do NOT guess or use outside knowledge.\n"
+    "- Output the JSON object only. No prose, no markdown."
+)
+
+_CONVERSATION_SYSTEM_PROMPT = (
+    "You are continuing a conversation about a person's private journal. "
+    "You are given the conversation so far and a numbered list of dated "
+    "passages retrieved from their journal for the latest message. Answer "
+    "the latest user message ONLY from these passages and the conversation.\n\n"
+    "Output a single JSON object with exactly this shape:\n"
+    "  {\n"
+    '    "answer": "<your answer, addressed to the journal author as \'you\'>",\n'
+    '    "answered": <true|false>,\n'
+    '    "cited_entry_ids": [<entry_id>, ...]\n'
+    "  }\n\n"
+    "Rules:\n"
+    "- Ground every claim in the passages. Quote dates from the passages "
+    "when relevant.\n"
+    "- For 'when did X start' questions, identify the EARLIEST passage that "
+    "evidences X and lead with its date.\n"
+    "- `cited_entry_ids` lists the entry ids of the passages you actually "
+    "used, most relevant first. Never invent an id.\n"
+    "- If the passages do not contain enough to answer the latest message, "
+    'set "answered": false and "answer": "' + NO_MATCH_MESSAGE + '" and '
+    "leave `cited_entry_ids` empty. Do NOT guess or use outside knowledge.\n"
     "- Output the JSON object only. No prose, no markdown."
 )
 
@@ -160,6 +209,40 @@ class AnthropicAnswerer:
             logger.warning("AnthropicAnswerer call failed: %s", e)
             raise AnswerUnavailable(str(e)) from e
 
+        return self._result_from_response(response, {p.entry_id for p in passages})
+
+    @staticmethod
+    def _first_text(response: object) -> str:
+        content = getattr(response, "content", None) or []
+        for block in content:
+            text = getattr(block, "text", None)
+            if text:
+                return text
+        return ""
+
+    @staticmethod
+    def _passage_lines(passages: list[AnswerPassage]) -> list[str]:
+        lines = ["Passages:"]
+        for p in passages:
+            text = p.text
+            if len(text) > _MAX_PASSAGE_CHARS:
+                text = text[: _MAX_PASSAGE_CHARS - 1] + "…"
+            lines.append(f"[entry_id={p.entry_id} date={p.entry_date}] {text}")
+        return lines
+
+    @staticmethod
+    def _format_user_message(
+        question: str, passages: list[AnswerPassage]
+    ) -> str:
+        lines = [f"Question: {question}", ""]
+        lines.extend(AnthropicAnswerer._passage_lines(passages))
+        lines.append("")
+        lines.append("Output the JSON object now.")
+        return "\n".join(lines)
+
+    def _result_from_response(
+        self, response: object, valid_ids: set[int]
+    ) -> AnswerResult:
         raw = self._first_text(response)
         parsed = self._parse_response(raw)
         if parsed is None:
@@ -169,8 +252,6 @@ class AnthropicAnswerer:
                 (raw or "")[:200],
             )
             raise AnswerUnavailable("malformed answerer output")
-
-        valid_ids = {p.entry_id for p in passages}
         cited: list[int] = []
         for eid in parsed["cited_entry_ids"]:
             try:
@@ -185,28 +266,42 @@ class AnthropicAnswerer:
             cited_entry_ids=cited,
         )
 
-    @staticmethod
-    def _first_text(response: object) -> str:
-        content = getattr(response, "content", None) or []
-        for block in content:
-            text = getattr(block, "text", None)
-            if text:
-                return text
-        return ""
+    def continue_conversation(
+        self,
+        history: list[ConversationTurn],
+        passages: list[AnswerPassage],
+    ) -> AnswerResult:
+        if not history:
+            return AnswerResult(answer=NO_MATCH_MESSAGE, answered=False)
 
-    @staticmethod
-    def _format_user_message(
-        question: str, passages: list[AnswerPassage]
-    ) -> str:
-        lines = [f"Question: {question}", "", "Passages:"]
-        for p in passages:
-            text = p.text
-            if len(text) > _MAX_PASSAGE_CHARS:
-                text = text[: _MAX_PASSAGE_CHARS - 1] + "…"
-            lines.append(f"[entry_id={p.entry_id} date={p.entry_date}] {text}")
-        lines.append("")
-        lines.append("Output the JSON object now.")
-        return "\n".join(lines)
+        messages = [{"role": t.role, "content": t.content} for t in history]
+        # Append the freshly-retrieved passages to the final user turn so
+        # the model grounds the latest message against them.
+        passage_block = "\n".join(
+            [*self._passage_lines(passages), "", "Output the JSON object now."]
+        )
+        messages[-1]["content"] = (
+            f"{messages[-1]['content']}\n\n{passage_block}"
+        )
+        try:
+            response = self._client.messages.create(
+                model=self._model,
+                max_tokens=self._max_tokens,
+                thinking={"type": "adaptive"},
+                system=[
+                    {
+                        "type": "text",
+                        "text": _CONVERSATION_SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=messages,
+            )
+        except anthropic.APIError as e:
+            logger.warning("AnthropicAnswerer continue call failed: %s", e)
+            raise AnswerUnavailable(str(e)) from e
+
+        return self._result_from_response(response, {p.entry_id for p in passages})
 
     @staticmethod
     def _parse_response(raw: str) -> dict | None:

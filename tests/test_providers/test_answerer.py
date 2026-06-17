@@ -10,6 +10,7 @@ from journal.providers.answerer import (
     AnswerPassage,
     AnswerUnavailable,
     AnthropicAnswerer,
+    ConversationTurn,
     NoopAnswerer,
     build_answerer,
 )
@@ -105,3 +106,70 @@ def test_build_answerer_selects_adapter():
         build_answerer("anthropic", anthropic_api_key="")
     with pytest.raises(ValueError):
         build_answerer("bogus")
+
+
+def _history() -> list[ConversationTurn]:
+    return [
+        ConversationTurn(role="user", content="when did my back hurt?"),
+        ConversationTurn(role="assistant", content="On 2026-02-14."),
+        ConversationTurn(role="user", content="and when did it get better?"),
+    ]
+
+
+def test_continue_conversation_maps_history_to_messages() -> None:
+    raw = (
+        '{"answer": "Around 2026-03-01.", "answered": true,'
+        ' "cited_entry_ids": [7]}'
+    )
+    answerer = _answerer(raw=raw)
+    passages = [
+        AnswerPassage(entry_id=7, entry_date="2026-03-01", text="Back better now."),
+    ]
+    result = answerer.continue_conversation(_history(), passages)
+    assert result.answered is True
+    assert result.cited_entry_ids == [7]
+    sent = answerer._client.messages.calls[0]  # type: ignore[attr-defined]
+    roles = [m["role"] for m in sent["messages"]]
+    assert roles == ["user", "assistant", "user"]
+    # Passages are appended to the FINAL user turn only.
+    assert "entry_id=7" in sent["messages"][-1]["content"]
+    assert "entry_id=7" not in sent["messages"][0]["content"]
+
+
+def test_continue_conversation_filters_invented_ids() -> None:
+    raw = (
+        '{"answer": "x", "answered": true, "cited_entry_ids": [7, 999]}'
+    )
+    passages = [AnswerPassage(entry_id=7, entry_date="2026-03-01", text="t")]
+    result = _answerer(raw=raw).continue_conversation(_history(), passages)
+    assert result.cited_entry_ids == [7]
+
+
+def test_continue_conversation_malformed_raises() -> None:
+    passages = [AnswerPassage(entry_id=7, entry_date="2026-03-01", text="t")]
+    with pytest.raises(AnswerUnavailable):
+        _answerer(raw="not json").continue_conversation(_history(), passages)
+
+
+def test_continue_conversation_api_error_raises() -> None:
+    exc = anthropic.APIError("boom", request=MagicMock(), body=None)
+    passages = [AnswerPassage(entry_id=7, entry_date="2026-03-01", text="t")]
+    with pytest.raises(AnswerUnavailable):
+        _answerer(exc=exc).continue_conversation(_history(), passages)
+
+
+def test_noop_continue_conversation_is_not_answered() -> None:
+    result = NoopAnswerer().continue_conversation(
+        [ConversationTurn(role="user", content="hi")], []
+    )
+    assert result.answered is False
+
+
+def test_continue_conversation_empty_history_returns_no_match() -> None:
+    # Empty history short-circuits to the no-match result without calling
+    # the model — the guard mirrors the one-shot empty-passages guard.
+    answerer = _answerer(raw='{"answer": "x", "answered": true, "cited_entry_ids": []}')
+    result = answerer.continue_conversation([], [])
+    assert result.answered is False
+    assert result.answer == NO_MATCH_MESSAGE
+    assert answerer._client.messages.calls == []  # type: ignore[attr-defined]
