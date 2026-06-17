@@ -29,10 +29,6 @@ log = logging.getLogger(__name__)
 #: Conversation titles are the question text, trimmed.
 _MAX_TITLE_CHARS = 120
 
-#: Length of the citation preview snippet (chars of the entry text).
-#: Mirrors ``services.answer._SNIPPET_CHARS`` — keep the two in sync.
-_SNIPPET_CHARS = 160
-
 
 class ConversationNotFoundError(Exception):  # noqa: N818
     """Raised when a conversation isn't found / not owned by the user.

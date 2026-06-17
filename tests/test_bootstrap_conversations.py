@@ -50,3 +50,21 @@ def test_bootstrap_wires_conversation_service(
         runner = services.get("job_runner")
         if runner is not None:
             runner.shutdown(wait=True, cancel_futures=False)
+
+
+def test_bootstrap_conversation_service_has_router(
+    config, monkeypatch, _mock_chromadb
+) -> None:
+    """The conversation service must be wired with a classifier and all four handlers."""
+    monkeypatch.setattr("journal.mcp_server.bootstrap.load_config", lambda: config)
+
+    services = mcp_module._init_services()
+    try:
+        svc = services.get("conversation")
+        assert svc is not None
+        assert svc._classifier is not None
+        assert set(svc._handlers) >= {"lookup", "aggregate", "temporal", "trend"}
+    finally:
+        runner = services.get("job_runner")
+        if runner is not None:
+            runner.shutdown(wait=True, cancel_futures=False)
