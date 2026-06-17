@@ -247,19 +247,29 @@ paging through results does not re-run the BM25/dense/RRF/rerank pipeline. See `
 - `503 Server not initialized` — service registry is missing,
   typically during a startup race or test setup error.
 
-## Answer synthesis (opt-in)
+## Answer synthesis (auto-classified)
 
 `POST /api/search/answer` synthesizes a short, grounded, cited answer to a
-natural-language question. It is opt-in — the webapp only calls it when the
-user clicks "Answer this", so the per-query LLM cost is never paid on a plain
-search.
+natural-language question. The webapp calls it automatically after every
+search; the endpoint first runs a **cheap query classifier** so the expensive
+answer model only fires for actual questions, not plain keyword searches.
 
 **Body:** `{q: str, start_date?: ISO, end_date?: ISO}` (same bearer auth as
 `/api/search`).
 
-**Flow:** reuse the hybrid search top-`ANSWER_CONTEXT_ENTRIES` (default 8) as
-grounding → ask the answerer (`claude-sonnet-4-6`, adaptive thinking) for a
-strictly-grounded JSON answer → resolve cited ids back to entries.
+**Flow:**
+
+1. **Classify** the query (`ANSWER_CLASSIFIER_MODEL`, default `claude-haiku-4-5`
+   — one ~80-token call, ≈$0.0001) as a QUESTION vs. a keyword SEARCH. On
+   classifier error/unparseable output it falls back to an offline heuristic
+   (`?`-suffix or wh-word opener) so classification never blocks the request.
+2. If it is **not** a question → return `is_question: false`, `answered: false`,
+   empty `answer` immediately. No retrieval, no answer model — a keyword search
+   costs only the classifier call.
+3. If it **is** a question → reuse the hybrid search top-`ANSWER_CONTEXT_ENTRIES`
+   (default 8) as grounding (cache-shared with the preceding `GET /api/search`)
+   → ask the answerer (`claude-sonnet-4-6`, adaptive thinking) for a
+   strictly-grounded JSON answer → resolve cited ids back to entries.
 
 **Grounding contract:** the answerer may only use the supplied passages. If
 they don't cover the question it returns `answered: false` with the fixed
@@ -273,14 +283,19 @@ guesses.
   "question": "when did my back start hurting?",
   "answer": "Your back pain first appears on 2026-02-14 …",
   "answered": true,
+  "is_question": true,
   "citations": [{"entry_id": 42, "entry_date": "2026-02-14", "snippet": "…"}],
   "model": "claude-sonnet-4-6"
 }
 ```
 
-**Config:** `ANSWER_PROVIDER` (`anthropic`|`none`, default `anthropic`),
-`ANSWER_MODEL` (default `claude-sonnet-4-6`), `ANSWER_CONTEXT_ENTRIES`
-(default 8).
+A keyword search returns `{"is_question": false, "answered": false, "answer":
+"", "citations": [], ...}` — the client shows no answer tile.
+
+**Config:** `ANSWER_PROVIDER` (`anthropic`|`none`, default `anthropic`; `none`
+uses the offline heuristic classifier and never synthesizes), `ANSWER_MODEL`
+(default `claude-sonnet-4-6`), `ANSWER_CLASSIFIER_MODEL` (default
+`claude-haiku-4-5`), `ANSWER_CONTEXT_ENTRIES` (default 8).
 
 **Errors:** `400 missing_query`; `502 answer_unavailable` (synthesis failed —
 the client should fall back to the results list); `503` if synthesis is not

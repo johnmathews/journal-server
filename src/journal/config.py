@@ -380,6 +380,14 @@ class Config:
     answer_context_entries: int = field(
         default_factory=lambda: int(os.environ.get("ANSWER_CONTEXT_ENTRIES", "8"))
     )
+    # Cheap model that classifies a query as a question (→ auto-answer)
+    # vs. a plain keyword search (→ results only), so the expensive
+    # answer model only runs for questions.
+    answer_classifier_model: str = field(
+        default_factory=lambda: os.environ.get(
+            "ANSWER_CLASSIFIER_MODEL", "claude-haiku-4-5"
+        )
+    )
 
     # Storylines (docs/storylines-plan.md)
     storyline_narrator_model: str = field(

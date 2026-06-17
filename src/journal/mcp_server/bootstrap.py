@@ -33,6 +33,7 @@ from journal.providers.answerer import build_answerer
 from journal.providers.embeddings import OpenAIEmbeddingsProvider
 from journal.providers.extraction import AnthropicExtractionProvider
 from journal.providers.ocr import build_ocr_provider
+from journal.providers.query_classifier import build_query_classifier
 from journal.providers.reranker import build_reranker
 from journal.providers.transcription import build_transcription_provider
 from journal.services.answer import AnswerService
@@ -298,10 +299,18 @@ def _init_services() -> dict:
         anthropic_api_key=config.anthropic_api_key,
         model=config.answer_model,
     )
+    query_classifier = build_query_classifier(
+        config.answer_provider,
+        anthropic_api_key=config.anthropic_api_key,
+        model=config.answer_classifier_model,
+    )
     log.info(
-        "  Answerer: provider=%s (%s)",
+        "  Answerer: provider=%s (answer=%s, classifier=%s)",
         config.answer_provider,
         config.answer_model if config.answer_provider != "none" else "n/a",
+        config.answer_classifier_model
+        if config.answer_provider != "none"
+        else "heuristic",
     )
     log.info(
         "  Providers: OCR=%s%s (%s), transcription=%s, embeddings=%s, "
@@ -756,6 +765,7 @@ def _init_services() -> dict:
     answer_service = AnswerService(
         query_service,
         answerer,
+        query_classifier,
         model=config.answer_model,
         context_entries=config.answer_context_entries,
     )

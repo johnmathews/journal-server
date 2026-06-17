@@ -1199,6 +1199,7 @@ class TestSearchAnswer:
                     answered=True,
                     citations=[AnswerCitation(42, "2026-02-14", "lower back hurting")],
                     model="claude-sonnet-4-6",
+                    is_question=True,
                 )
 
         services["answer"] = _FakeAnswer()
@@ -1206,6 +1207,7 @@ class TestSearchAnswer:
         assert resp.status_code == 200
         body = resp.json()
         assert body["answered"] is True
+        assert body["is_question"] is True
         assert body["citations"][0]["entry_id"] == 42
         assert body["model"] == "claude-sonnet-4-6"
 
