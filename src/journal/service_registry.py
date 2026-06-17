@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 
 if TYPE_CHECKING:
     from journal.config import Config
+    from journal.db.conversation_repository import SQLiteConversationRepository
     from journal.db.factory import ConnectionFactory
     from journal.db.fitness_repository import FitnessRepository
     from journal.db.jobs_repository import SQLiteJobRepository
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from journal.entitystore.store import SQLiteEntityStore
     from journal.services.answer import AnswerService
     from journal.services.auth import AuthService
+    from journal.services.conversations import ConversationService
     from journal.services.email import EmailService
     from journal.services.entity_extraction import EntityExtractionService
     from journal.services.fitness.garmin_pending import (
@@ -53,6 +55,8 @@ class ServicesDict(TypedDict, total=False):
     ingestion: IngestionService
     query: QueryService
     answer: AnswerService
+    conversation: ConversationService
+    conversation_repository: SQLiteConversationRepository
     entity_store: SQLiteEntityStore
     entity_casing_exceptions: dict[str, str]
     entity_extraction: EntityExtractionService
