@@ -93,11 +93,8 @@ def _make_client(
     }
     svc = ConversationService(
         repository=repo,
-        query_service=fake_query,
-        answerer=answerer,
         classifier=HeuristicIntentClassifier(),
         handlers=handlers,
-        model="claude-sonnet-4-6",
     )
     services: dict[str, Any] = {"conversation": svc}
     mcp = FastMCP("test-conversations")

@@ -792,11 +792,8 @@ def _init_services() -> dict:
     }
     conversation_service = ConversationService(
         repository=conversation_repository,
-        query_service=query_service,
-        answerer=answerer,
         classifier=intent_classifier,
         handlers=conversation_handlers,
-        model=config.answer_model,
     )
     _services = {
         "ingestion": ingestion_service,

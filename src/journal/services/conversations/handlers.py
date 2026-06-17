@@ -189,6 +189,8 @@ class TemporalHandler:
             user_id=user_id,
             sort="date_asc",
         )
+        # Bypass adaptive selection: keep all date-ordered results (the
+        # earliest evidencing entry must survive), windowed in place.
         passages = [
             AnswerPassage(
                 entry_id=r.entry_id,

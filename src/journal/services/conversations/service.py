@@ -20,9 +20,7 @@ from journal.providers.answerer import AnswerUnavailable, ConversationTurn
 if TYPE_CHECKING:
     from journal.db.conversation_repository import SQLiteConversationRepository
     from journal.models import Conversation, ConversationMessage
-    from journal.providers.answerer import Answerer
     from journal.providers.intent_classifier import IntentClassifier
-    from journal.services.query import QueryService
 
 log = logging.getLogger(__name__)
 
@@ -42,18 +40,12 @@ class ConversationService:
         self,
         *,
         repository: SQLiteConversationRepository,
-        query_service: QueryService,
-        answerer: Answerer,
         classifier: IntentClassifier,
         handlers: dict[str, object],
-        model: str,
     ) -> None:
         self._repo = repository
-        self._query = query_service
-        self._answerer = answerer
         self._classifier = classifier
         self._handlers = handlers
-        self._model = model
 
     def start(
         self,

@@ -93,11 +93,8 @@ def _service(repo, query, answerer, **kw) -> ConversationService:
     }
     return ConversationService(
         repository=repo,
-        query_service=query,
-        answerer=answerer,
         classifier=classifier,
         handlers=handlers,
-        model=kw.pop("model", "claude-sonnet-4-6"),
     )
 
 
@@ -126,7 +123,7 @@ def test_reply_combines_query_and_persists_both_turns(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     query = _FakeQuery([_result(7, "2026-03-01", "Back better now.")])
     answerer = _FakeAnswerer(AnswerResult("Around 2026-03-01.", True, [7]))
-    svc = _service(repo, query, answerer, context_entries=8)
+    svc = _service(repo, query, answerer)
     cid = _seed(svc)
 
     msg = svc.reply(USER_A, cid, "and when did it get better?")
