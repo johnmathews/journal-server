@@ -1,7 +1,7 @@
 # Conversations Retrieval Robustness — Design
 
 **Date:** 2026-06-17
-**Status:** draft (design approved, spec under review)
+**Status:** implemented 2026-06-18.
 **Scope:** `server/` — conversation/chat reply path and its retrieval.
 
 ## Problem
