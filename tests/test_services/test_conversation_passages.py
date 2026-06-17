@@ -6,7 +6,12 @@ from journal.models import ChunkMatch, SearchResult
 from journal.services.conversations.passages import window_passage
 
 
-def _result(text: str, *, chunks=None, snippet=None) -> SearchResult:
+def _result(
+    text: str,
+    *,
+    chunks: list[ChunkMatch] | None = None,
+    snippet: str | None = None,
+) -> SearchResult:
     return SearchResult(
         entry_id=1, entry_date="2026-01-01", text=text, score=1.0,
         matching_chunks=chunks or [], snippet=snippet,
@@ -20,6 +25,8 @@ def test_window_centers_on_matching_chunk() -> None:
     out = window_passage(_result(text, chunks=[chunk]), max_chars=100)
     assert "TARGET" in out
     assert len(out) <= 100
+    idx = out.index("TARGET")
+    assert 35 <= idx <= 65  # TARGET sits near the center of the window, not the head
 
 
 def test_window_falls_back_to_head_when_no_offsets() -> None:
