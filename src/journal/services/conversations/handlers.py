@@ -12,13 +12,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from journal.providers.answerer import AnswerPassage
 from journal.services.conversations.passages import (
     build_citations,
     select_passages,
 )
 
 if TYPE_CHECKING:
-    from journal.providers.answerer import Answerer, AnswerPassage, ConversationTurn  # noqa: F401
+    from journal.providers.answerer import Answerer, ConversationTurn
     from journal.providers.intent_classifier import IntentResult
     from journal.services.query import QueryService
 
@@ -87,6 +88,67 @@ class LookupHandler:
 
         result = self._answerer.continue_conversation(
             history, passages, retrieve=_retrieve
+        )
+        return ReplyOutcome(
+            answer=result.answer,
+            answered=result.answered,
+            citations=build_citations(
+                result.cited_entry_ids, by_id, snippet_chars=_SNIPPET_CHARS
+            ),
+        )
+
+
+def _entry_text(entry: object) -> str:
+    return getattr(entry, "final_text", None) or getattr(entry, "raw_text", None) or ""
+
+
+class AggregateHandler:
+    """Count/frequency questions — answer leads with the number."""
+
+    def __init__(
+        self,
+        query_service: QueryService,
+        answerer: Answerer,
+        *,
+        passage_chars: int = 800,
+    ) -> None:
+        self._query = query_service
+        self._answerer = answerer
+        self._passage_chars = passage_chars
+
+    def handle(
+        self,
+        history: list[ConversationTurn],
+        intent: IntentResult,
+        user_id: int,
+    ) -> ReplyOutcome:
+        topic = intent.topic or intent.search_query
+        freq = self._query.get_topic_frequency(
+            topic,
+            start_date=intent.start_date,
+            end_date=intent.end_date,
+            user_id=user_id,
+        )
+        note = (
+            f"The phrase/topic '{freq.topic}' appears in {freq.count} "
+            f"journal entries"
+            + (
+                f" between {intent.start_date} and {intent.end_date}."
+                if intent.start_date and intent.end_date
+                else "."
+            )
+        )
+        passages = [
+            AnswerPassage(
+                entry_id=e.id,
+                entry_date=e.entry_date,
+                text=_entry_text(e)[: self._passage_chars],
+            )
+            for e in freq.entries
+        ]
+        by_id = {e.id: (e.entry_date, _entry_text(e)) for e in freq.entries}
+        result = self._answerer.continue_conversation(
+            history, passages, context_note=note
         )
         return ReplyOutcome(
             answer=result.answer,

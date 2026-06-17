@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from journal.models import SearchResult
+from journal.models import Entry, SearchResult, TopicFrequency
 from journal.providers.answerer import AnswerResult, ConversationTurn
 from journal.providers.intent_classifier import IntentResult
 from journal.services.conversations.handlers import (
+    AggregateHandler,
     LookupHandler,
     ReplyOutcome,
 )
@@ -70,3 +71,21 @@ def test_lookup_handler_passes_retrieve_and_resolves_citations() -> None:
     # retrieval used the condensed search_query, larger candidate pool
     assert query.calls[0][1]["query"] == "back pain better"
     assert query.calls[0][1]["limit"] >= 15
+
+
+def test_aggregate_handler_injects_count_note_and_cites_entries() -> None:
+    entries = [Entry(id=7, entry_date="2026-02-14", source_type="text",
+                     raw_text="my back hurt", final_text="my back hurt")]
+    tf = TopicFrequency(topic="back", count=40, entries=entries)
+    query = _Query(get_topic_frequency=tf)
+    answerer = _Answerer(AnswerResult("You mentioned it 40 times.", True, [7]))
+    handler = AggregateHandler(query, answerer, passage_chars=800)
+    intent = IntentResult(intent="aggregate", search_query="back",
+                          topic="back")
+
+    out = handler.handle(_history(), intent, user_id=1)
+
+    assert query.calls[0][0] == "get_topic_frequency"
+    assert "40" in answerer.last_kwargs["context_note"]
+    assert out.citations[0]["entry_id"] == 7
+    assert out.answer == "You mentioned it 40 times."
