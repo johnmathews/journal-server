@@ -1,25 +1,30 @@
 """Conversation service — start a thread from a Search answer, then chat.
 
 A conversation is seeded from an answer the user already has (no second
-synthesis call). Each ``reply`` re-grounds: it re-retrieves passages with
-the combined ``original_question + "\\n" + follow-up`` query so new
-specifics pull the right entries, hands the full thread to the multi-turn
-answerer, and persists the user + assistant turns only after the LLM
-succeeds — a failed reply leaves the thread consistent.
+synthesis call). Each ``reply`` classifies the message into an intent,
+dispatches to the matching handler, and falls back to the ``lookup``
+handler on any non-``AnswerUnavailable`` error so a routing bug never
+breaks chat. Both user and assistant turns are persisted only after the
+handler succeeds — a failed reply leaves the thread consistent.
 """
 
 from __future__ import annotations
 
+import logging
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from journal.db.conversation_repository import ConversationNotFound
-from journal.providers.answerer import AnswerPassage, ConversationTurn
+from journal.providers.answerer import AnswerUnavailable, ConversationTurn
 
 if TYPE_CHECKING:
     from journal.db.conversation_repository import SQLiteConversationRepository
     from journal.models import Conversation, ConversationMessage
     from journal.providers.answerer import Answerer
+    from journal.providers.intent_classifier import IntentClassifier
     from journal.services.query import QueryService
+
+log = logging.getLogger(__name__)
 
 #: Conversation titles are the question text, trimmed.
 _MAX_TITLE_CHARS = 120
@@ -43,16 +48,16 @@ class ConversationService:
         repository: SQLiteConversationRepository,
         query_service: QueryService,
         answerer: Answerer,
+        classifier: IntentClassifier,
+        handlers: dict[str, object],
         model: str,
-        context_entries: int = 8,
-        passage_chars: int = 800,
     ) -> None:
         self._repo = repository
         self._query = query_service
         self._answerer = answerer
+        self._classifier = classifier
+        self._handlers = handlers
         self._model = model
-        self._context_entries = context_entries
-        self._passage_chars = passage_chars
 
     def start(
         self,
@@ -80,40 +85,14 @@ class ConversationService:
                 f"conversation {conversation_id} not found"
             )
 
-        original_question = conv.messages[0].content if conv.messages else message
-        results = self._query.search_entries(
-            query=f"{original_question}\n{message}",
-            limit=self._context_entries,
-            offset=0,
-            user_id=user_id,
-        )
-
         history = [
             ConversationTurn(role=m.role, content=m.content) for m in conv.messages
         ]
         history.append(ConversationTurn(role="user", content=message))
+        context = "\n".join(f"{m.role}: {m.content}" for m in conv.messages)
 
-        passages = [
-            AnswerPassage(
-                entry_id=r.entry_id,
-                entry_date=r.entry_date,
-                text=r.text[: self._passage_chars],
-            )
-            for r in results
-        ]
-        # Propagates AnswerUnavailable; nothing is persisted on failure.
-        result = self._answerer.continue_conversation(history, passages)
-
-        by_id = {r.entry_id: r for r in results}
-        citations = [
-            {
-                "entry_id": eid,
-                "entry_date": by_id[eid].entry_date,
-                "snippet": by_id[eid].text[:_SNIPPET_CHARS].strip(),
-            }
-            for eid in result.cited_entry_ids
-            if eid in by_id
-        ]
+        intent = self._classifier.classify(message, context=context)
+        outcome = self._dispatch(intent, history, user_id)
 
         try:
             added = self._repo.add_messages(
@@ -123,15 +102,34 @@ class ConversationService:
                     {"role": "user", "content": message, "citations": []},
                     {
                         "role": "assistant",
-                        "content": result.answer,
-                        "citations": citations,
+                        "content": outcome.answer,
+                        "citations": outcome.citations,
                     },
                 ],
             )
         except ConversationNotFound as e:  # raced delete between get and add
             raise ConversationNotFoundError(str(e)) from e
+        return added[-1]
 
-        return added[-1]  # the assistant turn
+    def _dispatch(self, intent, history, user_id):
+        """Route to the intent's handler; fall back to lookup on any error.
+
+        AnswerUnavailable propagates (the caller maps it to 502 and
+        persists nothing); every other handler error degrades to the
+        lookup path so a routing bug never breaks chat.
+        """
+        handler = self._handlers.get(intent.intent) or self._handlers["lookup"]
+        try:
+            return handler.handle(history, intent, user_id)
+        except AnswerUnavailable:
+            raise
+        except Exception as e:  # noqa: BLE001 — deliberate degrade-to-lookup
+            log.warning(
+                "handler %r failed (%s); falling back to lookup",
+                intent.intent, e,
+            )
+            lookup_intent = replace(intent, intent="lookup")
+            return self._handlers["lookup"].handle(history, lookup_intent, user_id)
 
     def list(self, user_id: int) -> list[Conversation]:
         return self._repo.list(user_id)

@@ -18,6 +18,7 @@ from journal.providers.answerer import (
     AnswerUnavailable,
     ConversationTurn,
 )
+from journal.providers.intent_classifier import IntentResult
 from journal.services.conversations import (
     ConversationNotFoundError,
     ConversationService,
@@ -55,21 +56,48 @@ class _FakeAnswerer:
         self._exc = exc
         self.history: list[ConversationTurn] | None = None
 
-    def continue_conversation(self, history, passages):
+    def continue_conversation(self, history, passages, *, context_note=None, retrieve=None):
         self.history = history
         if self._exc is not None:
             raise self._exc
         return self._result
 
 
+class _FakeClassifier:
+    def __init__(self, result: IntentResult):
+        self._result = result
+        self.seen: list[str] = []
+
+    def classify(self, question, context=None):
+        self.seen.append(question)
+        return self._result
+
+
+class _RecordingHandler:
+    def __init__(self, outcome):
+        self._outcome = outcome
+        self.called = False
+
+    def handle(self, history, intent, user_id):
+        self.called = True
+        return self._outcome
+
+
 def _service(repo, query, answerer, **kw) -> ConversationService:
+    from journal.providers.intent_classifier import HeuristicIntentClassifier
+    from journal.services.conversations.handlers import LookupHandler
+
+    classifier = kw.pop("classifier", HeuristicIntentClassifier())
+    handlers = kw.pop("handlers", None) or {
+        "lookup": LookupHandler(query, answerer, passage_chars=800),
+    }
     return ConversationService(
         repository=repo,
         query_service=query,
         answerer=answerer,
+        classifier=classifier,
+        handlers=handlers,
         model=kw.pop("model", "claude-sonnet-4-6"),
-        context_entries=kw.pop("context_entries", 8),
-        passage_chars=kw.pop("passage_chars", 800),
     )
 
 
@@ -103,11 +131,9 @@ def test_reply_combines_query_and_persists_both_turns(tmp_path: Path) -> None:
 
     msg = svc.reply(USER_A, cid, "and when did it get better?")
 
-    # combined query = original question + "\n" + follow-up
-    assert query.calls[0]["query"] == (
-        "when did my back hurt?\nand when did it get better?"
-    )
-    assert query.calls[0]["limit"] == 8
+    # heuristic classifier sets search_query to just the follow-up message
+    assert query.calls[0]["query"] == "and when did it get better?"
+    assert query.calls[0]["limit"] == 20
     assert query.calls[0]["user_id"] == USER_A
     # history passed to answerer ends with the new user turn
     assert answerer.history[-1].role == "user"
@@ -150,3 +176,48 @@ def test_reply_missing_conversation_raises_not_found(tmp_path: Path) -> None:
     svc = _service(repo, _FakeQuery([]), _FakeAnswerer())
     with pytest.raises(ConversationNotFoundError):
         svc.reply(USER_A, 99999, "hello?")
+
+
+def test_reply_routes_to_handler_for_classified_intent(tmp_path: Path) -> None:
+    from journal.services.conversations.handlers import ReplyOutcome
+
+    repo = _repo(tmp_path)
+    classifier = _FakeClassifier(IntentResult(intent="aggregate", search_query="back"))
+    handler = _RecordingHandler(
+        ReplyOutcome(answer="42 times.", answered=True,
+                     citations=[{"entry_id": 7, "entry_date": "2026-02-14",
+                                 "snippet": "back"}])
+    )
+    svc = _service(repo, _FakeQuery([]), _FakeAnswerer(),
+                   classifier=classifier, handlers={"aggregate": handler})
+    cid = _seed(svc)
+
+    msg = svc.reply(USER_A, cid, "how many times did I mention my back?")
+
+    assert handler.called
+    assert msg.content == "42 times."
+    assert msg.citations[0]["entry_id"] == 7
+
+
+def test_reply_falls_back_to_lookup_when_handler_errors(tmp_path: Path) -> None:
+    from journal.services.conversations.handlers import ReplyOutcome
+
+    repo = _repo(tmp_path)
+    classifier = _FakeClassifier(IntentResult(intent="aggregate", search_query="back"))
+
+    class _Boom:
+        def handle(self, history, intent, user_id):
+            raise RuntimeError("aggregate path broke")
+
+    lookup = _RecordingHandler(
+        ReplyOutcome(answer="fallback answer", answered=True, citations=[])
+    )
+    svc = _service(repo, _FakeQuery([]), _FakeAnswerer(),
+                   classifier=classifier,
+                   handlers={"aggregate": _Boom(), "lookup": lookup})
+    cid = _seed(svc)
+
+    msg = svc.reply(USER_A, cid, "how many times?")
+
+    assert lookup.called  # degraded to lookup, did not raise
+    assert msg.content == "fallback answer"
