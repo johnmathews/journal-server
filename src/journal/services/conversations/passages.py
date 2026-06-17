@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from journal.providers.answerer import AnswerPassage
+
 if TYPE_CHECKING:
     from journal.models import SearchResult
 
@@ -53,3 +55,36 @@ def _match_center(result: SearchResult, text: str) -> int | None:
             if pos >= 0:
                 return pos + len(term) // 2
     return None
+
+
+def select_passages(
+    results: list[SearchResult],
+    *,
+    max_chars: int,
+    floor: int = 3,
+    ceiling: int = 15,
+    band: float = 0.5,
+) -> list[AnswerPassage]:
+    """Pick an adaptive number of passages from ranked `results`.
+
+    `results` must be ordered by rerank score descending. Keeps every
+    result whose score is within `band` (relative to the top score) of
+    the top, then clamps the count to `[floor, ceiling]`. Each kept
+    result is truncated with `window_passage`.
+    """
+    if not results:
+        return []
+    top = results[0].score
+    cutoff = top * (1.0 - band) if top > 0 else 0.0
+    kept = [r for r in results if r.score >= cutoff]
+    n = max(floor, min(len(kept), ceiling))
+    n = min(n, len(results))
+    chosen = results[:n]
+    return [
+        AnswerPassage(
+            entry_id=r.entry_id,
+            entry_date=r.entry_date,
+            text=window_passage(r, max_chars),
+        )
+        for r in chosen
+    ]
