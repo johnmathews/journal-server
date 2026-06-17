@@ -88,3 +88,30 @@ def select_passages(
         )
         for r in chosen
     ]
+
+
+def build_citations(
+    cited_entry_ids: list[int],
+    by_id: dict[int, tuple[str, str]],
+    *,
+    snippet_chars: int = 160,
+) -> list[dict]:
+    """Resolve cited entry ids to citation dicts, dropping unknown ids.
+
+    `by_id` maps entry_id -> (entry_date, text). Preserves the order of
+    `cited_entry_ids`. Mirrors the citation shape the conversation repo
+    persists.
+    """
+    out: list[dict] = []
+    for eid in cited_entry_ids:
+        if eid not in by_id:
+            continue
+        date, text = by_id[eid]
+        out.append(
+            {
+                "entry_id": eid,
+                "entry_date": date,
+                "snippet": text[:snippet_chars].strip(),
+            }
+        )
+    return out

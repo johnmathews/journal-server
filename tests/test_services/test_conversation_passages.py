@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from journal.models import ChunkMatch, SearchResult
-from journal.services.conversations.passages import window_passage
+from journal.providers.answerer import AnswerPassage
+from journal.services.conversations.passages import (
+    build_citations,
+    select_passages,
+    window_passage,
+)
 
 
 def _result(
@@ -40,10 +45,6 @@ def test_window_returns_short_text_unchanged() -> None:
     assert out == "short"
 
 
-from journal.providers.answerer import AnswerPassage  # noqa: E402
-from journal.services.conversations.passages import select_passages  # noqa: E402
-
-
 def _scored(entry_id: int, score: float) -> SearchResult:
     return SearchResult(
         entry_id=entry_id, entry_date="2026-01-01", text="t" * 50,
@@ -70,3 +71,12 @@ def test_select_returns_answer_passages_with_windowed_text() -> None:
     assert isinstance(out[0], AnswerPassage)
     assert out[0].entry_id == 1
     assert len(out[0].text) <= 10
+
+
+def test_build_citations_resolves_known_ids_and_drops_unknown() -> None:
+    by_id = {7: ("2026-03-01", "Back better now, much less pain today.")}
+    cites = build_citations([7, 999], by_id, snippet_chars=10)
+    assert len(cites) == 1
+    assert cites[0]["entry_id"] == 7
+    assert cites[0]["entry_date"] == "2026-03-01"
+    assert cites[0]["snippet"] == "Back bette"
