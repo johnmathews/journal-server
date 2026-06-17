@@ -16,6 +16,7 @@ from journal.providers.answerer import AnswerPassage
 from journal.services.conversations.passages import (
     build_citations,
     select_passages,
+    window_passage,
 )
 
 if TYPE_CHECKING:
@@ -150,6 +151,54 @@ class AggregateHandler:
         result = self._answerer.continue_conversation(
             history, passages, context_note=note
         )
+        return ReplyOutcome(
+            answer=result.answer,
+            answered=result.answered,
+            citations=build_citations(
+                result.cited_entry_ids, by_id, snippet_chars=_SNIPPET_CHARS
+            ),
+        )
+
+
+class TemporalHandler:
+    """When-did-X questions — retrieve date-ascending so the earliest wins."""
+
+    def __init__(
+        self,
+        query_service: QueryService,
+        answerer: Answerer,
+        *,
+        passage_chars: int = 800,
+    ) -> None:
+        self._query = query_service
+        self._answerer = answerer
+        self._passage_chars = passage_chars
+
+    def handle(
+        self,
+        history: list[ConversationTurn],
+        intent: IntentResult,
+        user_id: int,
+    ) -> ReplyOutcome:
+        results = self._query.search_entries(
+            query=intent.search_query,
+            start_date=intent.start_date,
+            end_date=intent.end_date,
+            limit=_PASSAGE_CEILING,
+            offset=0,
+            user_id=user_id,
+            sort="date_asc",
+        )
+        passages = [
+            AnswerPassage(
+                entry_id=r.entry_id,
+                entry_date=r.entry_date,
+                text=window_passage(r, self._passage_chars),
+            )
+            for r in results
+        ]
+        by_id = {r.entry_id: (r.entry_date, r.text) for r in results}
+        result = self._answerer.continue_conversation(history, passages)
         return ReplyOutcome(
             answer=result.answer,
             answered=result.answered,

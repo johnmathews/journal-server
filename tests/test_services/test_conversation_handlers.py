@@ -9,6 +9,7 @@ from journal.services.conversations.handlers import (
     AggregateHandler,
     LookupHandler,
     ReplyOutcome,
+    TemporalHandler,
 )
 
 
@@ -89,3 +90,17 @@ def test_aggregate_handler_injects_count_note_and_cites_entries() -> None:
     assert "40" in answerer.last_kwargs["context_note"]
     assert out.citations[0]["entry_id"] == 7
     assert out.answer == "You mentioned it 40 times."
+
+
+def test_temporal_handler_sorts_ascending_and_cites() -> None:
+    query = _Query(search_entries=[_sr(7, "First back pain.")])
+    answerer = _Answerer(AnswerResult("It started 2026-03-01.", True, [7]))
+    handler = TemporalHandler(query, answerer, passage_chars=800)
+    intent = IntentResult(intent="temporal", search_query="back pain start")
+
+    out = handler.handle(_history(), intent, user_id=1)
+
+    # date_asc guarantees the earliest evidencing entry is present
+    assert query.calls[0][1]["sort"] == "date_asc"
+    assert out.citations[0]["entry_id"] == 7
+    assert out.answer == "It started 2026-03-01."
