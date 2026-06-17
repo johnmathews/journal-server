@@ -635,6 +635,30 @@ class FitnessActivity:
 
 
 @dataclass
+class ConversationMessage:
+    """One turn in a conversation about a journal answer."""
+
+    id: int
+    role: str               # "user" | "assistant"
+    content: str
+    citations: list[dict]   # [{entry_id, entry_date, snippet}]; [] for user turns
+    created_at: str
+
+
+@dataclass
+class Conversation:
+    """A persisted chat thread, seeded from a Search answer."""
+
+    id: int
+    user_id: int
+    title: str
+    created_at: str
+    updated_at: str
+    messages: list[ConversationMessage] = field(default_factory=list)
+    message_count: int = 0
+
+
+@dataclass
 class FitnessDaily:
     """One daily rollup row (recovery + training-state metrics)."""
 

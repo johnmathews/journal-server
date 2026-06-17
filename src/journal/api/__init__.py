@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 # helpers directly from the old single-file api module. New code should import
 # from journal.api._shared instead.
 from journal.api._shared import _convert_heic_to_jpeg, _runtime_get
+from journal.api.conversations import register_conversations_routes
 from journal.api.dashboard import register_dashboard_routes
 from journal.api.entities import register_entities_routes
 from journal.api.entity_merge import register_entity_merge_routes
@@ -65,6 +66,7 @@ def register_api_routes(
     register_health_routes(mcp, services_getter)
     register_dashboard_routes(mcp, services_getter)
     register_search_routes(mcp, services_getter)
+    register_conversations_routes(mcp, services_getter)
     register_jobs_routes(mcp, services_getter)
     register_entities_routes(mcp, services_getter)
     register_entity_merge_routes(mcp, services_getter)

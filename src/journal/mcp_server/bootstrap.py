@@ -23,6 +23,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from journal.config import load_config
+from journal.db.conversation_repository import SQLiteConversationRepository
 from journal.db.factory import ConnectionFactory
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
@@ -39,6 +40,7 @@ from journal.providers.transcription import build_transcription_provider
 from journal.services.answer import AnswerService
 from journal.services.backfill import backfill_mood_scores
 from journal.services.chunking import build_chunker
+from journal.services.conversations import ConversationService
 from journal.services.entity_extraction import EntityExtractionService
 from journal.services.hybrid import HybridConfig
 from journal.services.ingestion import IngestionService
@@ -769,10 +771,20 @@ def _init_services() -> dict:
         model=config.answer_model,
         context_entries=config.answer_context_entries,
     )
+    conversation_repository = SQLiteConversationRepository(db_factory)
+    conversation_service = ConversationService(
+        repository=conversation_repository,
+        query_service=query_service,
+        answerer=answerer,
+        model=config.answer_model,
+        context_entries=config.answer_context_entries,
+    )
     _services = {
         "ingestion": ingestion_service,
         "query": query_service,
         "answer": answer_service,
+        "conversation": conversation_service,
+        "conversation_repository": conversation_repository,
         "entity_store": entity_store,
         "entity_casing_exceptions": entity_casing_exceptions,
         "entity_extraction": entity_extraction_service,
