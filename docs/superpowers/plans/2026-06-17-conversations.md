@@ -11,7 +11,7 @@
 **Source spec:** `server/docs/superpowers/specs/2026-06-17-conversations-design.md`.
 
 **Verified facts (do not re-derive):**
-- Latest migration is `0029_fitness_activity_type_add_row.sql` → new file is `0030`.
+- Latest migration on the branch is `0031_storyline_chapter_sectioning.sql` → new file is `0032_conversations.sql`. (An earlier date-sorted `ls` masked the `0030`/`0031` storyline-chapter migrations already present on `feat/conversations`; corrected during Task 1.)
 - `users` primary key column is `id` (see `db/migrations/0011_multi_tenant.sql`).
 - `PRAGMA foreign_keys=ON` is set in `db/connection.py:44`, so `ON DELETE CASCADE` fires.
 - Answer config already exists: `config.answer_model` (`ANSWER_MODEL`, default `claude-sonnet-4-6`), `config.answer_context_entries` (`ANSWER_CONTEXT_ENTRIES`, default `8`). No new env vars.
