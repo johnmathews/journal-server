@@ -206,3 +206,65 @@ class TemporalHandler:
                 result.cited_entry_ids, by_id, snippet_chars=_SNIPPET_CHARS
             ),
         )
+
+
+class TrendHandler:
+    """Change-over-time / mood questions — summarize the series as a note."""
+
+    def __init__(
+        self,
+        query_service: QueryService,
+        answerer: Answerer,
+        *,
+        passage_chars: int = 800,
+    ) -> None:
+        self._query = query_service
+        self._answerer = answerer
+        self._passage_chars = passage_chars
+
+    def handle(
+        self,
+        history: list[ConversationTurn],
+        intent: IntentResult,
+        user_id: int,
+    ) -> ReplyOutcome:
+        trends = self._query.get_mood_trends(
+            start_date=intent.start_date,
+            end_date=intent.end_date,
+            user_id=user_id,
+        )
+        relevant = (
+            [t for t in trends if t.dimension == intent.dimension]
+            if intent.dimension
+            else trends
+        )
+        series = ", ".join(f"{t.period}={t.avg_score:.2f}" for t in relevant)
+        note = (
+            f"Mood trend for '{intent.dimension or 'overall'}' "
+            f"(period=avg_score): {series}."
+            if series
+            else "No mood-trend data is available for this period."
+        )
+        results = self._query.search_entries(
+            query=intent.search_query,
+            limit=_PASSAGE_FLOOR,
+            offset=0,
+            user_id=user_id,
+        )
+        passages = select_passages(
+            results,
+            max_chars=self._passage_chars,
+            floor=_PASSAGE_FLOOR,
+            ceiling=_PASSAGE_FLOOR,
+        )
+        by_id = {r.entry_id: (r.entry_date, r.text) for r in results}
+        result = self._answerer.continue_conversation(
+            history, passages, context_note=note
+        )
+        return ReplyOutcome(
+            answer=result.answer,
+            answered=result.answered,
+            citations=build_citations(
+                result.cited_entry_ids, by_id, snippet_chars=_SNIPPET_CHARS
+            ),
+        )

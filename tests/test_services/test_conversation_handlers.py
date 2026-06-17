@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from journal.models import Entry, SearchResult, TopicFrequency
+from journal.models import Entry, MoodTrend, SearchResult, TopicFrequency
 from journal.providers.answerer import AnswerResult, ConversationTurn
 from journal.providers.intent_classifier import IntentResult
 from journal.services.conversations.handlers import (
@@ -10,6 +10,7 @@ from journal.services.conversations.handlers import (
     LookupHandler,
     ReplyOutcome,
     TemporalHandler,
+    TrendHandler,
 )
 
 
@@ -104,3 +105,25 @@ def test_temporal_handler_sorts_ascending_and_cites() -> None:
     assert query.calls[0][1]["sort"] == "date_asc"
     assert out.citations[0]["entry_id"] == 7
     assert out.answer == "It started 2026-03-01."
+
+
+def test_trend_handler_summarizes_series_into_note() -> None:
+    trends = [
+        MoodTrend(period="2026-W01", dimension="happiness", avg_score=0.3,
+                  entry_count=4),
+        MoodTrend(period="2026-W20", dimension="happiness", avg_score=0.7,
+                  entry_count=5),
+    ]
+    query = _Query(get_mood_trends=trends,
+                   search_entries=[_sr(7, "Felt great.")])
+    answerer = _Answerer(AnswerResult("You've trended happier.", True, [7]))
+    handler = TrendHandler(query, answerer, passage_chars=800)
+    intent = IntentResult(intent="trend", search_query="happiness over time",
+                          dimension="happiness")
+
+    out = handler.handle(_history(), intent, user_id=1)
+
+    assert query.calls[0][0] == "get_mood_trends"
+    assert "happiness" in answerer.last_kwargs["context_note"]
+    assert "0.3" in answerer.last_kwargs["context_note"]
+    assert out.answer == "You've trended happier."
