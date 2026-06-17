@@ -300,3 +300,6 @@ uses the offline heuristic classifier and never synthesizes), `ANSWER_MODEL`
 **Errors:** `400 missing_query`; `502 answer_unavailable` (synthesis failed —
 the client should fall back to the results list); `503` if synthesis is not
 wired.
+
+To continue chatting about an answer across follow-up questions, see
+[conversations.md](conversations.md).
