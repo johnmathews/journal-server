@@ -173,3 +173,29 @@ def test_continue_conversation_empty_history_returns_no_match() -> None:
     assert result.answered is False
     assert result.answer == NO_MATCH_MESSAGE
     assert answerer._client.messages.calls == []  # type: ignore[attr-defined]
+
+
+def test_context_note_is_prepended_to_last_user_turn(monkeypatch) -> None:
+    captured = {}
+
+    class _Block:
+        text = '{"answer": "ok", "answered": true, "cited_entry_ids": [1]}'
+
+    class _Resp:
+        content = [_Block()]
+
+    a = AnthropicAnswerer(api_key="x")
+
+    def _fake_create(**kwargs):
+        captured.update(kwargs)
+        return _Resp()
+
+    monkeypatch.setattr(a._client.messages, "create", _fake_create)
+
+    history = [ConversationTurn(role="user", content="how many times?")]
+    passages = [AnswerPassage(entry_id=1, entry_date="2026-01-01", text="back")]
+    a.continue_conversation(history, passages, context_note="Computed: 40 entries.")
+
+    last_user = captured["messages"][-1]["content"]
+    assert "Computed: 40 entries." in last_user
+    assert "back" in last_user  # passages still present

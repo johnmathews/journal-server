@@ -83,6 +83,8 @@ class Answerer(Protocol):
         self,
         history: list[ConversationTurn],
         passages: list[AnswerPassage],
+        *,
+        context_note: str | None = None,
     ) -> AnswerResult: ...
 
 
@@ -106,6 +108,8 @@ class NoopAnswerer:
         self,
         history: list[ConversationTurn],
         passages: list[AnswerPassage],
+        *,
+        context_note: str | None = None,
     ) -> AnswerResult:
         return AnswerResult(
             answer="Answer synthesis is disabled.",
@@ -270,18 +274,19 @@ class AnthropicAnswerer:
         self,
         history: list[ConversationTurn],
         passages: list[AnswerPassage],
+        *,
+        context_note: str | None = None,
     ) -> AnswerResult:
         if not history:
             return AnswerResult(answer=NO_MATCH_MESSAGE, answered=False)
 
         messages = [{"role": t.role, "content": t.content} for t in history]
-        # Append the freshly-retrieved passages to the final user turn so
-        # the model grounds the latest message against them.
+        note_block = f"Computed facts: {context_note}\n\n" if context_note else ""
         passage_block = "\n".join(
             [*self._passage_lines(passages), "", "Output the JSON object now."]
         )
         messages[-1]["content"] = (
-            f"{messages[-1]['content']}\n\n{passage_block}"
+            f"{messages[-1]['content']}\n\n{note_block}{passage_block}"
         )
         try:
             response = self._client.messages.create(
