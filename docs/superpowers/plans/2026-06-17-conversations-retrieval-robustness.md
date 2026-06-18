@@ -1,5 +1,7 @@
 # Conversations Retrieval Robustness — Implementation Plan
 
+**Status:** implemented 2026-06-18 — all 14 tasks shipped and merged to `main`. See the [design spec](../specs/2026-06-17-conversations-retrieval-robustness-design.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the `/conversations` reply path answer aggregate, temporal, and trend questions correctly (not from an 8-entry sample) while keeping today's strong lookup retrieval, strict grounding, and bounded cost.

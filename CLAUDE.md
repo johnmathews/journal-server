@@ -20,7 +20,7 @@ src/journal/
     connection.py       — get_connection() with PRAGMAs (same-thread guard on)
     factory.py          — ConnectionFactory: per-thread SQLite connections
     migrations.py       — Migration runner (PRAGMA user_version)
-    migrations/*.sql    — SQL migration files (currently 0001 → 0029)
+    migrations/*.sql    — SQL migration files (currently 0001 → 0032)
     repository/         — SQLiteEntryRepository carved into protocol/store/core/
                           pages/chunks/search/mood/stats/analytics
     fitness_repository.py    — Fitness activities / daily wellness / auth state
@@ -37,6 +37,11 @@ src/journal/
     mood_scorer.py      — Mood scoring (Anthropic tool-use)
     formatter.py        — Transcript paragraph-break formatter (Anthropic Haiku)
     reranker.py         — Listwise reranker (Anthropic Haiku) for hybrid search
+    answerer.py         — Grounded answer synthesis + multi-turn continue_conversation
+                          (Sonnet; optional context_note + one-hop search_again tool)
+    query_classifier.py — Binary question/search gate for the answer endpoint (Haiku)
+    intent_classifier.py — Four-way conversation intent classifier
+                          (lookup/aggregate/temporal/trend, Haiku) + heuristic fallback
   vectorstore/
     store.py            — VectorStore Protocol + ChromaDB implementation
   entitystore/          — Entity persistence carved into store/mentions/relationships/aliases
@@ -45,6 +50,8 @@ src/journal/
     query.py            — Query routing (semantic + FTS5 + stats)
     chunking.py         — Text chunking with tiktoken
     hybrid.py           — Hybrid BM25 + dense + RRF + listwise rerank pipeline
+    conversations/      — Multi-turn chat reply: intent classify → per-intent
+                          handlers (lookup/aggregate/temporal/trend) + passages
     entity_extraction/  — Entity extraction service (orchestrator + helpers)
     fitness/            — Strava/Garmin fetch, normalize, backfill + activity-type map
     storylines/         — Storyline generation service, extension classifier, segments

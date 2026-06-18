@@ -91,6 +91,7 @@ All external APIs are behind provider-agnostic interfaces (Python Protocols), ma
 - [Fitness Schema](docs/fitness-schema.md) — Tables, columns, indexes, migration sequencing
 - [Development](docs/development.md) — Local setup and contributing
 - [API Reference](docs/api.md) — MCP tool documentation
+- [Conversations](docs/conversations.md) — Multi-turn chat: intent routing (lookup/aggregate/temporal/trend) over journal retrieval
 
 ## Cost
 

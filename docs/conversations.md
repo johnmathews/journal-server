@@ -135,6 +135,8 @@ Intent-routing tunable knobs (compile-time constants in `services/conversations/
 | `_PASSAGE_CEILING` | `15` | Maximum passages kept after adaptive selection. |
 | `_SNIPPET_CHARS` | `160` | Characters per citation snippet. |
 
+The adaptive score `band` (default `0.5` — the relative rerank-score cutoff for keeping a passage) is a parameter of `select_passages` in `services/conversations/passages.py`, not a `handlers.py` constant.
+
 `ConversationService` is wired in `mcp_server/bootstrap.py` alongside `SQLiteConversationRepository` and `IntentClassifier`; all injected via `service_registry.py` under the `conversation` key.
 
 ## Out of scope (v1)
@@ -142,7 +144,6 @@ Intent-routing tunable knobs (compile-time constants in `services/conversations/
 - Streaming replies (full answer after a "Thinking…" state).
 - LLM-generated conversation titles (question text is used directly).
 - Editing, branching, or regenerating turns; sharing conversations.
-- Per-turn standalone query rewrite (concatenating original + follow-up is sufficient).
 
 ## Related
 
