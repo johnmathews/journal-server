@@ -86,24 +86,26 @@ _ROLE_CLAUSES: dict[PageRole, str] = {
     PageRole.FIRST: (
         "\n\nThis is the FIRST page of a journal entry that continues onto "
         "later pages. If text belonging to a PREVIOUS, already-finished entry "
-        f"sits above this entry's first line, emit {ENTRY_BEGINS} on its own "
-        "line immediately before this entry's first line. The entry continues past this page."
+        f"sits above this entry's first line, emit `{ENTRY_BEGINS}` on its own "
+        "line immediately before this entry's first line. Never emit "
+        f"`{ENTRY_ENDS}` — the entry continues past this page."
     ),
     PageRole.MIDDLE: (
         "\n\nThis is a MIDDLE page of a single ongoing entry — a pure "
-        "continuation. Do not emit any markers."
+        f"continuation. Do NOT emit `{ENTRY_BEGINS}` or `{ENTRY_ENDS}`."
     ),
     PageRole.LAST: (
         "\n\nThis is the LAST page of the entry; the entry ends on this page. "
         "If a DIFFERENT, new entry begins below where this entry ends (for "
-        f"example a fresh date heading), emit {ENTRY_ENDS} on its own line "
-        "immediately after this entry's last line."
+        f"example a fresh date heading), emit `{ENTRY_ENDS}` on its own line "
+        "immediately after this entry's last line. Never emit "
+        f"`{ENTRY_BEGINS}`."
     ),
     PageRole.ONLY: (
         "\n\nThis image is a COMPLETE entry on a single page. If a previous "
-        f"entry's tail sits above it, emit {ENTRY_BEGINS} on its own line "
+        f"entry's tail sits above it, emit `{ENTRY_BEGINS}` on its own line "
         "immediately before this entry's first line. If a different, new entry "
-        f"begins below it, emit {ENTRY_ENDS} on its own line immediately "
+        f"begins below it, emit `{ENTRY_ENDS}` on its own line immediately "
         "after this entry's last line. Emit each marker at most once."
     ),
 }
