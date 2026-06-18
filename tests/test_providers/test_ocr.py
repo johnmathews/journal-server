@@ -155,15 +155,20 @@ class TestAnthropicOCRProvider:
         assert "uncertain" in SYSTEM_PROMPT.lower()
         assert "sparingly" in SYSTEM_PROMPT.lower()
 
-    def test_system_prompt_mentions_entry_delimiter(self) -> None:
-        """The OCR prompt must instruct the model to emit ``<<<NEW ENTRY>>>``
-        when a single image contains the start of more than one journal
-        entry. Without that instruction the segmentation in ingest_image
-        is a no-op."""
-        from journal.services.ingestion.image import ENTRY_DELIMITER
+    def test_role_prompts_mention_entry_begins_and_ends(self) -> None:
+        """Role-specific prompt clauses must reference ENTRY_BEGINS / ENTRY_ENDS
+        so the model knows which markers to emit for boundary pages."""
+        from journal.providers.ocr import ENTRY_BEGINS, ENTRY_ENDS, PageRole, role_prompt_clause
 
-        assert ENTRY_DELIMITER in SYSTEM_PROMPT
-        assert "more than one" in SYSTEM_PROMPT.lower()
+        only_clause = role_prompt_clause(PageRole.ONLY)
+        assert ENTRY_BEGINS in only_clause
+        assert ENTRY_ENDS in only_clause
+
+        first_clause = role_prompt_clause(PageRole.FIRST)
+        assert ENTRY_BEGINS in first_clause
+
+        last_clause = role_prompt_clause(PageRole.LAST)
+        assert ENTRY_ENDS in last_clause
 
     def test_system_prompt_does_not_instruct_line_structure_preservation(
         self,
