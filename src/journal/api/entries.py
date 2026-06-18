@@ -4,7 +4,8 @@ Six routes under ``/api/entries/...``:
 
 - ``GET    /api/entries`` — paginated list with date filters.
 - ``GET    /api/entries/{id}`` — entry detail with uncertain spans.
-- ``PATCH  /api/entries/{id}`` — update final_text and/or entry_date.
+- ``PATCH  /api/entries/{id}`` — update final_text, entry_date, and/or
+  content-window fields (content_start_char / content_end_char).
 - ``DELETE /api/entries/{id}`` — soft-blocked while entry has active jobs.
 - ``POST   /api/entries/{id}/verify-doubts`` — mark all OCR doubts verified.
 - ``GET    /api/entries/{id}/chunks`` — persisted chunks with offsets.
@@ -158,9 +159,20 @@ def register_entries_routes(
         final_text = body.get("final_text")
         new_date = body.get("entry_date")
 
-        if final_text is None and new_date is None:
+        # Content-window fields — must be provided together.
+        has_start = "content_start_char" in body
+        has_end = "content_end_char" in body
+        start = body.get("content_start_char")
+        end = body.get("content_end_char")
+
+        if final_text is None and new_date is None and not (has_start or has_end):
             return JSONResponse(
-                {"error": "At least one of 'final_text' or 'entry_date' is required"},
+                {
+                    "error": (
+                        "At least one of 'final_text', 'entry_date', or "
+                        "'content_start_char'/'content_end_char' is required"
+                    )
+                },
                 status_code=400,
             )
 
@@ -189,6 +201,8 @@ def register_entries_routes(
         reprocess_job_id: str | None = None
         mood_job_id: str | None = None
         pipeline_job_id: str | None = None
+        should_queue_pipeline = False
+
         if final_text is not None:
             if not isinstance(final_text, str):
                 return JSONResponse(
@@ -205,7 +219,77 @@ def register_entries_routes(
             except ValueError as e:
                 log.warning("PATCH /api/entries/%d — error: %s", entry_id, e)
                 return JSONResponse({"error": str(e)}, status_code=400)
+            should_queue_pipeline = True
 
+        # Apply content window if the fields were present.
+        # NOTE: when both final_text and window fields are sent in the same
+        # request, the window update runs *after* save_final_text and
+        # re-derives final_text from the raw_text slice.  The window-derived
+        # text therefore takes precedence over any manually supplied
+        # final_text in that request.
+        if has_start or has_end:
+            if not (has_start and has_end):
+                return JSONResponse(
+                    {
+                        "error": (
+                            "content_start_char and content_end_char must be "
+                            "provided together"
+                        )
+                    },
+                    status_code=400,
+                )
+            if start is None and end is None:
+                # null/null — clear the window, re-derive from full raw_text.
+                try:
+                    updated = ingestion_svc.update_content_window(
+                        entry_id, None, None, user_id=user_id,
+                    )
+                except ValueError as e:
+                    log.warning("PATCH /api/entries/%d — window clear error: %s", entry_id, e)
+                    return JSONResponse({"error": str(e)}, status_code=400)
+                should_queue_pipeline = True
+            elif start is None or end is None:
+                # Exactly one of the two values is null — this is ambiguous
+                # (not a clear, not a valid range).  Reject with an explicit
+                # message before falling into the range-validation branch,
+                # which would otherwise produce a misleading type error.
+                return JSONResponse(
+                    {
+                        "error": (
+                            "content_start_char and content_end_char must both be "
+                            "integers, or both null to clear the window"
+                        )
+                    },
+                    status_code=400,
+                )
+            else:
+                if (
+                    not isinstance(start, int)
+                    or not isinstance(end, int)
+                    or not (0 <= start < end <= len(entry.raw_text or ""))
+                ):
+                    return JSONResponse(
+                        {
+                            "error": (
+                                "content window must satisfy "
+                                "0 <= start < end <= len(raw_text)"
+                            )
+                        },
+                        status_code=400,
+                    )
+                try:
+                    updated = ingestion_svc.update_content_window(
+                        entry_id, start, end, user_id=user_id,
+                    )
+                except ValueError as e:
+                    log.warning("PATCH /api/entries/%d — window update error: %s", entry_id, e)
+                    return JSONResponse({"error": str(e)}, status_code=400)
+                should_queue_pipeline = True
+
+        # Queue the save-entry pipeline once — regardless of whether the
+        # trigger was a final_text change, a window change, or both.
+        # The single `should_queue_pipeline` flag prevents double-submission.
+        if should_queue_pipeline:
             # Queue the save-entry pipeline: one synthetic parent job
             # holds three children (reprocess_embeddings, entity_extraction,
             # mood_score_entry) and emits a SINGLE consolidated Pushover

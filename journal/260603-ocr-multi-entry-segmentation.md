@@ -1,3 +1,5 @@
+**Status:** superseded by [entry content window](260618-entry-content-window.md) (2026-06-18). Multi-entry-per-page fan-out was removed; every upload now produces exactly one entry and neighbour text is kept + greyed via the content window.
+
 # OCR multi-entry page segmentation
 
 **Date:** 2026-06-03

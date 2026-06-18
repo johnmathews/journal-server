@@ -119,7 +119,10 @@ class TestIngestImageFromUrl:
 
         assert entry.entry_date == "2026-03-22"
         assert entry.source_type == "photo"
-        mock_ocr.extract.assert_called_once_with(b"fake image bytes", "image/jpeg")
+        # extract now receives a PageRole as the third positional arg
+        ocr_call = mock_ocr.extract.call_args
+        assert ocr_call.args[0] == b"fake image bytes"
+        assert ocr_call.args[1] == "image/jpeg"
 
     @patch("journal.services.ingestion.url_sources.urlopen")
     def test_uses_explicit_media_type(self, mock_url, ingestion_service, mock_ocr):
@@ -131,7 +134,9 @@ class TestIngestImageFromUrl:
             media_type="image/png",
         )
 
-        mock_ocr.extract.assert_called_once_with(b"png data", "image/png")
+        ocr_call = mock_ocr.extract.call_args
+        assert ocr_call.args[0] == b"png data"
+        assert ocr_call.args[1] == "image/png"
 
     @patch("journal.services.ingestion.url_sources.urlopen")
     def test_infers_media_type_from_response(self, mock_url, ingestion_service, mock_ocr):
@@ -142,7 +147,9 @@ class TestIngestImageFromUrl:
             date="2026-03-22",
         )
 
-        mock_ocr.extract.assert_called_once_with(b"data", "image/webp")
+        ocr_call = mock_ocr.extract.call_args
+        assert ocr_call.args[0] == b"data"
+        assert ocr_call.args[1] == "image/webp"
 
     @patch("journal.services.ingestion.url_sources.urlopen")
     def test_download_failure_raises(self, mock_url, ingestion_service):
@@ -370,7 +377,9 @@ class TestRedirectHandling:
 
         second_req = mock_url.call_args_list[1][0][0]
         assert second_req.full_url == "https://example.com/b/photo.jpg"
-        mock_ocr.extract.assert_called_once_with(b"image bytes", "image/jpeg")
+        ocr_call = mock_ocr.extract.call_args
+        assert ocr_call.args[0] == b"image bytes"
+        assert ocr_call.args[1] == "image/jpeg"
 
     @patch("journal.services.ingestion.url_sources.urlopen")
     def test_redirect_chain_longer_than_five_hops_raises(
@@ -414,7 +423,9 @@ class TestRedirectHandling:
         )
 
         assert mock_url.call_count == 6
-        mock_ocr.extract.assert_called_once_with(b"final image", "image/jpeg")
+        ocr_call = mock_ocr.extract.call_args
+        assert ocr_call.args[0] == b"final image"
+        assert ocr_call.args[1] == "image/jpeg"
 
 
 class TestIngestMultiPageFromUrls:

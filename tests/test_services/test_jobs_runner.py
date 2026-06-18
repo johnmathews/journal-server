@@ -684,13 +684,6 @@ class FakeIngestionService:
         self.ingest_image_calls.append((image_data, media_type, date))
         return self._entry
 
-    def ingest_image_entries(
-        self, image_data: bytes, media_type: str, date: str,
-        *, skip_mood: bool = False, user_id: int = 1,
-    ) -> list[Any]:
-        self.ingest_image_calls.append((image_data, media_type, date))
-        return [self._entry]
-
     def ingest_multi_page_entry(
         self,
         images: list[tuple[bytes, str]],
@@ -818,45 +811,38 @@ class TestImageIngestionProgress:
 
 
 # --------------------------------------------------------------------
-# Multi-entry segmentation → follow-up jobs per created entry (W27)
+# Single-entry contract: image worker creates exactly one entry (Task 7)
 # --------------------------------------------------------------------
 
 
-class TestImageIngestionMultiEntryFollowUps:
-    """When OCR splits one image into N entries, the worker must queue
-    mood-scoring + entity-extraction follow-ups for EVERY created entry,
-    not just the returned (last) one. Closes the deferral documented in
-    ``journal/260603-ocr-multi-entry-segmentation.md``."""
+class TestImageIngestionSingleEntryContract:
+    """The image worker always produces exactly one entry — single image
+    goes through ``ingest_image``, multi-image through
+    ``ingest_multi_page_entry``. Follow-up keys are unsuffixed; result
+    has no ``entry_ids`` fan-out key. Regression for Task-6/7 collapse."""
 
     def _make_runner(
         self,
         jobs_repo: SQLiteJobRepository,
         threadsafe_factory: ConnectionFactory,
+        *,
+        ocr_text: str,
     ) -> tuple[JobRunner, Any, FakeNotificationService]:
-        """JobRunner wired to a REAL IngestionService whose mocked OCR
-        provider returns delimiter-marked text yielding three entries."""
+        """JobRunner wired to a real IngestionService with a mocked OCR
+        provider returning ``ocr_text``."""
         from unittest.mock import MagicMock
 
         from journal.db.repository import SQLiteEntryRepository
         from journal.providers.ocr import OCRResult
         from journal.services.chunking import FixedTokenChunker
         from journal.services.ingestion import IngestionService
-        from journal.services.ingestion.image import ENTRY_DELIMITER
         from journal.vectorstore.store import InMemoryVectorStore
 
         repo = SQLiteEntryRepository(threadsafe_factory)
 
-        entry_a = "1 June 2026\n\nFirst entry body."
-        entry_b = "2 June 2026\n\nSecond entry body."
-        entry_c = "3 June 2026\n\nThird entry body."
         ocr = MagicMock()
-        # Orphan tail (discarded) + three delimiter-marked entries.
         ocr.extract.return_value = OCRResult(
-            text=(
-                f"…tail of a previous entry.\n\n{ENTRY_DELIMITER}\n\n{entry_a}"
-                f"\n\n{ENTRY_DELIMITER}\n\n{entry_b}"
-                f"\n\n{ENTRY_DELIMITER}\n\n{entry_c}"
-            ),
+            text=ocr_text,
             uncertain_spans=[],
         )
         embeddings = MagicMock()
@@ -887,63 +873,123 @@ class TestImageIngestionMultiEntryFollowUps:
         )
         return runner, repo, notif
 
-    def test_three_entry_page_queues_follow_ups_for_every_entry(
+    def test_single_image_creates_one_entry(
         self, jobs_repo, threadsafe_factory
     ) -> None:
-        runner, repo, _ = self._make_runner(jobs_repo, threadsafe_factory)
+        """A single image produces exactly one entry and no ``entry_ids``
+        key in the result (regression: no fan-out)."""
+        runner, repo, _ = self._make_runner(
+            jobs_repo, threadsafe_factory,
+            ocr_text="3 June 2026\n\nSome journal entry body.",
+        )
 
-        images = [(b"page with three entries", "image/jpeg", "page1.jpg")]
+        images = [(b"page data", "image/jpeg", "page1.jpg")]
         parent = runner.submit_image_ingestion(images, "2026-06-03", user_id=1)
         _wait_terminal(jobs_repo, parent.id)
         runner.shutdown(wait=True, cancel_futures=False)
 
-        # The OCR text yielded three persisted entries.
-        entries = repo.list_entries(limit=10)
-        assert len(entries) == 3
-        entry_ids = {e.id for e in entries}
-
-        # One mood-scoring AND one entity-extraction follow-up per
-        # created entry — not just the last one.
-        mood_jobs, _ = jobs_repo.list_jobs(job_type="mood_score_entry")
-        entity_jobs, _ = jobs_repo.list_jobs(job_type="entity_extraction")
-        assert len(mood_jobs) == 3, (
-            f"expected 3 mood follow-ups, got {len(mood_jobs)} "
-            f"(entry_ids={[j.params.get('entry_id') for j in mood_jobs]})"
-        )
-        assert len(entity_jobs) == 3, (
-            f"expected 3 entity follow-ups, got {len(entity_jobs)} "
-            f"(entry_ids={[j.params.get('entry_id') for j in entity_jobs]})"
-        )
-        assert {j.params["entry_id"] for j in mood_jobs} == entry_ids
-        assert {j.params["entry_id"] for j in entity_jobs} == entry_ids
-
-        # Every follow-up is stitched to the ingestion job so the
-        # combined pipeline notification still fires once at the end.
-        for fj in (*mood_jobs, *entity_jobs):
-            assert fj.params["parent_job_id"] == parent.id
-
-        # The parent result's follow_up_jobs map records all six with
-        # collision-free keys.
         final = jobs_repo.get(parent.id)
-        assert final is not None and final.status == "succeeded"
+        assert final is not None
+        assert final.status == "succeeded"
+
+        # Exactly one entry persisted.
+        entries = repo.list_entries(limit=10)
+        assert len(entries) == 1
+
+        # No fan-out key in result.
+        assert "entry_ids" not in final.result
+
+        # Follow-up keys are unsuffixed.
         follow_ups = final.result["follow_up_jobs"]
-        assert len(follow_ups) == 6
-        assert set(follow_ups.values()) == {
-            j.id for j in (*mood_jobs, *entity_jobs)
-        }
-        # Primary (returned, last-dated) entry keeps the unsuffixed keys
-        # so the pipeline notification renders unchanged.
         assert "mood_scoring" in follow_ups
         assert "entity_extraction" in follow_ups
 
-    def test_three_entry_page_sends_one_combined_notification(
+    def test_single_image_with_trailing_neighbor_creates_one_entry(
         self, jobs_repo, threadsafe_factory
     ) -> None:
-        """The pipeline notification still fires exactly once, after all
-        six follow-ups finish, and reports every created entry."""
-        runner, repo, notif = self._make_runner(jobs_repo, threadsafe_factory)
+        """Regression: OCR returns body + ENTRY_ENDS marker + a neighbour
+        entry. ``ingest_image`` must still produce exactly ONE entry;
+        the worker must not fan-out."""
+        from journal.providers.ocr import ENTRY_ENDS
 
-        images = [(b"page with three entries", "image/jpeg", "page1.jpg")]
+        neighbor_text = "Neighbor entry text"
+        ocr_text = (
+            "3 June 2026\n\nMain entry body."
+            f"\n{ENTRY_ENDS}\n"
+            f"2025-01-02\n{neighbor_text}"
+        )
+        runner, repo, _ = self._make_runner(
+            jobs_repo, threadsafe_factory, ocr_text=ocr_text,
+        )
+
+        images = [(b"page with trailing neighbour", "image/jpeg", "page1.jpg")]
+        parent = runner.submit_image_ingestion(images, "2026-06-03", user_id=1)
+        _wait_terminal(jobs_repo, parent.id)
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        final = jobs_repo.get(parent.id)
+        assert final is not None
+        assert final.status == "succeeded"
+
+        # Exactly one entry persisted.
+        entries = repo.list_entries(limit=10)
+        assert len(entries) == 1
+
+        # No multi-entry fan-out key.
+        assert "entry_ids" not in final.result
+
+        # Follow-up keys are unsuffixed.
+        follow_ups = final.result["follow_up_jobs"]
+        assert "mood_scoring" in follow_ups
+        assert "entity_extraction" in follow_ups
+
+        # Trimming path: content_end_char must be set (ENTRY_ENDS was present).
+        entry = repo.get_entry(entries[0].id)
+        assert entry is not None
+        assert entry.content_end_char is not None
+
+        # final_text (the in-bounds/reading slice) must NOT contain the
+        # neighbour text — it was trimmed at the ENTRY_ENDS boundary.
+        assert neighbor_text not in entry.final_text
+
+        # raw_text is verbatim OCR output so the neighbour IS present.
+        assert neighbor_text in entry.raw_text
+
+    def test_single_image_queues_exactly_two_follow_ups(
+        self, jobs_repo, threadsafe_factory
+    ) -> None:
+        """Worker queues exactly one mood-scoring + one entity-extraction
+        follow-up (two total) for the single created entry."""
+        runner, repo, _ = self._make_runner(
+            jobs_repo, threadsafe_factory,
+            ocr_text="3 June 2026\n\nEntry body.",
+        )
+
+        images = [(b"page data", "image/jpeg", "page1.jpg")]
+        parent = runner.submit_image_ingestion(images, "2026-06-03", user_id=1)
+        _wait_terminal(jobs_repo, parent.id)
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        mood_jobs, _ = jobs_repo.list_jobs(job_type="mood_score_entry")
+        entity_jobs, _ = jobs_repo.list_jobs(job_type="entity_extraction")
+        assert len(mood_jobs) == 1
+        assert len(entity_jobs) == 1
+
+        entry = repo.list_entries(limit=10)[0]
+        assert mood_jobs[0].params["entry_id"] == entry.id
+        assert entity_jobs[0].params["entry_id"] == entry.id
+
+    def test_single_image_sends_one_combined_notification(
+        self, jobs_repo, threadsafe_factory
+    ) -> None:
+        """The pipeline notification fires exactly once with ``ingest_images``
+        job type and no ``entry_ids`` key."""
+        runner, _, notif = self._make_runner(
+            jobs_repo, threadsafe_factory,
+            ocr_text="3 June 2026\n\nEntry body.",
+        )
+
+        images = [(b"page data", "image/jpeg", "page1.jpg")]
         parent = runner.submit_image_ingestion(images, "2026-06-03", user_id=1)
         _wait_terminal(jobs_repo, parent.id)
         final = jobs_repo.get(parent.id)
@@ -955,8 +1001,7 @@ class TestImageIngestionMultiEntryFollowUps:
         assert len(notif.success_calls) == 1
         _, job_type, result = notif.success_calls[0]
         assert job_type == "ingest_images"
-        entry_ids = {e.id for e in repo.list_entries(limit=10)}
-        assert set(result["entry_ids"]) == entry_ids
+        assert "entry_ids" not in result
 
 
 # --------------------------------------------------------------------

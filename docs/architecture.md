@@ -139,24 +139,35 @@ one entry:
 - The entry's `raw_text` and `final_text` are the concatenation of all page texts
 - Adding pages to an existing entry triggers the same re-chunking and re-embedding flow
 
-### Multi-Entry Pages (single-image segmentation)
+### Content Window
 
-The inverse case — a single photographed page containing the start of more than one journal entry (e.g. the tail of
-yesterday's entry above a fresh dated entry, or two short entries written back-to-back) — is handled in the single-image
-ingest path. The OCR system prompt asks the vision model to emit the marker `<<<NEW ENTRY>>>` on its own line between
-consecutive entries. `ingest_image` then:
+Every image upload — single or multi-page — produces exactly **one** entry. Neighbour text that bleeds onto the first
+or last page is kept in `raw_text` but excluded from all derived artifacts via a half-open content window.
 
-- Splits the OCR text on the marker via `split_text_into_entries`
-- **Discards the orphan tail** above the first marker (per the project's "discard orphan tail" policy — the tail belongs
-  to a previous entry that's already stored elsewhere)
-- Creates one entry per remaining segment, each with its own `source_files` row referencing the shared image hash
-- Returns the most recently dated entry (typically the new one the user just photographed); the image-ingestion job
-  worker uses the sibling `ingest_image_entries` (same behaviour, returns all created entries) so it can queue
-  mood-scoring + entity-extraction follow-up jobs for **every** entry created from the page, not just the returned one
+**PageRole and begin/end markers.** The OCR provider receives a `PageRole` (FIRST / MIDDLE / LAST / ONLY) for each
+page. The role appends a clause to the system prompt instructing the model to bracket the target entry with
+`<<<ENTRY BEGINS>>>` / `<<<ENTRY ENDS>>>` markers:
 
-Multi-image uploads (`ingest_multi_page_entry`) do not run segmentation — when a user uploads a batch of images as one
-entry, that intent is honoured. If a page in the batch happens to contain the marker, it survives as literal text in
-the combined entry; users who actually have a multi-entry multi-page situation should upload each page individually.
+- FIRST — emit `<<<ENTRY BEGINS>>>` before the entry's first line if a previous entry's tail precedes it.
+- MIDDLE — pure continuation; emit neither marker.
+- LAST — emit `<<<ENTRY ENDS>>>` after the entry's last line if a new entry follows it.
+- ONLY — emit both markers as applicable.
+
+**Content window model.** After all pages are OCR'd and combined, `extract_content_window()` (a pure-Python,
+I/O-free function in `services/ingestion/boundaries.py`) strips the markers from the combined text, records the
+resulting `[content_start_char, content_end_char)` half-open offsets into the clean text, and re-anchors uncertain
+spans. The clean text is stored as `raw_text` verbatim — no data is discarded. `content_start_char` /
+`content_end_char` are `NULL` when no markers were present (whole text is in-bounds, which is also the implicit
+value for all pre-feature entries).
+
+`final_text`, chunks, embeddings, FTS5, and mood scoring are derived exclusively from `raw_text[start:end]`.
+Out-of-bounds text is preserved in `raw_text` for the Review UI but is otherwise inert.
+
+The `content_boundary` field on `GET /api/entries/{id}` responses exposes `{"char_start": N, "char_end": M}` or
+`null`. `PATCH /api/entries/{id}` accepts `content_start_char` / `content_end_char` to adjust or clear
+(both-null = full text in-bounds) the window; each accepted change re-derives `final_text` and requeues the
+save-entry pipeline. See [`api.md`](api.md) for the PATCH contract and [`ocr-context.md`](ocr-context.md) for the
+sentinel protocol.
 
 ## Chunking Strategies
 

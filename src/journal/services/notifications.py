@@ -200,14 +200,8 @@ def build_success_message(job_type: str, result: dict[str, Any]) -> str:
     parts: list[str] = []
 
     if job_type in ("ingest_images", "ingest_audio"):
-        # A single image can segment into multiple entries; the worker
-        # records all ids in ``entry_ids`` when that happens.
-        entry_ids = result.get("entry_ids") or []
         entry_id = result.get("entry_id")
-        if len(entry_ids) > 1:
-            ids = ", ".join(str(i) for i in entry_ids)
-            parts.append(f"- Created Entries {ids}")
-        elif entry_id:
+        if entry_id:
             parts.append(f"- Created Entry {entry_id}")
 
         # Include follow-up results when available (pipeline complete).

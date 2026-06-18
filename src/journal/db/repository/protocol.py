@@ -95,9 +95,16 @@ class EntryRepository(Protocol):
         self, entry_date: str, source_type: str, raw_text: str, word_count: int,
         final_text: str | None = None,
         user_id: int = 1,
+        content_start_char: int | None = None,
+        content_end_char: int | None = None,
     ) -> Entry: ...
 
     def get_entry(self, entry_id: int, user_id: int | None = None) -> Entry | None: ...
+
+    def set_content_window(
+        self, entry_id: int, start: int | None, end: int | None,
+        user_id: int | None = None,
+    ) -> "Entry | None": ...
 
     def update_final_text(
         self, entry_id: int, final_text: str, word_count: int, chunk_count: int,
@@ -291,4 +298,6 @@ def _row_to_entry(row: sqlite3.Row) -> Entry:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         doubts_verified=bool(row["doubts_verified"]),
+        content_start_char=row["content_start_char"],
+        content_end_char=row["content_end_char"],
     )

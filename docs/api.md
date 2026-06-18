@@ -136,7 +136,8 @@ Get a single entry with full text.
  "uncertain_spans": [
   { "char_start": 6, "char_end": 12 },
   { "char_start": 18, "char_end": 24 }
- ]
+ ],
+ "content_boundary": { "char_start": 42, "char_end": 980 }
 }
 ```
 
@@ -153,6 +154,13 @@ span list untouched.
 even though the underlying span rows are preserved in the database for future analysis (e.g., glossary enrichment,
 accuracy tracking).
 
+`content_boundary` is a half-open `[char_start, char_end)` window into `raw_text` marking which portion of the text
+belongs to this entry. It is set by the ingestion pipeline when OCR markers (`<<<ENTRY BEGINS>>>` / `<<<ENTRY ENDS>>>`)
+indicate that neighbour-entry text bleeds onto the first or last page. `null` means the whole `raw_text` is in-bounds
+(single-page entries with no neighbour text, or entries ingested before migration `0033`). All derived artifacts —
+`final_text`, chunks, embeddings, FTS5, mood scoring — are computed from the in-bounds slice only. See
+[`architecture.md`](architecture.md#content-window) for the full model.
+
 **Response (404):**
 
 ```json
@@ -161,33 +169,44 @@ accuracy tracking).
 
 ### PATCH /api/entries/{id}
 
-Update an entry's `final_text` and/or `entry_date`. At least one field must be provided. When `final_text` is updated,
-triggers re-chunking, re-embedding, FTS5 rebuild, and an async entity re-extraction job.
+Update an entry's `final_text`, `entry_date`, and/or content window. At least one field must be provided. When
+`final_text` or the content window is updated, triggers re-chunking, re-embedding, FTS5 rebuild, and async entity
+re-extraction and mood-scoring jobs (queued as a single save-entry pipeline).
 
 **Request body (all fields optional, at least one required):**
 
 ```json
 {
  "final_text": "corrected text...",
- "entry_date": "2026-02-17"
+ "entry_date": "2026-02-17",
+ "content_start_char": 42,
+ "content_end_char": 980
 }
 ```
 
-| Field        | Type   | Required | Description                        |
-| ------------ | ------ | -------- | ---------------------------------- |
-| `final_text` | string | no\*     | Corrected text (triggers re-embed) |
-| `entry_date` | string | no\*     | ISO 8601 date (YYYY-MM-DD)         |
+| Field                 | Type        | Required | Description                                                          |
+| --------------------- | ----------- | -------- | -------------------------------------------------------------------- |
+| `final_text`          | string      | no\*     | Corrected text (triggers re-embed)                                   |
+| `entry_date`          | string      | no\*     | ISO 8601 date (YYYY-MM-DD)                                           |
+| `content_start_char`  | int or null | no\*     | Start of the content window (must be provided with `content_end_char`) |
+| `content_end_char`    | int or null | no\*     | End of the content window (must be provided with `content_start_char`) |
 
-\* At least one of `final_text` or `entry_date` must be provided.
+\* At least one field must be provided. `content_start_char` and `content_end_char` must always be sent together:
+both integers to adjust the window (`0 <= start < end <= len(raw_text)`), or both `null` to clear it (full text
+in-bounds). Sending exactly one as `null` is rejected.
 
-**Response (200):** Updated entry detail (same shape as GET /api/entries/{id}). When `final_text` was updated, the
-response includes an additional `entity_extraction_job_id` field (string) with the ID of the queued background extraction
-job. Omitted when only `entry_date` was changed or if the job could not be queued.
+When the content window is adjusted or cleared, `final_text` is re-derived from the new in-bounds slice and the
+save-entry pipeline is queued. If `final_text` and window fields appear in the same request, the window-derived
+text takes precedence.
+
+**Response (200):** Updated entry detail (same shape as GET /api/entries/{id}). When the save-entry pipeline was
+queued, the response includes a `pipeline_job_id` field with the background job ID. Omitted if the job runner was
+unavailable.
 
 **Response (400):**
 
 ```json
-{ "error": "At least one of 'final_text' or 'entry_date' is required" }
+{ "error": "At least one of 'final_text', 'entry_date', or 'content_start_char'/'content_end_char' is required" }
 ```
 
 **Response (404):**

@@ -450,7 +450,7 @@ class _FakeOCR:
         self._texts = texts or ["Met a friend for coffee and we talked for hours"]
         self.calls = 0
 
-    def extract(self, image_data: bytes, media_type: str):
+    def extract(self, image_data: bytes, media_type: str, page_role=None):
         from journal.providers.ocr import OCRResult
 
         text = self._texts[min(self.calls, len(self._texts) - 1)]
@@ -589,7 +589,7 @@ class TestIngestMediaTool:
             date="2026-04-16",
             ctx=ctx,
         )
-        assert second.startswith("Error: This image has already been uploaded")
+        assert second.startswith("Error: Page 1 has already been uploaded")
 
     def test_date_defaults_to_today(self, media_ingest_ctx):
         from datetime import date as date_type

@@ -24,20 +24,42 @@ class _CoreMixin:
         self, entry_date: str, source_type: str, raw_text: str, word_count: int,
         final_text: str | None = None,
         user_id: int = 1,
+        content_start_char: int | None = None,
+        content_end_char: int | None = None,
     ) -> Entry:
         actual_final = final_text if final_text is not None else raw_text
         sql = (
             "INSERT INTO entries"
-            " (user_id, entry_date, source_type, raw_text, final_text, word_count)"
-            " VALUES (?, ?, ?, ?, ?, ?)"
+            " (user_id, entry_date, source_type, raw_text, final_text, word_count,"
+            "  content_start_char, content_end_char)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
-        params = (user_id, entry_date, source_type, raw_text, actual_final, word_count)
+        params = (
+            user_id, entry_date, source_type, raw_text, actual_final, word_count,
+            content_start_char, content_end_char,
+        )
         conn = self._conn()
         with conn:
             cursor = conn.execute(sql, params)
         entry_id = cursor.lastrowid
         log.info("Created entry %d for date %s", entry_id, entry_date)
         return self.get_entry(entry_id)  # type: ignore[return-value]
+
+    def set_content_window(
+        self, entry_id: int, start: int | None, end: int | None,
+        user_id: int | None = None,
+    ) -> "Entry | None":
+        conn = self._conn()
+        sql = "UPDATE entries SET content_start_char = ?, content_end_char = ?"
+        params: list[object] = [start, end]
+        sql += " WHERE id = ?"
+        params.append(entry_id)
+        if user_id is not None:
+            sql += " AND user_id = ?"
+            params.append(user_id)
+        with conn:
+            conn.execute(sql, params)
+        return self.get_entry(entry_id, user_id=user_id)
 
     def get_entry(self, entry_id: int, user_id: int | None = None) -> Entry | None:
         conn = self._conn()

@@ -448,6 +448,51 @@ class IngestionService(
         """
         return self._repo.verify_doubts(entry_id, user_id=user_id)
 
+    def update_content_window(
+        self,
+        entry_id: int,
+        start: int | None,
+        end: int | None,
+        user_id: int = 1,
+    ) -> "Entry":
+        """Set the content window and re-derive final_text from the slice.
+
+        When *start* and *end* are both ``None`` the window is cleared and
+        ``final_text`` is re-derived from the full ``raw_text``.  Otherwise
+        the slice ``raw_text[start:end]`` is used after heading detection.
+        Raises ``ValueError`` if the sliced content is empty or the entry is
+        not found.
+        """
+        from journal.services.date_extraction import extract_date_from_text
+
+        entry = self._repo.get_entry(entry_id, user_id=user_id)
+        if entry is None:
+            raise ValueError(f"Entry {entry_id} not found")
+
+        # Persist the new window coordinates first.
+        self._repo.set_content_window(entry_id, start, end, user_id=user_id)
+
+        # Re-derive the content slice.
+        lo = start if start is not None else 0
+        hi = end if end is not None else len(entry.raw_text or "")
+        content = (entry.raw_text or "")[lo:hi]
+
+        if not content.strip():
+            raise ValueError(
+                f"content window [{lo}:{hi}] produces empty content for entry {entry_id}"
+            )
+
+        # Optionally detect and strip a leading date heading.
+        date = entry.entry_date
+        extracted = extract_date_from_text(content)
+        if extracted:
+            date = extracted
+        det = self._detect_heading(content, date)
+        final_text = det.body if det.has_heading else content
+
+        # Persist the updated final_text (updates word_count, leaves chunk_count).
+        return self.save_final_text(entry_id, final_text, user_id=user_id)
+
     def store_source_file(
         self, entry_id: int, file_path: str, file_type: str, file_hash: str
     ) -> int | None:
