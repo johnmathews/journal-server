@@ -1,6 +1,7 @@
 from journal.providers.ocr import (
     ENTRY_BEGINS,
     ENTRY_ENDS,
+    OCRProvider,
     PageRole,
     role_prompt_clause,
 )
@@ -46,3 +47,20 @@ def test_only_role_mentions_both_markers():
     clause = role_prompt_clause(PageRole.ONLY)
     assert ENTRY_BEGINS in clause
     assert ENTRY_ENDS in clause
+
+
+class _FakeExtractor:
+    """Minimal stand-in asserting the protocol's new default arg exists."""
+
+    def extract(self, image_data, media_type, page_role=None):
+        return (image_data, media_type, page_role)
+
+
+def test_extract_accepts_optional_page_role_and_defaults_none():
+    fake = _FakeExtractor()
+    # default omitted → None
+    assert fake.extract(b"x", "image/png")[2] is None
+    # explicit role passes through
+    assert fake.extract(b"x", "image/png", PageRole.FIRST)[2] is PageRole.FIRST
+    # structural protocol check
+    assert isinstance(fake, OCRProvider)

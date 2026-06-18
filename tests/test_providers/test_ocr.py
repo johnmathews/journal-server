@@ -1025,8 +1025,8 @@ class TestDualPassOCRProvider:
         provider = DualPassOCRProvider(primary, secondary)
         provider.extract(b"image", "image/jpeg")
 
-        primary.extract.assert_called_once_with(b"image", "image/jpeg")
-        secondary.extract.assert_called_once_with(b"image", "image/jpeg")
+        primary.extract.assert_called_once_with(b"image", "image/jpeg", None)
+        secondary.extract.assert_called_once_with(b"image", "image/jpeg", None)
 
     def test_returns_reconciled_result_confident_disagreement(self) -> None:
         """Confident disagreement → trust primary, no doubt."""

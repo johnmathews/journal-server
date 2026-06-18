@@ -312,7 +312,9 @@ def _build_cache_control(ttl: str) -> dict[str, str]:
 class OCRProvider(Protocol):
     """Protocol for OCR providers."""
 
-    def extract(self, image_data: bytes, media_type: str) -> OCRResult: ...
+    def extract(
+        self, image_data: bytes, media_type: str, page_role: PageRole | None = None
+    ) -> OCRResult: ...
 
 
 class AnthropicOCRProvider:
@@ -389,7 +391,9 @@ class AnthropicOCRProvider:
                 self._model,
             )
 
-    def extract(self, image_data: bytes, media_type: str) -> OCRResult:
+    def extract(
+        self, image_data: bytes, media_type: str, page_role: PageRole | None = None
+    ) -> OCRResult:
         """Extract text from an image via Anthropic's vision API.
 
         The model is prompted to wrap uncertain words or phrases in
@@ -402,6 +406,9 @@ class AnthropicOCRProvider:
         logger.info("Extracting text via Anthropic OCR (model=%s)", self._model)
 
         encoded_image = base64.standard_b64encode(image_data).decode("utf-8")
+
+        user_text = "Extract all handwritten text from this image."
+        user_text += role_prompt_clause(page_role)
 
         message = self._client.messages.create(
             model=self._model,
@@ -427,7 +434,7 @@ class AnthropicOCRProvider:
                         },
                         {
                             "type": "text",
-                            "text": "Extract all handwritten text from this image.",
+                            "text": user_text,
                         },
                     ],
                 }
@@ -489,7 +496,9 @@ class GeminiOCRProvider:
     def model(self) -> str:
         return self._model
 
-    def extract(self, image_data: bytes, media_type: str) -> OCRResult:
+    def extract(
+        self, image_data: bytes, media_type: str, page_role: PageRole | None = None
+    ) -> OCRResult:
         """Extract text from an image via Google's Gemini vision API.
 
         Uses the same system prompt, context glossary, and ⟪/⟫ uncertainty
@@ -499,11 +508,14 @@ class GeminiOCRProvider:
         """
         logger.info("Extracting text via Gemini OCR (model=%s)", self._model)
 
+        user_text = "Extract all handwritten text from this image."
+        user_text += role_prompt_clause(page_role)
+
         response = self._client.models.generate_content(
             model=self._model,
             contents=[
                 genai_types.Part.from_bytes(data=image_data, mime_type=media_type),
-                "Extract all handwritten text from this image.",
+                user_text,
             ],
             config=genai_types.GenerateContentConfig(
                 system_instruction=self._system_text,
@@ -740,12 +752,18 @@ class DualPassOCRProvider:
     def secondary(self) -> OCRProvider:
         return self._secondary
 
-    def extract(self, image_data: bytes, media_type: str) -> OCRResult:
+    def extract(
+        self, image_data: bytes, media_type: str, page_role: PageRole | None = None
+    ) -> OCRResult:
         from concurrent.futures import ThreadPoolExecutor
 
         with ThreadPoolExecutor(max_workers=2) as pool:
-            primary_future = pool.submit(self._primary.extract, image_data, media_type)
-            secondary_future = pool.submit(self._secondary.extract, image_data, media_type)
+            primary_future = pool.submit(
+                self._primary.extract, image_data, media_type, page_role
+            )
+            secondary_future = pool.submit(
+                self._secondary.extract, image_data, media_type, page_role
+            )
             primary_result = primary_future.result()
             secondary_result = secondary_future.result()
 
