@@ -5,6 +5,8 @@ once _ingest_pages, _combine_pages, and the updated public wrappers land in
 image.py.
 """
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from journal.db.repository import SQLiteEntryRepository
@@ -22,7 +24,7 @@ class _RoleOCR:
         self._i = 0
         self.roles: list[PageRole | None] = []
 
-    def extract(  # noqa: E501
+    def extract(
         self, image_data: bytes, media_type: str, page_role: PageRole | None = None,
     ) -> OCRResult:
         self.roles.append(page_role)
@@ -34,7 +36,6 @@ class _RoleOCR:
 @pytest.fixture
 def make_ingestion(factory):
     """Return a factory function that builds IngestionService with the given OCR provider."""
-    from unittest.mock import MagicMock
 
     def _make(ocr_provider):
         repo = SQLiteEntryRepository(factory)

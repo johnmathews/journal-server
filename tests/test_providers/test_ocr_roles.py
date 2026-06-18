@@ -1,10 +1,21 @@
 from journal.providers.ocr import (
     ENTRY_BEGINS,
     ENTRY_ENDS,
+    SYSTEM_PROMPT,
     OCRProvider,
     PageRole,
     role_prompt_clause,
 )
+
+
+def test_system_prompt_does_not_contain_new_entry_marker() -> None:
+    """SYSTEM_PROMPT must not instruct the model to emit <<<NEW ENTRY>>>.
+
+    That clause was superseded by the per-page role mechanism (ENTRY_BEGINS /
+    ENTRY_ENDS); leaving it in would cause the model to emit a stale marker
+    that the parser does not recognise, corrupting ingested text.
+    """
+    assert "NEW ENTRY" not in SYSTEM_PROMPT
 
 
 def test_marker_tokens_are_distinct_triple_angle():
@@ -52,7 +63,12 @@ def test_only_role_mentions_both_markers():
 class _FakeExtractor:
     """Minimal stand-in asserting the protocol's new default arg exists."""
 
-    def extract(self, image_data, media_type, page_role=None):
+    def extract(
+        self,
+        image_data: bytes,
+        media_type: str,
+        page_role: PageRole | None = None,
+    ) -> tuple[bytes, str, PageRole | None]:
         return (image_data, media_type, page_role)
 
 

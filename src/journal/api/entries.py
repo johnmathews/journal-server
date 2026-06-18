@@ -4,7 +4,8 @@ Six routes under ``/api/entries/...``:
 
 - ``GET    /api/entries`` — paginated list with date filters.
 - ``GET    /api/entries/{id}`` — entry detail with uncertain spans.
-- ``PATCH  /api/entries/{id}`` — update final_text and/or entry_date.
+- ``PATCH  /api/entries/{id}`` — update final_text, entry_date, and/or
+  content-window fields (content_start_char / content_end_char).
 - ``DELETE /api/entries/{id}`` — soft-blocked while entry has active jobs.
 - ``POST   /api/entries/{id}/verify-doubts`` — mark all OCR doubts verified.
 - ``GET    /api/entries/{id}/chunks`` — persisted chunks with offsets.
