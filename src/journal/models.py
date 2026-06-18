@@ -34,6 +34,8 @@ class Entry:
     created_at: str = ""
     updated_at: str = ""
     doubts_verified: bool = False
+    content_start_char: int | None = None
+    content_end_char: int | None = None
 
 
 @dataclass
