@@ -24,13 +24,17 @@ in ``journal/260509-fitness-w11-cli-reauth.md``.
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from datetime import UTC, datetime
 from getpass import getpass
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlencode, urlparse
+
+from garminconnect import Garmin
 
 from journal.db.factory import ConnectionFactory
 from journal.db.fitness_repository import FitnessRepository
@@ -56,6 +60,7 @@ from journal.services.fitness.normalize import normalize_garmin, normalize_strav
 
 if TYPE_CHECKING:
     import argparse
+    from collections.abc import Callable
 
     from journal.config import Config
 
@@ -326,6 +331,200 @@ def cmd_fitness_reauth_garmin(args: argparse.Namespace, config: Config) -> None:
         ),
     )
     print("Garmin re-auth complete — token blob persisted.")
+
+
+# ── Garmin token mint / import (split-IP recovery) ───────────────────
+#
+# When Garmin's Cloudflare bot defenses flag the server's egress IP, a
+# fresh username/password login from the server fails (429 / bot
+# challenge) even though the credentials are correct. These two commands
+# split the recovery so the network-bound login runs somewhere unflagged:
+#
+#   1. ``fitness-garmin-mint-token`` — run on a laptop / unflagged network.
+#      Logs into Garmin, prints a portable JSON envelope to stdout. Does
+#      NOT touch the database, so it needs no prod DB access.
+#   2. ``fitness-garmin-import-token`` — run on the server. Reads the
+#      envelope from stdin/file and writes the token blob into
+#      ``fitness_auth_state`` (auth_status='ok'). No network login.
+#
+# A garth OAuth1 token is valid ~1 year, so a single mint+import keeps the
+# daily sync running without the server ever doing a fresh SSO login.
+
+
+def _mint_garmin_token_envelope(
+    *,
+    username: str,
+    password: str,
+    client_factory: Callable[..., Any] | None = None,
+    mfa_prompt: Callable[[], str] = _stdin_mfa_prompt,
+) -> dict[str, Any]:
+    """Log into Garmin and return a portable token envelope.
+
+    Pure network + in-memory: constructs a ``garminconnect.Garmin``,
+    logs in (prompting for MFA via ``mfa_prompt`` when Garmin asks),
+    reads the upstream account identity, and captures the token blob.
+    Never opens the database — safe to run from any machine/network.
+
+    The returned envelope carries ``upstream_user_id`` (for the D8
+    different-account guard on import) and ``tokens_blob`` (the value the
+    fetch service boots from).
+    """
+    factory = client_factory or Garmin
+    client = factory(
+        email=username, password=password, prompt_mfa=mfa_prompt,
+    )
+    client.login()
+    profile = client.get_user_profile()
+    upstream: str | None = None
+    if isinstance(profile, dict):
+        raw = profile.get("displayName") or profile.get("userName")
+        if isinstance(raw, str) and raw:
+            upstream = raw
+    return {
+        "source": "garmin",
+        "upstream_user_id": upstream or username,
+        "tokens_blob": client.client.dumps(),
+        "minted_at": _now_iso(),
+    }
+
+
+def cmd_fitness_garmin_mint_token(args: argparse.Namespace, config: Config) -> None:
+    """Mint a Garmin token envelope (no DB writes) — run on an unflagged IP.
+
+    ``--username`` is required; the password is read from stdin via
+    getpass (never env vars), matching ``fitness-reauth-garmin``. The JSON
+    envelope goes to ``--output`` (a path, or ``-`` for stdout, the
+    default); all human-readable progress goes to stderr so the stdout
+    envelope can be piped straight into ``fitness-garmin-import-token``.
+    """
+    del config  # intentionally unused — minting never touches the DB
+    username = args.username.strip()
+    password = getpass("Garmin password: ")
+    if not username or not password:
+        print(
+            "Error: --username and a non-empty password are required.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        envelope = _mint_garmin_token_envelope(username=username, password=password)
+    except KeyboardInterrupt:
+        print("\nCancelled — no token minted.", file=sys.stderr)
+        sys.exit(130)
+
+    payload = json.dumps(envelope, indent=2)
+    destination = getattr(args, "output", None) or "-"
+    if destination == "-":
+        print(
+            f"Garmin token minted (upstream={envelope['upstream_user_id']}). "
+            "Pipe the JSON below into 'journal fitness-garmin-import-token' "
+            "on the server.",
+            file=sys.stderr,
+        )
+        print(payload)
+    else:
+        Path(destination).write_text(payload + "\n", encoding="utf-8")
+        print(
+            f"Garmin token envelope written to {destination} "
+            f"(upstream={envelope['upstream_user_id']}).",
+            file=sys.stderr,
+        )
+
+
+def _import_garmin_token_envelope(
+    repo: FitnessRepository,
+    *,
+    user_id: int,
+    envelope: dict[str, Any],
+    client_factory: Callable[..., Any] | None = None,
+) -> str:
+    """Persist a minted envelope into ``fitness_auth_state`` (auth_status='ok').
+
+    Validates the blob is well-formed and loadable by the SDK (offline)
+    before writing, warns on stderr if it belongs to a different upstream
+    account than the one already stored (D8), then upserts with the same
+    operator-driven semantics as :func:`cmd_fitness_reauth_garmin`.
+    Returns the ``upstream_user_id`` written.
+    """
+    blob = envelope.get("tokens_blob")
+    upstream = envelope.get("upstream_user_id")
+    if not isinstance(blob, str) or not blob:
+        raise ValueError("envelope missing a non-empty 'tokens_blob'")
+    if not isinstance(upstream, str) or not upstream:
+        raise ValueError("envelope missing a non-empty 'upstream_user_id'")
+
+    # Offline sanity check: the blob must be JSON and load into a fresh SDK
+    # client. Catches a truncated/corrupted paste before it reaches the DB.
+    factory = client_factory or Garmin
+    try:
+        json.loads(blob)
+        factory(email="", password="").client.loads(blob)
+    except Exception as exc:  # noqa: BLE001 — surface a clean operator error
+        raise ValueError(f"token blob failed to load into the SDK: {exc}") from exc
+
+    existing = repo.get_auth_state(user_id=user_id, source="garmin")
+    if existing is not None:
+        stored = (existing.extra_state or {}).get("upstream_user_id")
+        if stored and stored != upstream:
+            print(
+                f"Warning: importing a different Garmin account "
+                f"(stored={stored}, incoming={upstream}).",
+                file=sys.stderr,
+            )
+    extra = dict(existing.extra_state) if existing else {}
+    extra["tokens_blob"] = blob
+    extra["upstream_user_id"] = upstream
+    repo.upsert_auth_state(
+        FitnessAuthState(
+            user_id=user_id,
+            source="garmin",
+            access_token=existing.access_token if existing else None,
+            refresh_token=existing.refresh_token if existing else None,
+            token_expires_at=existing.token_expires_at if existing else None,
+            extra_state=extra,
+            last_successful_login_at=_now_iso(),
+            last_refresh_at=existing.last_refresh_at if existing else None,
+            auth_status="ok",
+            auth_broken_since=None,
+            created_at=existing.created_at if existing else "",
+        ),
+    )
+    return upstream
+
+
+def cmd_fitness_garmin_import_token(args: argparse.Namespace, config: Config) -> None:
+    """Import a minted Garmin token envelope into the DB — run on the server.
+
+    Reads the JSON envelope from ``--input`` (a path, or ``-`` for stdin,
+    the default) and persists it for ``--user-id``. No network login —
+    the daily sync boots from the stored blob.
+    """
+    source = getattr(args, "input", None) or "-"
+    raw = sys.stdin.read() if source == "-" else Path(source).read_text(encoding="utf-8")
+    try:
+        envelope = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"Error: input is not valid JSON: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(envelope, dict):
+        print("Error: envelope must be a JSON object.", file=sys.stderr)
+        sys.exit(1)
+
+    db_factory = ConnectionFactory(config.db_path)
+    run_migrations(db_factory.get())
+    repo = FitnessRepository(db_factory)
+    try:
+        upstream = _import_garmin_token_envelope(
+            repo, user_id=args.user_id, envelope=envelope,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(
+        f"Garmin token imported for user_id={args.user_id} "
+        f"(upstream={upstream}); auth_status set to ok.",
+    )
 
 
 # ── fitness-sync ─────────────────────────────────────────────────────

@@ -18,11 +18,13 @@ entry — production wiring resolves it to ``garminconnect.Garmin``.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 import pytest
 from garminconnect import (
     GarminConnectAuthenticationError,
+    GarminConnectConnectionError,
     GarminConnectTooManyRequestsError,
 )
 from starlette.testclient import TestClient
@@ -69,6 +71,7 @@ class FakeGarmin:
         mfa_required: bool = False,
         profile: dict[str, Any] | None = None,
         login_raises: BaseException | None = None,
+        login_logs: list[str] | None = None,
         resume_raises: BaseException | None = None,
         resume_profile: dict[str, Any] | None = None,
         profile_after_mfa_raises: BaseException | None = None,
@@ -79,6 +82,7 @@ class FakeGarmin:
         self._return_on_mfa = return_on_mfa
         self._mfa_required = mfa_required
         self._login_raises = login_raises
+        self._login_logs = login_logs
         self._resume_raises = resume_raises
         self._profile = profile or {"displayName": "alice.j", "fullName": "Alice J"}
         self._resume_profile = resume_profile or self._profile
@@ -94,6 +98,13 @@ class FakeGarmin:
         )()
 
     def login(self) -> tuple[Any, Any]:
+        # garminconnect's strategy chain emits 429/Cloudflare diagnostics on
+        # its own logger before the terminal exception surfaces; replay them
+        # so the endpoint's log-capture disambiguation can be exercised.
+        if self._login_logs:
+            gc_logger = logging.getLogger("garminconnect.client")
+            for message in self._login_logs:
+                gc_logger.warning(message)
         if self._login_raises is not None:
             raise self._login_raises
         if self._mfa_required and not self._mfa_resolved and self._return_on_mfa:
@@ -322,6 +333,108 @@ def test_connect_upstream_429_surfaces_distinctly(
     assert resp.status_code == 429
     body = resp.json()
     assert "retry_after_seconds" in body
+
+
+def test_connect_cloudflare_block_reclassified_from_invalid_credentials(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+) -> None:
+    """A Cloudflare/rate-limit block that garminconnect surfaces as a generic
+    ``GarminConnectAuthenticationError`` must NOT be reported to the user as
+    "invalid credentials".
+
+    Reproduces the prod failure mode: the login strategy chain hits 429s and a
+    Cloudflare bot challenge (logged as warnings), then the portal strategy
+    misreads the interstitial and raises an auth error with a generic
+    "Invalid Username or Password" message. We disambiguate via the captured
+    warnings and surface a 429 rate-limit response instead of a 401.
+    """
+    factory = FakeGarminFactory(
+        login_raises=GarminConnectAuthenticationError(
+            "401 Unauthorized (Invalid Username or Password)",
+        ),
+        login_logs=[
+            "mobile+cffi returned 429: Mobile login returned 429 — "
+            "IP rate limited by Garmin",
+            "widget+cffi failed: Widget login: unexpected title "
+            "'GARMIN Authentication Application'",
+        ],
+    )
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory,
+    )
+    with _build_client(services) as client:
+        resp = client.post(
+            "/api/fitness/garmin/connect",
+            json={"username": "alice@example.com", "password": "correct-horse"},
+        )
+    assert resp.status_code == 429
+    body = resp.json()
+    assert body.get("reason") == "upstream_rate_limited"
+    assert "retry_after_seconds" in body
+
+
+def test_connect_all_strategies_exhausted_is_rate_limited_not_502(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+) -> None:
+    """``GarminConnectConnectionError('All login strategies exhausted: …')`` —
+    the terminal outcome when transports hit Cloudflare challenges — should be
+    surfaced as a rate-limit (429), not a generic 502 upstream error.
+    """
+    factory = FakeGarminFactory(
+        login_raises=GarminConnectConnectionError(
+            "All login strategies exhausted: Portal login: CAPTCHA required "
+            "(bot challenge)",
+        ),
+    )
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory,
+    )
+    with _build_client(services) as client:
+        resp = client.post(
+            "/api/fitness/garmin/connect",
+            json={"username": "alice@example.com", "password": "correct-horse"},
+        )
+    assert resp.status_code == 429
+    body = resp.json()
+    assert body.get("reason") == "upstream_rate_limited"
+
+
+def test_connect_genuine_bad_password_still_401(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+) -> None:
+    """Regression guard: a real bad-password auth error (no rate-limit
+    diagnostics during the attempt) must still report ``invalid_credentials``.
+    """
+    factory = FakeGarminFactory(
+        login_raises=GarminConnectAuthenticationError(
+            "401 Unauthorized (Invalid Username or Password)",
+        ),
+    )
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory,
+    )
+    with _build_client(services) as client:
+        resp = client.post(
+            "/api/fitness/garmin/connect",
+            json={"username": "alice@example.com", "password": "wrong"},
+        )
+    assert resp.status_code == 401
+    assert resp.json().get("reason") == "invalid_credentials"
 
 
 def test_connect_per_email_cooldown_blocks_after_threshold(

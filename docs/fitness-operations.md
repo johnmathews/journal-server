@@ -195,6 +195,52 @@ by Garmin` lines before a third transport succeeds. **The `Garmin
 re-auth complete — token blob persisted.` line is authoritative.** The
 429 lines are not failures (see [§6](#6-troubleshooting)).
 
+### 2c-bis. Garmin — split-IP recovery when Cloudflare blocks the server
+
+`fitness-reauth-garmin` (§2c) and the webapp connect flow (§2a) both run
+the username/password login **from the server's egress IP**. When Garmin's
+Cloudflare bot defenses flag that IP — typically after a burst of failed
+login attempts — every fresh login from the server fails with a 429 / bot
+challenge **even though the credentials are correct**. The symptom in logs
+is a run of `mobile+cffi returned 429` / `unexpected title 'GARMIN
+Authentication Application' … Cloudflare rate limiting` lines, and the
+webapp surfaces `reason: "upstream_rate_limited"` (a 429), no longer the
+misleading `invalid_credentials` it reported before this was fixed.
+
+The fix is to do the network login somewhere **unflagged** and ship only
+the resulting token blob to the server. Because a `garth` OAuth1 token is
+valid ~1 year and the daily sync boots from the stored blob (no fresh SSO
+login), a single mint+import keeps syncing working for months.
+
+```bash
+# 1. MINT — on a laptop / unflagged network (e.g. phone hotspot, NOT the
+#    server's network). Prompts for the password via getpass; never writes
+#    the DB. Prints a JSON envelope to stdout (or use --output FILE).
+uv run journal fitness-garmin-mint-token --username user@example.com \
+    --output garmin-token.json
+
+# 2. IMPORT — on the server. No network login; just writes the blob into
+#    fitness_auth_state and sets auth_status='ok'.
+docker exec -i journal-server uv run journal fitness-garmin-import-token \
+    --user-id 1 --input - < garmin-token.json
+
+# …or pipe the two directly if the laptop can reach the server:
+uv run journal fitness-garmin-mint-token --username user@example.com \
+    | docker exec -i journal-server uv run journal \
+        fitness-garmin-import-token --user-id 1
+```
+
+Notes:
+- **Stop retrying first.** Every failed login from the flagged IP re-arms
+  the Cloudflare block. If even the laptop mint 429s, the account/IP is
+  still hot — wait (24h+) and mint from a different network.
+- The mint command needs the repo + a loadable `.env` (to start the CLI)
+  but **no DB access and no prod network**, so it runs anywhere the package
+  is installed.
+- Import validates the blob loads into the SDK before writing, and warns on
+  stderr if it belongs to a different Garmin account than the one already
+  stored (the D8 guard).
+
 ### 2d. Strava — CLI operator fallback (laptop / dev box)
 
 When the journal-server is **not** running on the same host (or is not
@@ -570,6 +616,12 @@ The fetch service has already fired the once-per-transition Pushover (if
 configured). Run `fitness-reauth-{strava,garmin}` to refresh credentials.
 Re-auth flips `auth_status` back to `ok` and clears `auth_broken_since`. The
 next sync (CLI, REST, or MCP) picks up from the existing watermark.
+
+If a Garmin re-auth itself keeps failing with 429 / `upstream_rate_limited`
+(webapp) or a wall of `… returned 429 … IP rate limited by Garmin` lines
+(CLI), the server's IP is Cloudflare-blocked — the credentials are fine.
+Stop retrying (each attempt re-arms the block) and use the split-IP
+mint/import recovery in [§2c-bis](#2c-bis-garmin--split-ip-recovery-when-cloudflare-blocks-the-server).
 
 ### `POST /api/fitness/sync/{source}` returns 503
 

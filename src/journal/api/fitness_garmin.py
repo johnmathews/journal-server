@@ -22,6 +22,7 @@ Auth is enforced by ``RequireAuthMiddleware``: every route below assumes
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -42,7 +43,7 @@ from journal.services.fitness.garmin_pending import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from mcp.server.fastmcp import FastMCP
     from starlette.requests import Request
@@ -51,6 +52,96 @@ if TYPE_CHECKING:
     from journal.service_registry import ServicesDict
 
 log = logging.getLogger(__name__)
+
+
+# Substrings that mark a Garmin login failure as a rate-limit / Cloudflare
+# bot-challenge rather than genuinely wrong credentials. Lower-cased match
+# against both the exception text and the diagnostics garminconnect logs
+# mid-login (see ``_capture_garmin_logs``). Kept deliberately broad: a false
+# positive only changes a 401 into a "try again later" 429, never the reverse.
+_RATE_LIMIT_SIGNALS = (
+    "429",
+    "rate limit",
+    "rate-limit",
+    "rate limiting",
+    "too many",
+    "cloudflare",
+    "bot challenge",
+    "captcha",
+    "unexpected title",
+    "strategies exhausted",
+    "ip rate limited",
+    "blocking this request",
+)
+
+
+def _looks_rate_limited(*texts: str) -> bool:
+    """True when any text carries a rate-limit / bot-challenge signal."""
+    blob = " ".join(t for t in texts if t).lower()
+    return any(signal in blob for signal in _RATE_LIMIT_SIGNALS)
+
+
+class _GarminLogCapture(logging.Handler):
+    """Collect the WARNING+ lines garminconnect emits during a login attempt.
+
+    garminconnect's login runs a 5-strategy chain; each strategy logs its 429 /
+    Cloudflare / bot-challenge outcome as a warning, then the chain can still
+    surface the *terminal* failure as a generic
+    :class:`GarminConnectAuthenticationError` (e.g. when the portal strategy
+    misreads a Cloudflare interstitial as ``INVALID_USERNAME_PASSWORD``). The
+    terminal message alone is therefore indistinguishable from a real bad
+    password — but the captured warnings are not. This handler lets the connect
+    endpoint tell "wrong password" apart from "Garmin blocked this IP".
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        # Logging capture must never break the login it observes.
+        with contextlib.suppress(Exception):
+            self.messages.append(record.getMessage())
+
+    @property
+    def text(self) -> str:
+        return " ".join(self.messages)
+
+
+@contextlib.contextmanager
+def _capture_garmin_logs() -> Iterator[_GarminLogCapture]:
+    """Temporarily tee ``garminconnect``'s WARNING+ records into a buffer."""
+    handler = _GarminLogCapture()
+    gc_logger = logging.getLogger("garminconnect")
+    gc_logger.addHandler(handler)
+    try:
+        yield handler
+    finally:
+        gc_logger.removeHandler(handler)
+
+
+def _garmin_rate_limited_response(detail: str) -> JSONResponse:
+    """Uniform 429 for an upstream rate-limit / Cloudflare bot challenge.
+
+    Distinct from the *local* cooldown 429 (``reason="local_cooldown"``): this
+    one means Garmin/Cloudflare refused the upstream login, typically because
+    the IP has been hammered. The remedy is to stop retrying and wait — every
+    further attempt re-arms the block — so the message says so.
+    """
+    return JSONResponse(
+        {
+            "error": (
+                "Garmin is rate-limiting or bot-challenging login attempts "
+                "from this server. Stop retrying and wait — each attempt "
+                "re-arms the block. Try again in a few minutes (longer if it "
+                "persists), ideally from an unflagged network."
+            ),
+            "reason": "upstream_rate_limited",
+            "retry_after_seconds": 300,
+            "detail": detail,
+        },
+        status_code=429,
+    )
 
 
 def _extract_upstream_user_id(client: Any, fallback: str) -> str | None:
@@ -182,10 +273,22 @@ def register_fitness_garmin_routes(
         # own copy briefly; we'll let GC reclaim that once the call returns.
         del password
 
+        # Capture garminconnect's mid-login diagnostics so we can tell a
+        # genuine bad password apart from a Cloudflare/rate-limit block that
+        # the strategy chain misreports as an auth error (the prod failure
+        # mode that looked like "invalid credentials" but was really a 429).
         try:
-            result = client.login()
+            with _capture_garmin_logs() as gc_logs:
+                result = client.login()
         except GarminConnectAuthenticationError as exc:
             cooldown.record_failure(username)
+            if _looks_rate_limited(str(exc), gc_logs.text):
+                log.warning(
+                    "POST /api/fitness/garmin/connect — login blocked by "
+                    "rate-limit/bot-challenge (surfaced as an auth error) "
+                    "for user_id=%d", user.user_id,
+                )
+                return _garmin_rate_limited_response(str(exc))
             log.info(
                 "POST /api/fitness/garmin/connect — invalid credentials "
                 "for user_id=%d", user.user_id,
@@ -204,19 +307,18 @@ def register_fitness_garmin_routes(
                 "POST /api/fitness/garmin/connect — Garmin returned 429 "
                 "for user_id=%d", user.user_id,
             )
-            return JSONResponse(
-                {
-                    "error": (
-                        "Garmin is rate-limiting login attempts. Wait a few "
-                        "minutes before retrying."
-                    ),
-                    "reason": "upstream_rate_limited",
-                    "retry_after_seconds": 300,
-                    "detail": str(exc),
-                },
-                status_code=429,
-            )
+            return _garmin_rate_limited_response(str(exc))
         except Exception as exc:  # noqa: BLE001
+            # The terminal "all strategies exhausted" failure (Cloudflare 403
+            # challenges, CAPTCHA, TLS-fingerprint blocks) lands here as a
+            # GarminConnectConnectionError. Classify it as a rate-limit too.
+            if _looks_rate_limited(str(exc), gc_logs.text):
+                cooldown.record_failure(username)
+                log.warning(
+                    "POST /api/fitness/garmin/connect — login blocked by "
+                    "rate-limit/bot-challenge for user_id=%d", user.user_id,
+                )
+                return _garmin_rate_limited_response(str(exc))
             log.exception(
                 "POST /api/fitness/garmin/connect — unexpected error "
                 "for user_id=%d", user.user_id,

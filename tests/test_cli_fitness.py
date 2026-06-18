@@ -653,3 +653,122 @@ def test_fitness_audit_null_user_id_fails(fitness_env, capsys):
     assert "FAIL" in out
     assert "fitness_sync_runs" in out
     assert "NULL" in out
+
+
+# ── Garmin token mint / import (split-IP recovery) ───────────────────
+
+
+class _FakeMintInternal:
+    """Stand-in for ``garminconnect.Garmin.client`` for mint/import."""
+
+    def __init__(self, dump_blob: str) -> None:
+        self._dump_blob = dump_blob
+        self.loaded: str | None = None
+
+    def dumps(self) -> str:
+        return self._dump_blob
+
+    def loads(self, blob: str) -> None:
+        # Mirror the SDK: reject anything that isn't the JSON we expect.
+        import json as _json
+
+        _json.loads(blob)
+        self.loaded = blob
+
+
+class _FakeMintGarmin:
+    """Drop-in for ``garminconnect.Garmin`` exercising the mint flow."""
+
+    def __init__(
+        self, *, email: str = "", password: str = "", prompt_mfa=None,
+    ) -> None:
+        self.email = email
+        self.password = password
+        self._prompt_mfa = prompt_mfa
+        self.client = _FakeMintInternal('{"oauth1": "MINTED_BLOB"}')
+        self.login_calls = 0
+
+    def login(self) -> None:
+        self.login_calls += 1
+
+    def get_user_profile(self) -> dict:
+        return {"displayName": "alice.j", "fullName": "Alice J"}
+
+
+def test_mint_garmin_token_envelope_shape() -> None:
+    """The minted envelope carries source, upstream id, blob, and timestamp."""
+    from journal.cli.fitness import _mint_garmin_token_envelope
+
+    envelope = _mint_garmin_token_envelope(
+        username="alice@example.com",
+        password="pw",
+        client_factory=_FakeMintGarmin,
+        mfa_prompt=lambda: "000000",
+    )
+    assert envelope["source"] == "garmin"
+    assert envelope["upstream_user_id"] == "alice.j"
+    assert envelope["tokens_blob"] == '{"oauth1": "MINTED_BLOB"}'
+    assert envelope["minted_at"].endswith("Z")
+
+
+def test_import_garmin_token_envelope_persists_ok(fitness_env) -> None:
+    """Importing a valid envelope writes the blob and flips auth_status='ok'."""
+    from journal.cli.fitness import _import_garmin_token_envelope
+
+    repo = FitnessRepository(ConnectionFactory(fitness_env))
+    envelope = {
+        "source": "garmin",
+        "upstream_user_id": "alice.j",
+        "tokens_blob": '{"oauth1": "MINTED_BLOB"}',
+        "minted_at": "2026-06-19T00:00:00Z",
+    }
+    upstream = _import_garmin_token_envelope(
+        repo, user_id=1, envelope=envelope, client_factory=_FakeMintGarmin,
+    )
+    assert upstream == "alice.j"
+    state = _read_state(fitness_env, source="garmin")
+    assert state is not None
+    assert state.extra_state.get("tokens_blob") == '{"oauth1": "MINTED_BLOB"}'
+    assert state.extra_state.get("upstream_user_id") == "alice.j"
+    assert state.auth_status == "ok"
+    assert state.auth_broken_since is None
+
+
+def test_import_garmin_token_envelope_rejects_bad_blob(fitness_env) -> None:
+    """A non-JSON / unloadable blob is rejected before touching the DB."""
+    from journal.cli.fitness import _import_garmin_token_envelope
+
+    repo = FitnessRepository(ConnectionFactory(fitness_env))
+    envelope = {"source": "garmin", "upstream_user_id": "alice.j", "tokens_blob": "not-json"}
+    with pytest.raises(ValueError, match="failed to load"):
+        _import_garmin_token_envelope(
+            repo, user_id=1, envelope=envelope, client_factory=_FakeMintGarmin,
+        )
+    assert _read_state(fitness_env, source="garmin") is None
+
+
+def test_mint_then_import_roundtrip_via_main(fitness_env, monkeypatch, tmp_path) -> None:
+    """End-to-end: mint to a file, import from it, DB row lands auth_status='ok'."""
+    monkeypatch.setattr("journal.cli.fitness.getpass", lambda *a, **kw: "pw")
+    monkeypatch.setattr("journal.cli.fitness.Garmin", _FakeMintGarmin)
+    envelope_path = tmp_path / "garmin-token.json"
+
+    sys.argv = [
+        "journal", "fitness-garmin-mint-token",
+        "--username", "alice@example.com",
+        "--output", str(envelope_path),
+    ]
+    main()
+    assert envelope_path.exists()
+
+    sys.argv = [
+        "journal", "fitness-garmin-import-token",
+        "--user-id", "1",
+        "--input", str(envelope_path),
+    ]
+    main()
+
+    state = _read_state(fitness_env, source="garmin")
+    assert state is not None
+    assert state.auth_status == "ok"
+    assert state.extra_state.get("tokens_blob") == '{"oauth1": "MINTED_BLOB"}'

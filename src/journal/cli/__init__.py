@@ -30,6 +30,8 @@ from journal.cli.entities import (
 from journal.cli.fitness import (
     cmd_fitness_audit,
     cmd_fitness_backfill,
+    cmd_fitness_garmin_import_token,
+    cmd_fitness_garmin_mint_token,
     cmd_fitness_reauth_garmin,
     cmd_fitness_reauth_strava,
     cmd_fitness_status,
@@ -657,6 +659,48 @@ def main():
         ),
     )
 
+    # fitness-garmin-mint-token
+    p_fit_mint = subparsers.add_parser(
+        "fitness-garmin-mint-token",
+        help=(
+            "Log into Garmin and print a portable token envelope to stdout "
+            "(no DB writes). Run this on a laptop / unflagged network when "
+            "Garmin's Cloudflare bot defenses are blocking the server's IP, "
+            "then feed the envelope to fitness-garmin-import-token."
+        ),
+    )
+    p_fit_mint.add_argument(
+        "--username",
+        required=True,
+        help="Garmin Connect login email (required — no env-var fallback).",
+    )
+    p_fit_mint.add_argument(
+        "--output",
+        default="-",
+        help="Where to write the JSON envelope ('-' for stdout, the default).",
+    )
+
+    # fitness-garmin-import-token
+    p_fit_import = subparsers.add_parser(
+        "fitness-garmin-import-token",
+        help=(
+            "Read a token envelope from fitness-garmin-mint-token and persist "
+            "it into fitness_auth_state (auth_status='ok'). No network login "
+            "— run this on the server."
+        ),
+    )
+    p_fit_import.add_argument(
+        "--user-id",
+        type=int,
+        required=True,
+        help="Owner of the auth row (required — no default).",
+    )
+    p_fit_import.add_argument(
+        "--input",
+        default="-",
+        help="JSON envelope source ('-' for stdin, the default, or a path).",
+    )
+
     # fitness-sync
     p_fit_sync = subparsers.add_parser(
         "fitness-sync",
@@ -766,6 +810,8 @@ def main():
         "migrate-chromadb": cmd_migrate_chromadb,
         "fitness-reauth-strava": cmd_fitness_reauth_strava,
         "fitness-reauth-garmin": cmd_fitness_reauth_garmin,
+        "fitness-garmin-mint-token": cmd_fitness_garmin_mint_token,
+        "fitness-garmin-import-token": cmd_fitness_garmin_import_token,
         "fitness-sync": cmd_fitness_sync,
         "fitness-backfill": cmd_fitness_backfill,
         "fitness-status": cmd_fitness_status,
