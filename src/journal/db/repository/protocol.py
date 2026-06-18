@@ -95,6 +95,8 @@ class EntryRepository(Protocol):
         self, entry_date: str, source_type: str, raw_text: str, word_count: int,
         final_text: str | None = None,
         user_id: int = 1,
+        content_start_char: int | None = None,
+        content_end_char: int | None = None,
     ) -> Entry: ...
 
     def get_entry(self, entry_id: int, user_id: int | None = None) -> Entry | None: ...
