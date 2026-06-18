@@ -54,6 +54,10 @@ SYSTEM_PROMPT = (
     "Use a paragraph break (two consecutive newlines) ONLY between distinct "
     "paragraphs, where the author left a clear visual gap, indented a new line, "
     "or started a new thought. When in doubt, prefer fewer paragraph breaks.\n\n"
+    "If the author crossed out a word or phrase — a line struck through it — that "
+    "text is a mistake the author deleted. Omit it entirely: do not transcribe "
+    "crossed-out text and do not mark it with strikethrough. Keep only what the "
+    "author left standing.\n\n"
     "Output only the extracted text with no commentary or preamble. "
     "When you are unsure about a word or short phrase — illegible strokes, ambiguous "
     "letters, a guess you cannot make with confidence — wrap that word or phrase in "
@@ -195,6 +199,50 @@ def parse_uncertain_markers(raw: str) -> tuple[str, list[tuple[int, int]]]:
         )
 
     return "".join(clean), spans
+
+# Crossed-out handwriting (a word with a line struck through it) is a
+# mistake the author deleted, so it must not reach the entry text. The
+# OCR model represents such words with Markdown strikethrough (~~word~~).
+# This regex matches one strikethrough span. It is deliberately:
+#   * non-greedy (``.+?``) so ``~~a~~b~~c~~`` removes the two struck
+#     words and keeps ``b`` between them, rather than swallowing ``b``;
+#   * single-line (``.`` excludes ``\n``) so an unmatched ``~~`` cannot
+#     eat across a paragraph break. A struck phrase that wraps across a
+#     physical line is the accepted tail risk — the system prompt also
+#     instructs the model to omit crossed-out text, so the stripper is a
+#     safety net rather than the sole mechanism.
+_STRIKETHROUGH_RE = re.compile(r"~~.+?~~")
+
+
+def strip_strikethrough(text: str) -> str:
+    """Remove Markdown strikethrough (``~~crossed out~~``) spans from *text*.
+
+    Words the author struck through are mistakes they deleted; they must
+    not appear in the saved entry. The OCR model emits them as Markdown
+    strikethrough, which this function removes along with the whitespace
+    the removal would otherwise strand:
+
+    - runs of spaces/tabs left behind collapse to a single space
+      (``"to  the"`` → ``"to the"``);
+    - a space stranded before sentence punctuation is dropped
+      (``"happy ."`` → ``"happy."``);
+    - leading/trailing horizontal whitespace on each line is trimmed,
+      and the whole result is stripped.
+
+    Paragraph breaks (``\\n``) are preserved. A lone, unmatched ``~~`` is
+    not a strikethrough span and is left untouched.
+
+    Run this on the raw model output **before** ``parse_uncertain_markers``
+    so the uncertain-span character offsets are computed against the
+    already-stripped text and stay valid.
+    """
+    without = _STRIKETHROUGH_RE.sub("", text)
+    without = re.sub(r"[ \t]{2,}", " ", without)
+    without = re.sub(r" +([,.;:!?])", r"\1", without)
+    without = re.sub(r"[ \t]+\n", "\n", without)
+    without = re.sub(r"\n[ \t]+", "\n", without)
+    return without.strip()
+
 
 def reflow_paragraphs(text: str) -> str:
     """Replace hard line breaks within paragraphs with spaces.
@@ -435,6 +483,9 @@ class AnthropicOCRProvider:
         )
 
         raw = message.content[0].text
+        # Drop crossed-out (struck-through) words before parsing sentinels
+        # so the uncertain-span offsets are anchored to the final text.
+        raw = strip_strikethrough(raw)
         clean_text, spans = parse_uncertain_markers(raw)
         # The OCR prompt asks the model to reflow line wraps as a single
         # space, but Anthropic (like Gemini) occasionally preserves a
@@ -516,6 +567,9 @@ class GeminiOCRProvider:
         )
 
         raw = response.text
+        # Drop crossed-out (struck-through) words before parsing sentinels
+        # so the uncertain-span offsets are anchored to the final text.
+        raw = strip_strikethrough(raw)
         clean_text, spans = parse_uncertain_markers(raw)
         # Gemini preserves physical line breaks from the handwritten page.
         # Reflow into natural paragraphs — single \n → space, \n\n+ kept.

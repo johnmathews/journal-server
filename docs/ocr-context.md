@@ -149,6 +149,27 @@ necessary but not sufficient — the ground truth is your eyes on the pages.
 - **Cache-miss cost surprises.** If the user edits context files and restarts frequently, cache writes (2× multiplier)
   dominate. At ~$0.04 per cold start this is negligible but worth knowing.
 
+## Crossed-out words (strikethrough removal)
+
+When the author strikes a word through to delete a mistake, that correction must **not** reach the entry text. This is
+handled in two layers:
+
+1. **System prompt** — the model is told that crossed-out text is a deletion: omit it entirely, do not transcribe it, and
+   do not mark it with strikethrough.
+2. **Deterministic safety net** — `strip_strikethrough(raw)` in `providers/ocr.py` removes any Markdown strikethrough
+   (`~~crossed out~~`) the model emits anyway. It runs on the raw model output **before** `parse_uncertain_markers`, so
+   the uncertain-span offsets are anchored to the already-stripped text and stay valid.
+
+The stripper removes each `~~…~~` span and cleans up the whitespace the removal would strand: collapsed double spaces, a
+space stranded before sentence punctuation (`"happy ."` → `"happy."`), and leading/trailing line whitespace. The regex is
+non-greedy and single-line, so `~~a~~b~~c~~` keeps the `b` between two struck words, and an unmatched lone `~~` is left
+untouched rather than swallowing the rest of a paragraph. A struck phrase that wraps across a physical line is the
+accepted tail risk — the system-prompt instruction is the primary defence there.
+
+Both the Anthropic and Gemini providers share `SYSTEM_PROMPT` and the same `extract()` cleanup path, so the behaviour is
+identical across providers (and through dual-pass reconciliation, which operates on each provider's already-stripped
+text). This is a forward-only behaviour: existing stored entries are not retroactively re-cleaned.
+
 ## Uncertainty spans (the "Review" feature)
 
 Glossary priming raises the ceiling on proper-noun accuracy but doesn't solve the deeper problem: **the user doesn't know

@@ -23,6 +23,7 @@ from journal.providers.ocr import (
     parse_uncertain_markers,
     reconcile_ocr_results,
     reflow_paragraphs,
+    strip_strikethrough,
 )
 
 
@@ -128,6 +129,38 @@ class TestAnthropicOCRProvider:
         assert result.text[12:18] == "Ritsya"
         assert result.uncertain_spans == [(12, 18)]
 
+    def test_extract_drops_crossed_out_words(self) -> None:
+        """Strikethrough (~~word~~) the model emits for crossed-out
+        handwriting must not appear in the entry text."""
+        provider, client = self._make_provider()
+        mock_message = MagicMock()
+        mock_message.content = [
+            MagicMock(text="I went to ~~the shop~~ the market today.")
+        ]
+        client.messages.create.return_value = mock_message
+
+        result = provider.extract(b"data", "image/png")
+
+        assert result.text == "I went to the market today."
+        assert "~~" not in result.text
+
+    def test_extract_strikethrough_keeps_uncertain_spans_valid(self) -> None:
+        """When a crossed-out word precedes an uncertain word, the
+        uncertain span must still point at the right text after the
+        strikethrough is removed — strikethrough is stripped BEFORE the
+        sentinel parser computes offsets."""
+        provider, client = self._make_provider()
+        raw = f"Met ~~Bob~~ {UNCERTAIN_OPEN}Ritsya{UNCERTAIN_CLOSE} today."
+        mock_message = MagicMock()
+        mock_message.content = [MagicMock(text=raw)]
+        client.messages.create.return_value = mock_message
+
+        result = provider.extract(b"data", "image/png")
+
+        assert result.text == "Met Ritsya today."
+        start, end = result.uncertain_spans[0]
+        assert result.text[start:end] == "Ritsya"
+
     def test_system_prompt_included_without_context(self) -> None:
         provider, client = self._make_provider()
         mock_message = MagicMock()
@@ -154,6 +187,15 @@ class TestAnthropicOCRProvider:
         # Smell-test a couple of phrases to catch accidental deletes.
         assert "uncertain" in SYSTEM_PROMPT.lower()
         assert "sparingly" in SYSTEM_PROMPT.lower()
+
+    def test_system_prompt_instructs_omitting_crossed_out_text(self) -> None:
+        """SYSTEM_PROMPT must tell the model to omit struck-through /
+        crossed-out words so corrections the author crossed out never
+        reach the entry text. The deterministic stripper is a safety
+        net, but the prompt is the first line of defence."""
+        lowered = SYSTEM_PROMPT.lower()
+        assert "crossed out" in lowered or "struck" in lowered
+        assert "omit" in lowered or "do not include" in lowered
 
     def test_role_prompts_mention_entry_begins_and_ends(self) -> None:
         """Role-specific prompt clauses must reference ENTRY_BEGINS / ENTRY_ENDS
@@ -571,6 +613,60 @@ class TestReflowParagraphs:
         result = reflow_paragraphs(text)
         assert result[20:25] == "store"
         assert text[20:25] == "store"
+
+
+class TestStripStrikethrough:
+    """Tests for strip_strikethrough — removing crossed-out (~~word~~)
+    text the OCR model emits when the author struck a word through.
+
+    Every behaviour here is documented in the function's docstring.
+    """
+
+    def test_plain_text_unchanged(self) -> None:
+        assert strip_strikethrough("hello world") == "hello world"
+
+    def test_empty_string(self) -> None:
+        assert strip_strikethrough("") == ""
+
+    def test_removes_single_word_mid_sentence(self) -> None:
+        # The struck word and the now-redundant space collapse to one space.
+        assert (
+            strip_strikethrough("I went to ~~the shop~~ the market today")
+            == "I went to the market today"
+        )
+
+    def test_removes_at_start(self) -> None:
+        assert strip_strikethrough("~~Wrong~~ Right start") == "Right start"
+
+    def test_removes_at_end(self) -> None:
+        assert strip_strikethrough("Keep this ~~drop this~~") == "Keep this"
+
+    def test_no_space_left_before_punctuation(self) -> None:
+        # "I felt ~~sad~~." must not leave "I felt ." with a dangling space.
+        assert strip_strikethrough("I felt happy ~~sad~~.") == "I felt happy."
+
+    def test_multiple_strikethroughs(self) -> None:
+        assert (
+            strip_strikethrough("a ~~b~~ c ~~d~~ e") == "a c e"
+        )
+
+    def test_single_letter_word(self) -> None:
+        assert strip_strikethrough("the ~~a~~ best") == "the best"
+
+    def test_non_greedy_does_not_span_across_pairs(self) -> None:
+        # "~~a~~b~~c~~" → the b between two struck words survives.
+        assert strip_strikethrough("~~a~~b~~c~~") == "b"
+
+    def test_lone_double_tilde_left_alone(self) -> None:
+        # A single unmatched ~~ is not a strikethrough span; leave it be
+        # rather than swallowing the rest of the text.
+        assert strip_strikethrough("a ~~ b") == "a ~~ b"
+
+    def test_strikethrough_within_paragraph_preserves_breaks(self) -> None:
+        text = "First para ~~oops~~ done.\n\nSecond para here."
+        assert (
+            strip_strikethrough(text) == "First para done.\n\nSecond para here."
+        )
 
 
 class TestGeminiOCRProvider:
