@@ -118,6 +118,15 @@ def _entry_to_dict(
         "uncertain_spans": []
         if verified
         else [{"char_start": start, "char_end": end} for start, end in (uncertain_spans or [])],
+        "content_boundary": (
+            {
+                "char_start": entry.content_start_char,
+                "char_end": entry.content_end_char,
+            }
+            if entry.content_start_char is not None
+            and entry.content_end_char is not None
+            else None
+        ),
     }
 
 
