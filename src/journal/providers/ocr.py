@@ -19,6 +19,7 @@ import base64
 import logging
 import re
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import anthropic
@@ -67,6 +68,52 @@ SYSTEM_PROMPT = (
     "uncertain span itself, not around whole sentences. A span may cover one word or "
     "several consecutive words if they are jointly uncertain. Do not nest sentinels."
 )
+
+
+class PageRole(StrEnum):
+    """Where a page sits in a multi-page upload — drives the OCR prompt."""
+
+    FIRST = "first"
+    MIDDLE = "middle"
+    LAST = "last"
+    ONLY = "only"
+
+
+ENTRY_BEGINS = "<<<ENTRY BEGINS>>>"
+ENTRY_ENDS = "<<<ENTRY ENDS>>>"
+
+_ROLE_CLAUSES: dict[PageRole, str] = {
+    PageRole.FIRST: (
+        "\n\nThis is the FIRST page of a journal entry that continues onto "
+        "later pages. If text belonging to a PREVIOUS, already-finished entry "
+        f"sits above this entry's first line, emit {ENTRY_BEGINS} on its own "
+        "line immediately before this entry's first line. The entry continues past this page."
+    ),
+    PageRole.MIDDLE: (
+        "\n\nThis is a MIDDLE page of a single ongoing entry — a pure "
+        "continuation. Do not emit any markers."
+    ),
+    PageRole.LAST: (
+        "\n\nThis is the LAST page of the entry; the entry ends on this page. "
+        "If a DIFFERENT, new entry begins below where this entry ends (for "
+        f"example a fresh date heading), emit {ENTRY_ENDS} on its own line "
+        "immediately after this entry's last line."
+    ),
+    PageRole.ONLY: (
+        "\n\nThis image is a COMPLETE entry on a single page. If a previous "
+        f"entry's tail sits above it, emit {ENTRY_BEGINS} on its own line "
+        "immediately before this entry's first line. If a different, new entry "
+        f"begins below it, emit {ENTRY_ENDS} on its own line immediately "
+        "after this entry's last line. Emit each marker at most once."
+    ),
+}
+
+
+def role_prompt_clause(role: PageRole | None) -> str:
+    """Return the system-prompt addendum for a page role (``""`` if None)."""
+    if role is None:
+        return ""
+    return _ROLE_CLAUSES[role]
 
 
 @dataclass(frozen=True)
