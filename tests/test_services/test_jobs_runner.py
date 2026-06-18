@@ -910,11 +910,13 @@ class TestImageIngestionSingleEntryContract:
         """Regression: OCR returns body + ENTRY_ENDS marker + a neighbour
         entry. ``ingest_image`` must still produce exactly ONE entry;
         the worker must not fan-out."""
-        entry_delimiter = "<<<ENTRY_ENDS>>>"
+        from journal.providers.ocr import ENTRY_ENDS
+
+        neighbor_text = "Neighbor entry text"
         ocr_text = (
             "3 June 2026\n\nMain entry body."
-            f"\n\n{entry_delimiter}\n\n"
-            "4 June 2026\n\nTrailing neighbour entry body."
+            f"\n{ENTRY_ENDS}\n"
+            f"2025-01-02\n{neighbor_text}"
         )
         runner, repo, _ = self._make_runner(
             jobs_repo, threadsafe_factory, ocr_text=ocr_text,
@@ -929,8 +931,7 @@ class TestImageIngestionSingleEntryContract:
         assert final is not None
         assert final.status == "succeeded"
 
-        # Exactly one entry — trailing neighbour is discarded or stored
-        # separately by the ingestion layer, but the worker sees one.
+        # Exactly one entry persisted.
         entries = repo.list_entries(limit=10)
         assert len(entries) == 1
 
@@ -941,6 +942,18 @@ class TestImageIngestionSingleEntryContract:
         follow_ups = final.result["follow_up_jobs"]
         assert "mood_scoring" in follow_ups
         assert "entity_extraction" in follow_ups
+
+        # Trimming path: content_end_char must be set (ENTRY_ENDS was present).
+        entry = repo.get_entry(entries[0].id)
+        assert entry is not None
+        assert entry.content_end_char is not None
+
+        # final_text (the in-bounds/reading slice) must NOT contain the
+        # neighbour text — it was trimmed at the ENTRY_ENDS boundary.
+        assert neighbor_text not in entry.final_text
+
+        # raw_text is verbatim OCR output so the neighbour IS present.
+        assert neighbor_text in entry.raw_text
 
     def test_single_image_queues_exactly_two_follow_ups(
         self, jobs_repo, threadsafe_factory
