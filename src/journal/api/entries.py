@@ -221,6 +221,11 @@ def register_entries_routes(
             should_queue_pipeline = True
 
         # Apply content window if the fields were present.
+        # NOTE: when both final_text and window fields are sent in the same
+        # request, the window update runs *after* save_final_text and
+        # re-derives final_text from the raw_text slice.  The window-derived
+        # text therefore takes precedence over any manually supplied
+        # final_text in that request.
         if has_start or has_end:
             if not (has_start and has_end):
                 return JSONResponse(
@@ -242,6 +247,20 @@ def register_entries_routes(
                     log.warning("PATCH /api/entries/%d — window clear error: %s", entry_id, e)
                     return JSONResponse({"error": str(e)}, status_code=400)
                 should_queue_pipeline = True
+            elif start is None or end is None:
+                # Exactly one of the two values is null — this is ambiguous
+                # (not a clear, not a valid range).  Reject with an explicit
+                # message before falling into the range-validation branch,
+                # which would otherwise produce a misleading type error.
+                return JSONResponse(
+                    {
+                        "error": (
+                            "content_start_char and content_end_char must both be "
+                            "integers, or both null to clear the window"
+                        )
+                    },
+                    status_code=400,
+                )
             else:
                 if (
                     not isinstance(start, int)

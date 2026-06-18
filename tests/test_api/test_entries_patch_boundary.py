@@ -191,3 +191,62 @@ class TestPatchBoundary:
             json={"content_end_char": 9},
         )
         assert resp.status_code == 400
+
+    def test_patch_partial_null_window_returns_clear_error(
+        self, client: TestClient, seeded_entry: object
+    ) -> None:
+        """Exactly one null in a window pair must return 400 with a clear message."""
+        # null start, int end
+        resp = client.patch(
+            f"/api/entries/{seeded_entry.id}",
+            json={"content_start_char": None, "content_end_char": 9},
+        )
+        assert resp.status_code == 400, resp.text
+        error_msg = resp.json()["error"]
+        assert "both" in error_msg.lower()
+        assert "null" in error_msg.lower()
+
+        # int start, null end
+        resp2 = client.patch(
+            f"/api/entries/{seeded_entry.id}",
+            json={"content_start_char": 5, "content_end_char": None},
+        )
+        assert resp2.status_code == 400, resp2.text
+        error_msg2 = resp2.json()["error"]
+        assert "both" in error_msg2.lower()
+        assert "null" in error_msg2.lower()
+
+    def test_patch_final_text_and_window_window_wins(
+        self,
+        client: TestClient,
+        seeded_entry: object,
+        services: dict,
+    ) -> None:
+        """When final_text and window are both supplied, the window-derived text wins."""
+        mock_parent = MagicMock()
+        mock_parent.id = "pipeline-parent-id"
+        mock_runner = MagicMock()
+        mock_runner.submit_save_entry_pipeline = MagicMock(
+            return_value=(mock_parent, {}),
+        )
+        services["job_runner"] = mock_runner
+
+        resp = client.patch(
+            f"/api/entries/{seeded_entry.id}",
+            # "manual text" would be the final_text if the window didn't override it.
+            # The window [5:9] slices _RAW_TEXT ("tail body next") → "body".
+            json={
+                "final_text": "manual text",
+                "content_start_char": 5,
+                "content_end_char": 9,
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # Window re-derives final_text from the slice, so "body" wins over "manual text".
+        assert body["final_text"] == "body", (
+            f"expected window-derived 'body', got {body['final_text']!r}"
+        )
+        # Pipeline should have been queued exactly once despite two triggers.
+        assert mock_runner.submit_save_entry_pipeline.call_count == 1
