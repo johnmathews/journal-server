@@ -169,6 +169,27 @@ The `content_boundary` field on `GET /api/entries/{id}` responses exposes `{"cha
 save-entry pipeline. See [`api.md`](api.md) for the PATCH contract and [`ocr-context.md`](ocr-context.md) for the
 sentinel protocol.
 
+### Entry date resolution
+
+A handwritten page usually opens with a date, and ingestion files the entry under it (so a backdated entry isn't filed
+under "today"). The date is resolved in three layers, each overriding the previous when it produces a result:
+
+1. **Caller default** — the upload's date (today if unspecified).
+2. **Deterministic parser** — `extract_date_from_text()` (`services/date_extraction.py`) scans the first 500 chars for a
+   date. It handles day-first named months (`"7 June 2016"`), ISO, and numeric forms, and is tolerant of a leading
+   **weekday** and a trailing **time** (`"Thursday 18 June 22:55"`). Two rules exploit the fact that **a journal entry
+   can never be dated in the future**:
+   - **Missing year** → inferred as the most recent occurrence on/before today. When a weekday is present it picks the
+     most recent past year whose weekday matches (`"Wednesday 18 June"` → 2025, not the current-year Thursday), falling
+     back to the plain most-recent-past year if none matches.
+   - **Explicit year** → trusted verbatim, even if it lands in the future (an OCR year is assumed intentional, not a
+     misread).
+3. **LLM heading detector** — `AnthropicHeadingDetector` (`services/heading_detector.py`, Haiku) handles spelled-out and
+   relative phrasings ("today", "yesterday") the regex can't, resolving relatives against the date hint from layer 2.
+
+This is forward-only at ingestion time: it sets `entry_date` on new entries. Existing entries are unaffected; their date
+is editable via `PATCH /api/entries/{id}`.
+
 ## Chunking Strategies
 
 Chunking — splitting a journal entry into overlapping fragments before embedding — is the single biggest lever on

@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from journal.services.date_extraction import extract_date_from_filename, extract_date_from_text
+
+# A fixed "today" so year-inference tests are deterministic. 2026-06-18 is a
+# Thursday (see the weekday-disambiguation cases below).
+_TODAY = date(2026, 6, 18)
 
 
 class TestDMYNamedFormat:
@@ -25,6 +31,86 @@ class TestDMYNamedFormat:
 
     def test_single_digit_day(self) -> None:
         assert extract_date_from_text("3 March 2026") == "2026-03-03"
+
+
+class TestYearlessDate:
+    """Day-first named-month dates with NO year — the year is inferred as the
+    most recent occurrence that is not in the future."""
+
+    def test_day_month_only(self) -> None:
+        # 9 June 2026 is on/before today (18 June 2026) → current year.
+        assert extract_date_from_text("9 June", today=_TODAY) == "2026-06-09"
+
+    def test_today_itself(self) -> None:
+        assert extract_date_from_text("18 June", today=_TODAY) == "2026-06-18"
+
+    def test_future_month_day_rolls_back_a_year(self) -> None:
+        # 20 June 2026 is after today → fall back to 20 June 2025.
+        assert extract_date_from_text("20 June", today=_TODAY) == "2025-06-20"
+
+    def test_abbreviated_month(self) -> None:
+        assert extract_date_from_text("9 Jun", today=_TODAY) == "2026-06-09"
+
+    def test_invalid_day_returns_none(self) -> None:
+        assert extract_date_from_text("31 June", today=_TODAY) is None
+
+
+class TestTimeSuffixIgnored:
+    """A trailing time (HH:MM) must not break parsing or change the date."""
+
+    def test_yearless_with_time(self) -> None:
+        assert extract_date_from_text("10 June 23:35", today=_TODAY) == "2026-06-10"
+
+    def test_year_with_time(self) -> None:
+        assert (
+            extract_date_from_text("11 June 2026 22:15", today=_TODAY) == "2026-06-11"
+        )
+
+    def test_weekday_year_time(self) -> None:
+        assert (
+            extract_date_from_text("Thursday 18 June 2026 14:30", today=_TODAY)
+            == "2026-06-18"
+        )
+
+
+class TestWeekdayDisambiguation:
+    """When a weekday name is present on a year-less date, it selects the most
+    recent past year whose weekday matches."""
+
+    def test_weekday_matches_current_year(self) -> None:
+        # 18 June 2026 is a Thursday → current year wins.
+        assert (
+            extract_date_from_text("Thursday 18 June 22:55", today=_TODAY)
+            == "2026-06-18"
+        )
+
+    def test_weekday_picks_previous_year(self) -> None:
+        # 18 June 2026 is Thursday, 2025 is Wednesday → "Wednesday 18 June" = 2025.
+        assert (
+            extract_date_from_text("Wednesday 18 June", today=_TODAY) == "2025-06-18"
+        )
+
+    def test_weekday_picks_several_years_back(self) -> None:
+        # Nearest past Friday-the-18th-of-June before/at today is 2021.
+        assert extract_date_from_text("Friday 18 June", today=_TODAY) == "2021-06-18"
+
+    def test_weekday_with_invalid_day_returns_none(self) -> None:
+        assert extract_date_from_text("Monday 31 April", today=_TODAY) is None
+
+
+class TestExplicitYearKeptEvenIfFuture:
+    """An explicitly written year is trusted as-is — the no-future rule only
+    governs INFERRED (missing) years."""
+
+    def test_future_explicit_year_kept(self) -> None:
+        assert extract_date_from_text("9 June 2030", today=_TODAY) == "2030-06-09"
+
+    def test_future_day_in_current_year_kept(self) -> None:
+        # 20 June 2026 is after today, but the year was written → keep it.
+        assert extract_date_from_text("20 June 2026", today=_TODAY) == "2026-06-20"
+
+    def test_historical_year_kept(self) -> None:
+        assert extract_date_from_text("7 June 2016", today=_TODAY) == "2016-06-07"
 
 
 class TestMDYNamedFormat:
