@@ -22,7 +22,10 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 import anthropic
 
@@ -83,6 +86,9 @@ class Answerer(Protocol):
         self,
         history: list[ConversationTurn],
         passages: list[AnswerPassage],
+        *,
+        context_note: str | None = None,
+        retrieve: Callable[[str], list[AnswerPassage]] | None = None,
     ) -> AnswerResult: ...
 
 
@@ -106,6 +112,9 @@ class NoopAnswerer:
         self,
         history: list[ConversationTurn],
         passages: list[AnswerPassage],
+        *,
+        context_note: str | None = None,
+        retrieve: Callable[[str], list[AnswerPassage]] | None = None,
     ) -> AnswerResult:
         return AnswerResult(
             answer="Answer synthesis is disabled.",
@@ -160,6 +169,25 @@ _CONVERSATION_SYSTEM_PROMPT = (
     "leave `cited_entry_ids` empty. Do NOT guess or use outside knowledge.\n"
     "- Output the JSON object only. No prose, no markdown."
 )
+
+_SEARCH_AGAIN_TOOL = {
+    "name": "search_again",
+    "description": (
+        "Retrieve more journal passages with a reformulated query. Use "
+        "ONCE if the supplied passages are insufficient to answer the "
+        "latest message. Returns dated passages."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "A standalone search query.",
+            }
+        },
+        "required": ["query"],
+    },
+}
 
 
 class AnthropicAnswerer:
@@ -221,6 +249,13 @@ class AnthropicAnswerer:
         return ""
 
     @staticmethod
+    def _first_tool_use(response: object):
+        for block in getattr(response, "content", None) or []:
+            if getattr(block, "type", None) == "tool_use":
+                return block
+        return None
+
+    @staticmethod
     def _passage_lines(passages: list[AnswerPassage]) -> list[str]:
         lines = ["Passages:"]
         for p in passages:
@@ -270,38 +305,78 @@ class AnthropicAnswerer:
         self,
         history: list[ConversationTurn],
         passages: list[AnswerPassage],
+        *,
+        context_note: str | None = None,
+        retrieve: Callable[[str], list[AnswerPassage]] | None = None,
     ) -> AnswerResult:
         if not history:
             return AnswerResult(answer=NO_MATCH_MESSAGE, answered=False)
 
         messages = [{"role": t.role, "content": t.content} for t in history]
-        # Append the freshly-retrieved passages to the final user turn so
-        # the model grounds the latest message against them.
+        note_block = f"Computed facts: {context_note}\n\n" if context_note else ""
         passage_block = "\n".join(
             [*self._passage_lines(passages), "", "Output the JSON object now."]
         )
         messages[-1]["content"] = (
-            f"{messages[-1]['content']}\n\n{passage_block}"
+            f"{messages[-1]['content']}\n\n{note_block}{passage_block}"
         )
-        try:
-            response = self._client.messages.create(
-                model=self._model,
-                max_tokens=self._max_tokens,
-                thinking={"type": "adaptive"},
-                system=[
-                    {
-                        "type": "text",
-                        "text": _CONVERSATION_SYSTEM_PROMPT,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-                messages=messages,
-            )
-        except anthropic.APIError as e:
-            logger.warning("AnthropicAnswerer continue call failed: %s", e)
-            raise AnswerUnavailable(str(e)) from e
 
-        return self._result_from_response(response, {p.entry_id for p in passages})
+        valid_ids = {p.entry_id for p in passages}
+        tools = [_SEARCH_AGAIN_TOOL] if retrieve is not None else []
+        hops_left = 1
+
+        while True:
+            try:
+                response = self._client.messages.create(
+                    model=self._model,
+                    max_tokens=self._max_tokens,
+                    thinking={"type": "adaptive"},
+                    system=[
+                        {
+                            "type": "text",
+                            "text": _CONVERSATION_SYSTEM_PROMPT,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                    messages=messages,
+                    tools=tools,
+                )
+            except anthropic.APIError as e:
+                logger.warning("AnthropicAnswerer continue call failed: %s", e)
+                raise AnswerUnavailable(str(e)) from e
+
+            if getattr(response, "stop_reason", None) == "tool_use" and hops_left > 0:
+                tool_use = self._first_tool_use(response)
+                if tool_use is not None and retrieve is not None:
+                    hops_left -= 1
+                    new_passages = retrieve(tool_use.input.get("query", ""))
+                    valid_ids.update(p.entry_id for p in new_passages)
+                    messages.append(
+                        {"role": "assistant", "content": response.content}
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": tool_use.id,
+                                    "content": "\n".join(
+                                        self._passage_lines(new_passages)
+                                    ),
+                                }
+                            ],
+                        }
+                    )
+                    continue
+                # No usable tool call — stop and treat as unanswered.
+                return AnswerResult(answer=NO_MATCH_MESSAGE, answered=False)
+
+            if getattr(response, "stop_reason", None) == "tool_use":
+                # Out of hops but the model still wants the tool — give up.
+                return AnswerResult(answer=NO_MATCH_MESSAGE, answered=False)
+
+            return self._result_from_response(response, valid_ids)
 
     @staticmethod
     def _parse_response(raw: str) -> dict | None:

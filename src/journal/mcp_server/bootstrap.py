@@ -33,6 +33,7 @@ from journal.logging import setup_logging
 from journal.providers.answerer import build_answerer
 from journal.providers.embeddings import OpenAIEmbeddingsProvider
 from journal.providers.extraction import AnthropicExtractionProvider
+from journal.providers.intent_classifier import build_intent_classifier
 from journal.providers.ocr import build_ocr_provider
 from journal.providers.query_classifier import build_query_classifier
 from journal.providers.reranker import build_reranker
@@ -41,6 +42,12 @@ from journal.services.answer import AnswerService
 from journal.services.backfill import backfill_mood_scores
 from journal.services.chunking import build_chunker
 from journal.services.conversations import ConversationService
+from journal.services.conversations.handlers import (
+    AggregateHandler,
+    LookupHandler,
+    TemporalHandler,
+    TrendHandler,
+)
 from journal.services.entity_extraction import EntityExtractionService
 from journal.services.hybrid import HybridConfig
 from journal.services.ingestion import IngestionService
@@ -772,12 +779,21 @@ def _init_services() -> dict:
         context_entries=config.answer_context_entries,
     )
     conversation_repository = SQLiteConversationRepository(db_factory)
+    intent_classifier = build_intent_classifier(
+        config.answer_provider,
+        anthropic_api_key=config.anthropic_api_key,
+        model=config.answer_classifier_model,
+    )
+    conversation_handlers = {
+        "lookup": LookupHandler(query_service, answerer, passage_chars=800),
+        "aggregate": AggregateHandler(query_service, answerer, passage_chars=800),
+        "temporal": TemporalHandler(query_service, answerer, passage_chars=800),
+        "trend": TrendHandler(query_service, answerer, passage_chars=800),
+    }
     conversation_service = ConversationService(
         repository=conversation_repository,
-        query_service=query_service,
-        answerer=answerer,
-        model=config.answer_model,
-        context_entries=config.answer_context_entries,
+        classifier=intent_classifier,
+        handlers=conversation_handlers,
     )
     _services = {
         "ingestion": ingestion_service,

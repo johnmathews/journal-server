@@ -14,7 +14,14 @@ from journal.db.conversation_repository import SQLiteConversationRepository
 from journal.db.factory import ConnectionFactory
 from journal.models import SearchResult
 from journal.providers.answerer import AnswerResult, AnswerUnavailable
+from journal.providers.intent_classifier import HeuristicIntentClassifier
 from journal.services.conversations import ConversationService
+from journal.services.conversations.handlers import (
+    AggregateHandler,
+    LookupHandler,
+    TemporalHandler,
+    TrendHandler,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -56,7 +63,7 @@ class _FakeAnswerer:
         self._result = result
         self._exc = exc
 
-    def continue_conversation(self, history, passages):
+    def continue_conversation(self, history, passages, **kwargs):
         if self._exc is not None:
             raise self._exc
         return self._result
@@ -77,11 +84,17 @@ def _make_client(
     factory = ConnectionFactory(tmp_path / "conv.db")
     run_migrations(factory.get())
     repo = SQLiteConversationRepository(factory)
+    fake_query = _FakeQuery([_result(7, "2026-03-01", "Better now.")])
+    handlers = {
+        "lookup": LookupHandler(fake_query, answerer, passage_chars=800),
+        "aggregate": AggregateHandler(fake_query, answerer, passage_chars=800),
+        "temporal": TemporalHandler(fake_query, answerer, passage_chars=800),
+        "trend": TrendHandler(fake_query, answerer, passage_chars=800),
+    }
     svc = ConversationService(
         repository=repo,
-        query_service=_FakeQuery([_result(7, "2026-03-01", "Better now.")]),
-        answerer=answerer,
-        model="claude-sonnet-4-6",
+        classifier=HeuristicIntentClassifier(),
+        handlers=handlers,
     )
     services: dict[str, Any] = {"conversation": svc}
     mcp = FastMCP("test-conversations")

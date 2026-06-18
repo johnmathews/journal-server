@@ -71,7 +71,7 @@ All routes require bearer auth. "Another user's id" is indistinguishable from "n
 | `502` | `answer_unavailable` | LLM call failed during reply synthesis. |
 | `503` | `service_unavailable` | `ConversationService` not wired in the registry. |
 
-## Reply flow (re-grounding)
+## Reply flow (classify → dispatch → fallback)
 
 ```
 POST /api/conversations/{id}/messages  {message}
@@ -79,22 +79,39 @@ POST /api/conversations/{id}/messages  {message}
          ▼
   ConversationService.reply()
    1. load conversation (404 if missing)
-   2. combined_query = original_question + "\n" + message
-   3. QueryService.search_entries(combined_query, limit=context_entries, user_id)
-   4. build history: existing turns → ConversationTurn list
-                     + new user turn appended
-   5. Answerer.continue_conversation(history, passages)
-      • passages appended to the final user turn in the Anthropic request
-      • same strict grounding rules as the one-shot answer
-      • AnswerUnavailable propagates → 502, nothing persisted
-   6. resolve cited_entry_ids → citations (ids not in results are dropped)
-   7. repo.add_messages([user turn, assistant turn])  ← both persisted atomically
-   8. return assistant ConversationMessage
+   2. IntentClassifier.classify(message, context)
+      → IntentResult{intent, search_query, topic, start_date, end_date, dimension}
+      • Primary: AnthropicIntentClassifier (Haiku, one cheap JSON call)
+      • Fallback: HeuristicIntentClassifier (offline regex) if Haiku errors
+   3. dispatch to handler by intent (lookup/aggregate/temporal/trend)
+      • any handler error except AnswerUnavailable → fall back to LookupHandler
+   4. handler returns ReplyOutcome{answer, answered, citations}
+   5. repo.add_messages([user turn, assistant turn])  ← both persisted atomically
+   6. return assistant ConversationMessage
 ```
 
-The **combined query** (`original_question + "\n" + follow-up`) gives the dense and BM25 retrievers pronoun context without a separate query-rewrite LLM call.
+**Persist-on-success:** both turns are stored only after the handler succeeds. `AnswerUnavailable` propagates → 502, nothing persisted.
 
-**Persist-on-success:** both turns are stored only after the LLM succeeds. A failed reply leaves the thread consistent — the message count does not increment.
+### Intent handlers
+
+| Intent | Example | What the handler does |
+|---|---|---|
+| `lookup` | "what did I say about Rome?" | Hybrid retrieval, candidate pool 20 → adaptive `select_passages` [3,15] → matched-chunk truncation (`window_passage`) → one bounded `search_again` re-retrieval hop |
+| `aggregate` | "how many times did I mention my back?" | `get_topic_frequency` → count fed as `context_note` |
+| `temporal` | "when did the back pain start?" | `search_entries(sort="date_asc")` so the earliest evidencing entry is present |
+| `trend` | "have I gotten happier this year?" | `get_mood_trends` summarized into `context_note` + a few representative entries |
+
+**Fallback safety:** any handler error (except `AnswerUnavailable`) falls back to the `lookup` handler, so the floor is always the previous behavior.
+
+### Adaptive passage selection (lookup)
+
+`select_passages` picks an adaptive number of passages from a ranked candidate pool:
+
+1. Retrieve the top **20** candidates (`_CANDIDATE_POOL`).
+2. Keep every result whose score is within a **0.5 band** of the top score.
+3. Clamp to **[3, 15]** (`_PASSAGE_FLOOR`, `_PASSAGE_CEILING`).
+4. Truncate each passage with `window_passage`, which centers the 800-char window on the matched chunk (dense `char_start`/`char_end` → FTS5 snippet → head fallback), replacing the old naïve head truncation.
+5. If the answerer requests a second retrieval (`search_again`), one additional hop is allowed; the same pool+selection logic applies.
 
 ## Seeding a conversation
 
@@ -104,14 +121,21 @@ The webapp calls this when the user clicks "Continue this conversation →" on t
 
 ## Config and wiring
 
-Conversations reuse the existing answer configuration — no new env vars:
-
 | Env var | Default | Used for |
 |---|---|---|
 | `ANSWER_MODEL` | `claude-sonnet-4-6` | LLM model for `continue_conversation`. |
-| `ANSWER_CONTEXT_ENTRIES` | `8` | Number of passages retrieved per reply. |
+| `ANSWER_CONTEXT_ENTRIES` | `8` | Passage limit for the legacy path (unused by handlers; handlers use `_CANDIDATE_POOL=20`). |
 
-`ConversationService` is wired in `mcp_server/bootstrap.py` alongside `SQLiteConversationRepository`; both are injected via `service_registry.py` under the `conversation` key.
+Intent-routing tunable knobs (compile-time constants in `services/conversations/handlers.py`):
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `_CANDIDATE_POOL` | `20` | Hybrid-search candidate pool before adaptive trim. |
+| `_PASSAGE_FLOOR` | `3` | Minimum passages kept after adaptive selection. |
+| `_PASSAGE_CEILING` | `15` | Maximum passages kept after adaptive selection. |
+| `_SNIPPET_CHARS` | `160` | Characters per citation snippet. |
+
+`ConversationService` is wired in `mcp_server/bootstrap.py` alongside `SQLiteConversationRepository` and `IntentClassifier`; all injected via `service_registry.py` under the `conversation` key.
 
 ## Out of scope (v1)
 
@@ -123,7 +147,10 @@ Conversations reuse the existing answer configuration — no new env vars:
 ## Related
 
 - [search.md](search.md) — hybrid retrieval and answer synthesis that conversations re-use.
-- `src/journal/services/conversations.py` — `ConversationService`.
+- `src/journal/services/conversations/` — `ConversationService` package.
+- `src/journal/services/conversations/handlers.py` — four per-intent handlers + `ReplyOutcome`.
+- `src/journal/services/conversations/passages.py` — `window_passage`, `select_passages`, `build_citations`.
+- `src/journal/providers/intent_classifier.py` — `IntentClassifier` Protocol + Anthropic/heuristic adapters.
 - `src/journal/db/conversation_repository.py` — `SQLiteConversationRepository`.
 - `src/journal/providers/answerer.py` — `ConversationTurn` + `continue_conversation`.
 - `src/journal/api/conversations.py` — REST route registration.
