@@ -95,3 +95,11 @@ def test_only_begins_marker_uses_full_end():
     assert w.end == len(w.text)
     assert ENTRY_BEGINS not in w.text
     assert w.text[w.start:] == "My entry"
+
+
+def test_begins_marker_at_end_of_text_yields_empty_window():
+    # ENTRY_BEGINS with no content after it → empty window at end, no crash, no fallback noise
+    text = f"some body\n{ENTRY_BEGINS}"
+    w = extract_content_window(text, [])
+    assert ENTRY_BEGINS not in w.text
+    assert w.start == w.end == len(w.text)
