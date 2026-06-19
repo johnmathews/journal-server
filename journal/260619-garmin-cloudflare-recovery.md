@@ -72,7 +72,11 @@ Two new CLI commands so the network login can run off the flagged IP:
 
 A `garth` OAuth1 token is valid ~1 year, so one mint+import keeps the daily
 sync running for months without the server ever doing a fresh SSO login.
-Documented in `docs/fitness-operations.md` §2c-bis (+ §6 cross-ref).
+Documented in `docs/fitness-operations.md` §2c-bis (+ §6 cross-ref). The
+`/done` doc-freshness audit also caught a stale claim in `docs/api.md` (the
+connect endpoint's error table still tied every `GarminConnectAuthenticationError`
+to `401 invalid_credentials`); updated it to document the two `429` reasons
+(`local_cooldown` vs `upstream_rate_limited`) and the reclassification.
 
 ## Verification
 

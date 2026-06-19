@@ -2621,18 +2621,29 @@ the connect flow.
 - `400` `{"error": "username and password are required"}` — body missing
   either field.
 - `401` `{"error": "Garmin rejected those credentials.", "reason":
-  "invalid_credentials"}` — `GarminConnectAuthenticationError`. The
-  per-email cool-down counter is incremented; after 5 failures within 15
-  minutes subsequent attempts are refused with `429` (see below) until the
-  window rolls forward.
-- `429` `{"error": "Too many failed Garmin login attempts for that account…",
-  "retry_after_seconds": 240}` — either local cool-down (per-email failure
-  counter tripped) OR upstream `GarminConnectTooManyRequestsError`. The
-  cool-down keys on the supplied email so a user typo'ing twice does not
-  lock the whole server. The local check fires before any upstream call,
-  so it cannot deepen an existing Garmin lockout.
+  "invalid_credentials"}` — a `GarminConnectAuthenticationError` that is
+  *genuinely* a bad password. The endpoint inspects the diagnostics
+  garminconnect logs during the login attempt and only returns this when
+  there are **no** rate-limit / Cloudflare / bot-challenge signals; otherwise
+  the same exception is reclassified to `429 upstream_rate_limited` (below).
+  The per-email cool-down counter is incremented; after 5 failures within 15
+  minutes subsequent attempts are refused with `429 local_cooldown`.
+- `429` — two distinct cases, told apart by `reason`:
+  - `{"reason": "local_cooldown", "retry_after_seconds": …}` — the per-email
+    failure counter tripped. Keyed on the supplied email so a user typo'ing
+    twice does not lock the whole server, and checked *before* any upstream
+    call so it cannot deepen an existing Garmin lockout.
+  - `{"reason": "upstream_rate_limited", "retry_after_seconds": 300}` —
+    Garmin/Cloudflare is rate-limiting or bot-challenging the login. Covers
+    a direct `GarminConnectTooManyRequestsError`, an auth/connection error
+    whose mid-login diagnostics carry rate-limit signals (the prod case where
+    a Cloudflare block surfaced as a generic auth error), and the terminal
+    "all strategies exhausted" `GarminConnectConnectionError`. The remedy is
+    to stop retrying — each attempt re-arms the block — and recover via the
+    split-IP mint/import flow (see
+    [`fitness-operations.md` §2c-bis](fitness-operations.md#2c-bis-garmin--split-ip-recovery-when-cloudflare-blocks-the-server)).
 - `502` `{"error": "Garmin login failed: …", "reason": "upstream_error"}` —
-  any other exception out of `garminconnect`.
+  any other exception out of `garminconnect` with no rate-limit signal.
 
 The connect endpoint also enforces the D8 *reconnect with different upstream
 account* rule. If the user already has a `fitness_auth_state` row for
