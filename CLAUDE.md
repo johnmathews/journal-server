@@ -20,7 +20,7 @@ src/journal/
     connection.py       — get_connection() with PRAGMAs (same-thread guard on)
     factory.py          — ConnectionFactory: per-thread SQLite connections
     migrations.py       — Migration runner (PRAGMA user_version)
-    migrations/*.sql    — SQL migration files (currently 0001 → 0032)
+    migrations/*.sql    — SQL migration files (currently 0001 → 0033)
     repository/         — SQLiteEntryRepository carved into protocol/store/core/
                           pages/chunks/search/mood/stats/analytics
     fitness_repository.py    — Fitness activities / daily wellness / auth state
