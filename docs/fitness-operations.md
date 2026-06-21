@@ -1,6 +1,6 @@
 # Fitness Operations
 
-**Status:** active. **Last updated:** 2026-06-10 (prod `.env` hygiene completed — the retired `GARMIN_USERNAME` / `GARMIN_PASSWORD` / `STRAVA_REFRESH_TOKEN` vars are gone from prod; see `journal/260604-strava-refresh-token-vestigial-audit.md`).
+**Status:** active. **Last updated:** 2026-06-21 (Garmin Cloudflare-block handling: connect endpoint reclassifies IP/bot-challenge blocks as `upstream_rate_limited` and trips a global pre-flight cooldown; split-IP mint/import recovery in §2c-bis; see `journal/260619-garmin-cloudflare-recovery.md` and `journal/260621-garmin-upstream-cooldown.md`).
 
 Operator-facing runbook for the fitness pipeline. Covers initial setup, re-auth,
 historical backfill, sync monitoring, and troubleshooting the rough edges that
@@ -107,11 +107,23 @@ to switch upstream accounts.
 
 Garmin's auth rate-limiter keys on clientId + account email rather than
 IP, so a user typo'ing their password a few times can lock themselves
-out account-wide. The connect endpoint applies a per-email cool-down
-(5 failures within ~15 minutes → 429 with `retry_after_seconds`) so a
-user mistyping does not deepen an existing upstream lockout. The webapp
-surfaces 429 responses as "try again in N minutes" rather than
-auto-retrying.
+out account-wide. The connect endpoint applies two complementary 429
+guards, both checked **before** any upstream call:
+
+- a **per-email** cool-down (`reason: "local_cooldown"`, 5 failures
+  within ~15 minutes → `retry_after_seconds`) so a user mistyping does
+  not deepen an account-wide upstream lockout; and
+- a **global** cool-down (`reason: "upstream_rate_limited"`, default 5
+  minutes) tripped the moment any attempt is blocked by Garmin's
+  Cloudflare / IP rate-limiter. That block lives on the server's shared
+  egress IP, so the next connect for *any* account is refused pre-flight
+  until it ages out — stopping the UI from re-arming a block already in
+  place (the per-email guard can't, since a different email sails
+  straight through). Recover via
+  [§2c-bis](#2c-bis-garmin--split-ip-recovery-when-cloudflare-blocks-the-server).
+
+The webapp surfaces both 429s as "stop retrying and wait N minutes"
+rather than auto-retrying.
 
 See [`api.md`](./api.md#post-apifitnessgarminconnect) for the full
 endpoint reference (including the `post_mfa_profile_fetch_failed`
@@ -247,6 +259,19 @@ Notes:
 - Import validates the blob loads into the SDK before writing, and warns on
   stderr if it belongs to a different Garmin account than the one already
   stored (the D8 guard).
+- **Verify with a live sync, not just the import.** The offline SDK load only
+  proves the blob is well-formed — it does not prove the token works against
+  Garmin's API. Run `fitness-sync --source garmin --user-id N` right after
+  importing and confirm `status=success fetched>0`; if it comes back
+  `auth_broken`/429 the token was minted on a still-flagged IP and must be
+  re-minted from a cleaner network.
+- If the mint hit 429s mid-login, the post-login profile fetch can fail and
+  `upstream_user_id` falls back to the **login email** instead of the Garmin
+  display name. The token is usually still valid (verify per above); the only
+  side effect is that the import's D8 check may warn about an account change.
+- Run the CLI **inside the prod container** as
+  `docker exec [-i] journal-server uv run journal …` — the bare `journal`
+  console script is not on the container's `$PATH`.
 
 ### 2d. Strava — CLI operator fallback (laptop / dev box)
 
