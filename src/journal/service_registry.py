@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from journal.services.fitness.garmin_pending import (
         GarminCooldownTracker,
         GarminPendingStore,
+        GarminUpstreamCooldown,
     )
     from journal.services.fitness.strava_pending import StravaPendingStore
     from journal.services.ingestion import IngestionService
@@ -87,6 +88,7 @@ class ServicesDict(TypedDict, total=False):
     fitness_repo: FitnessRepository
     garmin_pending: GarminPendingStore
     garmin_cooldown: GarminCooldownTracker
+    garmin_upstream_cooldown: GarminUpstreamCooldown  # global IP/Cloudflare gate
     garmin_client_factory: Any  # test seam — defaults to garminconnect.Garmin
     strava_pending: StravaPendingStore
     strava_exchange_code: Any  # test seam — defaults to providers.strava.exchange_code

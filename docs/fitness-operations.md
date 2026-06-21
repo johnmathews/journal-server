@@ -234,6 +234,13 @@ Notes:
 - **Stop retrying first.** Every failed login from the flagged IP re-arms
   the Cloudflare block. If even the laptop mint 429s, the account/IP is
   still hot — wait (24h+) and mint from a different network.
+- **The connect endpoint now enforces this for you.** The first
+  `upstream_rate_limited` trips a server-wide cooldown (default 5 min), and
+  every connect attempt after it — any account — is refused pre-flight with
+  the same `reason` until it ages out, so the UI can't keep hammering the
+  block. This only gates the interactive **connect/re-auth** path; the
+  split-IP import above writes the blob directly and does no network login,
+  so it is never blocked by the cooldown.
 - The mint command needs the repo + a loadable `.env` (to start the CLI)
   but **no DB access and no prod network**, so it runs anywhere the package
   is installed.

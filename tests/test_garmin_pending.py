@@ -12,9 +12,11 @@ import pytest
 from journal.services.fitness.garmin_pending import (
     DEFAULT_COOLDOWN_THRESHOLD,
     DEFAULT_COOLDOWN_WINDOW_S,
+    DEFAULT_UPSTREAM_BLOCK_S,
     PENDING_TTL_SECONDS,
     GarminCooldownTracker,
     GarminPendingStore,
+    GarminUpstreamCooldown,
 )
 
 
@@ -173,3 +175,57 @@ def test_cooldown_reset_after_partial_failures_preserves_clean_state(
     for _ in range(DEFAULT_COOLDOWN_THRESHOLD - 1):
         tracker.record_failure("alice@example.com")
     assert tracker.check("alice@example.com") is None
+
+
+# ── Upstream (global) cooldown ───────────────────────────────────────
+
+
+def test_upstream_cooldown_default_block_documented() -> None:
+    assert DEFAULT_UPSTREAM_BLOCK_S == 5 * 60
+
+
+def test_upstream_cooldown_clean_state_allows_attempts() -> None:
+    gate = GarminUpstreamCooldown()
+    assert gate.check() is None
+
+
+def test_upstream_cooldown_single_block_trips_the_gate() -> None:
+    # Unlike the per-email tracker, ONE block is enough — there is no benign
+    # reason to retry into a live Cloudflare block.
+    clock = _FakeClock()
+    gate = GarminUpstreamCooldown(time_func=clock)
+    gate.record_block()
+    remaining = gate.check()
+    assert remaining is not None
+    assert 0 < remaining <= DEFAULT_UPSTREAM_BLOCK_S
+
+
+def test_upstream_cooldown_expires_after_block_window() -> None:
+    clock = _FakeClock()
+    gate = GarminUpstreamCooldown(time_func=clock)
+    gate.record_block()
+    assert gate.check() is not None
+
+    clock.t += DEFAULT_UPSTREAM_BLOCK_S + 1
+    assert gate.check() is None
+
+
+def test_upstream_cooldown_reset_clears_block() -> None:
+    gate = GarminUpstreamCooldown()
+    gate.record_block()
+    assert gate.check() is not None
+    gate.reset()
+    assert gate.check() is None
+
+
+def test_upstream_cooldown_re_arm_extends_window() -> None:
+    clock = _FakeClock()
+    gate = GarminUpstreamCooldown(time_func=clock)
+    gate.record_block()
+
+    # Half-way through, a second block pushes expiry out to a fresh full window.
+    clock.t += DEFAULT_UPSTREAM_BLOCK_S / 2
+    gate.record_block()
+    clock.t += DEFAULT_UPSTREAM_BLOCK_S / 2 + 1
+    # Would have expired under the first block; the re-arm keeps it hot.
+    assert gate.check() is not None

@@ -40,6 +40,7 @@ from journal.models import FitnessAuthState
 from journal.services.fitness.garmin_pending import (
     GarminCooldownTracker,
     GarminPendingStore,
+    GarminUpstreamCooldown,
 )
 
 if TYPE_CHECKING:
@@ -120,13 +121,19 @@ def _capture_garmin_logs() -> Iterator[_GarminLogCapture]:
         gc_logger.removeHandler(handler)
 
 
-def _garmin_rate_limited_response(detail: str) -> JSONResponse:
+def _garmin_rate_limited_response(
+    detail: str, *, retry_after_seconds: int = 300,
+) -> JSONResponse:
     """Uniform 429 for an upstream rate-limit / Cloudflare bot challenge.
 
     Distinct from the *local* cooldown 429 (``reason="local_cooldown"``): this
     one means Garmin/Cloudflare refused the upstream login, typically because
     the IP has been hammered. The remedy is to stop retrying and wait — every
     further attempt re-arms the block — so the message says so.
+
+    Returned both when an attempt is freshly blocked upstream and, pre-flight,
+    when the global :class:`GarminUpstreamCooldown` is still hot from a recent
+    block (``retry_after_seconds`` then carries the real time remaining).
     """
     return JSONResponse(
         {
@@ -137,7 +144,7 @@ def _garmin_rate_limited_response(detail: str) -> JSONResponse:
                 "persists), ideally from an unflagged network."
             ),
             "reason": "upstream_rate_limited",
-            "retry_after_seconds": 300,
+            "retry_after_seconds": retry_after_seconds,
             "detail": detail,
         },
         status_code=429,
@@ -222,6 +229,13 @@ def register_fitness_garmin_routes(
             services["garmin_cooldown"] = tracker
         return tracker
 
+    def _garmin_upstream_cooldown(services: ServicesDict) -> GarminUpstreamCooldown:
+        gate = services.get("garmin_upstream_cooldown")
+        if gate is None:
+            gate = GarminUpstreamCooldown()
+            services["garmin_upstream_cooldown"] = gate
+        return gate
+
     @mcp.custom_route(
         "/api/fitness/garmin/connect",
         methods=["POST"],
@@ -235,6 +249,7 @@ def register_fitness_garmin_routes(
         repo: FitnessRepository = services["fitness_repo"]
         pending = _garmin_pending(services)
         cooldown = _garmin_cooldown(services)
+        upstream_cooldown = _garmin_upstream_cooldown(services)
         client_factory = services.get("garmin_client_factory") or Garmin
 
         username = (body.get("username") or "").strip()
@@ -245,9 +260,26 @@ def register_fitness_garmin_routes(
                 status_code=400,
             )
 
-        # Cool-down before any upstream call. Garmin's rate-limiter keys on
-        # clientId+email; if we let the user keep retrying after a few wrong
-        # passwords we deepen the upstream lockout. The local tracker
+        # Global upstream gate before anything else. A Cloudflare/IP block is
+        # account-agnostic — it lives on the server's egress IP — so once any
+        # recent attempt was blocked we refuse *every* connect (any email)
+        # until it ages out. Attempting again would only re-arm the block.
+        upstream_remaining = upstream_cooldown.check()
+        if upstream_remaining is not None:
+            log.info(
+                "POST /api/fitness/garmin/connect — refused pre-flight, "
+                "upstream cooldown hot (%ds left) for user_id=%d",
+                int(upstream_remaining), user.user_id,
+            )
+            return _garmin_rate_limited_response(
+                "A recent login attempt was blocked by Garmin's rate-limiter; "
+                "the server is waiting before trying again.",
+                retry_after_seconds=int(upstream_remaining),
+            )
+
+        # Per-email cool-down before any upstream call. Garmin's rate-limiter
+        # keys on clientId+email; if we let the user keep retrying after a few
+        # wrong passwords we deepen the upstream lockout. The local tracker
         # protects them by refusing inside the same window.
         retry_after = cooldown.check(username)
         if retry_after is not None:
@@ -283,6 +315,7 @@ def register_fitness_garmin_routes(
         except GarminConnectAuthenticationError as exc:
             cooldown.record_failure(username)
             if _looks_rate_limited(str(exc), gc_logs.text):
+                upstream_cooldown.record_block()
                 log.warning(
                     "POST /api/fitness/garmin/connect — login blocked by "
                     "rate-limit/bot-challenge (surfaced as an auth error) "
@@ -303,6 +336,7 @@ def register_fitness_garmin_routes(
             )
         except GarminConnectTooManyRequestsError as exc:
             cooldown.record_failure(username)
+            upstream_cooldown.record_block()
             log.warning(
                 "POST /api/fitness/garmin/connect — Garmin returned 429 "
                 "for user_id=%d", user.user_id,
@@ -314,6 +348,7 @@ def register_fitness_garmin_routes(
             # GarminConnectConnectionError. Classify it as a rate-limit too.
             if _looks_rate_limited(str(exc), gc_logs.text):
                 cooldown.record_failure(username)
+                upstream_cooldown.record_block()
                 log.warning(
                     "POST /api/fitness/garmin/connect — login blocked by "
                     "rate-limit/bot-challenge for user_id=%d", user.user_id,
@@ -330,6 +365,10 @@ def register_fitness_garmin_routes(
                 },
                 status_code=502,
             )
+
+        # Upstream contact succeeded (MFA challenge or straight login both
+        # mean Garmin let us through, not a block), so clear the global gate.
+        upstream_cooldown.reset()
 
         # ``Garmin.login()`` returns ``("needs_mfa", legacy)`` when MFA is
         # required (``return_on_mfa=True``) and ``(None, legacy)`` on

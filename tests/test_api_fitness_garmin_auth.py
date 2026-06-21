@@ -38,6 +38,7 @@ from journal.services.fitness.garmin_pending import (
     DEFAULT_COOLDOWN_THRESHOLD,
     GarminCooldownTracker,
     GarminPendingStore,
+    GarminUpstreamCooldown,
 )
 
 if TYPE_CHECKING:
@@ -206,14 +207,20 @@ def _build_services(
     pending_store: GarminPendingStore,
     cooldown_tracker: GarminCooldownTracker,
     garmin_factory: Any,
+    upstream_cooldown: GarminUpstreamCooldown | None = None,
 ) -> dict:
-    return {
+    services = {
         "fitness_repo": fitness_repo,
         "db_factory": fitness_factory,
         "garmin_pending": pending_store,
         "garmin_cooldown": cooldown_tracker,
         "garmin_client_factory": garmin_factory,
     }
+    # When a test wants to inspect/advance the global gate it injects its own;
+    # otherwise the endpoint lazily creates one (default 5-minute block).
+    if upstream_cooldown is not None:
+        services["garmin_upstream_cooldown"] = upstream_cooldown
+    return services
 
 
 def _build_client(services: dict, *, user_id: int = 1) -> TestClient:
@@ -470,6 +477,84 @@ def test_connect_per_email_cooldown_blocks_after_threshold(
         body = resp.json()
         assert body.get("reason") == "local_cooldown"
         assert body.get("retry_after_seconds") > 0
+
+
+def test_connect_upstream_block_refuses_other_accounts_preflight(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+) -> None:
+    """A Cloudflare/IP block from one account must gate *every* subsequent
+    connect attempt — even a different, valid account — until it ages out.
+
+    The block lives on the server's shared egress IP, and each fresh login
+    only re-arms it, so the endpoint refuses pre-flight without calling Garmin
+    at all. This is the per-email tracker's blind spot: it would have let a
+    different email straight through to deepen the block.
+    """
+    upstream = GarminUpstreamCooldown()
+    blocked_factory = FakeGarminFactory(
+        login_raises=GarminConnectAuthenticationError(
+            "401 Unauthorized (Invalid Username or Password)",
+        ),
+        login_logs=["mobile+cffi returned 429: IP rate limited by Garmin"],
+    )
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=blocked_factory, upstream_cooldown=upstream,
+    )
+    with _build_client(services) as client:
+        first = client.post(
+            "/api/fitness/garmin/connect",
+            json={"username": "alice@example.com", "password": "correct-horse"},
+        )
+        assert first.status_code == 429
+        assert first.json().get("reason") == "upstream_rate_limited"
+
+        # A factory that *would* succeed for a different account.
+        good_factory = FakeGarminFactory(
+            mfa_required=False, profile={"displayName": "bob.k"},
+        )
+        services["garmin_client_factory"] = good_factory
+        second = client.post(
+            "/api/fitness/garmin/connect",
+            json={"username": "bob@example.com", "password": "also-correct"},
+        )
+    assert second.status_code == 429
+    second_body = second.json()
+    assert second_body.get("reason") == "upstream_rate_limited"
+    assert second_body.get("retry_after_seconds") > 0
+    # Pre-flight refusal: the good factory was never even constructed, so no
+    # upstream login ran to re-arm the block.
+    assert good_factory.last_client is None
+
+
+def test_connect_success_leaves_upstream_gate_clear(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+) -> None:
+    """A successful login goes through the success path, which resets the
+    global gate rather than arming it — a clean gate stays clean."""
+    upstream = GarminUpstreamCooldown()
+    factory = FakeGarminFactory(
+        mfa_required=False, profile={"displayName": "alice.j"},
+    )
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory, upstream_cooldown=upstream,
+    )
+    with _build_client(services) as client:
+        resp = client.post(
+            "/api/fitness/garmin/connect",
+            json={"username": "alice@example.com", "password": "secret"},
+        )
+    assert resp.status_code == 200
+    assert upstream.check() is None
 
 
 # ── Tests: connect (MFA path) ────────────────────────────────────────

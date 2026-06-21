@@ -2633,7 +2633,7 @@ the connect flow.
     failure counter tripped. Keyed on the supplied email so a user typo'ing
     twice does not lock the whole server, and checked *before* any upstream
     call so it cannot deepen an existing Garmin lockout.
-  - `{"reason": "upstream_rate_limited", "retry_after_seconds": 300}` —
+  - `{"reason": "upstream_rate_limited", "retry_after_seconds": …}` —
     Garmin/Cloudflare is rate-limiting or bot-challenging the login. Covers
     a direct `GarminConnectTooManyRequestsError`, an auth/connection error
     whose mid-login diagnostics carry rate-limit signals (the prod case where
@@ -2642,6 +2642,14 @@ the connect flow.
     to stop retrying — each attempt re-arms the block — and recover via the
     split-IP mint/import flow (see
     [`fitness-operations.md` §2c-bis](fitness-operations.md#2c-bis-garmin--split-ip-recovery-when-cloudflare-blocks-the-server)).
+    The block lives on the **server's egress IP**, not the account, so the
+    first such response also trips a **global cooldown** (default 5 minutes):
+    every subsequent connect — *any* account — is then refused **pre-flight**
+    with this same `reason`, without an upstream call, until the cooldown ages
+    out (`retry_after_seconds` then carries the remaining time, not a fixed
+    300). A successful login clears the gate. This stops the connect UI from
+    re-arming a block that's already in place — the per-email cool-down can't,
+    since a different email would otherwise sail straight through.
 - `502` `{"error": "Garmin login failed: …", "reason": "upstream_error"}` —
   any other exception out of `garminconnect` with no rate-limit signal.
 
