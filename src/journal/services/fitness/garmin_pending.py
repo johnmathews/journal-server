@@ -18,6 +18,13 @@ implemented by ``api/fitness.py`` (W2 of the multi-user plan, see
   twice in quick succession can trigger an account-wide 429 lockout. The
   local tracker refuses retries for the same email after the threshold is
   reached, surfacing a "too many attempts" error before any upstream call.
+- :class:`GarminUpstreamCooldown` is a single global gate that trips the
+  moment *any* connect attempt is blocked by Garmin's Cloudflare / IP
+  rate-limiter. Unlike the per-email tracker, this one is account-agnostic:
+  the block lives on the *server's egress IP*, shared by every user and
+  every email, and each fresh login attempt re-arms it. So one observed
+  block refuses all further upstream logins until it ages out, stopping the
+  connect UI from deepening a block that's already in place.
 """
 
 from __future__ import annotations
@@ -39,6 +46,12 @@ PENDING_TTL_SECONDS = 10 * 60
 
 DEFAULT_COOLDOWN_THRESHOLD = 5
 DEFAULT_COOLDOWN_WINDOW_S = 15 * 60
+
+# How long a single observed Cloudflare / upstream rate-limit block gates all
+# further connect attempts. Matches the ``retry_after_seconds`` the endpoint
+# already advertises for an ``upstream_rate_limited`` 429, so the UI's "try
+# again in N seconds" and the server's own refusal window stay in step.
+DEFAULT_UPSTREAM_BLOCK_S = 5 * 60
 
 
 @dataclass(frozen=True)
@@ -172,3 +185,53 @@ class GarminCooldownTracker:
         else:
             self._failures.pop(email, None)
         return kept
+
+
+class GarminUpstreamCooldown:
+    """Global gate after an upstream rate-limit / Cloudflare bot-challenge.
+
+    A single timestamp, not a per-email counter. A Cloudflare block is on the
+    server's egress IP — shared by every user and every email — and *every*
+    fresh login attempt (whatever account it uses) re-arms it. So one observed
+    block trips this gate, and the connect endpoint refuses all upstream login
+    attempts until it ages out. Distinct from :class:`GarminCooldownTracker`,
+    which protects a single account from an account-scoped 429 after repeated
+    bad passwords; this one protects the shared IP from the connect UI itself.
+
+    A single failure trips the block (``record_block``) because, unlike a
+    mistyped password, there is no benign reason to retry into a live block —
+    the next attempt only deepens it. A successful upstream contact clears it
+    (``reset``).
+    """
+
+    def __init__(
+        self,
+        *,
+        block_s: float = DEFAULT_UPSTREAM_BLOCK_S,
+        time_func: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._lock = threading.Lock()
+        self._blocked_until: float | None = None
+        self._block_s = block_s
+        self._time = time_func
+
+    def check(self) -> float | None:
+        """Seconds until the next attempt is allowed, or ``None`` if clear."""
+        with self._lock:
+            if self._blocked_until is None:
+                return None
+            remaining = self._blocked_until - self._time()
+            if remaining <= 0:
+                self._blocked_until = None
+                return None
+            return remaining
+
+    def record_block(self) -> None:
+        """Arm (or re-arm) the global cooldown for ``block_s`` from now."""
+        with self._lock:
+            self._blocked_until = self._time() + self._block_s
+
+    def reset(self) -> None:
+        """Clear the gate — a login just succeeded, so the IP isn't blocked."""
+        with self._lock:
+            self._blocked_until = None
