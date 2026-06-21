@@ -68,3 +68,22 @@ parity with the other two garmin services (lazy-created by the endpoint).
   (no network login).
 
 Both 06-19 follow-ups are now closed.
+
+## Doc-freshness follow-up (#51, same day)
+
+A "is the documentation fresh/complete/surfaceable?" pass caught that
+`docs/fitness-operations.md` §2a still described only the per-email cooldown
+after this change shipped. Fixed in #51:
+
+- §2a now documents both connect 429 guards (per-email `local_cooldown` and
+  the new global `upstream_rate_limited` pre-flight cooldown).
+- §2c-bis notes gained the lessons from the live recovery: verify with a real
+  sync (offline SDK load ≠ working token), the `upstream_user_id`→email
+  fallback when minting hits 429s, and the `uv run journal` in-container CLI
+  gotcha (bare `journal` isn't on the container `$PATH`).
+- Bumped the `fitness-operations.md` Last-updated header (was 2026-06-10).
+
+Operational note: prod Garmin had been `broken` since 06-18 (Cloudflare/IP
+block); recovered via the mint/import flow (`fitness-sync` → `success
+fetched=34 normalized=10`). `server/CLAUDE.md` migration range corrected
+0032 → 0033 (stale; 0033 predates this session).
