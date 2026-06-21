@@ -92,7 +92,7 @@ journal/                — Development journal entries (YYMMDD-name.md)
 
 The suite has two tiers:
 
-- **Unit tests** (~2580 tests): pure Python + in-memory SQLite. No
+- **Unit tests** (~2950 tests): pure Python + in-memory SQLite. No
   external services. `uv run pytest` runs them and they always pass.
 - **Integration tests** (`tests/integration/`, marked
   `@pytest.mark.integration`): need a real ChromaDB. `tests/integration/
@@ -102,7 +102,7 @@ The suite has two tiers:
   **auto-skips the suite
   with an actionable reason** if Chroma isn't reachable. So plain
   `uv run pytest` from a cold dev box now reports
-  "2583 passed, 11 skipped" rather than 11 errors.
+  "2954 passed, 11 skipped" rather than 11 errors.
 
 Three modes:
 
