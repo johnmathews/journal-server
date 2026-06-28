@@ -4,9 +4,9 @@ version = "0.1.0"
 description = "Personal journal insight engine — ingest handwritten pages and voice notes, query with natural language"
 requires-python = ">=3.13"
 dependencies = [
-    "anthropic>=0.111.0,<1",
-    "google-genai==2.9.0",
-    "openai>=2.43.0,<3",
+    "anthropic>=0.112.0,<1",
+    "google-genai==2.10.0",
+    "openai>=2.44.0,<3",
     "chromadb-client>=1.5.9,<2",
     "mcp[cli]>=1.28.0,<2",
     "tiktoken>=0.13.0,<1",
@@ -56,9 +56,9 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "TCH"]
 
 [dependency-groups]
 dev = [
-    "coverage>=7.14.2",
+    "coverage>=7.14.3",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
-    "ruff>=0.15.18",
+    "ruff>=0.15.20",
 ]
