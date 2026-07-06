@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from stravalib.exc import AccessUnauthorized, AuthError
+from stravalib.exc import AccessUnauthorized, AuthError, Fault
 from stravalib.model import DetailedActivity, SummaryActivity
 
 from journal.providers.strava import (
@@ -380,3 +380,77 @@ def test_refresh_translates_auth_error_to_typed_error() -> None:
 
     with pytest.raises(StravaAuthError):
         provider.refresh_token_if_needed()
+
+
+# 6b. 403 Fault (app deactivated / forbidden) → StravaAuthError -------
+#
+# stravalib maps only 401 to AccessUnauthorized; a 403 surfaces as a bare
+# ``Fault``. In prod this is what a subscriber-only-API cutover looks like:
+#   403 Forbidden [{'resource': 'Application', 'field': 'Status',
+#                   'code': 'Inactive'}]
+# It is a permanent, action-required failure, not a transient blip, so the
+# adapter must translate it to StravaAuthError (→ FitnessAuthError →
+# auth_broken → notify) rather than letting it fall through to the fetch
+# service's transient catch-all.
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+
+
+def _fault(status_code: int, msg: str = "boom") -> Fault:
+    return Fault(msg, response=_FakeResponse(status_code))  # type: ignore[arg-type]
+
+
+_APP_INACTIVE_MSG = (
+    "403 Client Error: Forbidden "
+    "[Forbidden: [{'resource': 'Application', 'field': 'Status', "
+    "'code': 'Inactive'}]]"
+)
+
+
+def test_list_activities_translates_403_fault_to_typed_auth_error() -> None:
+    """A 403 Fault (app Inactive / forbidden) becomes StravaAuthError, not Fault."""
+    provider, fake, _ = _make_provider()
+    fake.get_activities = _raiser(_fault(403, _APP_INACTIVE_MSG))  # type: ignore[method-assign]
+
+    with pytest.raises(StravaAuthError):
+        list(provider.list_activities(
+            after=datetime(2026, 4, 1, tzinfo=UTC),
+            before=datetime(2026, 5, 1, tzinfo=UTC),
+        ))
+
+
+def test_get_activity_detail_translates_403_fault_to_typed_auth_error() -> None:
+    provider, fake, _ = _make_provider()
+    fake.get_activity = _raiser(_fault(403, _APP_INACTIVE_MSG))  # type: ignore[method-assign]
+
+    with pytest.raises(StravaAuthError):
+        provider.get_activity_detail("42")
+
+
+def test_refresh_translates_403_fault_to_typed_auth_error() -> None:
+    provider, fake, _ = _make_provider(
+        token_expires_at="2020-01-01T00:00:00Z",  # forces refresh
+    )
+    fake.refresh_access_token = _raiser(_fault(403, _APP_INACTIVE_MSG))  # type: ignore[method-assign]
+
+    with pytest.raises(StravaAuthError):
+        provider.refresh_token_if_needed()
+
+
+def test_list_activities_leaves_5xx_fault_transient() -> None:
+    """A 5xx Fault is a genuine transient failure — it must NOT become an auth error.
+
+    It propagates as the raw Fault so the fetch service classifies it as
+    transient_failure and retries, exactly as before.
+    """
+    provider, fake, _ = _make_provider()
+    fake.get_activities = _raiser(_fault(503))  # type: ignore[method-assign]
+
+    with pytest.raises(Fault):
+        list(provider.list_activities(
+            after=datetime(2026, 4, 1, tzinfo=UTC),
+            before=datetime(2026, 5, 1, tzinfo=UTC),
+        ))

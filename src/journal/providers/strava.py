@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict, runtime_checkable
 
 from stravalib import Client
-from stravalib.exc import AccessUnauthorized, AuthError
+from stravalib.exc import AccessUnauthorized, AuthError, Fault
 
 if TYPE_CHECKING:
     from stravalib.model import DetailedActivity, SummaryActivity
@@ -40,11 +40,31 @@ logger = logging.getLogger(__name__)
 class StravaAuthError(Exception):
     """Raised when Strava returns 401/403 — the fetch service classifies as ``auth_broken``.
 
-    Translates ``stravalib.exc.AccessUnauthorized`` (HTTP 401/403 on data calls)
-    and ``stravalib.exc.AuthError`` (refresh-grant rejected) into a single typed
-    contract so ``services/fitness/`` depends only on the provider module, not on
+    Translates ``stravalib.exc.AccessUnauthorized`` (HTTP 401),
+    ``stravalib.exc.AuthError`` (refresh-grant rejected), and a bare
+    ``stravalib.exc.Fault`` carrying HTTP 403 into a single typed contract so
+    ``services/fitness/`` depends only on the provider module, not on
     ``stravalib``. Mirrors :class:`journal.providers.garmin.GarminAuthError`.
+
+    The 403 case matters: stravalib maps only 401 to ``AccessUnauthorized`` and
+    leaves 403 as a plain ``Fault``. A 403 is a permanent, action-required
+    condition — a deauthorised app, missing scope, or the subscriber-only-API
+    cutover (``{'resource': 'Application', 'field': 'Status', 'code':
+    'Inactive'}``) — not a transient blip. Translating it here routes it to the
+    ``auth_broken`` path (notify once, stop retrying) instead of the fetch
+    service's transient catch-all, which would retry silently forever.
     """
+
+
+def _is_forbidden_fault(exc: Fault) -> bool:
+    """True when a stravalib ``Fault`` carries an HTTP 403.
+
+    ``AccessUnauthorized`` (401) is handled separately; every other status
+    (429 rate-limit, 5xx server error, network faults) stays a plain ``Fault``
+    so the fetch service keeps treating it as transient.
+    """
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) == 403
 
 
 @dataclass(frozen=True)
@@ -143,12 +163,20 @@ class StravalibStravaProvider:
                 yield _summary_from_stravalib(activity)
         except (AccessUnauthorized, AuthError) as exc:
             raise StravaAuthError(str(exc)) from exc
+        except Fault as exc:
+            if _is_forbidden_fault(exc):
+                raise StravaAuthError(str(exc)) from exc
+            raise
 
     def get_activity_detail(self, source_id: str) -> StravaActivitySummary:
         try:
             activity = self._client.get_activity(int(source_id))
         except (AccessUnauthorized, AuthError) as exc:
             raise StravaAuthError(str(exc)) from exc
+        except Fault as exc:
+            if _is_forbidden_fault(exc):
+                raise StravaAuthError(str(exc)) from exc
+            raise
         return _summary_from_stravalib(activity)
 
     def refresh_token_if_needed(self) -> None:
@@ -173,6 +201,10 @@ class StravalibStravaProvider:
             )
         except (AccessUnauthorized, AuthError) as exc:
             raise StravaAuthError(str(exc)) from exc
+        except Fault as exc:
+            if _is_forbidden_fault(exc):
+                raise StravaAuthError(str(exc)) from exc
+            raise
         new_expires_iso = _epoch_to_iso(int(token["expires_at"]))
         self._access_token = token["access_token"]
         self._refresh_token = token["refresh_token"]
