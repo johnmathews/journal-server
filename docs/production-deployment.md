@@ -75,6 +75,102 @@ or running Watchtower with a label allowlist scoped to the journal containers, w
 meaningful robustness improvement. Out of scope for now; flagged here so future work has
 context.
 
+## Deploy runbook (releasing a new build)
+
+Use this whenever a change has merged to `main` and needs to reach the running stack.
+Deploying is **pull + up**; migrations apply themselves. The steps below add the checks
+that turn "it pulled" into "it's actually serving the new code with the schema it expects".
+
+### Do migrations or backfills need to run?
+
+**Schema migrations: automatic, no operator step.** `journal-server` calls `run_migrations`
+on startup (`src/journal/mcp_server/bootstrap.py` → `src/journal/db/migrations.py`). The
+runner compares each `src/journal/db/migrations/NNNN_*.sql` file's number against
+`PRAGMA user_version` on `/data/journal.db`, executes every file with a higher number in
+order via `executescript`, and bumps `user_version`. So the moment the new
+`journal-server` container starts (`docker compose up -d`), any pending migrations run
+against the bind-mounted DB. There is **no separate `migrate` command** and no manual step.
+
+**Backfills: check per release, but they are usually migrations too.** Data backfills in
+this project are written as ordinary `INSERT OR IGNORE` / `UPDATE` migration files (e.g.
+`0035_pricing_backfill.sql`), so they run through the same automatic path — no standalone
+script. Before deploying, decide whether the release needs an *out-of-band* backfill (a
+one-off script over historical rows that a migration can't express) by scanning the diff:
+
+```bash
+# From a clean checkout of the release commit:
+git diff --stat <previous-deployed-sha>..main -- src/journal/db/migrations/   # new schema/backfill migrations
+git diff --stat <previous-deployed-sha>..main -- scripts/ bin/                # any standalone backfill/one-off scripts
+```
+
+If `migrations/` shows new files, they apply automatically. If `scripts/`/`bin/` gained a
+backfill you were told to run, run it *after* `up -d` (so the schema exists) via
+`docker exec journal-server python3 -m <module>` and record it below. Forward-only columns
+(new nullable columns that populate for *new* rows only, like per-job `input_tokens` /
+`output_tokens` / `cost_usd` from `0034`) need **no** historical backfill — old rows stay
+NULL by design.
+
+### Pre-deploy checks
+
+1. **CI is green on `main`** for the commit you're shipping (both `test` and
+   `integration-test`, plus `build-and-push` so the `:latest` image exists):
+   ```bash
+   gh run list --repo johnmathews/journal-server --branch main --limit 1 \
+     --json headSha,conclusion,status
+   ```
+2. **Note the currently-deployed version** so you can verify the bump and roll back if
+   needed:
+   ```bash
+   ssh media 'docker inspect --format "{{index .Config.Labels \"org.opencontainers.image.revision\"}}" journal-server'
+   ssh media 'docker exec journal-server python3 -c "import sqlite3;print(sqlite3.connect(\"/data/journal.db\").execute(\"PRAGMA user_version\").fetchone()[0])"'
+   ```
+3. **Back up the DB** before a release that carries migrations (cheap insurance; the whole
+   state dir is the backup target — see [Backup target](#backup-target)):
+   ```bash
+   ssh media 'cp /srv/media/config/journal/data/journal.db /srv/media/config/journal/data/journal.db.pre-deploy-$(date +%Y%m%d)'
+   ```
+
+### Deploy
+
+```bash
+ssh media 'cd /srv/media && docker compose pull journal-server journal-webapp journal-chromadb && docker compose up -d'
+```
+
+Only the containers whose image digest changed are recreated; `up -d` is a no-op for the
+rest. Migrations run during `journal-server` startup, inside this step.
+
+### Post-deploy verification
+
+1. **Containers healthy:** `ssh media 'cd /srv/media && docker compose ps'` — all journal
+   services `Up`.
+2. **Migrations applied:** `PRAGMA user_version` now equals the highest migration number
+   shipped (re-run the command from pre-deploy step 2). If it didn't advance, the new
+   migrations did **not** run — check the startup logs.
+3. **No startup errors:** `ssh media 'docker logs --since 5m journal-server 2>&1 | grep -iE "error|traceback|migrat"'` —
+   expect the `SQLite connected and migrated` line and no tracebacks.
+4. **API up:** `ssh media 'curl -fsS localhost:8400/api/health'` (or the app's health route).
+5. **Smoke-test the shipped change** end-to-end, not just the process being up. (E.g. for the
+   jobs throughput/observability release: load `/jobs`, confirm running jobs show the live
+   spinner + counting duration and that In/Out/Cost columns render.)
+
+### Rollback
+
+Images are `:latest`, so rollback means pinning to the previous digest, not re-pulling
+`:latest` (which would fetch the same bad build):
+
+```bash
+# Find the previous image digest (from step 2's revision, or `docker images --digests`),
+# then in /srv/media/docker-compose.yml pin the image to that digest:
+#   image: ghcr.io/johnmathews/journal-server@sha256:<previous-digest>
+ssh media 'cd /srv/media && docker compose up -d journal-server'
+```
+
+**Schema caveat:** the migrations in this project are additive and nullable, so an older
+image running against a newer schema is safe — it simply ignores columns it doesn't know
+about. There are no down-migrations. If a release ever ships a *destructive* migration
+(dropped/renamed column, narrowed type), that safety no longer holds and the DB backup from
+pre-deploy step 3 becomes the rollback path — restore it and redeploy the old image.
+
 ## Public exposure
 
 There is no reverse proxy on `media`. The webapp is exposed on `:8402` to the LAN only.
