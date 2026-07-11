@@ -8,6 +8,9 @@
   ``tool_use`` block; falls back to "maybe" on malformed response.
 * W7: ``_queue_post_ingestion_jobs`` queues a storyline_extension_check
   job when the classifier is wired; skips silently when it isn't.
+* W1: the storyline_extension_check is queued by the entity-extraction
+  worker after mentions are committed (not as a racing sibling), so the
+  classifier's entity-overlap signal is reliable.
 """
 
 from __future__ import annotations
@@ -28,6 +31,9 @@ from journal.providers.storyline_extension_decider import (
 )
 from journal.services.jobs.runner import JobRunner
 from journal.services.jobs.workers import WorkerContext
+from journal.services.jobs.workers.entity_extraction import (
+    run_entity_extraction,
+)
 from journal.services.jobs.workers.storyline_extension_check import (
     run_storyline_extension_check,
 )
@@ -117,6 +123,33 @@ class _FakeClassifier:
     ) -> list[ExtensionResult]:
         self.calls.append((entry_id, user_id))
         return self._by_entry.get(entry_id, [])
+
+
+@dataclass
+class _FakeExtractionResult:
+    """Minimal stand-in for the object ``EntityExtractionService``
+    returns; ``run_entity_extraction`` only reads these count fields."""
+
+    entities_created: int = 0
+    entities_matched: int = 0
+    entities_deleted: int = 0
+    mentions_created: int = 0
+    relationships_created: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+
+class _FakeExtraction:
+    def __init__(self) -> None:
+        self.entry_calls: list[int] = []
+        self.batch_calls: int = 0
+
+    def extract_from_entry(self, entry_id: int) -> _FakeExtractionResult:
+        self.entry_calls.append(entry_id)
+        return _FakeExtractionResult()
+
+    def extract_batch(self, **_kwargs: Any) -> list[_FakeExtractionResult]:  # noqa: ANN401
+        self.batch_calls += 1
+        return [_FakeExtractionResult()]
 
 
 # ── W5: run_storyline_generation worker ─────────────────────────
@@ -480,6 +513,8 @@ def classifier_world(
         "classifier": classifier,
         "decider": decider,
         "storyline_repo": storyline_repo,
+        "entity_store": store,
+        "entry_repository": _MiniEntryRepo(),
     }
 
 
@@ -526,6 +561,73 @@ class TestExtensionClassifier:
         assert results[0].decision == "no"
         assert results[0].stage == "no_match"
         assert classifier_world["decider"].calls == []
+
+    def _classifier_with_embedder(
+        self, world: dict[str, Any], embedder: Any,  # noqa: ANN401
+    ) -> StorylineExtensionClassifier:
+        return StorylineExtensionClassifier(
+            entity_store=world["entity_store"],
+            entry_repository=world["entry_repository"],
+            storyline_repository=world["storyline_repo"],
+            decider=world["decider"],
+            embedder=embedder,
+            relevance_threshold=0.5,
+        )
+
+    def test_embedding_fallback_escalates_to_decider(
+        self, classifier_world: dict[str, Any],
+    ) -> None:
+        """W6: an entry with no entity overlap and no surface-form match,
+        but whose embedding is close to the storyline summary, escalates
+        to the Haiku decider instead of an outright 'no'."""
+        world = classifier_world
+        world["storyline_repo"].update_summary_embedding(
+            world["storyline_id"], [1.0, 0.0, 0.0],
+        )
+        clf = self._classifier_with_embedder(
+            world, lambda _text: [1.0, 0.0, 0.0],  # cosine 1.0 with summary
+        )
+        results = clf.classify_for_entry(
+            entry_id=world["entry_nope_id"], user_id=world["user_id"],
+        )
+        assert len(results) == 1
+        assert results[0].stage == "embedding_llm"
+        assert results[0].decision == "yes"  # canned decider verdict
+        assert len(world["decider"].calls) == 1
+
+    def test_embedding_fallback_below_threshold_stays_no(
+        self, classifier_world: dict[str, Any],
+    ) -> None:
+        world = classifier_world
+        world["storyline_repo"].update_summary_embedding(
+            world["storyline_id"], [1.0, 0.0, 0.0],
+        )
+        clf = self._classifier_with_embedder(
+            world, lambda _text: [0.0, 1.0, 0.0],  # orthogonal → cosine 0
+        )
+        results = clf.classify_for_entry(
+            entry_id=world["entry_nope_id"], user_id=world["user_id"],
+        )
+        assert len(results) == 1
+        assert results[0].decision == "no"
+        assert results[0].stage == "no_match"
+        assert world["decider"].calls == []
+
+    def test_embedding_fallback_skipped_when_no_summary_embedding(
+        self, classifier_world: dict[str, Any],
+    ) -> None:
+        """No storyline summary embedding → the fallback can't run, so the
+        entry stays a no-match (no decider call)."""
+        world = classifier_world  # storyline has no summary embedding
+        clf = self._classifier_with_embedder(
+            world, lambda _text: [1.0, 0.0, 0.0],
+        )
+        results = clf.classify_for_entry(
+            entry_id=world["entry_nope_id"], user_id=world["user_id"],
+        )
+        assert results[0].decision == "no"
+        assert results[0].stage == "no_match"
+        assert world["decider"].calls == []
 
 
 # ── W6 decider parser ──────────────────────────────────────────
@@ -589,6 +691,60 @@ class TestExtensionDeciderParser:
 
 
 # ── W7: extension-check worker + ingestion hook ────────────────
+
+
+class TestEntityExtractionTriggersStorylineCheck:
+    """W1: the storyline extension check is enqueued by the
+    entity-extraction worker *after* mentions are committed, not as a
+    concurrent sibling that races entity extraction. This fixes the
+    root cause of a burst ingest updating zero storylines."""
+
+    def test_single_entry_extraction_queues_storyline_check(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        jobs, notifier = job_ctx
+        spy: list[tuple[int, int | None]] = []
+        ctx = _build_minimal_ctx(
+            jobs, notifier,
+            extraction=_FakeExtraction(),
+            queue_storyline_check=lambda eid, uid: spy.append((eid, uid)),
+        )
+        job = jobs.create(
+            "entity_extraction", {"entry_id": 7, "user_id": 1}, user_id=1,
+        )
+        run_entity_extraction(ctx, job.id, {"entry_id": 7, "user_id": 1})
+
+        finished = jobs.get(job.id)
+        assert finished is not None
+        assert finished.status == "succeeded"
+        # Trigger fired exactly once, for this entry + user.
+        assert spy == [(7, 1)]
+
+    def test_batch_extraction_does_not_queue_storyline_check(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        """Batch extraction (no entry_id) must not fan out one storyline
+        check per entry — that would be a regeneration storm."""
+        jobs, notifier = job_ctx
+        spy: list[Any] = []
+        ctx = _build_minimal_ctx(
+            jobs, notifier,
+            extraction=_FakeExtraction(),
+            queue_storyline_check=lambda *a: spy.append(a),  # noqa: ANN401
+        )
+        job = jobs.create(
+            "entity_extraction", {"stale_only": True}, user_id=1,
+        )
+        run_entity_extraction(
+            ctx, job.id, {"stale_only": True, "user_id": 1},
+        )
+
+        finished = jobs.get(job.id)
+        assert finished is not None
+        assert finished.status == "succeeded"
+        assert spy == []
 
 
 class TestExtensionCheckWorker:
@@ -695,6 +851,86 @@ class TestExtensionCheckWorker:
         assert finished is not None
         assert finished.status == "failed"
 
+    def test_coalesces_when_open_regeneration_already_queued(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        """W4: a burst ingest must not fire one full regeneration per
+        entry. If a queued open-refresh for the storyline already exists,
+        it will pick up this entry when it runs, so skip queuing another."""
+        jobs, notifier = job_ctx
+        classifier = _FakeClassifier({
+            42: [
+                ExtensionResult(
+                    storyline_id=1, decision="yes",
+                    reasoning="ok", stage="entity_overlap",
+                ),
+            ],
+        })
+        ctx = _build_minimal_ctx(jobs, notifier, classifier=classifier)
+        # A prior entry in this batch already queued an open refresh for
+        # storyline 1 (still queued — not yet run).
+        jobs.create(
+            "storyline_generation",
+            {"storyline_id": 1, "user_id": 1, "auto_split": True},
+            user_id=1,
+        )
+        regen_calls: list[int] = []
+
+        def fake_regen(storyline_id: int, **_: Any) -> Any:  # noqa: ANN401
+            regen_calls.append(storyline_id)
+            return type("J", (), {"id": "regen"})()
+
+        job = jobs.create(
+            "storyline_extension_check",
+            {"entry_id": 42, "user_id": 1}, user_id=1,
+        )
+        run_storyline_extension_check(
+            ctx, job.id, {"entry_id": 42, "user_id": 1}, fake_regen,
+        )
+
+        finished = jobs.get(job.id)
+        assert finished is not None
+        assert finished.status == "succeeded"
+        assert regen_calls == []  # coalesced onto the queued regen
+        assert finished.result is not None
+        assert finished.result["regenerations_queued"] == []
+        assert finished.result["coalesced_storyline_ids"] == [1]
+
+    def test_queues_regeneration_when_no_pending_regeneration(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        """W4: with nothing pending, the "yes" still queues a regen."""
+        jobs, notifier = job_ctx
+        classifier = _FakeClassifier({
+            42: [
+                ExtensionResult(
+                    storyline_id=1, decision="yes",
+                    reasoning="ok", stage="entity_overlap",
+                ),
+            ],
+        })
+        ctx = _build_minimal_ctx(jobs, notifier, classifier=classifier)
+        regen_calls: list[int] = []
+
+        def fake_regen(storyline_id: int, **_: Any) -> Any:  # noqa: ANN401
+            regen_calls.append(storyline_id)
+            return type("J", (), {"id": "regen"})()
+
+        job = jobs.create(
+            "storyline_extension_check",
+            {"entry_id": 42, "user_id": 1}, user_id=1,
+        )
+        run_storyline_extension_check(
+            ctx, job.id, {"entry_id": 42, "user_id": 1}, fake_regen,
+        )
+
+        finished = jobs.get(job.id)
+        assert finished is not None
+        assert regen_calls == [1]
+        assert finished.result["coalesced_storyline_ids"] == []
+
 
 # ── _build_minimal_ctx helper ───────────────────────────────────
 
@@ -705,6 +941,8 @@ def _build_minimal_ctx(
     *,
     generation: Any = None,  # noqa: ANN401
     classifier: Any = None,  # noqa: ANN401
+    extraction: Any = None,  # noqa: ANN401
+    queue_storyline_check: Any = None,  # noqa: ANN401
 ) -> WorkerContext:
     """Build a WorkerContext with only the fields the storyline
     workers touch. Other fields are set to placeholder objects that
@@ -714,7 +952,7 @@ def _build_minimal_ctx(
     ctx = WorkerContext(
         jobs=jobs,
         notifier=notifier,  # type: ignore[arg-type]
-        extraction=sentinel,  # type: ignore[arg-type]
+        extraction=extraction if extraction is not None else sentinel,  # type: ignore[arg-type]
         reembedder=sentinel,  # type: ignore[arg-type]
         mood_backfill=sentinel,  # type: ignore[arg-type]
         mood_scoring=sentinel,  # type: ignore[arg-type]
@@ -723,6 +961,7 @@ def _build_minimal_ctx(
         pop_pending_images=lambda _: [],
         pop_pending_audio=lambda _: [],
         queue_post_ingestion_jobs=lambda *_a, **_k: {},
+        queue_storyline_extension_check=queue_storyline_check,
         storyline_generation=generation,
         storyline_extension_classifier=classifier,
     )
@@ -912,6 +1151,52 @@ class TestJobRunnerStorylineSubmit:
         with pytest.raises(RuntimeError, match="not configured"):
             runner.submit_storyline_extension_check(1, user_id=1)
         runner.shutdown(wait=True, cancel_futures=False)
+
+    def test_maybe_queue_extension_check_creates_job_when_wired(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        """W1: the entity-extraction worker's trigger callable queues a
+        real storyline_extension_check job when storylines are wired."""
+        classifier = _FakeClassifier({})  # classify → [] (no regens)
+        runner = _build_minimal_runner(factory, classifier=classifier)
+        runner._maybe_queue_storyline_extension_check(5, 1)  # noqa: SLF001
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        jobs = SQLiteJobRepository(factory)
+        checks, _ = jobs.list_jobs(job_type="storyline_extension_check")
+        assert len(checks) == 1
+        assert checks[0].params["entry_id"] == 5
+        assert checks[0].params["user_id"] == 1
+
+    def test_maybe_queue_extension_check_noop_when_not_wired(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        """Storylines opt-out: the trigger is a safe no-op, no exception,
+        no job — so non-storyline servers ingest normally."""
+        runner = _build_minimal_runner(factory, classifier=None)
+        runner._maybe_queue_storyline_extension_check(5, 1)  # noqa: SLF001
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        jobs = SQLiteJobRepository(factory)
+        checks, _ = jobs.list_jobs(job_type="storyline_extension_check")
+        assert checks == []
+
+    def test_maybe_queue_extension_check_noop_when_user_unknown(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        """No silent drop, but no job either: a user-less entry can't be
+        scoped to a user's storylines, so we log and skip."""
+        classifier = _FakeClassifier({})
+        runner = _build_minimal_runner(factory, classifier=classifier)
+        runner._maybe_queue_storyline_extension_check(5, None)  # noqa: SLF001
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        jobs = SQLiteJobRepository(factory)
+        checks, _ = jobs.list_jobs(job_type="storyline_extension_check")
+        assert checks == []
 
 
 def _build_minimal_runner(

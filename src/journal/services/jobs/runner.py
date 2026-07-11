@@ -250,6 +250,9 @@ class JobRunner:
             pop_pending_images=lambda jid: self._pending_images.pop(jid, []),
             pop_pending_audio=lambda jid: self._pending_audio.pop(jid, []),
             queue_post_ingestion_jobs=self._queue_post_ingestion_jobs,
+            queue_storyline_extension_check=(
+                self._maybe_queue_storyline_extension_check
+            ),
             fetch_strava=fetch_strava_callable,
             fetch_garmin=fetch_garmin_callable,
             normalize_strava=normalize_strava_callable,
@@ -557,6 +560,35 @@ class JobRunner:
         )
         return job
 
+    def _maybe_queue_storyline_extension_check(
+        self, entry_id: int, user_id: int | None,
+    ) -> None:
+        """Best-effort storyline extension check for a freshly-extracted
+        entry, called by the entity-extraction worker.
+
+        Safe to call unconditionally: no-ops when storylines aren't wired
+        on this server (opt-in feature), and logs — rather than silently
+        drops — when the entry has no known user, since the classifier
+        scopes to a user's active storylines. Queue failures are logged
+        and swallowed so they never fail the parent extraction job.
+        """
+        if self._ctx.storyline_extension_classifier is None:
+            return
+        if user_id is None:
+            log.warning(
+                "Not queuing storyline extension check for entry %d: "
+                "no user_id on the extraction job.",
+                entry_id,
+            )
+            return
+        try:
+            self.submit_storyline_extension_check(entry_id, user_id=user_id)
+        except Exception:  # noqa: BLE001 — never fail the parent job
+            log.warning(
+                "Failed to queue storyline extension check for entry %d",
+                entry_id, exc_info=True,
+            )
+
     def submit_entity_reembed(
         self, entity_id: int, *, user_id: int,
     ) -> Job:
@@ -803,21 +835,12 @@ class JobRunner:
                  user_id=user_id,
              )),
         ]
-        # Storylines is opt-in at boot — only queue an extension check
-        # when both the classifier service is wired and a user_id is
-        # known (the classifier loops the user's active storylines).
-        if (
-            self._ctx.storyline_extension_classifier is not None
-            and user_id is not None
-        ):
-            follow_up_jobs.append(
-                ("storyline extension check", "storyline_extension_check",
-                 lambda: self.submit_storyline_extension_check(
-                     entry_id,
-                     user_id=user_id,
-                     parent_job_id=parent_job_id,
-                 )),
-            )
+        # NB: the storyline extension check is intentionally NOT queued
+        # here. It is fired by the entity-extraction worker once mentions
+        # are committed (see _maybe_queue_storyline_extension_check), so
+        # the classifier's entity-overlap signal is reliable. Queuing it
+        # here — concurrently with entity extraction on a separate pool —
+        # was the root cause of ingests updating zero storylines.
 
         follow_up_ids: dict[str, str] = {}
         for label, key, submit in follow_up_jobs:

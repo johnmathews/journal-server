@@ -40,6 +40,10 @@ def run_audio_ingestion(
         ]
         entry_date = params["entry_date"]
         job_user_id = params.get("user_id")
+        # Resolve the effective user once so the entry and every follow-up
+        # (mood, entity extraction → storyline check) share one attribution
+        # and the storyline trigger is never silently dropped (W3).
+        resolved_user_id = job_user_id or 1
         total = len(recordings)
 
         def progress_callback(current: int, _total_recs: int) -> None:
@@ -53,7 +57,7 @@ def run_audio_ingestion(
                 source_type=params.get("source_type", "voice"),
                 skip_mood=True,
                 on_progress=progress_callback,
-                user_id=job_user_id or 1,
+                user_id=resolved_user_id,
             )
 
         entry = run_with_retry(
@@ -68,9 +72,11 @@ def run_audio_ingestion(
 
         ctx.jobs.update_progress(job_id, total, total)
 
-        # Queue follow-up jobs: mood scoring + entity extraction.
+        # Queue follow-up jobs: mood scoring + entity extraction (the
+        # latter fires the storyline check). Attributed to the resolved
+        # user so the storyline trigger is scoped, not skipped.
         follow_up_ids = ctx.queue_post_ingestion_jobs(
-            job_id, "Audio", entry.id, job_user_id,
+            job_id, "Audio", entry.id, resolved_user_id,
         )
 
         result: dict[str, Any] = {

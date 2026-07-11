@@ -1304,6 +1304,32 @@ class TestImageIngestionSingleEntryContract:
         assert mood_jobs[0].params["entry_id"] == entry.id
         assert entity_jobs[0].params["entry_id"] == entry.id
 
+    def test_image_ingest_without_user_propagates_default_user(
+        self, jobs_repo, threadsafe_factory
+    ) -> None:
+        """W3: when the ingest job carries no user_id, the entry is
+        attributed to user 1 (``job_user_id or 1``) and the follow-up
+        jobs must be queued for user 1 too — not None. A None user_id on
+        the entity-extraction job would make the storyline extension
+        trigger silently skip, since it scopes to a user's storylines."""
+        runner, _, _ = self._make_runner(
+            jobs_repo, threadsafe_factory,
+            ocr_text="3 June 2026\n\nEntry body.",
+        )
+
+        images = [(b"page data", "image/jpeg", "page1.jpg")]
+        parent = runner.submit_image_ingestion(images, "2026-06-03")  # no user_id
+        _wait_terminal(jobs_repo, parent.id)
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        entity_jobs, _ = jobs_repo.list_jobs(job_type="entity_extraction")
+        mood_jobs, _ = jobs_repo.list_jobs(job_type="mood_score_entry")
+        assert len(entity_jobs) == 1
+        assert entity_jobs[0].user_id == 1
+        assert entity_jobs[0].params.get("user_id") == 1
+        assert len(mood_jobs) == 1
+        assert mood_jobs[0].user_id == 1
+
     def test_single_image_sends_one_combined_notification(
         self, jobs_repo, threadsafe_factory
     ) -> None:
