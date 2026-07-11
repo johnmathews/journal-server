@@ -571,11 +571,12 @@ def _init_services() -> dict:
     else:
         log.info("  Notification service initialized (Pushover, per-user credentials only)")
 
-    # Jobs infrastructure: repository + single-worker runner.
+    # Jobs infrastructure: repository + two-pool runner (parallel Pool A
+    # for ingestion/fast jobs, single-worker Pool B for storylines).
     #
     # The jobs repo uses the process-wide ``ConnectionFactory`` (see
     # ``db_factory`` above) so each thread that touches it (ASGI
-    # request handler, JobRunner worker, lifespan hooks) opens its
+    # request handler, JobRunner pool workers, lifespan hooks) opens its
     # own ``sqlite3.Connection``. That eliminates the shared-state
     # commit race that bit prod on 2026-04-XX and 2026-05-11 — see
     # ``docs/archive/sqlite-per-thread-connections-plan.md``.
@@ -668,6 +669,7 @@ def _init_services() -> dict:
         notification_service=notification_service,
         storyline_generation_service=storyline_generation_service,
         storyline_extension_classifier=storyline_extension_classifier,
+        worker_count=config.job_worker_count,
         **fitness_callables,
     )
     # Garmin is wired unconditionally (per-user creds, W6). Strava is
@@ -680,7 +682,11 @@ def _init_services() -> dict:
             "  Fitness sync wired (Garmin only — no STRAVA_CLIENT_ID; "
             "submit_fitness_sync_strava will refuse)",
         )
-    log.info("  Jobs: JobRunner started (single-worker executor)")
+    log.info(
+        "  Jobs: JobRunner started (Pool A ingestion workers=%d, "
+        "Pool B storyline workers=1)",
+        config.job_worker_count,
+    )
 
     # Health poller — daemon thread that monitors internal components
     # and notifies admins via Pushover on status degradation.

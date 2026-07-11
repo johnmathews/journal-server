@@ -104,8 +104,11 @@ def submit_save_entry_pipeline(
     # connections (db/factory.py, 2026-05-11) removed that failure
     # mode, but the deferred dispatch is kept deliberately: children
     # must observe the parent row (and their own rows) fully
-    # committed when they start, and batched FIFO dispatch keeps the
-    # pipeline ordering deterministic.
+    # committed when they start. These children run on the N-worker
+    # Pool A (ingestion) executor and MAY run in parallel with each
+    # other; that is safe because the consolidated pipeline
+    # notification is driven off terminal-state counts (the last child
+    # to finish fires it), not off any dispatch ordering.
     deferred: list[Callable[[], None]] = []
 
     def _stage_child(
@@ -168,8 +171,10 @@ def submit_save_entry_pipeline(
     )
 
     # All API-thread writes have committed; safe to release the
-    # workers. The single-worker executor will drain them in FIFO
-    # order without contending against this thread.
+    # workers. Pool A may run these children in parallel; each opens
+    # its own per-thread SQLite connection (WAL + busy_timeout) and the
+    # consolidated notification is count-based, so parallel execution is
+    # safe.
     for dispatch in deferred:
         dispatch()
 

@@ -546,6 +546,15 @@ class Config:
         ).lower() in ("1", "true", "yes", "on")
     )
 
+    # Background job runner worker pool (services/jobs/runner.py).
+    # Sizes Pool A, which runs everything except storyline jobs in
+    # parallel. The storyline pool is always single-worker (ingestion
+    # priority + same-storyline race avoidance) and has no knob. Must
+    # be >= 1.
+    job_worker_count: int = field(
+        default_factory=lambda: int(os.environ.get("JOB_WORKER_COUNT", "4"))
+    )
+
     def __post_init__(self) -> None:
         valid_providers = {"openai", "gemini"}
         if self.transcription_provider not in valid_providers:
@@ -579,6 +588,8 @@ class Config:
             raise ValueError(
                 "FITNESS_HEALTH_BROKEN_DEGRADED_HOURS must be >= 1"
             )
+        if self.job_worker_count < 1:
+            raise ValueError("JOB_WORKER_COUNT must be >= 1")
 
 
 def load_config() -> Config:

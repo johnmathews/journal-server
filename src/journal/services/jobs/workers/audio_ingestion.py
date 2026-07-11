@@ -89,6 +89,16 @@ def run_audio_ingestion(
             # If follow-ups were queued the combined pipeline notification
             # fires when the last one completes.
             ctx.notifier.notify_success(job_user_id, "ingest_audio", result)
+        else:
+            # Defensive sweep: on the multi-worker Pool A, a follow-up
+            # child can reach a terminal state BEFORE this parent marked
+            # itself succeeded — that child's try_pipeline_notification
+            # then saw the parent still running and returned early. Now
+            # that the parent row is succeeded, re-check so the
+            # consolidated push still fires. try_acquire_notification_lock
+            # dedupes against the last child's own call, so this is a
+            # no-op when a child already fired.
+            ctx.notifier.try_pipeline_notification(job_id, job_user_id)
     except Exception as exc:  # noqa: BLE001 — terminal-state guard
         log.exception("Audio ingestion job %s failed", job_id)
         # Clean up any remaining audio data

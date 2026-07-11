@@ -212,6 +212,32 @@ def _wait_terminal(
     )
 
 
+def _wait_status(
+    jobs_repo: SQLiteJobRepository,
+    job_id: str,
+    status: str,
+    timeout: float = 5.0,
+) -> None:
+    """Busy-wait until the job row reaches ``status`` (e.g. ``running``).
+
+    Event-driven waits are preferred where possible, but job-status
+    transitions happen inside the worker and are only observable via
+    the jobs table, so a short poll is the right tool here.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        row = jobs_repo.get(job_id)
+        if row is not None and row.status == status:
+            return
+        time.sleep(0.01)
+    row = jobs_repo.get(job_id)
+    actual = row.status if row is not None else "<missing>"
+    raise AssertionError(
+        f"Job {job_id} did not reach status {status!r} within "
+        f"{timeout}s (last seen: {actual!r})"
+    )
+
+
 # --------------------------------------------------------------------
 # Fixtures
 # --------------------------------------------------------------------
@@ -257,7 +283,14 @@ def runner_factory(jobs_repo, threadsafe_factory):
         normalize_garmin_callable: Any = None,
         backfill_strava_callable: Any = None,
         backfill_garmin_callable: Any = None,
+        storyline_generation: Any = None,
+        storyline_extension_classifier: Any = None,
+        worker_count: int = 1,
     ) -> JobRunner:
+        # ``worker_count`` defaults to 1 so the serialisation/timing
+        # tests below stay deterministic on Pool A; the production
+        # default (config.job_worker_count) is 4. Tests that want to
+        # observe parallelism pass ``worker_count=2`` explicitly.
         runner = JobRunner(
             job_repository=jobs_repo,
             entity_extraction_service=(
@@ -274,6 +307,9 @@ def runner_factory(jobs_repo, threadsafe_factory):
             normalize_garmin_callable=normalize_garmin_callable,
             backfill_strava_callable=backfill_strava_callable,
             backfill_garmin_callable=backfill_garmin_callable,
+            storyline_generation_service=storyline_generation,
+            storyline_extension_classifier=storyline_extension_classifier,
+            worker_count=worker_count,
         )
         created.append(runner)
         return runner
@@ -613,7 +649,7 @@ class TestSerialisation:
         #
         # To keep the two calls distinguishable, track calls via
         # batch_calls which is shared across both invocations.
-        runner = runner_factory(extraction=first_fake)
+        runner = runner_factory(extraction=first_fake, worker_count=1)
 
         job1 = runner.submit_entity_extraction({"stale_only": False})
         # Wait until the first job's worker has actually started.
@@ -646,6 +682,180 @@ class TestSerialisation:
         assert final1 is not None and final1.status == "succeeded"
         assert final2 is not None and final2.status == "succeeded"
         assert len(first_fake.batch_calls) == 2
+
+
+# --------------------------------------------------------------------
+# Two-pool worker model (Pool A parallel ingestion + single-worker
+# Pool B for storyline jobs)
+# --------------------------------------------------------------------
+
+
+class _FakeStorylineResult:
+    """Minimal stand-in for a StorylineGenerationResult — the fields
+    run_storyline_generation reads to build its summary."""
+
+    def __init__(self) -> None:
+        self.entry_count = 0
+        self.entity_mention_count = 0
+        self.fts_fallback_count = 0
+        self.narrative_citation_count = 0
+        self.curation_citation_count = 0
+        self.narrative_model = "fake-narrator"
+        self.curation_model = "fake-curator"
+        self.chapter_count = 0
+        self.warnings: list[str] = []
+
+
+class FakeStorylineGenerationService:
+    """Blocks inside ``regenerate`` so tests can prove Pool B is
+    single-worker and independent of Pool A.
+
+    ``hold_event`` (if set) pauses each ``regenerate`` call until the
+    test releases it; ``entered_event`` fires when a call begins.
+    """
+
+    def __init__(
+        self,
+        *,
+        hold_event: threading.Event | None = None,
+        entered_event: threading.Event | None = None,
+    ) -> None:
+        self._hold = hold_event
+        self._entered = entered_event
+        self._lock = threading.Lock()
+        self.calls: list[int] = []
+
+    def regenerate(self, storyline_id: int, **_kwargs: Any) -> _FakeStorylineResult:
+        with self._lock:
+            self.calls.append(storyline_id)
+        if self._entered is not None:
+            self._entered.set()
+        if self._hold is not None:
+            self._hold.wait(timeout=10)
+        return _FakeStorylineResult()
+
+
+class TestTwoPoolWorkerModel:
+    """Pool A runs ingestion/fast jobs in parallel (``worker_count``);
+    Pool B runs storyline jobs on a single worker so ingestion is never
+    blocked and same-storyline regenerations can't race."""
+
+    def test_parallel_ingestion_two_jobs_run_concurrently(
+        self, runner_factory, jobs_repo,
+    ) -> None:
+        """With ``worker_count=2``, two blocked entity-extraction jobs
+        BOTH reach ``running`` at the same time (they'd serialise on a
+        single worker)."""
+        hold = threading.Event()
+        fake = FakeEntityExtractionService(batch_results=[], hold_event=hold)
+        runner = runner_factory(extraction=fake, worker_count=2)
+
+        j1 = runner.submit_entity_extraction({"stale_only": False})
+        j2 = runner.submit_entity_extraction({"stale_only": True})
+
+        # Both must be running simultaneously — impossible on one worker.
+        _wait_status(jobs_repo, j1.id, "running")
+        _wait_status(jobs_repo, j2.id, "running")
+
+        hold.set()
+        _wait_terminal(jobs_repo, j1.id)
+        _wait_terminal(jobs_repo, j2.id)
+
+        f1 = jobs_repo.get(j1.id)
+        f2 = jobs_repo.get(j2.id)
+        assert f1 is not None and f1.status == "succeeded"
+        assert f2 is not None and f2.status == "succeeded"
+
+    def test_ingestion_not_blocked_by_held_storyline_job(
+        self, runner_factory, jobs_repo,
+    ) -> None:
+        """A storyline job held on Pool B must not stall Pool A: an
+        entity-extraction job submitted afterwards still reaches
+        ``running`` while the storyline job is held."""
+        story_hold = threading.Event()
+        story_entered = threading.Event()
+        storyline = FakeStorylineGenerationService(
+            hold_event=story_hold, entered_event=story_entered,
+        )
+        # Non-blocking extraction so the ingestion job runs straight
+        # through once it gets a Pool A worker.
+        extraction = FakeEntityExtractionService(batch_results=[])
+        runner = runner_factory(
+            extraction=extraction,
+            storyline_generation=storyline,
+            worker_count=1,
+        )
+
+        story_job = runner.submit_storyline_generation(1, user_id=1)
+        # Wait until the storyline worker is actually inside regenerate,
+        # occupying Pool B's only slot.
+        assert story_entered.wait(timeout=5)
+
+        entity_job = runner.submit_entity_extraction({"stale_only": True})
+        # Pool A is a separate executor, so this must complete even
+        # though Pool B is fully occupied by the held storyline job.
+        _wait_terminal(jobs_repo, entity_job.id)
+
+        entity_final = jobs_repo.get(entity_job.id)
+        assert entity_final is not None
+        assert entity_final.status == "succeeded"
+
+        # Storyline job is still held (not terminal) at this point.
+        story_row = jobs_repo.get(story_job.id)
+        assert story_row is not None
+        assert story_row.status == "running"
+
+        story_hold.set()
+        _wait_terminal(jobs_repo, story_job.id)
+
+    def test_same_storyline_jobs_serialise_on_pool_b(
+        self, runner_factory, jobs_repo,
+    ) -> None:
+        """Two storyline_generation jobs for the SAME storyline run one
+        at a time on Pool B: while the first is held, the second stays
+        ``queued`` — the structural guard against the same-storyline
+        regeneration race, with no locking."""
+        hold = threading.Event()
+        entered = threading.Event()
+        storyline = FakeStorylineGenerationService(
+            hold_event=hold, entered_event=entered,
+        )
+        runner = runner_factory(
+            storyline_generation=storyline, worker_count=4,
+        )
+
+        job1 = runner.submit_storyline_generation(1, user_id=1)
+        assert entered.wait(timeout=5)
+
+        job2 = runner.submit_storyline_generation(1, user_id=1)
+
+        # First occupies the single Pool B worker; second must wait even
+        # though Pool A has 4 free workers.
+        row1 = jobs_repo.get(job1.id)
+        row2 = jobs_repo.get(job2.id)
+        assert row1 is not None and row1.status == "running"
+        assert row2 is not None and row2.status == "queued"
+
+        hold.set()
+        _wait_terminal(jobs_repo, job1.id)
+        _wait_terminal(jobs_repo, job2.id)
+
+        f1 = jobs_repo.get(job1.id)
+        f2 = jobs_repo.get(job2.id)
+        assert f1 is not None and f1.status == "succeeded"
+        assert f2 is not None and f2.status == "succeeded"
+        assert storyline.calls == [1, 1]
+
+    def test_submit_storyline_after_shutdown_raises(
+        self, runner_factory,
+    ) -> None:
+        """Shutdown drains BOTH pools: post-shutdown storyline submits
+        raise (exercises Pool B's executor shutdown, not just Pool A)."""
+        storyline = FakeStorylineGenerationService()
+        runner = runner_factory(storyline_generation=storyline)
+        runner.shutdown(wait=True, cancel_futures=False)
+        with pytest.raises(RuntimeError):
+            runner.submit_storyline_generation(1, user_id=1)
 
 
 # --------------------------------------------------------------------
@@ -1276,6 +1486,55 @@ class TestPipelineNotification:
 
         # Parent entry info still present
         assert result["entry_id"] == 1
+
+    def test_pipeline_notifies_when_children_finish_before_parent(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        """Two-pool regression: with parallel Pool A workers a follow-up
+        child can reach a terminal state BEFORE the parent ingestion job
+        marks itself succeeded. Each such child sees ``parent.status !=
+        'succeeded'`` and returns early, so the parent must run a
+        defensive pipeline sweep after marking itself succeeded — else
+        the consolidated push is lost entirely.
+
+        We force the exact interleaving deterministically: wrap
+        ``queue_post_ingestion_jobs`` so it blocks until every queued
+        child has finished before returning to the parent worker (which
+        then marks itself succeeded). This is precisely what parallel
+        Pool A workers can produce; under the old single-worker executor
+        it was impossible (children couldn't start until the parent
+        freed the worker).
+        """
+        runner, notif = self._make_pipeline_runner(jobs_repo)
+
+        real_queue = runner._queue_post_ingestion_jobs  # noqa: SLF001
+
+        def queue_and_drain(
+            parent_job_id: str, kind: str, entry_id: int,
+            user_id: int | None,
+        ) -> dict[str, str]:
+            ids = real_queue(parent_job_id, kind, entry_id, user_id)
+            # Block the parent worker until all children are terminal.
+            for fj_id in ids.values():
+                _wait_terminal(jobs_repo, fj_id)
+            return ids
+
+        # Override the seam the worker calls (ctx captured the bound
+        # method at construction).
+        runner._ctx.queue_post_ingestion_jobs = queue_and_drain  # noqa: SLF001
+
+        recordings = [(b"audio1", "audio/webm", "rec.webm")]
+        parent = runner.submit_audio_ingestion(
+            recordings, "2026-04-25", user_id=1,
+        )
+        _wait_terminal(jobs_repo, parent.id)
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        # Exactly one consolidated success push, despite the children
+        # finishing before the parent was marked succeeded.
+        assert len(notif.success_calls) == 1
+        _, job_type, _ = notif.success_calls[0]
+        assert job_type == "ingest_audio"
 
     def test_image_pipeline_sends_one_notification(
         self, jobs_repo: SQLiteJobRepository,

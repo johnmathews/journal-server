@@ -12,33 +12,45 @@ It owns:
 - Lifecycle bookkeeping against the `jobs` table: queued -> running
   -> (succeeded | failed), with per-step progress updates driven by
   the `on_progress` callback contract added in Work Unit 1.
-- A single-worker `ThreadPoolExecutor` that serialises every
-  submitted job. One worker gives us two things:
-    1. Predictable LLM rate usage (no contention for tokens).
-    2. Simpler failure reasoning: jobs cannot be racing each other.
+- TWO `ThreadPoolExecutor` pools that between them run every
+  submitted job:
 
-  SQLite safety is *not* part of that list any more: since the
-  per-thread `ConnectionFactory` migration (2026-05-11, see
-  `db/factory.py` and
-  `docs/archive/sqlite-per-thread-connections-plan.md`), each
-  thread — worker or API — opens its own connection, so the old
-  shared-connection commit race is structurally impossible.
+    * **Pool A (ingestion/fast)** — ``max_workers = worker_count``
+      (from ``config.job_worker_count``, default 4). Handles
+      EVERYTHING except storyline jobs, so independent ingestion /
+      mood / fitness / extraction jobs run in parallel.
+    * **Pool B (storyline)** — ``max_workers = 1``. Handles ONLY
+      ``storyline_generation`` and ``storyline_extension_check``.
 
-IMPORTANT: if `max_workers` is ever bumped above 1, the two
-rationales above are what you are giving up — LLM rate usage
-becomes contended and job-vs-job interactions need real analysis.
-SQLite is no longer the blocker (WAL + per-thread connections +
-the file-level writer lock handle concurrent writers), but the
-LLM-rate and reasoning constraints still make 1 the right number.
+  The split buys three things:
+    1. Parallel ingestion throughput (Pool A is multi-worker).
+    2. Ingestion is never starved by slow storyline work — storyline
+       jobs can't occupy a Pool A slot, so there is no head-of-line
+       blocking behind a long regeneration.
+    3. The same-storyline regeneration race is structurally
+       impossible: Pool B has a single worker, so two regenerations
+       of the same storyline can never run concurrently — no locking
+       required.
+
+  SQLite is safe under this concurrency: since the per-thread
+  `ConnectionFactory` migration (2026-05-11, see `db/factory.py` and
+  `docs/archive/sqlite-per-thread-connections-plan.md`) every thread
+  — each pool worker and each API thread — opens its own connection,
+  and `db/connection.py` applies WAL mode + ``busy_timeout=5000`` so
+  concurrent writers wait on the file-level writer lock instead of
+  erroring. Parallel Pool A workers writing to the jobs table are
+  therefore fine.
 
 Worker bodies live in ``services/jobs/workers/<name>.py``. Each one
 is a free function ``run_<name>(ctx, job_id, params)`` taking a
 ``WorkerContext`` so the worker is independently testable without
 constructing the full runner. This module is the dispatcher: it
-holds the executor + the in-memory blob queues used by image and
-audio ingestion (large bytes don't fit in the jobs.params_json
+holds the two executors + the in-memory blob queues used by image
+and audio ingestion (large bytes don't fit in the jobs.params_json
 column), and it exposes the ``submit_*`` API the rest of the system
-calls.
+calls. Each ``submit_*`` routes onto Pool A except
+``submit_storyline_generation`` / ``submit_storyline_extension_check``,
+which go to the single-worker Pool B.
 """
 
 from __future__ import annotations
@@ -139,25 +151,30 @@ class EntityReembedder(Protocol):
 
 
 class JobRunner:
-    """Run background batch jobs serialised on a single worker.
+    """Run background batch jobs across two thread pools.
 
-    Uses a single-worker `ThreadPoolExecutor` so jobs are
-    serialised — this keeps LLM rate-limiting simple and reasoning
-    about job-vs-job interactions tractable.
+    * **Pool A (ingestion/fast)** — ``max_workers = worker_count``
+      (``config.job_worker_count``, default 4). Runs everything
+      except storyline jobs, so independent jobs execute in parallel.
+    * **Pool B (storyline)** — ``max_workers = 1``. Runs only
+      ``storyline_generation`` and ``storyline_extension_check``.
 
-    NOTE: SQLite access is per-thread. The worker thread and each
-    API thread get their own connection from the process-wide
+    Keeping storyline work on its own single-worker pool means (a)
+    ingestion throughput is parallel, (b) storyline jobs can never
+    occupy an ingestion slot (no head-of-line blocking), and (c) two
+    regenerations of the same storyline can never run at once, so the
+    same-storyline race is impossible without any locking.
+
+    NOTE: SQLite access is per-thread. Every pool worker and each API
+    thread get their own connection from the process-wide
     `ConnectionFactory` (`db/factory.py`); the historical
     shared-connection hazard (one `check_same_thread=False`
     connection written by multiple threads) was retired on
     2026-05-11 — see
-    `docs/archive/sqlite-per-thread-connections-plan.md`.
-
-    IMPORTANT: `max_workers=1` is a deliberate choice for the two
-    reasons above (predictable LLM rate usage, tractable job-vs-job
-    reasoning), not an SQLite constraint. Bumping it requires
-    re-thinking LLM rate limits and inter-job interactions, not
-    the database layer.
+    `docs/archive/sqlite-per-thread-connections-plan.md`. With WAL +
+    ``busy_timeout=5000`` (`db/connection.py`), parallel Pool A
+    writers wait on the file-level writer lock rather than erroring,
+    so multi-worker concurrency is safe at the database layer.
     """
 
     def __init__(
@@ -183,6 +200,7 @@ class JobRunner:
         storyline_extension_classifier: (
             StorylineExtensionClassifierProtocol | None
         ) = None,
+        worker_count: int = 4,
     ) -> None:
         self._jobs = job_repository
         # Default the reembedder to the extraction service: it implements
@@ -193,13 +211,22 @@ class JobRunner:
             if entity_reembedder is not None
             else entity_extraction_service
         )
+        # Pool A: ingestion/fast jobs, parallel across ``worker_count``
+        # workers. Pool B: storyline jobs, single-worker so ingestion is
+        # never blocked and same-storyline regenerations can't race.
         self._executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="journal-jobs"
+            max_workers=worker_count, thread_name_prefix="journal-jobs"
+        )
+        self._storyline_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="journal-storyline"
         )
         # Temporary storage for image data keyed by job_id. The images
         # are large binary blobs that cannot be serialised into the
         # jobs table params_json column. They are popped from the dict
-        # when the worker starts so memory is released promptly.
+        # when the worker starts so memory is released promptly. Keys are
+        # unique per job id, so the concurrent Pool A workers never
+        # touch the same key — dict get/set on distinct keys is
+        # GIL-atomic, so no lock is needed.
         self._pending_images: dict[str, list[tuple[bytes, str, str]]] = {}
         # Same pattern for audio recordings: (data, media_type, filename).
         self._pending_audio: dict[str, list[tuple[bytes, str, str]]] = {}
@@ -478,7 +505,9 @@ class JobRunner:
         job = self._jobs.create(
             "storyline_generation", params, user_id=user_id,
         )
-        self._executor.submit(
+        # Pool B (single-worker): storyline jobs never contend for a
+        # Pool A ingestion slot, and same-storyline runs can't race.
+        self._storyline_executor.submit(
             run_storyline_generation, self._ctx, job.id, params,
         )
         return job
@@ -517,8 +546,9 @@ class JobRunner:
         )
         # The worker calls back into submit_storyline_generation to
         # queue regenerations. We pass the bound method explicitly so
-        # the worker is free of any runner-side reach-in.
-        self._executor.submit(
+        # the worker is free of any runner-side reach-in. Runs on Pool B
+        # (single-worker) alongside storyline_generation.
+        self._storyline_executor.submit(
             run_storyline_extension_check,
             self._ctx, job.id, params,
             self.submit_storyline_generation,
@@ -681,7 +711,7 @@ class JobRunner:
         return job
 
     def shutdown(self, wait: bool = False, *, cancel_futures: bool = True) -> None:
-        """Stop the executor.
+        """Stop both executors (Pool A + Pool B).
 
         Call once at server shutdown. Running tasks are allowed to
         finish their current iteration; with the default
@@ -694,9 +724,13 @@ class JobRunner:
         can cancel the future before the worker dequeues it on a loaded
         machine (observed as a CI-only flake, 2026-06-10).
         After `shutdown`, further `submit_*` calls raise
-        `RuntimeError` from the underlying executor.
+        `RuntimeError` from whichever executor they target (storyline
+        submits from Pool B, everything else from Pool A).
         """
         self._executor.shutdown(wait=wait, cancel_futures=cancel_futures)
+        self._storyline_executor.shutdown(
+            wait=wait, cancel_futures=cancel_futures,
+        )
 
     @property
     def mood_scoring(self) -> MoodScoringService | None:

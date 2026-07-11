@@ -363,6 +363,36 @@ class TestFitnessConfig:
             Config()
 
 
+class TestJobWorkerCount:
+    """`JOB_WORKER_COUNT` controls Pool A (ingestion/fast) worker count
+    for the background job runner. The storyline pool is always
+    single-worker and has no knob."""
+
+    def test_default_is_four(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("JOB_WORKER_COUNT", raising=False)
+        config = Config()
+        assert config.job_worker_count == 4
+        assert isinstance(config.job_worker_count, int)
+
+    def test_env_override_parses_to_int(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("JOB_WORKER_COUNT", "8")
+        config = Config()
+        assert config.job_worker_count == 8
+        assert isinstance(config.job_worker_count, int)
+
+    def test_zero_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("JOB_WORKER_COUNT", "0")
+        with pytest.raises(ValueError, match="JOB_WORKER_COUNT"):
+            Config()
+
+    def test_negative_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("JOB_WORKER_COUNT", "-1")
+        with pytest.raises(ValueError, match="JOB_WORKER_COUNT"):
+            Config()
+
+
 def test_fitness_sync_enabled_defaults_true(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("FITNESS_SYNC_ENABLED", raising=False)
     assert Config().fitness_sync_enabled is True
