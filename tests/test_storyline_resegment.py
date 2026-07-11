@@ -201,13 +201,19 @@ def _svc(
     store: SQLiteEntityStore,
     narrator: _FakeSectionedNarrator,
     glue: _FakeGlue | None = None,
+    *,
+    max_chapter_words: int | None = None,
 ) -> StorylineGenerationService:
+    kwargs: dict[str, Any] = {}
+    if max_chapter_words is not None:
+        kwargs["max_chapter_words"] = max_chapter_words
     return StorylineGenerationService(
         entity_store=store,
         entry_repository=_NoSearchEntryRepo(),
         storyline_repository=repo,
         narrator=narrator,
         glue=glue or _FakeGlue(),
+        **kwargs,
     )
 
 
@@ -278,6 +284,64 @@ class TestResegmentAllUnlocked:
             assert refreshed.narrative_word_count > 0
         _assert_invariants(repo, sid)
         assert result.chapter_count == 3
+
+    def test_bucketing_splits_when_narrative_is_long(
+        self, factory: ConnectionFactory,
+    ) -> None:
+        """The sectioning narrator won't split a long narrative on its own,
+        so resegment time-buckets deterministically: with an estimated
+        1000-word narrative and a 250-word chapter target, an 8-entry span
+        becomes 4 chapters, narrating one bucket at a time."""
+        dates = [
+            "2026-01-05", "2026-01-20",
+            "2026-02-05", "2026-02-20",
+            "2026-03-05", "2026-03-20",
+            "2026-04-05", "2026-04-20",
+        ]
+        repo, store, _user, sid = _seed(factory, dates)
+        ch = repo.create_chapter(
+            storyline_id=sid, seq=1, title="Everything",
+            start_date="2026-01-05", end_date=None, state="open",
+        )
+        # Estimated total narrative length → k = round(1000 / 250) = 4.
+        repo.set_chapter_word_count(ch.id, 1000)
+        narrator = _FakeSectionedNarrator(n_sections=1)
+        svc = _svc(repo, store, narrator, max_chapter_words=250)
+
+        result = svc.resegment_storyline(sid)
+
+        chapters = repo.list_chapters(sid)
+        assert len(chapters) == 4
+        assert result.chapter_count == 4
+        # One narrator call per bucket (not one over the whole span), each
+        # bucket carrying 2 of the 8 entries.
+        assert len(narrator.calls) == 4
+        assert [len(c) for c in narrator.calls] == [2, 2, 2, 2]
+        assert [c.state for c in chapters] == [
+            "closed", "closed", "closed", "open",
+        ]
+        _assert_invariants(repo, sid)
+
+    def test_no_bucketing_when_narrative_is_short(
+        self, factory: ConnectionFactory,
+    ) -> None:
+        """A short narrative (est below one chapter's worth) stays a single
+        chapter, narrated once — no fan-out."""
+        dates = ["2026-01-05", "2026-02-05", "2026-03-05"]
+        repo, store, _user, sid = _seed(factory, dates)
+        ch = repo.create_chapter(
+            storyline_id=sid, seq=1, title="Everything",
+            start_date="2026-01-05", end_date=None, state="open",
+        )
+        repo.set_chapter_word_count(ch.id, 120)  # k = round(120/250) = 0 → 1
+        narrator = _FakeSectionedNarrator(n_sections=1)
+        svc = _svc(repo, store, narrator, max_chapter_words=250)
+
+        svc.resegment_storyline(sid)
+
+        chapters = repo.list_chapters(sid)
+        assert len(chapters) == 1
+        assert len(narrator.calls) == 1
 
     def test_missing_storyline_raises(
         self, factory: ConnectionFactory,
