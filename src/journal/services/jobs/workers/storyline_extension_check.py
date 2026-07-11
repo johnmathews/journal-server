@@ -70,8 +70,19 @@ def run_storyline_extension_check(
         )
 
         regenerated_storyline_ids: list[int] = []
+        coalesced_storyline_ids: list[int] = []
         for r in results:
             if r.decision == "yes":
+                # W4: coalesce a burst ingest. If a full open-refresh for
+                # this storyline is already queued (not yet running), it
+                # will pick up this entry when it runs, so don't queue a
+                # duplicate regeneration — 30 gym entries → one refresh,
+                # not 30 serialized Opus calls on the single-worker pool.
+                if ctx.jobs.find_pending_open_regeneration(
+                    user_id=user_id, storyline_id=r.storyline_id,
+                ) is not None:
+                    coalesced_storyline_ids.append(r.storyline_id)
+                    continue
                 try:
                     submit_regenerate(
                         r.storyline_id,
@@ -100,6 +111,7 @@ def run_storyline_extension_check(
                 for r in results
             ],
             "regenerations_queued": regenerated_storyline_ids,
+            "coalesced_storyline_ids": coalesced_storyline_ids,
         }
         ctx.jobs.mark_succeeded(job_id, summary)
 

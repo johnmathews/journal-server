@@ -25,7 +25,11 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
+from journal.services.entity_extraction.matching import cosine_similarity
+
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from journal.db.repository.protocol import EntryRepository
     from journal.db.storyline_repository import SQLiteStorylineRepository
     from journal.entitystore.protocol import EntityStore
@@ -73,11 +77,20 @@ class StorylineExtensionClassifier:
         entry_repository: EntryRepository,
         storyline_repository: SQLiteStorylineRepository,
         decider: StorylineExtensionDeciderProtocol,
+        embedder: Callable[[str], list[float]] | None = None,
+        relevance_threshold: float = 0.5,
     ) -> None:
         self._entity_store = entity_store
         self._entry_repository = entry_repository
         self._storyline_repository = storyline_repository
         self._decider = decider
+        # Optional semantic fallback (W6): when set, an entry that matches
+        # neither an anchor entity nor a surface form is still escalated to
+        # the decider if its embedding is close enough to the storyline's
+        # summary embedding. None → the fallback is skipped entirely
+        # (behaviour identical to before W6).
+        self._embedder = embedder
+        self._relevance_threshold = relevance_threshold
 
     def classify_for_entry(
         self, entry_id: int, user_id: int,
@@ -104,6 +117,20 @@ class StorylineExtensionClassifier:
             e.id for e in self._entity_store.get_entities_for_entry(entry_id)
         }
 
+        # Embed the entry once (not per storyline) for the semantic
+        # fallback. Only when an embedder is wired and there is text to
+        # embed; a failure here degrades gracefully to no fallback.
+        entry_embedding: list[float] | None = None
+        if self._embedder is not None and entry_text.strip():
+            try:
+                entry_embedding = self._embedder(entry_text)
+            except Exception:  # noqa: BLE001 — fallback is best-effort
+                log.warning(
+                    "Failed to embed entry %d for storyline relevance "
+                    "fallback; skipping semantic match.", entry_id,
+                    exc_info=True,
+                )
+
         results: list[ExtensionResult] = []
         for storyline in storylines:
             results.append(
@@ -112,6 +139,7 @@ class StorylineExtensionClassifier:
                     entry=entry,
                     entry_text_lower=entry_text_lower,
                     extracted_entity_ids=extracted_entity_ids,
+                    entry_embedding=entry_embedding,
                 )
             )
             # Record the per-storyline check timestamp even when
@@ -126,6 +154,7 @@ class StorylineExtensionClassifier:
         entry: Entry,
         entry_text_lower: str,
         extracted_entity_ids: set[int],
+        entry_embedding: list[float] | None = None,
     ) -> ExtensionResult:
         anchor_ids = self._storyline_repository.list_anchors(storyline.id)
         anchor_set = set(anchor_ids)
@@ -152,18 +181,22 @@ class StorylineExtensionClassifier:
                 surface_form_hits = True
                 break
         if surface_form_hits:
-            decision = self._decider.decide(
-                storyline_name=storyline.name,
-                storyline_description=storyline.description,
-                entry_date=entry.entry_date,
-                entry_text=(entry.final_text or entry.raw_text or ""),
+            return self._decide(storyline, entry, stage="surface_form_llm")
+
+        # Stage 2.5 (W6): semantic fallback. When neither an anchor entity
+        # nor a surface form matched, but the entry is semantically close
+        # to the storyline's summary, escalate to the decider rather than
+        # returning an outright "no". Catches entries the extractor missed
+        # (pronouns, paraphrase) where the name never appears verbatim.
+        if (
+            entry_embedding is not None
+            and storyline.summary_embedding is not None
+        ):
+            similarity = cosine_similarity(
+                entry_embedding, storyline.summary_embedding,
             )
-            return ExtensionResult(
-                storyline_id=storyline.id,
-                decision=decision.decision,
-                reasoning=decision.reasoning,
-                stage="surface_form_llm",
-            )
+            if similarity >= self._relevance_threshold:
+                return self._decide(storyline, entry, stage="embedding_llm")
 
         # No signal at all — definite no, no LLM call.
         return ExtensionResult(
@@ -173,4 +206,22 @@ class StorylineExtensionClassifier:
                 "No entity or surface-form match between entry and storyline."
             ),
             stage="no_match",
+        )
+
+    def _decide(
+        self, storyline: Storyline, entry: Entry, *, stage: str,
+    ) -> ExtensionResult:
+        """Ask the Haiku decider whether this entry extends the storyline
+        and wrap the verdict with the triggering ``stage``."""
+        decision = self._decider.decide(
+            storyline_name=storyline.name,
+            storyline_description=storyline.description,
+            entry_date=entry.entry_date,
+            entry_text=(entry.final_text or entry.raw_text or ""),
+        )
+        return ExtensionResult(
+            storyline_id=storyline.id,
+            decision=decision.decision,
+            reasoning=decision.reasoning,
+            stage=stage,
         )

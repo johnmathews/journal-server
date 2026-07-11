@@ -148,6 +148,74 @@ class TestGet:
         assert jobs_repo.get("does-not-exist") is None
 
 
+class TestFindPendingOpenRegeneration:
+    """W4 coalescing: locate a queued full-refresh regeneration for a
+    storyline so a burst ingest doesn't queue one per entry."""
+
+    def test_finds_queued_open_refresh(self, jobs_repo):
+        jobs_repo.create(
+            "storyline_generation",
+            {"storyline_id": 5, "user_id": 1, "auto_split": True},
+            user_id=1,
+        )
+        found = jobs_repo.find_pending_open_regeneration(
+            user_id=1, storyline_id=5,
+        )
+        assert found is not None
+
+    def test_ignores_other_storyline(self, jobs_repo):
+        jobs_repo.create(
+            "storyline_generation", {"storyline_id": 5, "user_id": 1},
+            user_id=1,
+        )
+        assert jobs_repo.find_pending_open_regeneration(
+            user_id=1, storyline_id=6,
+        ) is None
+
+    def test_ignores_running_regeneration(self, jobs_repo):
+        """A running regen may already have selected its window, so a new
+        entry still needs its own regeneration — don't coalesce onto it."""
+        j = jobs_repo.create(
+            "storyline_generation", {"storyline_id": 5, "user_id": 1},
+            user_id=1,
+        )
+        jobs_repo.mark_running(j.id)
+        assert jobs_repo.find_pending_open_regeneration(
+            user_id=1, storyline_id=5,
+        ) is None
+
+    def test_ignores_scoped_regenerations(self, jobs_repo):
+        """Date-ranged, resegment, and chapter-scoped jobs may not cover
+        the new entry, so they don't count as a coalescing target."""
+        jobs_repo.create(
+            "storyline_generation",
+            {"storyline_id": 5, "user_id": 1, "start_date": "2026-06-01"},
+            user_id=1,
+        )
+        jobs_repo.create(
+            "storyline_generation",
+            {"storyline_id": 5, "user_id": 1, "resegment": True},
+            user_id=1,
+        )
+        jobs_repo.create(
+            "storyline_generation",
+            {"storyline_id": 5, "user_id": 1, "chapter_id": 9},
+            user_id=1,
+        )
+        assert jobs_repo.find_pending_open_regeneration(
+            user_id=1, storyline_id=5,
+        ) is None
+
+    def test_scoped_to_user(self, jobs_repo):
+        jobs_repo.create(
+            "storyline_generation", {"storyline_id": 5, "user_id": 1},
+            user_id=1,
+        )
+        assert jobs_repo.find_pending_open_regeneration(
+            user_id=2, storyline_id=5,
+        ) is None
+
+
 class TestReconcileStuckJobs:
     def test_reconcile_updates_non_terminal_rows(self, jobs_repo, db_conn):
         running1 = jobs_repo.create("entity_extraction", {})

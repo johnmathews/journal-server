@@ -647,6 +647,8 @@ def _init_services() -> dict:
             entry_repository=repo,
             storyline_repository=storyline_repository,
             decider=decider,
+            embedder=lambda text: embeddings.embed_texts([text])[0],
+            relevance_threshold=config.storyline_extension_relevance_threshold,
         )
         log.info(
             "  Storylines wired (narrator=%s, glue=%s, decider=%s)",

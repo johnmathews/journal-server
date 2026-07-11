@@ -513,6 +513,8 @@ def classifier_world(
         "classifier": classifier,
         "decider": decider,
         "storyline_repo": storyline_repo,
+        "entity_store": store,
+        "entry_repository": _MiniEntryRepo(),
     }
 
 
@@ -559,6 +561,73 @@ class TestExtensionClassifier:
         assert results[0].decision == "no"
         assert results[0].stage == "no_match"
         assert classifier_world["decider"].calls == []
+
+    def _classifier_with_embedder(
+        self, world: dict[str, Any], embedder: Any,  # noqa: ANN401
+    ) -> StorylineExtensionClassifier:
+        return StorylineExtensionClassifier(
+            entity_store=world["entity_store"],
+            entry_repository=world["entry_repository"],
+            storyline_repository=world["storyline_repo"],
+            decider=world["decider"],
+            embedder=embedder,
+            relevance_threshold=0.5,
+        )
+
+    def test_embedding_fallback_escalates_to_decider(
+        self, classifier_world: dict[str, Any],
+    ) -> None:
+        """W6: an entry with no entity overlap and no surface-form match,
+        but whose embedding is close to the storyline summary, escalates
+        to the Haiku decider instead of an outright 'no'."""
+        world = classifier_world
+        world["storyline_repo"].update_summary_embedding(
+            world["storyline_id"], [1.0, 0.0, 0.0],
+        )
+        clf = self._classifier_with_embedder(
+            world, lambda _text: [1.0, 0.0, 0.0],  # cosine 1.0 with summary
+        )
+        results = clf.classify_for_entry(
+            entry_id=world["entry_nope_id"], user_id=world["user_id"],
+        )
+        assert len(results) == 1
+        assert results[0].stage == "embedding_llm"
+        assert results[0].decision == "yes"  # canned decider verdict
+        assert len(world["decider"].calls) == 1
+
+    def test_embedding_fallback_below_threshold_stays_no(
+        self, classifier_world: dict[str, Any],
+    ) -> None:
+        world = classifier_world
+        world["storyline_repo"].update_summary_embedding(
+            world["storyline_id"], [1.0, 0.0, 0.0],
+        )
+        clf = self._classifier_with_embedder(
+            world, lambda _text: [0.0, 1.0, 0.0],  # orthogonal → cosine 0
+        )
+        results = clf.classify_for_entry(
+            entry_id=world["entry_nope_id"], user_id=world["user_id"],
+        )
+        assert len(results) == 1
+        assert results[0].decision == "no"
+        assert results[0].stage == "no_match"
+        assert world["decider"].calls == []
+
+    def test_embedding_fallback_skipped_when_no_summary_embedding(
+        self, classifier_world: dict[str, Any],
+    ) -> None:
+        """No storyline summary embedding → the fallback can't run, so the
+        entry stays a no-match (no decider call)."""
+        world = classifier_world  # storyline has no summary embedding
+        clf = self._classifier_with_embedder(
+            world, lambda _text: [1.0, 0.0, 0.0],
+        )
+        results = clf.classify_for_entry(
+            entry_id=world["entry_nope_id"], user_id=world["user_id"],
+        )
+        assert results[0].decision == "no"
+        assert results[0].stage == "no_match"
+        assert world["decider"].calls == []
 
 
 # ── W6 decider parser ──────────────────────────────────────────
@@ -781,6 +850,86 @@ class TestExtensionCheckWorker:
         finished = jobs.get(job.id)
         assert finished is not None
         assert finished.status == "failed"
+
+    def test_coalesces_when_open_regeneration_already_queued(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        """W4: a burst ingest must not fire one full regeneration per
+        entry. If a queued open-refresh for the storyline already exists,
+        it will pick up this entry when it runs, so skip queuing another."""
+        jobs, notifier = job_ctx
+        classifier = _FakeClassifier({
+            42: [
+                ExtensionResult(
+                    storyline_id=1, decision="yes",
+                    reasoning="ok", stage="entity_overlap",
+                ),
+            ],
+        })
+        ctx = _build_minimal_ctx(jobs, notifier, classifier=classifier)
+        # A prior entry in this batch already queued an open refresh for
+        # storyline 1 (still queued — not yet run).
+        jobs.create(
+            "storyline_generation",
+            {"storyline_id": 1, "user_id": 1, "auto_split": True},
+            user_id=1,
+        )
+        regen_calls: list[int] = []
+
+        def fake_regen(storyline_id: int, **_: Any) -> Any:  # noqa: ANN401
+            regen_calls.append(storyline_id)
+            return type("J", (), {"id": "regen"})()
+
+        job = jobs.create(
+            "storyline_extension_check",
+            {"entry_id": 42, "user_id": 1}, user_id=1,
+        )
+        run_storyline_extension_check(
+            ctx, job.id, {"entry_id": 42, "user_id": 1}, fake_regen,
+        )
+
+        finished = jobs.get(job.id)
+        assert finished is not None
+        assert finished.status == "succeeded"
+        assert regen_calls == []  # coalesced onto the queued regen
+        assert finished.result is not None
+        assert finished.result["regenerations_queued"] == []
+        assert finished.result["coalesced_storyline_ids"] == [1]
+
+    def test_queues_regeneration_when_no_pending_regeneration(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        """W4: with nothing pending, the "yes" still queues a regen."""
+        jobs, notifier = job_ctx
+        classifier = _FakeClassifier({
+            42: [
+                ExtensionResult(
+                    storyline_id=1, decision="yes",
+                    reasoning="ok", stage="entity_overlap",
+                ),
+            ],
+        })
+        ctx = _build_minimal_ctx(jobs, notifier, classifier=classifier)
+        regen_calls: list[int] = []
+
+        def fake_regen(storyline_id: int, **_: Any) -> Any:  # noqa: ANN401
+            regen_calls.append(storyline_id)
+            return type("J", (), {"id": "regen"})()
+
+        job = jobs.create(
+            "storyline_extension_check",
+            {"entry_id": 42, "user_id": 1}, user_id=1,
+        )
+        run_storyline_extension_check(
+            ctx, job.id, {"entry_id": 42, "user_id": 1}, fake_regen,
+        )
+
+        finished = jobs.get(job.id)
+        assert finished is not None
+        assert regen_calls == [1]
+        assert finished.result["coalesced_storyline_ids"] == []
 
 
 # ── _build_minimal_ctx helper ───────────────────────────────────

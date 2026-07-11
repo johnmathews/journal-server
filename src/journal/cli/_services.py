@@ -7,6 +7,7 @@ modules can import it without pulling the whole CLI package.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from journal.db.factory import ConnectionFactory
@@ -93,3 +94,89 @@ def build_services(
     )
 
     return ingestion, query, entity_extraction
+
+
+@dataclass
+class StorylineStack:
+    """Storyline collaborators a CLI command may need."""
+
+    entry_repository: SQLiteEntryRepository
+    storyline_repository: object
+    generation_service: object
+    extension_classifier: object
+
+
+def build_storyline_stack(config: Config) -> StorylineStack:
+    """Build the storyline collaborators for CLI commands (chapter
+    backfill, recheck).
+
+    Mirrors the storyline wiring in ``mcp_server/bootstrap.py``. Requires
+    ``ANTHROPIC_API_KEY`` — storylines are an Anthropic-backed feature and
+    there is no offline fallback, so we fail fast with an actionable error
+    rather than constructing a half-wired stack.
+    """
+    if not config.anthropic_api_key:
+        raise RuntimeError(
+            "Storylines require ANTHROPIC_API_KEY to be set; "
+            "cannot run this storyline command without it."
+        )
+    from journal.db.storyline_repository import SQLiteStorylineRepository
+    from journal.providers.storyline_extension_decider import (
+        AnthropicStorylineExtensionDecider,
+    )
+    from journal.providers.storyline_glue import AnthropicStorylineGlue
+    from journal.providers.storyline_narrator import AnthropicStorylineNarrator
+    from journal.services.storylines.extension import (
+        StorylineExtensionClassifier,
+    )
+    from journal.services.storylines.service import StorylineGenerationService
+
+    db_factory = ConnectionFactory(config.db_path)
+    run_migrations(db_factory.get())
+    repo = SQLiteEntryRepository(db_factory)
+    entity_store = SQLiteEntityStore(db_factory)
+    embeddings = OpenAIEmbeddingsProvider(
+        api_key=config.openai_api_key,
+        model=config.embedding_model,
+        dimensions=config.embedding_dimensions,
+    )
+    storyline_repository = SQLiteStorylineRepository(db_factory)
+    narrator = AnthropicStorylineNarrator(
+        api_key=config.anthropic_api_key,
+        model=config.storyline_narrator_model,
+        max_tokens=config.storyline_narrator_max_tokens,
+    )
+    glue = AnthropicStorylineGlue(
+        api_key=config.anthropic_api_key,
+        model=config.storyline_glue_model,
+    )
+    decider = AnthropicStorylineExtensionDecider(
+        api_key=config.anthropic_api_key,
+        model=config.storyline_extension_decider_model,
+    )
+    embedder = lambda text: embeddings.embed_texts([text])[0]  # noqa: E731
+    service = StorylineGenerationService(
+        entity_store=entity_store,
+        entry_repository=repo,
+        storyline_repository=storyline_repository,
+        narrator=narrator,
+        glue=glue,
+        embedder=embedder,
+        window_days=config.storyline_default_window_days,
+        fts_fallback_threshold=config.storyline_fts_fallback_threshold,
+        max_chapter_words=config.storyline_chapter_max_words,
+    )
+    classifier = StorylineExtensionClassifier(
+        entity_store=entity_store,
+        entry_repository=repo,
+        storyline_repository=storyline_repository,
+        decider=decider,
+        embedder=embedder,
+        relevance_threshold=config.storyline_extension_relevance_threshold,
+    )
+    return StorylineStack(
+        entry_repository=repo,
+        storyline_repository=storyline_repository,
+        generation_service=service,
+        extension_classifier=classifier,
+    )

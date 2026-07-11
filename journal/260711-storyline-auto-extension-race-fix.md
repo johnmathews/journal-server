@@ -24,10 +24,17 @@ Ingesting ~1 month of handwritten pages (OCR / image ingestion) in one morning u
 - `tests/test_services/test_jobs_runner.py::...::test_image_ingest_without_user_propagates_default_user` — user_id=None ingest attributes follow-ups to user 1.
 - Full unit suite green (3024 passed).
 
-## 1.5 Follow-ups (planned, see the run's improvement-plan)
+## 1.5 Follow-ups — all shipped same day
 
-- **W4:** coalesce regenerations per batch (one refresh per storyline, not per entry) — important before any large re-ingest to avoid a regeneration storm on single-worker Pool B.
-- **W5:** `backfill-storyline-chapters` CLI (dry-run default) to re-section existing one-chapter storylines.
-- **W6:** `recheck-storylines --since` command + embedding-relevance fallback in the classifier to cut false negatives.
+- **W4:** coalesce regenerations per batch. `jobs_repository.find_pending_open_regeneration` finds a queued full-refresh for a storyline; the extension-check worker skips queuing a duplicate. `coalesced_storyline_ids` on the job result. A burst of matching entries → one refresh on single-worker Pool B.
+- **W5:** `journal backfill-storyline-chapters` (dry-run default) + `services/storylines/backfill.py` — re-sections existing one-chapter storylines via `resegment_storyline`. Skips already-multichapter unless `--include-multichapter`.
+- **W6:** `journal recheck-storylines --since` + `services/storylines/recheck.py` — synchronous catch-up that re-classifies entries since a date and regenerates matches (coalesced). Plus an **embedding-relevance fallback** in the classifier: when entity-overlap and surface-form both miss, escalate to the Haiku decider if the entry embedding is within `STORYLINE_EXTENSION_RELEVANCE_THRESHOLD` (default 0.5) cosine of the storyline summary embedding. Wired at bootstrap.
 
-Engineering-team run dir: `.engineering-team/runs/manual-20260711T151121Z/`.
+## 1.6 To recover the current data (user action)
+
+1. `journal backfill-storyline-chapters --execute` — re-section the 4 existing one-chapter storylines.
+2. `journal recheck-storylines --since 2026-06-01 --execute` — pull this morning's ingested month into the storylines that match.
+
+(Both are dry-run without `--execute`.)
+
+Full unit suite green (3043 passed). Engineering-team run dir: `.engineering-team/runs/manual-20260711T151121Z/`.

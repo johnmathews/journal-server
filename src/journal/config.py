@@ -420,6 +420,16 @@ class Config:
             os.environ.get("STORYLINE_FTS_FALLBACK_THRESHOLD", "3")
         )
     )
+    # Extension classifier embedding fallback (W6): when neither an entity
+    # overlap nor a surface-form name match fires, compare the entry's
+    # embedding to the storyline's summary embedding; a cosine at/above
+    # this threshold escalates to the Haiku decider instead of an outright
+    # "no". Catches semantically-related entries the extractor missed.
+    storyline_extension_relevance_threshold: float = field(
+        default_factory=lambda: float(
+            os.environ.get("STORYLINE_EXTENSION_RELEVANCE_THRESHOLD", "0.5")
+        )
+    )
     # Auto-split chapter sizing, in words of narrative prose. The
     # segmenter aims for ``target`` words per chapter and only carves a
     # new boundary when doing so keeps both sides within

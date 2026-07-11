@@ -189,22 +189,31 @@ there is no loop). The steps below describe a single chapter's generation:
 
 `services/storylines/extension.StorylineExtensionClassifier.classify_for_entry(entry_id, user_id)` iterates the user's active storylines and returns one `ExtensionResult` per storyline. Pipeline per storyline:
 
-1. **Entity overlap** (deterministic). If *any* of the storyline's anchor entity ids appears in the entry's extracted mentions, return `yes` immediately. Zero LLM calls.
+1. **Entity overlap** (deterministic). If *any* of the storyline's anchor entity ids appears in the entry's extracted mentions, return `yes` immediately. Zero LLM calls. This is the primary, reliable signal — it depends on the entry's entity mentions already being committed, which the ingestion hook now guarantees (see below).
 2. **Surface form + LLM decider**. If *any* anchor entity's `canonical_name` is in the entry text (case-insensitive), call Haiku via `providers/storyline_extension_decider.AnthropicStorylineExtensionDecider` with a `record_decision` tool. Returns `yes`/`no`/`maybe` with one-sentence reasoning. On API failure or malformed response, the decider returns `maybe` so the entry surfaces for manual review.
-3. **No match**. Neither signal fires — definite `no`, no LLM call.
+3. **Embedding fallback** (optional, W6). When neither of the above fires, if an `embedder` is wired and the storyline has a `summary_embedding`, compare the entry embedding to it (cosine). At/above `STORYLINE_EXTENSION_RELEVANCE_THRESHOLD` the entry escalates to the same Haiku decider (stage `embedding_llm`) instead of an outright `no`. Catches semantically-related entries where the anchor name never appears verbatim (paraphrase, pronouns). The entry is embedded once per `classify_for_entry`, not once per storyline. Skipped entirely when no embedder is wired or the storyline has no summary embedding.
+4. **No match**. No signal fires — definite `no`, no LLM call.
 
 The classifier records `last_extension_check_at` on every storyline it inspects, not just the matches.
 
 ## Ingestion hook
 
-`JobRunner._queue_post_ingestion_jobs`, called from the text/image/audio ingest paths, queues a `storyline_extension_check` job alongside the existing `mood_score_entry` + `entity_extraction` jobs — but only when the classifier service is wired AND the entry has a known `user_id` (storylines are user-scoped).
+The `storyline_extension_check` is queued by the **entity-extraction worker** (`services/jobs/workers/entity_extraction.py`), on the single-entry path, **after** it commits the entry's mentions — via `JobRunner._maybe_queue_storyline_extension_check`. This ordering is deliberate: the classifier's Stage-1 entity-overlap signal reads the just-written mentions, so it is reliable. (Before W1 the check was queued as a *concurrent sibling* of entity extraction on a separate pool; on a burst ingest it raced ahead of extraction, read an empty mention set, and classified everything `no` — the cause of a month of entries updating zero storylines.) Because every ingestion path (text/file/image/audio) queues entity extraction, all of them now trigger storyline updates. The hook no-ops when the classifier isn't wired and logs — never silently drops — when the entry has no known `user_id`.
 
 The `run_storyline_extension_check` worker:
 
 * Calls the classifier
 * For each `yes` decision, queues a `storyline_generation` job via `JobRunner.submit_storyline_generation` **with `auto_split=True`**, so a growing open chapter that crosses `STORYLINE_CHAPTER_MAX_WORDS` is automatically re-segmented (hand-painted chapters stay put — the ingest path never sets `override_locked`)
+* **Coalesces** (W4): before queuing, it skips storylines that already have a *queued* full-refresh `storyline_generation` job (`jobs_repository.find_pending_open_regeneration`). A burst of entries all matching one storyline produces a single refresh, not one per entry — important on the single-worker storyline pool. Coalesced ids are recorded on the job result as `coalesced_storyline_ids`.
 * Records the classifications (including reasoning) on the job's result blob
 * Notifies only on failure (per-ingestion success notifications would be noisy)
+
+## Maintenance CLI
+
+Two one-off commands recover storylines that missed live updates:
+
+* `journal recheck-storylines --since YYYY-MM-DD [--user-id N] [--execute]` — re-runs the classifier over every entry since a date and regenerates each matched storyline (coalesced, synchronous). Dry-run by default. Use this to catch up storylines for entries ingested while auto-extension wasn't firing.
+* `journal backfill-storyline-chapters [--user-id N] [--storyline-id N] [--execute] [--include-multichapter] [--override-locked]` — re-sections existing storylines into word-sized chapters via `resegment_storyline`. Fixes storylines generated before the chapter feature (migrations 0030/0031) that are stuck as one long chapter; nothing re-carves them automatically. Dry-run by default; skips already-multichapter storylines unless `--include-multichapter`.
 
 ## REST API
 
@@ -272,6 +281,7 @@ All env vars are optional; defaults make the feature work out of the box once `A
 | `STORYLINE_EXTENSION_DECIDER_MODEL`      | `claude-haiku-4-5`    | Model for the extension classifier's decider stage   |
 | `STORYLINE_DEFAULT_WINDOW_DAYS`          | `90`                  | Default window when storyline has no explicit bounds |
 | `STORYLINE_FTS_FALLBACK_THRESHOLD`       | `3`                   | Below this many entity mentions, FTS fallback fires  |
+| `STORYLINE_EXTENSION_RELEVANCE_THRESHOLD`| `0.5`                 | Cosine at/above which the classifier's embedding fallback escalates to the decider |
 | `STORYLINE_CHAPTER_TARGET_WORDS`         | `210`                 | Target narrative words per sectioned chapter         |
 | `STORYLINE_CHAPTER_MIN_WORDS`            | `180`                 | Soft lower bound; out-of-band sections are logged    |
 | `STORYLINE_CHAPTER_MAX_WORDS`            | `240`                 | Soft upper bound; also the ingest auto-split trigger |
