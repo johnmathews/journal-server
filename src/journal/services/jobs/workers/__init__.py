@@ -67,6 +67,17 @@ class WorkerContext:
     queue_post_ingestion_jobs: Callable[
         [str, str, int, int | None], dict[str, str]
     ]
+    # Storyline auto-extension trigger (entry_id, user_id). Called by the
+    # entity-extraction worker *after* mentions are committed, so the
+    # classifier's entity-overlap signal reads a populated mention set —
+    # unlike the old design where the check raced entity extraction on a
+    # separate pool. No-op / logs (never silently drops) inside the bound
+    # runner method when storylines aren't wired or the user is unknown.
+    # Optional: defaults to None so worker unit tests that don't exercise
+    # the trigger can omit it.
+    queue_storyline_extension_check: Callable[[int, int | None], None] | None = (
+        None
+    )
     # Fitness sync seams (W8). All four are optional because
     # fitness sync is opt-in at server boot — when the providers
     # aren't wired the workers raise; the JobRunner gates submission

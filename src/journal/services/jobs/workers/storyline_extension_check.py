@@ -1,6 +1,8 @@
 """Worker body: classify whether a new entry extends each active storyline.
 
-Fires after ingestion (queued from ``_queue_post_ingestion_jobs``).
+Queued by the entity-extraction worker once an entry's mentions are
+committed (via ``JobRunner._maybe_queue_storyline_extension_check``), so
+the classifier's entity-overlap signal reads a populated mention set.
 For each ``yes`` decision, queues a follow-up
 ``storyline_generation`` job via the runner's
 ``submit_storyline_generation``. ``maybe`` decisions are recorded

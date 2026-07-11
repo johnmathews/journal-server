@@ -97,8 +97,9 @@ class StorylineExtensionClassifier:
         entry_text_lower = entry_text.lower()
         # Set of entity_ids the entity-extractor already linked to this
         # entry. The class doesn't repeat the LLM extraction itself —
-        # storyline_extension_check fires AFTER entity extraction has
-        # already run, so the mention rows are present.
+        # storyline_extension_check is queued by the entity-extraction
+        # worker only after it commits mentions, so the mention rows are
+        # guaranteed present here (no longer a race — see W1).
         extracted_entity_ids = {
             e.id for e in self._entity_store.get_entities_for_entry(entry_id)
         }

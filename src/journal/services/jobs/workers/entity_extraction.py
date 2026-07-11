@@ -60,6 +60,19 @@ def run_entity_extraction(
             "warnings": [w for r in results for w in r.warnings],
         }
         ctx.jobs.mark_succeeded(job_id, summary)
+
+        # Single-entry extraction corresponds to one newly-ingested (or
+        # edited) entry: now that its entity mentions are committed, kick
+        # off the storyline extension check. Doing it here — rather than
+        # as a concurrent sibling of this job — guarantees the classifier's
+        # entity-overlap signal sees the mentions we just wrote. Batch
+        # extraction (no entry_id) deliberately skips this to avoid fanning
+        # out one check per entry. The bound runner callable no-ops when
+        # storylines aren't wired and logs (never silently drops) when the
+        # user is unknown.
+        if entry_id is not None and ctx.queue_storyline_extension_check is not None:
+            ctx.queue_storyline_extension_check(int(entry_id), job_user_id)
+
         parent_job_id = params.get("parent_job_id")
         if parent_job_id:
             ctx.notifier.try_pipeline_notification(parent_job_id, job_user_id)

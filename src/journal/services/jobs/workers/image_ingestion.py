@@ -49,6 +49,12 @@ def run_image_ingestion(
         ]
         entry_date = params["entry_date"]
         job_user_id = params.get("user_id")
+        # Resolve the effective user once so the entry and every follow-up
+        # job (mood, entity extraction — which fires the storyline check)
+        # share one attribution. Passing the raw (possibly-None) id to the
+        # follow-ups while attributing the entry to user 1 was how the
+        # storyline extension check got silently dropped (W3).
+        resolved_user_id = job_user_id or 1
         total = len(images)
 
         def progress_callback(current: int, _total_pages: int) -> None:
@@ -60,14 +66,14 @@ def run_image_ingestion(
             if len(images) == 1:
                 entry = ctx.ingestion.ingest_image(
                     images[0][0], images[0][1], entry_date,
-                    skip_mood=True, user_id=job_user_id or 1,
+                    skip_mood=True, user_id=resolved_user_id,
                 )
                 ctx.jobs.update_progress(job_id, 1, total)
             else:
                 entry = ctx.ingestion.ingest_multi_page_entry(
                     images, entry_date, skip_mood=True,
                     on_progress=progress_callback,
-                    user_id=job_user_id or 1,
+                    user_id=resolved_user_id,
                 )
             return entry
 
@@ -84,8 +90,11 @@ def run_image_ingestion(
         ctx.jobs.update_progress(job_id, total, total)
 
         # Single entry → follow-up jobs keep the unsuffixed pipeline keys.
+        # Follow-ups are attributed to the same resolved user as the entry
+        # so the storyline extension check (fired by entity extraction) is
+        # scoped to a real user rather than silently skipped.
         follow_up_ids = ctx.queue_post_ingestion_jobs(
-            job_id, "Image", entry.id, job_user_id,
+            job_id, "Image", entry.id, resolved_user_id,
         )
 
         result: dict[str, Any] = {
