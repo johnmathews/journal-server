@@ -27,6 +27,8 @@ import tiktoken
 from google import genai
 from google.genai import types as genai_types
 
+from journal.services import usage
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -482,6 +484,8 @@ class AnthropicOCRProvider:
             ],
         )
 
+        usage.record_anthropic(self._model, message)
+
         raw = message.content[0].text
         # Drop crossed-out (struck-through) words before parsing sentinels
         # so the uncertain-span offsets are anchored to the final text.
@@ -565,6 +569,8 @@ class GeminiOCRProvider:
                 system_instruction=self._system_text,
             ),
         )
+
+        usage.record_gemini(self._model, response)
 
         raw = response.text
         # Drop crossed-out (struck-through) words before parsing sentinels
@@ -802,14 +808,20 @@ class DualPassOCRProvider:
     def extract(
         self, image_data: bytes, media_type: str, page_role: PageRole | None = None
     ) -> OCRResult:
+        import contextvars
         from concurrent.futures import ThreadPoolExecutor
 
+        # copy_context().run propagates the active usage_scope collector
+        # (services/usage.py) into the two sub-threads so their token
+        # counts land on the parent job — a thread-local would miss them.
         with ThreadPoolExecutor(max_workers=2) as pool:
             primary_future = pool.submit(
-                self._primary.extract, image_data, media_type, page_role
+                contextvars.copy_context().run,
+                self._primary.extract, image_data, media_type, page_role,
             )
             secondary_future = pool.submit(
-                self._secondary.extract, image_data, media_type, page_role
+                contextvars.copy_context().run,
+                self._secondary.extract, image_data, media_type, page_role,
             )
             primary_result = primary_future.result()
             secondary_result = secondary_future.result()

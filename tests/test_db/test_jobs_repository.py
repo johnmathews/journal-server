@@ -111,6 +111,38 @@ class TestMarkFailed:
         assert updated.result is None
 
 
+class TestRecordUsage:
+    def test_new_job_has_null_usage_columns(self, jobs_repo):
+        job = jobs_repo.create("entity_extraction", {})
+        fetched = jobs_repo.get(job.id)
+        assert fetched is not None
+        assert fetched.input_tokens is None
+        assert fetched.output_tokens is None
+        assert fetched.cost_usd is None
+
+    def test_record_usage_round_trip(self, jobs_repo):
+        job = jobs_repo.create("entity_extraction", {})
+        jobs_repo.record_usage(job.id, 1200, 340, None)
+        updated = jobs_repo.get(job.id)
+        assert updated is not None
+        assert updated.input_tokens == 1200
+        assert updated.output_tokens == 340
+        assert updated.cost_usd is None
+
+    def test_record_usage_after_mark_failed(self, jobs_repo):
+        # Usage is a follow-up UPDATE — it records tokens for FAILED jobs.
+        job = jobs_repo.create("entity_extraction", {})
+        jobs_repo.mark_running(job.id)
+        jobs_repo.mark_failed(job.id, "boom")
+        jobs_repo.record_usage(job.id, 50, 10, None)
+        updated = jobs_repo.get(job.id)
+        assert updated is not None
+        assert updated.status == "failed"
+        assert updated.error_message == "boom"
+        assert updated.input_tokens == 50
+        assert updated.output_tokens == 10
+
+
 class TestGet:
     def test_get_missing_returns_none(self, jobs_repo):
         assert jobs_repo.get("does-not-exist") is None

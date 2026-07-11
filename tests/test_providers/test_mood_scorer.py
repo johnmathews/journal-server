@@ -117,6 +117,44 @@ class TestBuildToolSchema:
         assert "rationale" in facet["properties"]
 
 
+class TestUsageRecording:
+    def test_score_records_anthropic_usage_in_scope(self, dims) -> None:
+        from types import SimpleNamespace
+
+        from journal.services import usage
+
+        client = MagicMock()
+        message = MagicMock(
+            content=[
+                _tool_block(
+                    {
+                        "joy_sadness": {"value": 0.6, "confidence": 0.9},
+                        "agency": {"value": 0.8, "confidence": 0.85},
+                    }
+                )
+            ]
+        )
+        message.usage = SimpleNamespace(input_tokens=1500, output_tokens=120)
+        client.messages.create.return_value = message
+        scorer = _make_scorer(client)
+
+        with usage.usage_scope() as collector:
+            scorer.score("Today was good.", dims)
+
+        assert collector.totals == (1500, 120)
+
+    def test_score_off_job_does_not_crash_without_usage(self, dims) -> None:
+        # No active scope + a MagicMock message whose .usage is a MagicMock:
+        # record must be a no-op and must not raise.
+        client = MagicMock()
+        client.messages.create.return_value = MagicMock(
+            content=[_tool_block({"joy_sadness": {"value": 0.1}, "agency": {"value": 0.1}})]
+        )
+        scorer = _make_scorer(client)
+        # Should simply not raise.
+        scorer.score("...", dims)
+
+
 class TestScoreHappyPath:
     def test_parses_full_tool_response(self, dims) -> None:
         client = MagicMock()

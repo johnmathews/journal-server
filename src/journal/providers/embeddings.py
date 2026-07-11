@@ -5,6 +5,8 @@ from typing import Protocol, runtime_checkable
 
 import openai
 
+from journal.services import usage
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,6 +40,8 @@ class OpenAIEmbeddingsProvider:
             input=texts,
             dimensions=self._dimensions,
         )
+
+        usage.record_openai(self._model, response)
 
         embeddings = [item.embedding for item in response.data]
         logger.info("Embedding complete (%d vectors)", len(embeddings))

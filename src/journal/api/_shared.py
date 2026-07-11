@@ -218,6 +218,9 @@ def _job_to_dict(job: Job) -> dict[str, Any]:
         "created_at": job.created_at,
         "started_at": job.started_at,
         "finished_at": job.finished_at,
+        "input_tokens": job.input_tokens,
+        "output_tokens": job.output_tokens,
+        "cost_usd": job.cost_usd,
     }
 
 

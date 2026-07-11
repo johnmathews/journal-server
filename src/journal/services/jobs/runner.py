@@ -81,6 +81,7 @@ if TYPE_CHECKING:
     )
 
 from journal.services.jobs.notifier import JobNotifier
+from journal.services.jobs.run_job import run_job
 from journal.services.jobs.save_pipeline import submit_save_entry_pipeline
 from journal.services.jobs.validation import (
     ENTITY_EXTRACTION_KEYS,
@@ -281,7 +282,7 @@ class JobRunner:
             run_params, ENTITY_EXTRACTION_KEYS, job_type="entity_extraction"
         )
         job = self._jobs.create("entity_extraction", run_params, user_id=user_id)
-        self._executor.submit(run_entity_extraction, self._ctx, job.id, run_params)
+        self._executor.submit(run_job, run_entity_extraction, self._ctx, job.id, run_params)
         return job
 
     def submit_mood_backfill(
@@ -310,7 +311,7 @@ class JobRunner:
                 f"{sorted(MOOD_BACKFILL_MODES)}, got {run_params['mode']!r}"
             )
         job = self._jobs.create("mood_backfill", run_params, user_id=user_id)
-        self._executor.submit(run_mood_backfill, self._ctx, job.id, run_params)
+        self._executor.submit(run_job, run_mood_backfill, self._ctx, job.id, run_params)
         return job
 
     def submit_image_ingestion(
@@ -337,7 +338,7 @@ class JobRunner:
             user_id=user_id,
         )
         self._pending_images[job.id] = images
-        self._executor.submit(run_image_ingestion, self._ctx, job.id, params)
+        self._executor.submit(run_job, run_image_ingestion, self._ctx, job.id, params)
         return job
 
     def submit_mood_score_entry(
@@ -357,7 +358,7 @@ class JobRunner:
             params["parent_job_id"] = parent_job_id
         validate_params(params, MOOD_SCORE_ENTRY_KEYS, job_type="mood_score_entry")
         job = self._jobs.create("mood_score_entry", params, user_id=user_id)
-        self._executor.submit(run_mood_score_entry, self._ctx, job.id, params)
+        self._executor.submit(run_job, run_mood_score_entry, self._ctx, job.id, params)
         return job
 
     def submit_reprocess_embeddings(
@@ -382,7 +383,7 @@ class JobRunner:
             params["parent_job_id"] = parent_job_id
         validate_params(params, REPROCESS_EMBEDDINGS_KEYS, job_type="reprocess_embeddings")
         job = self._jobs.create("reprocess_embeddings", params, user_id=user_id)
-        self._executor.submit(run_reprocess_embeddings, self._ctx, job.id, params)
+        self._executor.submit(run_job, run_reprocess_embeddings, self._ctx, job.id, params)
         return job
 
     def submit_save_entry_pipeline(
@@ -508,7 +509,7 @@ class JobRunner:
         # Pool B (single-worker): storyline jobs never contend for a
         # Pool A ingestion slot, and same-storyline runs can't race.
         self._storyline_executor.submit(
-            run_storyline_generation, self._ctx, job.id, params,
+            run_job, run_storyline_generation, self._ctx, job.id, params,
         )
         return job
 
@@ -549,6 +550,7 @@ class JobRunner:
         # the worker is free of any runner-side reach-in. Runs on Pool B
         # (single-worker) alongside storyline_generation.
         self._storyline_executor.submit(
+            run_job,
             run_storyline_extension_check,
             self._ctx, job.id, params,
             self.submit_storyline_generation,
@@ -570,7 +572,7 @@ class JobRunner:
         }
         validate_params(params, ENTITY_REEMBED_KEYS, job_type="entity_reembed")
         job = self._jobs.create("entity_reembed", params, user_id=user_id)
-        self._executor.submit(run_entity_reembed, self._ctx, job.id, params)
+        self._executor.submit(run_job, run_entity_reembed, self._ctx, job.id, params)
         return job
 
     def submit_audio_ingestion(
@@ -599,7 +601,7 @@ class JobRunner:
             user_id=user_id,
         )
         self._pending_audio[job.id] = recordings
-        self._executor.submit(run_audio_ingestion, self._ctx, job.id, params)
+        self._executor.submit(run_job, run_audio_ingestion, self._ctx, job.id, params)
         return job
 
     def submit_fitness_sync_strava(
@@ -626,7 +628,7 @@ class JobRunner:
             params["quiet_success"] = True
         validate_params(params, FITNESS_SYNC_KEYS, job_type="fitness_sync_strava")
         job = self._jobs.create("fitness_sync_strava", params, user_id=user_id)
-        self._executor.submit(run_fitness_sync_strava, self._ctx, job.id, params)
+        self._executor.submit(run_job, run_fitness_sync_strava, self._ctx, job.id, params)
         return job
 
     def submit_fitness_sync_garmin(
@@ -650,7 +652,7 @@ class JobRunner:
             params["quiet_success"] = True
         validate_params(params, FITNESS_SYNC_KEYS, job_type="fitness_sync_garmin")
         job = self._jobs.create("fitness_sync_garmin", params, user_id=user_id)
-        self._executor.submit(run_fitness_sync_garmin, self._ctx, job.id, params)
+        self._executor.submit(run_job, run_fitness_sync_garmin, self._ctx, job.id, params)
         return job
 
     def submit_fitness_backfill_strava(
@@ -680,7 +682,7 @@ class JobRunner:
             "fitness_backfill_strava", params, user_id=user_id,
         )
         self._executor.submit(
-            run_fitness_backfill_strava, self._ctx, job.id, params,
+            run_job, run_fitness_backfill_strava, self._ctx, job.id, params,
         )
         return job
 
@@ -706,7 +708,7 @@ class JobRunner:
             "fitness_backfill_garmin", params, user_id=user_id,
         )
         self._executor.submit(
-            run_fitness_backfill_garmin, self._ctx, job.id, params,
+            run_job, run_fitness_backfill_garmin, self._ctx, job.id, params,
         )
         return job
 

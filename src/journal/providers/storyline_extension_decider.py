@@ -19,6 +19,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from journal.services import usage
+
 log = logging.getLogger(__name__)
 
 
@@ -142,6 +144,7 @@ class AnthropicStorylineExtensionDecider:
                 tool_choice={"type": "tool", "name": "record_decision"},
                 messages=[{"role": "user", "content": user_text}],
             )
+            usage.record_anthropic(self._model, response)
         except Exception:  # noqa: BLE001 — provider failures surface as maybe
             log.exception("Extension decider API call failed")
             return ExtensionDecision(

@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from journal.services import usage
+
 if TYPE_CHECKING:
     from journal.models import DatedEntryExcerpt
 
@@ -131,6 +133,7 @@ class AnthropicStorylineGlue:
                 ],
                 messages=[{"role": "user", "content": user_text}],
             )
+            usage.record_anthropic(self._model, response)
         except Exception:  # noqa: BLE001 — provider failure falls back
             log.exception("Storyline glue API call failed — using fallback")
             return GlueResult(

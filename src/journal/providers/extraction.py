@@ -18,6 +18,8 @@ from typing import Any, Protocol, runtime_checkable
 
 import anthropic
 
+from journal.services import usage
+
 logger = logging.getLogger(__name__)
 
 
@@ -296,6 +298,8 @@ class AnthropicExtractionProvider:
                 }
             ],
         )
+
+        usage.record_anthropic(self._model, message)
 
         return _parse_tool_response(message)
 

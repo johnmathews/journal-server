@@ -555,6 +555,96 @@ class TestErrorHandling:
 
 
 # --------------------------------------------------------------------
+# Token usage capture (W2)
+# --------------------------------------------------------------------
+
+
+class _RecordingExtraction(FakeEntityExtractionService):
+    """Fake that records LLM token usage inside ``extract_batch``.
+
+    Proves the runner's usage-collection shim (services/jobs/run_job.py)
+    flushes contextvar-scoped tokens onto the job row. When
+    ``raise_after_record`` is set, it records THEN raises — so the row
+    still carries usage even though the job fails.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str = "test-model",
+        input_tokens: int = 100,
+        output_tokens: int = 40,
+        raise_after_record: BaseException | None = None,
+    ) -> None:
+        super().__init__(batch_results=[])
+        self._usage_model = model
+        self._in = input_tokens
+        self._out = output_tokens
+        self._raise_after_record = raise_after_record
+
+    def extract_batch(self, *args: Any, **kwargs: Any):  # type: ignore[override]
+        from journal.services import usage
+
+        usage.record(self._usage_model, self._in, self._out)
+        if self._raise_after_record is not None:
+            raise self._raise_after_record
+        return super().extract_batch(*args, **kwargs)
+
+
+class TestTokenUsageCapture:
+    def test_succeeding_worker_records_usage(self, runner_factory, jobs_repo):
+        extraction = _RecordingExtraction(input_tokens=1200, output_tokens=340)
+        runner = runner_factory(extraction=extraction)
+
+        job = runner.submit_entity_extraction({"stale_only": True})
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "succeeded"
+        assert final.input_tokens == 1200
+        assert final.output_tokens == 340
+        assert final.cost_usd is None
+
+    def test_failing_worker_still_records_usage(self, runner_factory, jobs_repo):
+        extraction = _RecordingExtraction(
+            input_tokens=50,
+            output_tokens=10,
+            raise_after_record=RuntimeError("boom"),
+        )
+        runner = runner_factory(extraction=extraction)
+
+        job = runner.submit_entity_extraction({"stale_only": True})
+        _wait_terminal(jobs_repo, job.id)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "failed"
+        assert final.error_message is not None and "boom" in final.error_message
+        # Usage recorded even though the job failed.
+        assert final.input_tokens == 50
+        assert final.output_tokens == 10
+
+    def test_worker_with_no_llm_calls_leaves_usage_null(
+        self, runner_factory, jobs_repo
+    ):
+        # The default fake makes no usage.record() call → columns stay NULL.
+        extraction = FakeEntityExtractionService(
+            batch_results=[_make_extraction_result(1)]
+        )
+        runner = runner_factory(extraction=extraction)
+
+        job = runner.submit_entity_extraction({})
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "succeeded"
+        assert final.input_tokens is None
+        assert final.output_tokens is None
+
+
+# --------------------------------------------------------------------
 # Param validation
 # --------------------------------------------------------------------
 

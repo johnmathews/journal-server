@@ -740,6 +740,24 @@ class TestGeminiOCRProvider:
 
         assert provider.extract_text(b"data", "image/png") == "plain text"
 
+    def test_extract_records_gemini_usage_in_scope(self) -> None:
+        from types import SimpleNamespace
+
+        from journal.services import usage
+
+        provider, client = self._make_provider()
+        mock_response = MagicMock()
+        mock_response.text = "extracted"
+        mock_response.usage_metadata = SimpleNamespace(
+            prompt_token_count=800, candidates_token_count=90,
+        )
+        client.models.generate_content.return_value = mock_response
+
+        with usage.usage_scope() as collector:
+            provider.extract(b"data", "image/png")
+
+        assert collector.totals == (800, 90)
+
     def test_extract_reflows_single_newlines(self) -> None:
         """Gemini preserves physical line breaks — extract() should
         collapse them into spaces while keeping paragraph breaks."""
@@ -1178,3 +1196,29 @@ class TestDualPassOCRProvider:
         provider = DualPassOCRProvider(primary, secondary)
         with pytest.raises(RuntimeError, match="quota exceeded"):
             provider.extract(b"image", "image/jpeg")
+
+    def test_fanout_subthread_usage_lands_in_parent_scope(self) -> None:
+        """Both sub-threads record via copy_context() into the parent's
+        usage_scope collector — the crux of why contextvar beats a
+        thread-local (which would miss these two fan-out threads)."""
+        from journal.services import usage
+
+        def _primary_extract(image, media_type, page_role):  # noqa: ANN001, ARG001
+            usage.record("primary-model", 500, 60)
+            return OCRResult(text="Hello world", uncertain_spans=[])
+
+        def _secondary_extract(image, media_type, page_role):  # noqa: ANN001, ARG001
+            usage.record("secondary-model", 480, 55)
+            return OCRResult(text="Hello world", uncertain_spans=[])
+
+        primary = MagicMock()
+        primary.extract.side_effect = _primary_extract
+        secondary = MagicMock()
+        secondary.extract.side_effect = _secondary_extract
+
+        provider = DualPassOCRProvider(primary, secondary)
+        with usage.usage_scope() as collector:
+            provider.extract(b"image", "image/jpeg")
+
+        # 500 + 480 input, 60 + 55 output — both sub-threads attributed.
+        assert collector.totals == (980, 115)

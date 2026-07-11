@@ -18,6 +18,7 @@ from google.genai import types as genai_types
 from pydantic import BaseModel, Field
 
 from journal.models import TranscriptionResult
+from journal.services import usage
 from journal.services.transcription_context import (
     build_full_context_instruction,
     build_whisper_prompt,
@@ -211,6 +212,10 @@ class OpenAITranscribeProvider:
 
                 transcript = self._client.audio.transcriptions.create(**kwargs)
 
+        # Some audio-transcription responses omit usage; record_openai
+        # tolerates that (no-ops when .usage is absent).
+        usage.record_openai(self._model, transcript)
+
         text: str = transcript.text
 
         # Extract uncertain spans from logprobs when available.
@@ -400,6 +405,8 @@ class GeminiTranscribeProvider:
             ),
         )
 
+        usage.record_gemini(self._model, response)
+
         parsed = getattr(response, "parsed", None)
         if parsed is None:
             raw_text = getattr(response, "text", None)
@@ -586,11 +593,18 @@ class ShadowTranscriptionProvider:
         media_type: str,
         language: str = "en",
     ) -> TranscriptionResult:
+        import contextvars
+
+        # copy_context().run propagates the active usage_scope collector
+        # (services/usage.py) into both sub-threads so the primary AND
+        # shadow token counts land on the parent job.
         with ThreadPoolExecutor(max_workers=2) as pool:
             primary_future = pool.submit(
+                contextvars.copy_context().run,
                 self._primary.transcribe, audio_data, media_type, language,
             )
             shadow_future = pool.submit(
+                contextvars.copy_context().run,
                 self._shadow.transcribe, audio_data, media_type, language,
             )
             primary_result = primary_future.result()

@@ -39,6 +39,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from journal.services import usage
 from journal.services.storylines.segments import (
     citation_segment,
     text_segment,
@@ -370,7 +371,7 @@ class AnthropicStorylineNarrator:
         prompt is cache-breakpointed.
         """
         document_blocks = _build_documents(excerpts)
-        return self._client.messages.create(
+        response = self._client.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,
             system=[
@@ -390,6 +391,8 @@ class AnthropicStorylineNarrator:
                 }
             ],
         )
+        usage.record_anthropic(self._model, response)
+        return response
 
 
 def _build_index_maps(

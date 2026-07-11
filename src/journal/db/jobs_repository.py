@@ -52,6 +52,9 @@ def _row_to_job(row: sqlite3.Row) -> Job:
         started_at=row["started_at"],
         finished_at=row["finished_at"],
         user_id=row["user_id"],
+        input_tokens=row["input_tokens"],
+        output_tokens=row["output_tokens"],
+        cost_usd=row["cost_usd"],
     )
 
 
@@ -154,6 +157,34 @@ class SQLiteJobRepository:
         )
         conn.commit()
         log.warning("Job %s -> failed: %s", job_id, error_message)
+
+    def record_usage(
+        self,
+        job_id: str,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        cost_usd: float | None,
+    ) -> None:
+        """Persist per-job LLM token usage (and eventually dollar cost).
+
+        Called by the runner's usage-collection shim AFTER the worker's own
+        ``mark_succeeded`` / ``mark_failed`` — so this is a follow-up UPDATE
+        that runs for FAILED jobs too. Kept separate from the ``mark_*``
+        transitions deliberately: usage is orthogonal to lifecycle, and the
+        collector total isn't known until the whole call stack unwinds.
+        ``cost_usd`` is ``None`` in W2; W3 will populate it.
+        """
+        conn = self._conn()
+        conn.execute(
+            "UPDATE jobs SET input_tokens = ?, output_tokens = ?, "
+            "cost_usd = ? WHERE id = ?",
+            (input_tokens, output_tokens, cost_usd, job_id),
+        )
+        conn.commit()
+        log.info(
+            "Job %s usage recorded (input=%s, output=%s, cost=%s)",
+            job_id, input_tokens, output_tokens, cost_usd,
+        )
 
     def get(self, job_id: str, user_id: int | None = None) -> Job | None:
         sql = "SELECT * FROM jobs WHERE id = ?"

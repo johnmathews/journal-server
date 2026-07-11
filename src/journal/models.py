@@ -353,6 +353,11 @@ class Job:
     started_at: str | None
     finished_at: str | None
     user_id: int | None = None
+    # Per-job LLM token usage + dollar cost (W2). NULL for legacy rows and
+    # jobs that made no LLM calls; cost_usd stays NULL until W3 wires pricing.
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cost_usd: float | None = None
 
 
 @dataclass

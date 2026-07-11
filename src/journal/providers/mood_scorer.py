@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import anthropic
 
+from journal.services import usage
+
 if TYPE_CHECKING:
     from journal.services.mood_dimensions import MoodDimension
 
@@ -266,6 +268,8 @@ class AnthropicMoodScorer:
                 }
             ],
         )
+
+        usage.record_anthropic(self._model, message)
 
         return _parse_tool_response(message, dimensions)
 

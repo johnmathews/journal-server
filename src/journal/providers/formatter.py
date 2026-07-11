@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Protocol, runtime_checkable
 
+from journal.services import usage
+
 log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
@@ -64,6 +66,7 @@ class AnthropicFormatter:
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": text}],
             )
+            usage.record_anthropic(self._model, response)
             formatted = response.content[0].text
         except Exception:
             log.warning("Formatter API call failed — returning original text", exc_info=True)

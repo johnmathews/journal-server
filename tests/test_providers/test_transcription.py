@@ -6,10 +6,61 @@ from unittest.mock import MagicMock, patch
 from journal.models import TranscriptionResult
 from journal.providers.transcription import (
     OpenAITranscribeProvider,
+    ShadowTranscriptionProvider,
     TranscriptionProvider,
     _logprobs_to_uncertain_spans,
     _supports_logprobs,
 )
+from journal.services import usage
+
+
+class TestShadowTranscriptionUsage:
+    """The shadow fan-out uses copy_context() so BOTH the primary and
+    shadow sub-threads attribute their tokens to the parent job."""
+
+    def test_both_subthreads_record_into_parent_scope(self) -> None:
+        class _RecordingProvider:
+            def __init__(self, model: str, tokens: tuple[int, int]) -> None:
+                self._model = model
+                self._tokens = tokens
+
+            def transcribe(
+                self, audio: bytes, media_type: str, language: str = "en",
+            ) -> TranscriptionResult:
+                usage.record(self._model, *self._tokens)
+                return TranscriptionResult(text="hello", uncertain_spans=[])
+
+        provider = ShadowTranscriptionProvider(
+            primary=_RecordingProvider("primary", (700, 80)),
+            shadow=_RecordingProvider("shadow", (650, 75)),
+        )
+
+        with usage.usage_scope() as collector:
+            result = provider.transcribe(b"audio", "audio/mpeg")
+
+        assert result.text == "hello"
+        assert collector.totals == (1350, 155)
+
+    def test_shadow_failure_still_records_primary(self) -> None:
+        class _Primary:
+            def transcribe(self, audio, media_type, language="en"):  # noqa: ANN001
+                usage.record("primary", 700, 80)
+                return TranscriptionResult(text="ok", uncertain_spans=[])
+
+        class _FailingShadow:
+            def transcribe(self, audio, media_type, language="en"):  # noqa: ANN001
+                usage.record("shadow", 10, 5)
+                raise RuntimeError("shadow down")
+
+        provider = ShadowTranscriptionProvider(
+            primary=_Primary(), shadow=_FailingShadow(),
+        )
+        with usage.usage_scope() as collector:
+            result = provider.transcribe(b"audio", "audio/mpeg")
+
+        assert result.text == "ok"
+        # Shadow ran (and recorded) before raising; primary recorded too.
+        assert collector.totals == (710, 85)
 
 
 class TestOpenAITranscribeProvider:
@@ -50,6 +101,21 @@ class TestOpenAITranscribeProvider:
         assert isinstance(result, TranscriptionResult)
         assert result.text == "Hello, this is a voice note."
         assert result.uncertain_spans == []
+
+    def test_transcribe_records_openai_usage_when_present(self) -> None:
+        provider, client = self._make_provider()
+        mock_transcript = MagicMock()
+        mock_transcript.text = "Hello"
+        mock_transcript.logprobs = None
+        mock_transcript.usage = SimpleNamespace(
+            prompt_tokens=200, completion_tokens=12,
+        )
+        client.audio.transcriptions.create.return_value = mock_transcript
+
+        with usage.usage_scope() as collector:
+            provider.transcribe(b"audio", "audio/mpeg")
+
+        assert collector.totals == (200, 12)
 
     def test_transcribe_with_logprobs(self) -> None:
         provider, client = self._make_provider(threshold=-0.5)

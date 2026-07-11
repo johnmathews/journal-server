@@ -474,6 +474,9 @@ class TestJobDetailRoute:
             "created_at",
             "started_at",
             "finished_at",
+            "input_tokens",
+            "output_tokens",
+            "cost_usd",
         }
         assert set(payload.keys()) == expected_keys
         assert payload["id"] == job_id
@@ -482,3 +485,8 @@ class TestJobDetailRoute:
         assert payload["started_at"] is not None
         assert payload["finished_at"] is not None
         assert payload["status"] == "succeeded"
+        # Token-usage keys are always present; null when no LLM call was
+        # recorded (the fake extraction service in these tests makes none).
+        assert payload["input_tokens"] is None
+        assert payload["output_tokens"] is None
+        assert payload["cost_usd"] is None

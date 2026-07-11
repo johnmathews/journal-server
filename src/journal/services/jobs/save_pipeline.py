@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from journal.services.jobs.run_job import run_job
 from journal.services.jobs.validation import (
     ENTITY_EXTRACTION_KEYS,
     MOOD_SCORE_ENTRY_KEYS,
@@ -123,7 +124,7 @@ def submit_save_entry_pipeline(
         follow_ups[follow_up_key] = child.id
         deferred.append(
             lambda jid=child.id, p=child_params: executor.submit(
-                run_method, ctx, jid, p,
+                run_job, run_method, ctx, jid, p,
             ),
         )
 

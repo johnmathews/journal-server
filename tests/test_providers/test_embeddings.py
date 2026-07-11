@@ -56,6 +56,32 @@ class TestOpenAIEmbeddingsProvider:
 
         assert result == [0.7, 0.8, 0.9]
 
+    def test_embed_texts_records_openai_usage_in_scope(self) -> None:
+        from types import SimpleNamespace
+
+        from journal.services import usage
+
+        provider, client = self._make_provider()
+        mock_response = MagicMock()
+        mock_response.data = [MagicMock(embedding=[0.1])]
+        # Embeddings responses carry prompt_tokens but no completion.
+        mock_response.usage = SimpleNamespace(prompt_tokens=64)
+        client.embeddings.create.return_value = mock_response
+
+        with usage.usage_scope() as collector:
+            provider.embed_texts(["hello", "world"])
+
+        assert collector.totals == (64, 0)
+
+    def test_embed_texts_off_job_does_not_crash(self) -> None:
+        # Default MagicMock response (.usage is a MagicMock) + no scope:
+        # record_openai must no-op without raising.
+        provider, client = self._make_provider()
+        mock_response = MagicMock()
+        mock_response.data = [MagicMock(embedding=[0.1])]
+        client.embeddings.create.return_value = mock_response
+        assert provider.embed_texts(["hi"]) == [[0.1]]
+
     def test_dimensions_parameter_passed_to_api(self) -> None:
         provider, client = self._make_provider()
         mock_response = MagicMock()
