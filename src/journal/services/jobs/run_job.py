@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from journal.db.pricing import estimate_cost
 from journal.services.usage import usage_scope
 
 if TYPE_CHECKING:
@@ -36,8 +37,15 @@ def run_job(
     The ``finally`` runs on the worker thread AFTER the worker's own
     ``mark_succeeded`` / ``mark_failed``, so ``record_usage`` is a
     follow-up UPDATE that records tokens even when the job failed. Cost is
-    passed as ``None`` (W3 wires pricing). Jobs that made no LLM call leave
-    the columns untouched (NULL).
+    computed best-effort from the existing pricing table via
+    ``estimate_cost`` (W3) and may be ``None`` when nothing was priceable
+    (e.g. transcription-only usage). Jobs that made no LLM call leave the
+    columns untouched (NULL).
+
+    The pricing lookup reads through ``ctx.jobs.connection`` — the same
+    repository the flush already writes through, and the worker thread's
+    own migrated connection — so ``record_usage`` stays a pure persistence
+    writer with no pricing logic leaking into the DB layer.
     """
     with usage_scope() as collector:
         try:
@@ -45,4 +53,5 @@ def run_job(
         finally:
             input_tokens, output_tokens = collector.totals
             if input_tokens or output_tokens:
-                ctx.jobs.record_usage(job_id, input_tokens, output_tokens, None)
+                cost = estimate_cost(ctx.jobs.connection, collector.per_model)
+                ctx.jobs.record_usage(job_id, input_tokens, output_tokens, cost)

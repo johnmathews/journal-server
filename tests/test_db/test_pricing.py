@@ -5,7 +5,12 @@ import sqlite3
 import pytest
 
 from journal.db.migrations import run_migrations
-from journal.db.pricing import PricingEntry, get_all_pricing, update_pricing
+from journal.db.pricing import (
+    PricingEntry,
+    estimate_cost,
+    get_all_pricing,
+    update_pricing,
+)
 
 
 @pytest.fixture
@@ -127,3 +132,129 @@ class TestUpdatePricing:
         )
         assert result is not None
         assert result.cost_per_minute == 0.01
+
+
+def _insert_row(
+    conn: sqlite3.Connection,
+    model: str,
+    category: str,
+    input_cost: float | None,
+    output_cost: float | None,
+    cost_per_minute: float | None = None,
+) -> None:
+    conn.execute(
+        "INSERT INTO pricing (model, category, input_cost_per_mtok, "
+        "output_cost_per_mtok, cost_per_minute, last_verified) "
+        "VALUES (?, ?, ?, ?, ?, '2026-01-01')",
+        (model, category, input_cost, output_cost, cost_per_minute),
+    )
+    conn.commit()
+
+
+class TestEstimateCost:
+    """estimate_cost — best-effort USD cost from captured tokens."""
+
+    def test_single_priced_model(self, conn: sqlite3.Connection) -> None:
+        # claude-opus-4-6 is seeded at 5.0 in / 25.0 out per Mtok.
+        per_model = {
+            "claude-opus-4-6": {"input_tokens": 1_000_000, "output_tokens": 1_000_000},
+        }
+        cost = estimate_cost(conn, per_model)
+        assert cost is not None
+        assert cost == pytest.approx(5.0 + 25.0)
+
+    def test_fractional_tokens(self, conn: sqlite3.Connection) -> None:
+        # claude-haiku-4-5 seeded at 1.0 in / 5.0 out per Mtok.
+        per_model = {
+            "claude-haiku-4-5": {"input_tokens": 500_000, "output_tokens": 200_000},
+        }
+        cost = estimate_cost(conn, per_model)
+        assert cost is not None
+        # 0.5 * 1.0 + 0.2 * 5.0 = 0.5 + 1.0
+        assert cost == pytest.approx(0.5 + 1.0)
+
+    def test_multi_model_sum(self, conn: sqlite3.Connection) -> None:
+        per_model = {
+            "claude-opus-4-6": {"input_tokens": 1_000_000, "output_tokens": 0},
+            "claude-haiku-4-5": {"input_tokens": 0, "output_tokens": 1_000_000},
+        }
+        cost = estimate_cost(conn, per_model)
+        assert cost is not None
+        # opus input 5.0 + haiku output 5.0
+        assert cost == pytest.approx(5.0 + 5.0)
+
+    def test_unknown_model_excluded_but_others_priced(
+        self, conn: sqlite3.Connection,
+    ) -> None:
+        per_model = {
+            "claude-opus-4-6": {"input_tokens": 1_000_000, "output_tokens": 0},
+            "no-such-model": {"input_tokens": 9_999_999, "output_tokens": 9_999_999},
+        }
+        cost = estimate_cost(conn, per_model)
+        assert cost is not None
+        assert cost == pytest.approx(5.0)
+
+    def test_unknown_model_only_returns_none(
+        self, conn: sqlite3.Connection,
+    ) -> None:
+        per_model = {
+            "no-such-model": {"input_tokens": 1_000_000, "output_tokens": 1_000_000},
+        }
+        assert estimate_cost(conn, per_model) is None
+
+    def test_transcription_category_excluded(
+        self, conn: sqlite3.Connection,
+    ) -> None:
+        # gpt-4o-transcribe is priced per audio-minute, not per token.
+        per_model = {
+            "gpt-4o-transcribe": {"input_tokens": 1_000_000, "output_tokens": 0},
+        }
+        assert estimate_cost(conn, per_model) is None
+
+    def test_transcription_excluded_but_llm_priced(
+        self, conn: sqlite3.Connection,
+    ) -> None:
+        per_model = {
+            "gpt-4o-transcribe": {"input_tokens": 1_000_000, "output_tokens": 0},
+            "claude-opus-4-6": {"input_tokens": 1_000_000, "output_tokens": 0},
+        }
+        cost = estimate_cost(conn, per_model)
+        assert cost is not None
+        assert cost == pytest.approx(5.0)
+
+    def test_null_output_cost_still_prices_input(
+        self, conn: sqlite3.Connection,
+    ) -> None:
+        _insert_row(conn, "in-only", "llm", 10.0, None)
+        per_model = {
+            "in-only": {"input_tokens": 1_000_000, "output_tokens": 1_000_000},
+        }
+        cost = estimate_cost(conn, per_model)
+        assert cost is not None
+        assert cost == pytest.approx(10.0)  # output term skipped
+
+    def test_null_input_cost_still_prices_output(
+        self, conn: sqlite3.Connection,
+    ) -> None:
+        _insert_row(conn, "out-only", "llm", None, 20.0)
+        per_model = {
+            "out-only": {"input_tokens": 1_000_000, "output_tokens": 1_000_000},
+        }
+        cost = estimate_cost(conn, per_model)
+        assert cost is not None
+        assert cost == pytest.approx(20.0)  # input term skipped
+
+    def test_empty_per_model_returns_none(self, conn: sqlite3.Connection) -> None:
+        assert estimate_cost(conn, {}) is None
+
+    def test_embedding_model_priced(self, conn: sqlite3.Connection) -> None:
+        # text-embedding-3-large: 0.13 in, 0 out — embeddings are in scope.
+        per_model = {
+            "text-embedding-3-large": {
+                "input_tokens": 1_000_000,
+                "output_tokens": 0,
+            },
+        }
+        cost = estimate_cost(conn, per_model)
+        assert cost is not None
+        assert cost == pytest.approx(0.13)

@@ -593,7 +593,10 @@ class _RecordingExtraction(FakeEntityExtractionService):
 
 class TestTokenUsageCapture:
     def test_succeeding_worker_records_usage(self, runner_factory, jobs_repo):
-        extraction = _RecordingExtraction(input_tokens=1200, output_tokens=340)
+        # claude-opus-4-6 is a seeded LLM model: 5.0 in / 25.0 out per Mtok.
+        extraction = _RecordingExtraction(
+            model="claude-opus-4-6", input_tokens=1_000_000, output_tokens=1_000_000
+        )
         runner = runner_factory(extraction=extraction)
 
         job = runner.submit_entity_extraction({"stale_only": True})
@@ -602,8 +605,30 @@ class TestTokenUsageCapture:
         final = jobs_repo.get(job.id)
         assert final is not None
         assert final.status == "succeeded"
-        assert final.input_tokens == 1200
-        assert final.output_tokens == 340
+        assert final.input_tokens == 1_000_000
+        assert final.output_tokens == 1_000_000
+        # W3: cost is now computed from the pricing table (5.0 + 25.0).
+        assert final.cost_usd is not None
+        assert final.cost_usd == pytest.approx(30.0)
+
+    def test_transcription_only_usage_records_tokens_but_null_cost(
+        self, runner_factory, jobs_repo
+    ):
+        # A transcription-category model is priced per audio-minute, not per
+        # token, so cost stays NULL while tokens are still recorded.
+        extraction = _RecordingExtraction(
+            model="gpt-4o-transcribe", input_tokens=800, output_tokens=0
+        )
+        runner = runner_factory(extraction=extraction)
+
+        job = runner.submit_entity_extraction({"stale_only": True})
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None
+        assert final.status == "succeeded"
+        assert final.input_tokens == 800
+        assert final.output_tokens == 0
         assert final.cost_usd is None
 
     def test_failing_worker_still_records_usage(self, runner_factory, jobs_repo):

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import sqlite3
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -28,6 +31,49 @@ def get_all_pricing(conn: sqlite3.Connection) -> list[PricingEntry]:
         "cost_per_minute, last_verified FROM pricing ORDER BY category, model",
     ).fetchall()
     return [PricingEntry(**dict(r)) for r in rows]
+
+
+def estimate_cost(
+    conn: sqlite3.Connection,
+    per_model: dict[str, dict[str, int]],
+) -> float | None:
+    """Best-effort USD cost for captured per-model token counts.
+
+    Reuses the existing ``pricing`` table (0017 seed + later backfills):
+    for each model in *per_model*, adds
+    ``input_tokens/1e6 * input_cost_per_mtok`` and
+    ``output_tokens/1e6 * output_cost_per_mtok``.
+
+    A model is *excluded* (not an error) when it has no pricing row (a
+    warning is logged) or when its row is ``category == 'transcription'``
+    — those are priced per audio-minute, not per token, so they can't be
+    costed from token counts. ``None`` cost fields (either direction) are
+    skipped term-by-term.
+
+    Returns ``None`` when nothing was priceable (so the caller can record
+    tokens while leaving ``cost_usd`` NULL); otherwise the float total.
+    """
+    pricing = {entry.model: entry for entry in get_all_pricing(conn)}
+    total = 0.0
+    priced_any = False
+    for model, bucket in per_model.items():
+        entry = pricing.get(model)
+        if entry is None:
+            log.warning(
+                "No pricing row for model %r; excluding from cost estimate", model,
+            )
+            continue
+        if entry.category == "transcription":
+            # Priced per audio-minute, not per token — out of scope here.
+            continue
+        input_tokens = bucket.get("input_tokens", 0)
+        output_tokens = bucket.get("output_tokens", 0)
+        if entry.input_cost_per_mtok is not None:
+            total += input_tokens / 1e6 * entry.input_cost_per_mtok
+        if entry.output_cost_per_mtok is not None:
+            total += output_tokens / 1e6 * entry.output_cost_per_mtok
+        priced_any = True
+    return total if priced_any else None
 
 
 def update_pricing(
