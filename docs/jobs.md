@@ -23,6 +23,12 @@ A single `jobs` table (migration `0006_jobs.sql`) holds one row per submitted ba
 | `created_at`       | TEXT    | ISO 8601, set at submission                                  |
 | `started_at`       | TEXT    | ISO 8601, set when the worker picks up the row               |
 | `finished_at`      | TEXT    | ISO 8601, set at terminal transition                         |
+| `input_tokens`     | INTEGER | LLM input tokens the job consumed (nullable — see [per-job token & cost capture](#per-job-token--cost-capture)) |
+| `output_tokens`    | INTEGER | LLM output tokens the job produced (nullable)                |
+| `cost_usd`         | REAL    | Best-effort USD cost from the `pricing` table (nullable)     |
+
+The three usage columns were added by migration `0034_job_token_usage.sql` (all nullable — legacy rows and jobs that
+made no LLM call leave them NULL).
 
 There are indexes on `status` and `created_at DESC` so the (small) dashboard lookups stay cheap.
 
@@ -33,8 +39,19 @@ There are indexes on `status` and `created_at DESC` so the (small) dashboard loo
 `runner.py`, `validation.py`, `notifier.py`, `save_pipeline.py`, `retry.py`, `errors.py`, and a `workers/`
 subdirectory with one file per job type.) Its contract:
 
-1. **Single-worker `ThreadPoolExecutor`.** `max_workers=1`. Concurrent submissions queue behind the running one. This is
-   deliberate and load-bearing — see [threading and SQLite](#threading-and-sqlite) below.
+1. **Two `ThreadPoolExecutor` pools.** The runner owns two executors that between them run every submitted job:
+
+   - **Pool A (ingestion/fast)** — `max_workers = config.job_worker_count` (env `JOB_WORKER_COUNT`, default 4). Runs
+     **everything except** storyline jobs, so independent ingestion / mood / fitness / extraction jobs execute in
+     parallel.
+   - **Pool B (storyline)** — `max_workers = 1`. Runs **only** `storyline_generation` and
+     `storyline_extension_check`.
+
+   The split buys three things: (a) parallel ingestion throughput; (b) ingestion is never starved by slow storyline
+   work — a long regeneration can't occupy a Pool A slot, so there's no head-of-line blocking; (c) the same-storyline
+   regeneration race is structurally impossible — Pool B has a single worker, so two regenerations of the same
+   storyline can never run at once, and no locking is needed. Set `JOB_WORKER_COUNT=1` to restore a fully-serial Pool
+   A. This is deliberate and load-bearing — see [threading and SQLite](#threading-and-sqlite) below.
 2. **Param validation before the row is created.** Unknown keys, wrong types, and invalid enum values (`mode`,
    `entry_id`) raise `ValueError` synchronously from `submit_*`. No job row is created for invalid input.
 3. **Always reach a terminal state.** The worker body is wrapped in `try/except` so any exception — including unexpected
@@ -60,17 +77,48 @@ This means the worst case after an unexpected crash is "the user sees the job th
 
 ## Threading and SQLite
 
-SQLite access is **per-thread**: every thread (the JobRunner's worker thread and each API request thread) gets its own
+SQLite access is **per-thread**: every thread (each pool worker and each API request thread) gets its own
 `sqlite3.Connection` from the process-wide `ConnectionFactory` (`src/journal/db/factory.py`), opened with the default
 `check_same_thread=True` so accidental cross-thread use trips Python's built-in guard. WAL mode lets independent
 connections read while another writes, and SQLite's file-level writer lock plus the 5s `busy_timeout` serialises
-writers.
+writers. This is what makes multi-worker Pool A safe: the `JOB_WORKER_COUNT` parallel workers each write through their
+own connection and wait on the file-level writer lock rather than erroring.
 
 The previous model — one shared `check_same_thread=False` connection written by multiple threads — caused two
 production incidents and was retired on 2026-05-11; see
-[`archive/sqlite-per-thread-connections-plan.md`](archive/sqlite-per-thread-connections-plan.md). `max_workers=1` on
-the executor remains a deliberate choice (predictable LLM rate usage, no job-vs-job races — see the docstrings in
-`services/jobs/runner.py`), but it is no longer an SQLite-safety requirement.
+[`archive/sqlite-per-thread-connections-plan.md`](archive/sqlite-per-thread-connections-plan.md). With per-thread
+connections in place, Pool A can safely run several jobs at once. Pool B stays single-worker not for SQLite safety but
+for ingestion priority and same-storyline race avoidance (see the docstrings in `services/jobs/runner.py`).
+
+## Per-job token & cost capture
+
+Every job records the LLM tokens it consumed (and a best-effort USD cost) onto its own row. This is observability, not
+billing — it lets the Job History UI show what each background run cost.
+
+**How tokens are attributed.** LLM token counts are captured through a `contextvars`-scoped collector
+(`src/journal/services/usage.py`). Threading a collector object through every service and provider would be invasive,
+so instead:
+
+1. Every worker is dispatched through the `run_job` shim (`src/journal/services/jobs/run_job.py`) rather than being
+   submitted to an executor directly. `run_job` opens a `usage_scope()` on the worker thread.
+2. Inside that scope, each provider adapter calls `usage.record_{anthropic,gemini,openai}(model, response)` right after
+   its SDK call. Because the collector rides on a contextvar it is visible to the whole synchronous call stack — and,
+   via `contextvars.copy_context().run(...)`, to the child threads the OCR dual-pass and transcription-shadow fan-outs
+   spawn (the heaviest token consumers).
+3. Off a job — the request path (answer synthesis, reranking, classifiers) — there is no active scope, so `record` is a
+   cheap no-op. W2 attributes tokens to **jobs only**.
+
+**Flush + failure handling.** `run_job` flushes the accumulated totals in a `finally`, so tokens are recorded even for
+**FAILED** jobs. The flush calls `SQLiteJobRepository.record_usage(job_id, input_tokens, output_tokens, cost)` — a
+follow-up UPDATE that runs *after* the worker's own `mark_succeeded` / `mark_failed`. Jobs that made no LLM call leave
+all three columns NULL.
+
+**Cost estimation.** Cost is computed best-effort by `estimate_cost()` (`src/journal/db/pricing.py`), which reads the
+existing `pricing` table (seeded by migration `0017`, backfilled by `0035_pricing_backfill.sql` to add
+`claude-opus-4-7` and `whisper-1`). For each model it adds `input_tokens/1e6 * input_cost_per_mtok` and the output
+equivalent. A model with no pricing row is excluded (a warning is logged); transcription-category models are excluded
+because they are priced per audio-minute, not per token. `cost_usd` is NULL when nothing was priceable. Pricing is
+runtime-editable via `PATCH /api/settings/pricing`, so cost estimates track rate changes without a code deploy.
 
 ## REST surface
 
@@ -165,9 +213,16 @@ Poll a job's current state:
  "error_message": null,
  "created_at": "2026-04-12T09:14:33+00:00",
  "started_at": "2026-04-12T09:14:33+00:00",
- "finished_at": null
+ "finished_at": null,
+ "input_tokens": null,
+ "output_tokens": null,
+ "cost_usd": null
 }
 ```
+
+`input_tokens`, `output_tokens`, and `cost_usd` are populated once the job reaches a terminal state (they stay `null`
+while it is still `queued` / `running`, and remain `null` for jobs that made no LLM call). See
+[per-job token & cost capture](#per-job-token--cost-capture).
 
 Returns **404** for an unknown id. Callers are expected to poll once per second until `status` is a terminal value
 (`succeeded` or `failed`).
@@ -177,7 +232,7 @@ Returns **404** for an unknown id. Callers are expected to poll once per second 
 Three MCP tools expose the same functionality via the MCP protocol. Unlike the REST endpoints, the `_batch` tools
 **block** until the job reaches a terminal state — they poll `SQLiteJobRepository.get(job_id)` internally at 500 ms
 intervals, up to a 3600-second deadline. This matches how Claude naturally consumes tool calls (synchronous in / out)
-while still using the single-worker executor for serialisation.
+while the job itself runs on the pooled executor (Pool A for extraction / mood backfill).
 
 - **`journal_extract_entities_batch`** — mirrors the REST body shape. Blocks until done and returns
   `{status, job_id, result, error_message}`.
@@ -339,7 +394,9 @@ scoring:
 
 For image and audio ingestion, mood scoring runs inline inside the ingestion worker (via
 `IngestionService._process_text`). Entity extraction is submitted as a follow-up job after the ingestion job succeeds —
-it runs on the same single-worker executor, so it starts once the ingestion job marks itself complete. The webapp's
+it is queued onto Pool A once the ingestion job marks itself complete, and (with `JOB_WORKER_COUNT > 1`) can run in
+parallel with other in-flight ingestion work. Storyline extension checks queued as follow-ups run on the dedicated
+single-worker Pool B. The webapp's
 notification bell automatically re-hydrates its active jobs list when any tracked job reaches terminal state, so
 server-spawned follow-up jobs (like entity extraction after ingestion) appear in the bell without a page refresh.
 
@@ -467,4 +524,7 @@ The pipeline orchestration must handle two race windows:
   `services/jobs/retry.py::run_with_retry` and `services/jobs/errors.py::is_transient`. The first retry sends a
   `notify_retrying` Pushover; subsequent retries are silent. After all retries are exhausted (or on a non-transient
   error) the job moves to `failed` and behaves as documented in this bullet.
-- **Multi-worker parallelism.** Would require rethinking the SQLite threading model and per-LLM rate limits.
+- **Unbounded multi-worker parallelism.** Pool A now runs `JOB_WORKER_COUNT` (default 4) jobs in parallel, which the
+  per-thread SQLite model makes safe. What remains out of scope is *dynamic* scaling and cross-process parallelism —
+  both would require rethinking per-LLM rate limits and job distribution beyond a single process. Pool B stays fixed
+  at one worker by design (storyline serialisation).

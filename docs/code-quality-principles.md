@@ -19,7 +19,9 @@ These are the non-negotiables. They help anyone reasoning about the code.
 3. **Behaviour-focused tests.** Tests act as executable specs. They tell a reader what the code is supposed to do — far more useful than docstrings that drift.
 4. **Honest naming.** A function called `resolve_entity` should resolve an entity, not also re-embed it as a side effect. Misleading names cost readers the same regardless of species.
 5. **Locality of behaviour.** Related code lives together. Cross-cutting state and "spooky action at a distance" hurt everyone.
-6. **Comments that explain *why*, not *what*.** The "why max_workers=1" docstring on `JobRunner` is the gold standard.
+6. **Comments that explain *why*, not *what*.** The "why two thread pools" docstring on `JobRunner`
+   (`services/jobs/runner.py`) is the gold standard — it explains why storyline jobs get a dedicated single-worker
+   pool (ingestion priority + same-storyline race avoidance) rather than just restating that two pools exist.
 
 ---
 

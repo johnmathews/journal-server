@@ -70,9 +70,10 @@ def estimate_cost(
         output_tokens = bucket.get("output_tokens", 0)
         if entry.input_cost_per_mtok is not None:
             total += input_tokens / 1e6 * entry.input_cost_per_mtok
+            priced_any = True
         if entry.output_cost_per_mtok is not None:
             total += output_tokens / 1e6 * entry.output_cost_per_mtok
-        priced_any = True
+            priced_any = True
     return total if priced_any else None
 
 

@@ -202,6 +202,16 @@ fallback). A user without a `fitness_auth_state` row produces a clean
 | `FITNESS_SYNC_ENABLED`                  | `true`                                 | When `true`, start the in-process `FitnessSyncScheduler` daemon thread that enqueues per-user incremental syncs once daily at 17:00 server-local time. Set to `0`, `false`, `no`, or `off` to disable. See [`fitness-operations.md` §4](fitness-operations.md#daily-auto-sync). |
 
 
+## Optional — background jobs
+
+The in-process job runner (`services/jobs/runner.py`) uses two thread pools: a parallel ingestion/fast pool (Pool A)
+and a single-worker storyline pool (Pool B). Only Pool A is sized by an env var. See [`jobs.md`](jobs.md#jobrunner)
+for the full model.
+
+| Variable            | Default | Description                                                                                                                                                          |
+| ------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `JOB_WORKER_COUNT`  | `4`     | Number of parallel workers in Pool A (ingestion / mood / fitness / extraction jobs). Storyline jobs always run on a separate single-worker pool. Must be ≥ 1; set to `1` for a fully-serial Pool A. |
+
 ## Runtime-toggleable settings
 
 The following env vars seed the initial value at startup, but are overlaid at runtime by rows in the `runtime_settings`

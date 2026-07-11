@@ -20,7 +20,7 @@ src/journal/
     connection.py       — get_connection() with PRAGMAs (same-thread guard on)
     factory.py          — ConnectionFactory: per-thread SQLite connections
     migrations.py       — Migration runner (PRAGMA user_version)
-    migrations/*.sql    — SQL migration files (currently 0001 → 0033)
+    migrations/*.sql    — SQL migration files (currently 0001 → 0035)
     repository/         — SQLiteEntryRepository carved into protocol/store/core/
                           pages/chunks/search/mood/stats/analytics
     fitness_repository.py    — Fitness activities / daily wellness / auth state
@@ -55,7 +55,10 @@ src/journal/
     entity_extraction/  — Entity extraction service (orchestrator + helpers)
     fitness/            — Strava/Garmin fetch, normalize, backfill + activity-type map
     storylines/         — Storyline generation service, extension classifier, segments
-    jobs/               — Background job runner: workers/, runner, save_pipeline,
+    usage.py            — Per-job LLM token-usage collector (contextvar-scoped)
+    jobs/               — Background job runner: workers/, runner (two-pool:
+                          parallel Pool A + single-worker storyline Pool B),
+                          run_job (usage-flush wrapper), save_pipeline,
                           notifier, retry
     auth.py / email.py  — Multi-user auth (sessions, API keys, password reset)
     notifications.py    — Toast + Pushover notification dispatch

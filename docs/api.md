@@ -1337,9 +1337,10 @@ Idempotent on already-active entities.
 
 ## Batch job endpoints
 
-Long-running batch operations (entity extraction, mood backfill) run asynchronously on an in-process single-worker job
-runner. Clients submit a job, receive `202 Accepted` with a `job_id`, and then poll `GET /api/jobs/{job_id}` once per
-second until `status` reaches a terminal value (`succeeded` or `failed`).
+Long-running batch operations (entity extraction, mood backfill) run asynchronously on an in-process, two-pool job
+runner: a parallel ingestion/fast pool (Pool A, `JOB_WORKER_COUNT` workers, default 4) and a single-worker storyline
+pool (Pool B). Clients submit a job, receive `202 Accepted` with a `job_id`, and then poll `GET /api/jobs/{job_id}` once
+per second until `status` reaches a terminal value (`succeeded` or `failed`).
 
 See [jobs.md](jobs.md) for the full data model, threading invariants, restart recovery semantics, and result payload
 shapes.
@@ -1484,7 +1485,10 @@ keys — so clients can rely on a fixed schema.
  "error_message": null,
  "created_at": "2026-04-12T09:14:33+00:00",
  "started_at": "2026-04-12T09:14:33+00:00",
- "finished_at": null
+ "finished_at": null,
+ "input_tokens": null,
+ "output_tokens": null,
+ "cost_usd": null
 }
 ```
 
@@ -1493,6 +1497,11 @@ keys — so clients can rely on a fixed schema.
 - `result` is populated on success (shape depends on `type` — see [jobs.md](jobs.md)).
 - `error_message` is populated when `status = failed`, including the sentinel `"server restarted before job completed"`
   for jobs reconciled on startup after an unclean shutdown.
+- `input_tokens` / `output_tokens` (nullable integers) and `cost_usd` (nullable number) carry the LLM token usage and
+  best-effort USD cost the job incurred. They are populated once the job reaches a terminal state — including for
+  `failed` jobs — and stay `null` while `queued` / `running` or when the job made no LLM call. `cost_usd` is `null`
+  when nothing the job called was priceable (e.g. transcription-only usage). See
+  [jobs.md § Per-job token & cost capture](jobs.md#per-job-token--cost-capture).
 
 **Response (404):**
 
@@ -3133,8 +3142,9 @@ the webapp started) from inside an MCP conversation.
 | `job_id`  | string | yes      | The UUID returned by a batch-job submission |
 
 **Returns:** the full serialised job dict —
-`{id, type, status, params, progress_current, progress_total, result, error_message, created_at, started_at, finished_at}`.
-If the job is not found, the returned dict is `{"error": "Job not found", "job_id": "..."}`.
+`{id, type, status, params, progress_current, progress_total, result, error_message, created_at, started_at, finished_at, input_tokens, output_tokens, cost_usd}`.
+The last three (nullable) carry the job's LLM token usage and best-effort USD cost. If the job is not found, the
+returned dict is `{"error": "Job not found", "job_id": "..."}`.
 
 ## Fitness Tools
 

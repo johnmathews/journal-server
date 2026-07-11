@@ -247,6 +247,18 @@ class TestEstimateCost:
     def test_empty_per_model_returns_none(self, conn: sqlite3.Connection) -> None:
         assert estimate_cost(conn, {}) is None
 
+    def test_llm_row_with_both_costs_null_returns_none(
+        self, conn: sqlite3.Connection,
+    ) -> None:
+        # An admin could null out BOTH cost columns on a priced-category
+        # row (rather than deleting it). That model contributes nothing,
+        # so if it is the only one, cost is unknown (None) — not $0.00.
+        _insert_row(conn, "unpriced-llm", "llm", None, None)
+        per_model = {
+            "unpriced-llm": {"input_tokens": 1_000_000, "output_tokens": 500_000},
+        }
+        assert estimate_cost(conn, per_model) is None
+
     def test_embedding_model_priced(self, conn: sqlite3.Connection) -> None:
         # text-embedding-3-large: 0.13 in, 0 out — embeddings are in scope.
         per_model = {
