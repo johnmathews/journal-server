@@ -112,13 +112,22 @@ Rules — all are load-bearing:
   specific entries you will draw on and the quotes that ground each claim. Use
   the Citations API to attach those quotes — do not fabricate quotes inline.
 
-Divide the narrative into chronological sections. Begin each section with a line
-`## <short title>` (a few words) on its own line. Break at natural topic shifts.
-Aim for about 200 words per section (it's fine to range roughly 180–240) but NEVER
-split or pad a coherent topic just to hit a word count — semantic coherence beats
-word count. Sections must be in chronological order. Do not add any preamble before
-the first `## ` heading, and do not duplicate the verbatim excerpts — synthesize
-them into prose, with citations carrying the link back.
+Divide the narrative into MULTIPLE chronological sections — think of them as the
+chapters of a short book. A storyline that spans several weeks, or draws on more than
+a couple of entries, must NOT be returned as a single long section. Begin each section
+with a line `## <short title>` (a few words) on its own line, and break at natural
+shifts in time or topic: a new phase, month, event, milestone, or development.
+
+Target roughly 200 words per section. A section must not exceed ~280 words: when a
+topic genuinely runs longer than that, split it into consecutive sub-sections, each
+with its own title, rather than emitting one oversized section. Do not pad a short,
+genuinely self-contained topic just to reach the target — but when in doubt, prefer
+more, shorter sections over one long one. As a rule of thumb, a narrative of N total
+words should have roughly N/200 sections.
+
+Sections must be in chronological order. Do not add any preamble before the first
+`## ` heading, and do not duplicate the verbatim excerpts — synthesize them into
+prose, with citations carrying the link back.
 """
 
 
@@ -132,6 +141,11 @@ _HEADING_RE = re.compile(r"^\s*##\s+(.+?)\s*$", re.MULTILINE)
 # are logged as warnings but still returned — semantics win over word count.
 WORD_BAND_MIN = 180
 WORD_BAND_MAX = 240
+# Hard ceiling. A section this long means the model failed to split a long
+# narrative into chapters (the prompt asks it to cap sections at ~280 words).
+# We still return it — never wipe content — but log it at a higher severity
+# so the failure is visible in ops, and it's the signal to iterate the prompt.
+WORD_BAND_HARD_MAX = 280
 
 
 @dataclass
@@ -651,7 +665,14 @@ def _finalize_section(section: NarrativeSection) -> None:
     section.source_entry_ids = source_entry_ids
     # Empty sections (heading with no prose) are tolerated silently —
     # only flag sections that have content but miss the word band.
-    if word_count and not (WORD_BAND_MIN <= word_count <= WORD_BAND_MAX):
+    if word_count > WORD_BAND_HARD_MAX:
+        log.warning(
+            "Narrative section %r has %d words, over the hard cap of %d "
+            "— the model did not split a long narrative into chapters; "
+            "returning anyway",
+            section.title, word_count, WORD_BAND_HARD_MAX,
+        )
+    elif word_count and not (WORD_BAND_MIN <= word_count <= WORD_BAND_MAX):
         log.warning(
             "Narrative section %r has %d words, outside band [%d, %d] "
             "— returning anyway (semantics win over word count)",
