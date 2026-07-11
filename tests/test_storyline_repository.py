@@ -867,10 +867,17 @@ class TestChapterCRUD:
         )
         ch = storyline_repo.create_chapter(storyline_id=sl.id, seq=1)
         assert ch.last_generated_at is None
+        assert storyline_repo.get_storyline(sl.id).last_generated_at is None
         storyline_repo.record_chapter_generation_complete(ch.id)
         refreshed = storyline_repo.get_chapter(ch.id)
         assert refreshed is not None
         assert refreshed.last_generated_at is not None
+        # The parent storyline's timestamp is bumped too, so the UI's
+        # "last generated" column reflects the fresh chapter content
+        # rather than showing a stale date forever.
+        parent = storyline_repo.get_storyline(sl.id)
+        assert parent is not None
+        assert parent.last_generated_at is not None
 
     def test_update_chapter_summary_embedding(
         self,
