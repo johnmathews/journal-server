@@ -174,6 +174,21 @@ class TestSectionParser:
         assert sections[0].word_count == 10
         assert any("word" in m.lower() for m in caplog.messages)
 
+    def test_over_hard_cap_section_logs_split_failure(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A section far over the ~280-word hard cap means the model
+        failed to split a long narrative into chapters — logged distinctly
+        so the failure is visible in ops (the signal to iterate the prompt)."""
+        response = _FakeResponse(content=[
+            {"type": "text", "text": f"## Giant\n{_words(1600)}",
+             "citations": []},
+        ])
+        with caplog.at_level("WARNING"):
+            sections = _parse_sectioned_response(response, document_to_entry={})
+        assert sections[0].word_count == 1600
+        assert any("hard cap" in m.lower() for m in caplog.messages)
+
     def test_in_band_section_does_not_warn(
         self, caplog: pytest.LogCaptureFixture,
     ) -> None:

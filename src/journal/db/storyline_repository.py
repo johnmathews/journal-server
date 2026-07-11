@@ -581,13 +581,28 @@ class SQLiteStorylineRepository:
         return self.get_chapter(chapter_id)
 
     def record_chapter_generation_complete(self, chapter_id: int) -> None:
-        """Stamp ``last_generated_at`` after a chapter's panels are written."""
+        """Stamp ``last_generated_at`` after a chapter's panels are written.
+
+        Also bumps the parent storyline's ``last_generated_at`` so the
+        storyline-level timestamp (what the storylines list UI displays)
+        reflects fresh chapter content. Without this the chapter-based
+        generation path only ever stamps chapters, and the list keeps
+        showing a stale "last generated" date even after a regeneration.
+        """
         conn = self._conn()
         conn.execute(
             "UPDATE storyline_chapters"
             " SET last_generated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),"
             "     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
             " WHERE id = ?",
+            (chapter_id,),
+        )
+        conn.execute(
+            "UPDATE storylines"
+            " SET last_generated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),"
+            "     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+            " WHERE id = (SELECT storyline_id FROM storyline_chapters"
+            "             WHERE id = ?)",
             (chapter_id,),
         )
         conn.commit()
