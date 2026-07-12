@@ -30,7 +30,7 @@ retry or surface that to the user.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from journal.services import usage
@@ -130,9 +130,9 @@ class EntryAssignment:
 
 @dataclass
 class ExtensionJudgment:
-    assignments: list[EntryAssignment] = field(default_factory=list)
-    draft_arc_complete: bool = False
-    reasoning: str = ""
+    assignments: list[EntryAssignment]
+    draft_arc_complete: bool
+    reasoning: str
     model_used: str = ""
     failed: bool = False  # True on API failure / malformed response
 
@@ -145,7 +145,7 @@ class PartitionChapter:
 
 @dataclass
 class PartitionResult:
-    chapters: list[PartitionChapter] = field(default_factory=list)
+    chapters: list[PartitionChapter]
     model_used: str = ""
     failed: bool = False
 
