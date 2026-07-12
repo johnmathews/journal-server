@@ -44,6 +44,10 @@ tables:
     The column is kept (no longer read) for one release to keep the
     migration re-runnable.
   * `last_generated_at`, `last_extension_check_at` — observability timestamps.
+    `last_generated_at` is the value the storylines-list UI displays; it is
+    bumped whenever any chapter regenerates (`record_chapter_generation_complete`
+    updates both the chapter row and its parent storyline), so the list reflects
+    fresh content rather than showing a stale date after a regeneration.
 * `storyline_entities` — join table for multi-entity anchors. PK is
   `(storyline_id, entity_id)` (no duplicate anchors). FK to
   `storylines(id) ON DELETE CASCADE`, FK to `entities(id)`. A reverse
@@ -124,19 +128,33 @@ Re-sequencing during split and delete runs inside a single transaction using a t
 
 ### Sectioned (word-sized) chapters
 
-Chapters can be **automatically carved** into titled, ~200-word units instead of
+Chapters can be **automatically carved** into titled, word-sized units instead of
 being painted by hand. This is **re-segmentation** and it is opt-in / triggered,
 never the default refresh:
 
-- The narrator's `generate_sectioned_narrative` produces an ordered list of
-  titled `## `-delimited sections — each a coherent topic, aiming for ~200 words
-  (soft band 180–240; semantic coherence wins over hitting the count).
+- **Splitting is deterministic, not model-driven.** The sectioning narrator
+  returns a single 1,500–1,700-word section per storyline no matter how it is
+  prompted or which model runs it (verified on prod with Opus 4.7 and 4.8) — it
+  treats a storyline as one coherent topic and won't self-split. So
+  `resegment_storyline` splits by **time-bucketing**: it estimates the
+  storyline's total narrative length from the cached `narrative_word_count` of
+  the chapters it's replacing, computes a target chapter count
+  (`round(est_words / max_chapter_words)`, capped at `_MAX_CHAPTERS`), splits the
+  date-ordered excerpts into that many **contiguous buckets**
+  (`_split_excerpts_contiguous`, snapping boundaries so a same-date run is never
+  split across chapters), and calls `generate_sectioned_narrative` **once per
+  bucket**. Each bucket's section becomes its own chapter with a model-written
+  title. When the estimate is unknown (0), one narration measures it and is
+  reused when the result is a single chapter (no extra call).
 - Each section's date window is **derived** from the min/max `entry_date` of its
   citations, then clamped so the resulting chapters tile the span contiguously.
   Sections are chronological, so they map cleanly onto the existing
   open/closed/contiguous-window model.
-- `resegment_storyline(storyline_id, override_locked=False)` runs one narrator
-  call **per unlocked span** (the maximal runs of non-`boundary_locked`
+- A transient per-bucket narrator failure (zero sections) aborts the span so the
+  existing chapters are **preserved untouched** — a flaky API call never wipes
+  good data.
+- `resegment_storyline(storyline_id, override_locked=False)` re-carves
+  **per unlocked span** (the maximal runs of non-`boundary_locked`
   chapters), then rebuilds the chapter rows atomically. `boundary_locked`
   chapters are preserved untouched (id, window, title, panels); a new section
   inherits a `title_locked` title when its window overlaps a locked chapter by a
