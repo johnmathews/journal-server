@@ -31,9 +31,11 @@ narrator needs to see the up-to-date membership it's narrating. The
 normally. If that branch raises (an unhandled narrator/publish
 exception), the clear is never reached and every id computed for this
 run — including ones already folded into draft membership — stays in
-the pending table for the next run to pick up; nothing is lost, at
-worst an already-assigned id lingers harmlessly in ``pending`` until
-the next successful pass clears it.
+the pending table for the next run to pick up; nothing is lost. At the
+very start of the *next* ``update()`` call, a sweep clears any pending
+id that's already present in the storyline's chapter membership —
+independent of whether that run finds anything new to process — so a
+stale already-assigned id never lingers past one extra call.
 """
 
 from __future__ import annotations
@@ -155,6 +157,18 @@ class StorylineEngine:
         candidates = self._candidate_entries(storyline)
         pending = self._repo.list_pending_entries(storyline_id)
         assigned = self._repo.assigned_entry_ids(storyline_id)
+
+        # Sweep stale pending ids: one already assigned to a chapter was
+        # persisted by a previous run whose pending-clear step never ran
+        # (see the failure-policy note above). The entry is already part
+        # of the storyline's membership, so there's nothing to retry —
+        # clear it now rather than waiting for some future run that
+        # happens to have other new candidates to process.
+        stale_pending = [eid for eid in pending if eid in assigned]
+        if stale_pending:
+            self._repo.clear_pending_entries(storyline_id, stale_pending)
+            pending = [eid for eid in pending if eid not in assigned]
+
         new_ids = [e.entry_id for e in candidates if e.entry_id not in assigned]
         new_ids += [eid for eid in pending if eid not in assigned and eid not in new_ids]
         if not new_ids:

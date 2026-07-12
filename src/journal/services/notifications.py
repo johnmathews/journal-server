@@ -141,6 +141,18 @@ TOPICS: list[dict[str, Any]] = [
         "admin_only": False,
         "default": False,
     },
+    # ── Storylines (storylines-redesign) ────────────────────────────
+    # Fires once per publish (StorylineEngine.update publishes at most
+    # one chapter per call), so it isn't noisy the way a per-entry
+    # notification would be — defaults on, unlike the other opt-in
+    # success topics above.
+    {
+        "key": "storyline_published",
+        "label": "New storyline chapter published",
+        "group": "success",
+        "admin_only": False,
+        "default": True,
+    },
 ]
 
 # Map job_type -> topic key for success notifications.
@@ -723,6 +735,35 @@ class PushoverNotificationService:
             log.warning(
                 "Failed to send fitness-normalize-drift notification for %s",
                 source, exc_info=True,
+            )
+
+    # ── Storylines ───────────────────────────────────────────────────
+
+    def notify_chapter_published(
+        self, user_id: int, storyline_name: str, chapter_title: str,
+    ) -> None:
+        """Notify a user that a new storyline chapter was published.
+
+        Caller (the ``storyline_update`` worker) only invokes this when
+        ``UpdateResult.published`` is set — at most one publish per
+        ``StorylineEngine.update()`` call, so this fires at most once
+        per job.
+        """
+        try:
+            if not self._is_topic_enabled(user_id, "storyline_published"):
+                return
+            user_key, app_token = self._resolve_credentials(user_id)
+            if not user_key or not app_token:
+                return
+            title = f"New chapter: {storyline_name}"
+            message = f"“{chapter_title}” is ready to read."
+            self._post_to_pushover(
+                user_key, app_token, title, message, PRIORITY_NORMAL,
+            )
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "Failed to send chapter-published notification for user %s",
+                user_id, exc_info=True,
             )
 
     def notify_health_alert(

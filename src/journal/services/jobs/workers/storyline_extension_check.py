@@ -3,11 +3,12 @@
 Queued by the entity-extraction worker once an entry's mentions are
 committed (via ``JobRunner._maybe_queue_storyline_extension_check``), so
 the classifier's entity-overlap signal reads a populated mention set.
-For each ``yes`` decision, queues a follow-up
-``storyline_generation`` job via the runner's
-``submit_storyline_generation``. ``maybe`` decisions are recorded
-on the job result for future surfacing; ``no`` decisions are simply
-counted.
+For each ``yes`` decision, records the entry as pending on that
+storyline (``storyline_repository.add_pending_entry`` — lossless even
+when coalesced, see below) and queues a follow-up ``storyline_update``
+job via the runner's ``submit_storyline_update``, unless one is already
+queued. ``maybe`` decisions are recorded on the job result for future
+surfacing; ``no`` decisions are simply counted.
 
 The classifier handles its own per-storyline timestamp update
 (``record_extension_check``), so this worker is a thin orchestrator
@@ -33,15 +34,15 @@ def run_storyline_extension_check(
     ctx: WorkerContext,
     job_id: str,
     params: dict[str, Any],
-    submit_regenerate: Callable[..., Any],
+    submit_update: Callable[..., Any],
 ) -> None:
     """Classify ``entry_id`` against each active storyline, queue
-    regenerations for positive matches.
+    updates for positive matches.
 
-    ``submit_regenerate`` is the runner's
-    ``submit_storyline_generation`` bound method, passed in so the
-    worker stays free of any runner-side reach-in. ``user_id`` is
-    required in ``params``; ``parent_job_id`` is honoured if set.
+    ``submit_update`` is the runner's ``submit_storyline_update`` bound
+    method, passed in so the worker stays free of any runner-side
+    reach-in. ``user_id`` is required in ``params``; ``parent_job_id``
+    is honoured if set.
     """
     user_id = params["user_id"]
     parent_job_id = params.get("parent_job_id")
@@ -69,32 +70,38 @@ def run_storyline_extension_check(
             entry_id=entry_id, user_id=user_id,
         )
 
-        regenerated_storyline_ids: list[int] = []
+        updates_queued: list[int] = []
         coalesced_storyline_ids: list[int] = []
         for r in results:
             if r.decision == "yes":
-                # W4: coalesce a burst ingest. If a full open-refresh for
-                # this storyline is already queued (not yet running), it
-                # will pick up this entry when it runs, so don't queue a
-                # duplicate regeneration — 30 gym entries → one refresh,
-                # not 30 serialized Opus calls on the single-worker pool.
-                if ctx.jobs.find_pending_open_regeneration(
+                # Record the entry as pending on this storyline FIRST —
+                # this is what makes coalescing lossless: whichever
+                # storyline_update job runs next (the one we're about to
+                # queue, or one already queued from an earlier entry in
+                # this burst) picks up every pending entry when it reads
+                # the pending table, so no entry is ever dropped even
+                # when we skip queuing a duplicate below.
+                if ctx.storyline_repository is not None:
+                    ctx.storyline_repository.add_pending_entry(
+                        r.storyline_id, entry_id,
+                    )
+                # Coalesce a burst ingest: if a plain update for this
+                # storyline is already queued (not yet running), it will
+                # pick up the pending entry just recorded above when it
+                # runs, so don't queue a duplicate — 30 gym entries → one
+                # update, not 30 serialized judge calls on the
+                # single-worker pool.
+                if ctx.jobs.find_pending_storyline_update(
                     user_id=user_id, storyline_id=r.storyline_id,
                 ) is not None:
                     coalesced_storyline_ids.append(r.storyline_id)
                     continue
                 try:
-                    submit_regenerate(
-                        r.storyline_id,
-                        user_id=user_id,
-                        # Ingest path opts into auto-split: an over-budget
-                        # open chapter is re-segmented automatically (W5).
-                        auto_split=True,
-                    )
-                    regenerated_storyline_ids.append(r.storyline_id)
+                    submit_update(r.storyline_id, user_id=user_id)
+                    updates_queued.append(r.storyline_id)
                 except Exception:  # noqa: BLE001 — log + continue
                     log.exception(
-                        "Failed to queue regeneration for storyline %d (entry %d)",
+                        "Failed to queue update for storyline %d (entry %d)",
                         r.storyline_id, entry_id,
                     )
 
@@ -110,7 +117,7 @@ def run_storyline_extension_check(
                 }
                 for r in results
             ],
-            "regenerations_queued": regenerated_storyline_ids,
+            "updates_queued": updates_queued,
             "coalesced_storyline_ids": coalesced_storyline_ids,
         }
         ctx.jobs.mark_succeeded(job_id, summary)

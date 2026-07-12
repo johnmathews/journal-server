@@ -20,17 +20,16 @@ It owns:
       EVERYTHING except storyline jobs, so independent ingestion /
       mood / fitness / extraction jobs run in parallel.
     * **Pool B (storyline)** — ``max_workers = 1``. Handles ONLY
-      ``storyline_generation`` and ``storyline_extension_check``.
+      ``storyline_update`` and ``storyline_extension_check``.
 
   The split buys three things:
     1. Parallel ingestion throughput (Pool A is multi-worker).
     2. Ingestion is never starved by slow storyline work — storyline
        jobs can't occupy a Pool A slot, so there is no head-of-line
-       blocking behind a long regeneration.
-    3. The same-storyline regeneration race is structurally
-       impossible: Pool B has a single worker, so two regenerations
-       of the same storyline can never run concurrently — no locking
-       required.
+       blocking behind a long update.
+    3. The same-storyline update race is structurally impossible:
+       Pool B has a single worker, so two updates of the same
+       storyline can never run concurrently — no locking required.
 
   SQLite is safe under this concurrency: since the per-thread
   `ConnectionFactory` migration (2026-05-11, see `db/factory.py` and
@@ -49,7 +48,7 @@ holds the two executors + the in-memory blob queues used by image
 and audio ingestion (large bytes don't fit in the jobs.params_json
 column), and it exposes the ``submit_*`` API the rest of the system
 calls. Each ``submit_*`` routes onto Pool A except
-``submit_storyline_generation`` / ``submit_storyline_extension_check``,
+``submit_storyline_update`` / ``submit_storyline_extension_check``,
 which go to the single-worker Pool B.
 """
 
@@ -64,6 +63,7 @@ if TYPE_CHECKING:
 
     from journal.db.jobs_repository import SQLiteJobRepository
     from journal.db.repository import EntryRepository
+    from journal.db.storyline_repository import SQLiteStorylineRepository
     from journal.models import Job
     from journal.services.backfill import MoodBackfillResult
     from journal.services.entity_extraction import EntityExtractionService
@@ -73,11 +73,9 @@ if TYPE_CHECKING:
     from journal.services.ingestion import IngestionService
     from journal.services.mood_scoring import MoodScoringService
     from journal.services.notifications import PushoverNotificationService
+    from journal.services.storylines.engine import StorylineEngineProtocol
     from journal.services.storylines.extension import (
         StorylineExtensionClassifierProtocol,
-    )
-    from journal.services.storylines.service import (
-        StorylineGenerationServiceProtocol,
     )
 
 from journal.services.jobs.notifier import JobNotifier
@@ -95,8 +93,7 @@ from journal.services.jobs.validation import (
     MOOD_SCORE_ENTRY_KEYS,
     REPROCESS_EMBEDDINGS_KEYS,
     STORYLINE_EXTENSION_CHECK_KEYS,
-    STORYLINE_GENERATION_KEYS,
-    STORYLINE_GENERATION_MODES,
+    STORYLINE_UPDATE_KEYS,
     validate_params,
 )
 from journal.services.jobs.workers import WorkerContext
@@ -124,9 +121,7 @@ from journal.services.jobs.workers.reprocess_embeddings import (
 from journal.services.jobs.workers.storyline_extension_check import (
     run_storyline_extension_check,
 )
-from journal.services.jobs.workers.storyline_generation import (
-    run_storyline_generation,
-)
+from journal.services.jobs.workers.storyline_update import run_storyline_update
 
 log = logging.getLogger(__name__)
 
@@ -158,12 +153,12 @@ class JobRunner:
       (``config.job_worker_count``, default 4). Runs everything
       except storyline jobs, so independent jobs execute in parallel.
     * **Pool B (storyline)** — ``max_workers = 1``. Runs only
-      ``storyline_generation`` and ``storyline_extension_check``.
+      ``storyline_update`` and ``storyline_extension_check``.
 
     Keeping storyline work on its own single-worker pool means (a)
     ingestion throughput is parallel, (b) storyline jobs can never
     occupy an ingestion slot (no head-of-line blocking), and (c) two
-    regenerations of the same storyline can never run at once, so the
+    updates of the same storyline can never run at once, so the
     same-storyline race is impossible without any locking.
 
     NOTE: SQLite access is per-thread. Every pool worker and each API
@@ -195,12 +190,11 @@ class JobRunner:
         normalize_garmin_callable: Callable[..., NormalizeResult] | None = None,
         backfill_strava_callable: Callable[..., BackfillResult] | None = None,
         backfill_garmin_callable: Callable[..., BackfillResult] | None = None,
-        storyline_generation_service: (
-            StorylineGenerationServiceProtocol | None
-        ) = None,
+        storyline_engine: StorylineEngineProtocol | None = None,
         storyline_extension_classifier: (
             StorylineExtensionClassifierProtocol | None
         ) = None,
+        storyline_repository: SQLiteStorylineRepository | None = None,
         worker_count: int = 4,
     ) -> None:
         self._jobs = job_repository
@@ -214,7 +208,7 @@ class JobRunner:
         )
         # Pool A: ingestion/fast jobs, parallel across ``worker_count``
         # workers. Pool B: storyline jobs, single-worker so ingestion is
-        # never blocked and same-storyline regenerations can't race.
+        # never blocked and same-storyline updates can't race.
         self._executor = ThreadPoolExecutor(
             max_workers=worker_count, thread_name_prefix="journal-jobs"
         )
@@ -259,8 +253,9 @@ class JobRunner:
             normalize_garmin=normalize_garmin_callable,
             backfill_strava=backfill_strava_callable,
             backfill_garmin=backfill_garmin_callable,
-            storyline_generation=storyline_generation_service,
+            storyline_engine=storyline_engine,
             storyline_extension_classifier=storyline_extension_classifier,
+            storyline_repository=storyline_repository,
         )
 
     # ------------------------------------------------------------------
@@ -414,105 +409,69 @@ class JobRunner:
             enable_mood_scoring=enable_mood_scoring,
         )
 
-    def submit_storyline_generation(
+    def submit_storyline_update(
         self,
         storyline_id: int,
         *,
-        user_id: int | None = None,
+        user_id: int,
         parent_job_id: str | None = None,
-        chapter_id: int | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        mode: str | None = None,
-        resegment: bool = False,
-        override_locked: bool = False,
-        auto_split: bool = False,
+        bootstrap: bool = False,
+        refresh_only: bool = False,
+        unpublish: bool = False,
     ) -> Job:
-        """Queue a storyline regeneration job.
+        """Queue a storyline update job.
 
-        Refuses to queue if the StorylineGenerationService isn't
-        wired on this server (opt-in at boot, like fitness sync).
-        ``user_id`` routes notifications; ``parent_job_id`` opts into
-        the consolidated pipeline-notification pattern used by the
-        extension-check hook.
+        Refuses to queue if the StorylineEngine isn't wired on this
+        server (opt-in at boot, like fitness sync). ``user_id`` routes
+        notifications; ``parent_job_id`` opts into the consolidated
+        pipeline-notification pattern used by the extension-check hook.
 
-        ``start_date`` and ``end_date`` (ISO YYYY-MM-DD) override the
-        storyline row's stored date window for this run only. ``mode``
-        is ``"replace"`` (default) or ``"append"``; append requires
-        ``start_date`` to be on or after the storyline's last
-        generation date.
+        At most one of ``bootstrap``/``refresh_only``/``unpublish`` may
+        be True — the worker branches on whichever is set:
 
-        ``chapter_id`` scopes the job to a single chapter: the worker
-        calls ``regenerate_chapter`` (replace-only) and the chapter's
-        own window is authoritative, so ``start_date``/``end_date`` are
-        ignored for chapter-scoped runs.
-
-        ``resegment`` (storyline-level only) re-carves the storyline
-        into titled, word-sized chapters via ``resegment_storyline``
-        instead of refreshing the open chapter. ``override_locked`` is
-        only meaningful with ``resegment=True``; it lets the re-carve
-        cross hand-painted (boundary-locked) chapter boundaries. Both
-        default False, preserving the legacy refresh behavior.
-        ``resegment`` is incompatible with ``chapter_id`` (a
-        chapter-scoped run can't re-segment) and with ``mode="append"``.
-
-        ``auto_split`` (storyline-level default path only) is the
-        ingest-time auto-split flag (W5): when True the worker forwards it
-        into ``regenerate`` so an over-budget open chapter is
-        automatically re-segmented after the refresh. The ingest
-        extension-check hook sets this; manual refreshes leave it False so
-        re-segmentation stays opt-in. It is ignored when combined with
-        ``chapter_id`` or ``resegment`` (those paths don't read it).
+        - ``bootstrap``: partition the storyline's full history into
+          chapters via ``engine.bootstrap``, replacing any existing
+          ones (one-time seed / re-seed use).
+        - ``refresh_only``: re-narrate the draft from its existing
+          membership via ``engine.refresh_draft``, without consulting
+          the judge or changing membership.
+        - ``unpublish``: fold the newest published chapter back into
+          the draft (``repo.unpublish_newest``) then re-narrate it —
+          used by the unpublish route (Task 9).
+        - none of the above: the default steady-state
+          ``engine.update`` call.
         """
-        if self._ctx.storyline_generation is None:
+        if self._ctx.storyline_engine is None:
             raise RuntimeError(
-                "StorylineGenerationService not configured; "
-                "cannot queue storyline_generation job."
+                "StorylineEngine not configured; cannot queue "
+                "storyline_update job."
             )
-        if mode is not None and mode not in STORYLINE_GENERATION_MODES:
+        if sum([bootstrap, refresh_only, unpublish]) > 1:
             raise ValueError(
-                f"Invalid mode {mode!r}; expected one of "
-                f"{sorted(STORYLINE_GENERATION_MODES)}"
+                "At most one of bootstrap/refresh_only/unpublish may "
+                "be True."
             )
-        if resegment and chapter_id is not None:
-            raise ValueError(
-                "resegment is incompatible with chapter_id: a "
-                "chapter-scoped run cannot re-segment the storyline."
-            )
-        if resegment and mode == "append":
-            raise ValueError(
-                "resegment is incompatible with mode='append': "
-                "re-segmentation always rebuilds the chapter set."
-            )
-        params: dict[str, Any] = {"storyline_id": storyline_id}
-        if user_id is not None:
-            params["user_id"] = user_id
+        params: dict[str, Any] = {
+            "storyline_id": storyline_id, "user_id": user_id,
+        }
         if parent_job_id is not None:
             params["parent_job_id"] = parent_job_id
-        if chapter_id is not None:
-            params["chapter_id"] = chapter_id
-        if start_date is not None:
-            params["start_date"] = start_date
-        if end_date is not None:
-            params["end_date"] = end_date
-        if mode is not None:
-            params["mode"] = mode
-        if resegment:
-            params["resegment"] = True
-        if override_locked:
-            params["override_locked"] = True
-        if auto_split:
-            params["auto_split"] = True
+        if bootstrap:
+            params["bootstrap"] = True
+        if refresh_only:
+            params["refresh_only"] = True
+        if unpublish:
+            params["unpublish"] = True
         validate_params(
-            params, STORYLINE_GENERATION_KEYS, job_type="storyline_generation",
+            params, STORYLINE_UPDATE_KEYS, job_type="storyline_update",
         )
         job = self._jobs.create(
-            "storyline_generation", params, user_id=user_id,
+            "storyline_update", params, user_id=user_id,
         )
         # Pool B (single-worker): storyline jobs never contend for a
         # Pool A ingestion slot, and same-storyline runs can't race.
         self._storyline_executor.submit(
-            run_job, run_storyline_generation, self._ctx, job.id, params,
+            run_job, run_storyline_update, self._ctx, job.id, params,
         )
         return job
 
@@ -527,8 +486,8 @@ class JobRunner:
 
         Refuses to queue if the StorylineExtensionClassifier isn't
         wired on this server. The worker iterates the user's active
-        storylines and queues a regeneration job for each ``yes``
-        classification via ``submit_storyline_generation``.
+        storylines and queues a coalesced update job for each ``yes``
+        classification via ``submit_storyline_update``.
         """
         if self._ctx.storyline_extension_classifier is None:
             raise RuntimeError(
@@ -548,15 +507,15 @@ class JobRunner:
         job = self._jobs.create(
             "storyline_extension_check", params, user_id=user_id,
         )
-        # The worker calls back into submit_storyline_generation to
-        # queue regenerations. We pass the bound method explicitly so
-        # the worker is free of any runner-side reach-in. Runs on Pool B
-        # (single-worker) alongside storyline_generation.
+        # The worker calls back into submit_storyline_update to queue
+        # updates. We pass the bound method explicitly so the worker is
+        # free of any runner-side reach-in. Runs on Pool B (single-
+        # worker) alongside storyline_update.
         self._storyline_executor.submit(
             run_job,
             run_storyline_extension_check,
             self._ctx, job.id, params,
-            self.submit_storyline_generation,
+            self.submit_storyline_update,
         )
         return job
 

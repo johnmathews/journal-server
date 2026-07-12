@@ -16,6 +16,7 @@ from journal.models import ExtractionResult
 from journal.services.backfill import MoodBackfillResult
 from journal.services.jobs import JobRunner
 from journal.services.jobs.errors import friendly_error, is_transient
+from journal.services.storylines.engine import UpdateResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -283,7 +284,7 @@ def runner_factory(jobs_repo, threadsafe_factory):
         normalize_garmin_callable: Any = None,
         backfill_strava_callable: Any = None,
         backfill_garmin_callable: Any = None,
-        storyline_generation: Any = None,
+        storyline_engine: Any = None,
         storyline_extension_classifier: Any = None,
         worker_count: int = 1,
     ) -> JobRunner:
@@ -307,7 +308,7 @@ def runner_factory(jobs_repo, threadsafe_factory):
             normalize_garmin_callable=normalize_garmin_callable,
             backfill_strava_callable=backfill_strava_callable,
             backfill_garmin_callable=backfill_garmin_callable,
-            storyline_generation_service=storyline_generation,
+            storyline_engine=storyline_engine,
             storyline_extension_classifier=storyline_extension_classifier,
             worker_count=worker_count,
         )
@@ -805,28 +806,12 @@ class TestSerialisation:
 # --------------------------------------------------------------------
 
 
-class _FakeStorylineResult:
-    """Minimal stand-in for a StorylineGenerationResult — the fields
-    run_storyline_generation reads to build its summary."""
-
-    def __init__(self) -> None:
-        self.entry_count = 0
-        self.entity_mention_count = 0
-        self.fts_fallback_count = 0
-        self.narrative_citation_count = 0
-        self.curation_citation_count = 0
-        self.narrative_model = "fake-narrator"
-        self.curation_model = "fake-curator"
-        self.chapter_count = 0
-        self.warnings: list[str] = []
-
-
-class FakeStorylineGenerationService:
-    """Blocks inside ``regenerate`` so tests can prove Pool B is
+class FakeStorylineEngine:
+    """Blocks inside ``update`` so tests can prove Pool B is
     single-worker and independent of Pool A.
 
-    ``hold_event`` (if set) pauses each ``regenerate`` call until the
-    test releases it; ``entered_event`` fires when a call begins.
+    ``hold_event`` (if set) pauses each ``update`` call until the test
+    releases it; ``entered_event`` fires when a call begins.
     """
 
     def __init__(
@@ -840,14 +825,20 @@ class FakeStorylineGenerationService:
         self._lock = threading.Lock()
         self.calls: list[int] = []
 
-    def regenerate(self, storyline_id: int, **_kwargs: Any) -> _FakeStorylineResult:
+    def update(self, storyline_id: int) -> UpdateResult:
         with self._lock:
             self.calls.append(storyline_id)
         if self._entered is not None:
             self._entered.set()
         if self._hold is not None:
             self._hold.wait(timeout=10)
-        return _FakeStorylineResult()
+        return UpdateResult(storyline_id=storyline_id)
+
+    def bootstrap(self, storyline_id: int, *, mark_read: bool = False) -> UpdateResult:  # noqa: ARG002
+        return UpdateResult(storyline_id=storyline_id)
+
+    def refresh_draft(self, storyline_id: int) -> UpdateResult:
+        return UpdateResult(storyline_id=storyline_id)
 
 
 class TestTwoPoolWorkerModel:
@@ -889,7 +880,7 @@ class TestTwoPoolWorkerModel:
         ``running`` while the storyline job is held."""
         story_hold = threading.Event()
         story_entered = threading.Event()
-        storyline = FakeStorylineGenerationService(
+        storyline = FakeStorylineEngine(
             hold_event=story_hold, entered_event=story_entered,
         )
         # Non-blocking extraction so the ingestion job runs straight
@@ -897,12 +888,12 @@ class TestTwoPoolWorkerModel:
         extraction = FakeEntityExtractionService(batch_results=[])
         runner = runner_factory(
             extraction=extraction,
-            storyline_generation=storyline,
+            storyline_engine=storyline,
             worker_count=1,
         )
 
-        story_job = runner.submit_storyline_generation(1, user_id=1)
-        # Wait until the storyline worker is actually inside regenerate,
+        story_job = runner.submit_storyline_update(1, user_id=1)
+        # Wait until the storyline worker is actually inside update,
         # occupying Pool B's only slot.
         assert story_entered.wait(timeout=5)
 
@@ -926,23 +917,23 @@ class TestTwoPoolWorkerModel:
     def test_same_storyline_jobs_serialise_on_pool_b(
         self, runner_factory, jobs_repo,
     ) -> None:
-        """Two storyline_generation jobs for the SAME storyline run one
-        at a time on Pool B: while the first is held, the second stays
+        """Two storyline_update jobs for the SAME storyline run one at a
+        time on Pool B: while the first is held, the second stays
         ``queued`` — the structural guard against the same-storyline
-        regeneration race, with no locking."""
+        update race, with no locking."""
         hold = threading.Event()
         entered = threading.Event()
-        storyline = FakeStorylineGenerationService(
+        storyline = FakeStorylineEngine(
             hold_event=hold, entered_event=entered,
         )
         runner = runner_factory(
-            storyline_generation=storyline, worker_count=4,
+            storyline_engine=storyline, worker_count=4,
         )
 
-        job1 = runner.submit_storyline_generation(1, user_id=1)
+        job1 = runner.submit_storyline_update(1, user_id=1)
         assert entered.wait(timeout=5)
 
-        job2 = runner.submit_storyline_generation(1, user_id=1)
+        job2 = runner.submit_storyline_update(1, user_id=1)
 
         # First occupies the single Pool B worker; second must wait even
         # though Pool A has 4 free workers.
@@ -966,11 +957,11 @@ class TestTwoPoolWorkerModel:
     ) -> None:
         """Shutdown drains BOTH pools: post-shutdown storyline submits
         raise (exercises Pool B's executor shutdown, not just Pool A)."""
-        storyline = FakeStorylineGenerationService()
-        runner = runner_factory(storyline_generation=storyline)
+        storyline = FakeStorylineEngine()
+        runner = runner_factory(storyline_engine=storyline)
         runner.shutdown(wait=True, cancel_futures=False)
         with pytest.raises(RuntimeError):
-            runner.submit_storyline_generation(1, user_id=1)
+            runner.submit_storyline_update(1, user_id=1)
 
 
 # --------------------------------------------------------------------

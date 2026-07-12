@@ -323,7 +323,7 @@ JobType = Literal[
     "reprocess_embeddings",
     "fitness_sync_strava",
     "fitness_sync_garmin",
-    "storyline_generation",
+    "storyline_update",
     "storyline_extension_check",
 ]
 

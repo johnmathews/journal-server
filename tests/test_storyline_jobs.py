@@ -1,13 +1,21 @@
-"""Tests for the storylines job/integration layer (W5-W7).
+"""Tests for the storylines job/integration layer (storylines-redesign
+Task 8).
 
-* W5: ``submit_storyline_generation`` + the ``run_storyline_generation``
-  worker — happy path, missing-service guard.
-* W6 decider: ``_parse_decision`` extracts the verdict from a
-  ``tool_use`` block; falls back to "maybe" on malformed response.
-  (``StorylineExtensionClassifier`` itself is tested in
-  ``tests/test_storyline_extension.py``.)
-* W7: ``_queue_post_ingestion_jobs`` queues a storyline_extension_check
-  job when the classifier is wired; skips silently when it isn't.
+* ``run_storyline_update`` — the worker driving ``StorylineEngine``:
+  default steady-state ``update``, ``bootstrap``/``refresh_only``/
+  ``unpublish`` routing, the publish notification (fires once, only on
+  an actual publish), missing-engine guard, engine-exception failure
+  handling.
+* ``submit_storyline_update`` — param validation (at most one of
+  bootstrap/refresh_only/unpublish), missing-engine guard, Pool B
+  submission.
+* ``run_storyline_extension_check`` — classifies an entry against each
+  active storyline; a ``yes`` records the entry as pending
+  (``storyline_repository.add_pending_entry``) and queues a coalesced
+  ``storyline_update`` unless one is already queued
+  (``find_pending_storyline_update``).
+* W6 decider parser (``_parse_decision``) — unrelated to Task 8, kept
+  alongside the rest of the storyline job-layer tests.
 * W1: the storyline_extension_check is queued by the entity-extraction
   worker after mentions are committed (not as a racing sibling), so the
   classifier's entity-overlap signal is reliable.
@@ -19,7 +27,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from journal.services.storylines.service import GenerationResult
 
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.providers.storyline_extension_decider import (
@@ -34,9 +41,8 @@ from journal.services.jobs.workers.entity_extraction import (
 from journal.services.jobs.workers.storyline_extension_check import (
     run_storyline_extension_check,
 )
-from journal.services.jobs.workers.storyline_generation import (
-    run_storyline_generation,
-)
+from journal.services.jobs.workers.storyline_update import run_storyline_update
+from journal.services.storylines.engine import PublishedInfo, UpdateResult
 from journal.services.storylines.extension import ExtensionResult
 
 if TYPE_CHECKING:
@@ -50,6 +56,7 @@ class _FakeJobNotifier:
     def __init__(self) -> None:
         self.successes: list[tuple[str, Any]] = []
         self.failures: list[tuple[str, str]] = []
+        self.chapter_published_calls: list[tuple[int | None, str, str]] = []
 
     def get_notify_strategy(self, _parent: str | None) -> str:
         return "individual"
@@ -62,48 +69,93 @@ class _FakeJobNotifier:
     ) -> None:
         self.failures.append((job_type, msg))
 
+    def notify_chapter_published(
+        self, user_id: int | None, storyline_name: str, chapter_title: str,
+    ) -> None:
+        self.chapter_published_calls.append((user_id, storyline_name, chapter_title))
+
     def try_pipeline_notification(
         self, _parent_job_id: str, _user: int | None,
     ) -> None:
         return None
 
 
-class _FakeGenerationService:
-    def __init__(self, result: GenerationResult) -> None:
-        self._result = result
-        self.calls: list[int] = []
-        self.kwargs: list[dict[str, Any]] = []
-        self.chapter_calls: list[int] = []
-        self.chapter_kwargs: list[dict[str, Any]] = []
-        self.resegment_calls: list[int] = []
-        self.resegment_kwargs: list[dict[str, Any]] = []
+class _FakeStorylineEngine:
+    """Records every call; returns a per-method configurable result.
 
-    def regenerate(
-        self,
-        storyline_id: int,
-        **kwargs: Any,  # noqa: ANN401
-    ) -> GenerationResult:
-        self.calls.append(storyline_id)
-        self.kwargs.append(kwargs)
-        return self._result
+    Each of ``update_result``/``bootstrap_result``/``refresh_result``
+    defaults to an empty ``UpdateResult`` (no publish, nothing new) so
+    tests that don't care about the return value don't have to
+    configure one.
+    """
 
-    def regenerate_chapter(
+    def __init__(
         self,
-        chapter_id: int,
-        **kwargs: Any,  # noqa: ANN401
-    ) -> GenerationResult:
-        self.chapter_calls.append(chapter_id)
-        self.chapter_kwargs.append(kwargs)
-        return self._result
+        *,
+        update_result: UpdateResult | None = None,
+        bootstrap_result: UpdateResult | None = None,
+        refresh_result: UpdateResult | None = None,
+        raise_exc: Exception | None = None,
+        call_order: list[str] | None = None,
+    ) -> None:
+        self.update_result = update_result or UpdateResult(storyline_id=0)
+        self.bootstrap_result = bootstrap_result or UpdateResult(storyline_id=0)
+        self.refresh_result = refresh_result or UpdateResult(storyline_id=0)
+        self._raise = raise_exc
+        self._order = call_order
+        self.update_calls: list[int] = []
+        self.bootstrap_calls: list[int] = []
+        self.refresh_calls: list[int] = []
 
-    def resegment_storyline(
+    def update(self, storyline_id: int) -> UpdateResult:
+        self.update_calls.append(storyline_id)
+        if self._raise is not None:
+            raise self._raise
+        return self.update_result
+
+    def bootstrap(self, storyline_id: int, *, mark_read: bool = False) -> UpdateResult:  # noqa: ARG002
+        self.bootstrap_calls.append(storyline_id)
+        return self.bootstrap_result
+
+    def refresh_draft(self, storyline_id: int) -> UpdateResult:
+        self.refresh_calls.append(storyline_id)
+        if self._order is not None:
+            self._order.append("refresh")
+        return self.refresh_result
+
+
+@dataclass
+class _FakeStoryline:
+    id: int
+    name: str
+
+
+class _FakeStorylineRepository:
+    """Records ``add_pending_entry``/``unpublish_newest`` calls; resolves
+    ``get_storyline`` from a name lookup table configured per test."""
+
+    def __init__(
         self,
-        storyline_id: int,
-        **kwargs: Any,  # noqa: ANN401
-    ) -> GenerationResult:
-        self.resegment_calls.append(storyline_id)
-        self.resegment_kwargs.append(kwargs)
-        return self._result
+        *,
+        names: dict[int, str] | None = None,
+        call_order: list[str] | None = None,
+    ) -> None:
+        self._names = names or {}
+        self._order = call_order
+        self.pending_calls: list[tuple[int, int]] = []
+        self.unpublish_calls: list[int] = []
+
+    def add_pending_entry(self, storyline_id: int, entry_id: int) -> None:
+        self.pending_calls.append((storyline_id, entry_id))
+
+    def get_storyline(self, storyline_id: int) -> _FakeStoryline | None:
+        name = self._names.get(storyline_id)
+        return None if name is None else _FakeStoryline(id=storyline_id, name=name)
+
+    def unpublish_newest(self, storyline_id: int) -> None:
+        self.unpublish_calls.append(storyline_id)
+        if self._order is not None:
+            self._order.append("unpublish")
 
 
 class _FakeClassifier:
@@ -145,7 +197,7 @@ class _FakeExtraction:
         return [_FakeExtractionResult()]
 
 
-# ── W5: run_storyline_generation worker ─────────────────────────
+# ── run_storyline_update worker ─────────────────────────────────
 
 
 @pytest.fixture
@@ -155,236 +207,187 @@ def job_ctx(
     return SQLiteJobRepository(factory), _FakeJobNotifier()
 
 
-class TestStorylineGenerationWorker:
-    def test_happy_path_marks_succeeded(
+class TestStorylineUpdateWorker:
+    def test_worker_update_calls_engine_and_records_summary(
         self,
         job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
     ) -> None:
         jobs, notifier = job_ctx
-        svc = _FakeGenerationService(GenerationResult(
-            storyline_id=42, entry_count=3,
-            entity_mention_count=3, fts_fallback_count=0,
-            narrative_citation_count=5, curation_citation_count=3,
-            narrative_model="opus-fake", curation_model="haiku-fake",
-        ))
-        ctx = _build_minimal_ctx(jobs, notifier, generation=svc)
+        engine = _FakeStorylineEngine(
+            update_result=UpdateResult(
+                storyline_id=42,
+                new_entry_count=3,
+                draft_entry_count=1,
+                published=PublishedInfo(chapter_id=5, title="T"),
+                reasoning="continues the arc",
+            ),
+        )
+        ctx = _build_minimal_ctx(jobs, notifier, engine=engine)
 
         job = jobs.create(
-            "storyline_generation",
-            {"storyline_id": 42, "user_id": 1},
-            user_id=1,
+            "storyline_update", {"storyline_id": 42, "user_id": 1}, user_id=1,
         )
-        run_storyline_generation(
-            ctx, job.id,
-            {"storyline_id": 42, "user_id": 1},
-        )
+        run_storyline_update(ctx, job.id, {"storyline_id": 42, "user_id": 1})
+
         finished = jobs.get(job.id)
         assert finished is not None
         assert finished.status == "succeeded"
         assert finished.result is not None
-        assert finished.result["entry_count"] == 3
-        assert finished.result["narrative_citation_count"] == 5
-        assert svc.calls == [42]
-        # storyline_generation is too noisy for Pushover: this fires on
-        # every entry that extends an active storyline. Failures still
-        # notify; success does not. Mirrors storyline_extension_check.
-        assert notifier.successes == []
+        assert finished.result["published_chapter_id"] == 5
+        assert finished.result["published_title"] == "T"
+        assert finished.result["reasoning"] == "continues the arc"
+        assert engine.update_calls == [42]
+        assert engine.bootstrap_calls == []
+        assert engine.refresh_calls == []
 
-    def test_passes_date_range_and_mode_through_to_service(
+    def test_worker_publish_fires_pushover(
         self,
         job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
     ) -> None:
-        """W6: when the job row carries start_date/end_date/mode the
-        worker must forward them to ``service.regenerate(...)`` as
-        kwargs. The validation layer already ensures only known keys
-        land here; this test pins the runtime forwarding."""
         jobs, notifier = job_ctx
-        svc = _FakeGenerationService(GenerationResult(storyline_id=11))
-        ctx = _build_minimal_ctx(jobs, notifier, generation=svc)
+        engine = _FakeStorylineEngine(
+            update_result=UpdateResult(
+                storyline_id=7, published=PublishedInfo(chapter_id=9, title="T"),
+            ),
+        )
+        repo = _FakeStorylineRepository(names={7: "Marathon Training"})
+        ctx = _build_minimal_ctx(jobs, notifier, engine=engine, storyline_repo=repo)
 
-        params = {
-            "storyline_id": 11,
-            "user_id": 1,
-            "start_date": "2099-01-01",
-            "end_date": "2099-01-31",
-            "mode": "append",
-        }
-        job = jobs.create("storyline_generation", params, user_id=1)
-        run_storyline_generation(ctx, job.id, params)
+        job = jobs.create(
+            "storyline_update", {"storyline_id": 7, "user_id": 1}, user_id=1,
+        )
+        run_storyline_update(ctx, job.id, {"storyline_id": 7, "user_id": 1})
+
+        assert notifier.chapter_published_calls == [
+            (1, "Marathon Training", "T"),
+        ]
+
+    def test_worker_no_publish_does_not_fire_pushover(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        jobs, notifier = job_ctx
+        engine = _FakeStorylineEngine(update_result=UpdateResult(storyline_id=8))
+        ctx = _build_minimal_ctx(jobs, notifier, engine=engine)
+
+        job = jobs.create(
+            "storyline_update", {"storyline_id": 8, "user_id": 1}, user_id=1,
+        )
+        run_storyline_update(ctx, job.id, {"storyline_id": 8, "user_id": 1})
 
         finished = jobs.get(job.id)
         assert finished is not None
         assert finished.status == "succeeded"
-        assert svc.calls == [11]
-        assert svc.kwargs == [{
-            "start_date": "2099-01-01",
-            "end_date": "2099-01-31",
-            "mode": "append",
-        }]
+        assert notifier.chapter_published_calls == []
 
-    def test_no_extra_kwargs_when_params_absent(
+    def test_worker_bootstrap_param_routes_to_bootstrap(
         self,
         job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
     ) -> None:
-        """A bare params dict (no date/mode keys) calls regenerate
-        with no kwargs — preserving the legacy code path."""
         jobs, notifier = job_ctx
-        svc = _FakeGenerationService(GenerationResult(storyline_id=12))
-        ctx = _build_minimal_ctx(jobs, notifier, generation=svc)
-        params = {"storyline_id": 12, "user_id": 1}
-        job = jobs.create("storyline_generation", params, user_id=1)
-        run_storyline_generation(ctx, job.id, params)
-        assert svc.kwargs == [{}]
+        engine = _FakeStorylineEngine(
+            bootstrap_result=UpdateResult(storyline_id=10, chapter_count=4),
+        )
+        ctx = _build_minimal_ctx(jobs, notifier, engine=engine)
 
-    def test_chapter_id_routes_to_regenerate_chapter(
-        self,
-        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
-    ) -> None:
-        """When the payload carries a chapter_id the worker calls
-        ``regenerate_chapter`` (forwarding only ``mode``) instead of
-        the storyline-level ``regenerate``."""
-        jobs, notifier = job_ctx
-        svc = _FakeGenerationService(GenerationResult(storyline_id=12))
-        ctx = _build_minimal_ctx(jobs, notifier, generation=svc)
-        params = {
-            "storyline_id": 12, "chapter_id": 7,
-            "user_id": 1, "mode": "replace",
-        }
-        job = jobs.create("storyline_generation", params, user_id=1)
-        run_storyline_generation(ctx, job.id, params)
+        params = {"storyline_id": 10, "user_id": 1, "bootstrap": True}
+        job = jobs.create("storyline_update", params, user_id=1)
+        run_storyline_update(ctx, job.id, params)
 
         finished = jobs.get(job.id)
         assert finished is not None
         assert finished.status == "succeeded"
-        # Routed to the chapter path, not the storyline path.
-        assert svc.chapter_calls == [7]
-        assert svc.chapter_kwargs == [{"mode": "replace"}]
-        assert svc.calls == []
-
-    def test_resegment_routes_to_resegment_storyline(
-        self,
-        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
-    ) -> None:
-        """W4: when the payload carries ``resegment`` the worker calls
-        ``resegment_storyline`` (forwarding ``override_locked``) instead
-        of the storyline-level ``regenerate``."""
-        jobs, notifier = job_ctx
-        svc = _FakeGenerationService(GenerationResult(
-            storyline_id=13, chapter_count=4,
-        ))
-        ctx = _build_minimal_ctx(jobs, notifier, generation=svc)
-        params = {
-            "storyline_id": 13,
-            "user_id": 1,
-            "resegment": True,
-            "override_locked": True,
-        }
-        job = jobs.create("storyline_generation", params, user_id=1)
-        run_storyline_generation(ctx, job.id, params)
-
-        finished = jobs.get(job.id)
-        assert finished is not None
-        assert finished.status == "succeeded"
-        # Routed to resegment, not regenerate / regenerate_chapter.
-        assert svc.resegment_calls == [13]
-        assert svc.resegment_kwargs == [{"override_locked": True}]
-        assert svc.calls == []
-        assert svc.chapter_calls == []
-        # chapter_count surfaces in the summary.
         assert finished.result is not None
         assert finished.result["chapter_count"] == 4
+        assert engine.bootstrap_calls == [10]
+        assert engine.update_calls == []
+        assert engine.refresh_calls == []
 
-    def test_resegment_defaults_override_locked_false(
-        self,
-        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
-    ) -> None:
-        """``resegment`` without ``override_locked`` forwards
-        ``override_locked=False``."""
-        jobs, notifier = job_ctx
-        svc = _FakeGenerationService(GenerationResult(storyline_id=14))
-        ctx = _build_minimal_ctx(jobs, notifier, generation=svc)
-        params = {"storyline_id": 14, "user_id": 1, "resegment": True}
-        job = jobs.create("storyline_generation", params, user_id=1)
-        run_storyline_generation(ctx, job.id, params)
-
-        assert svc.resegment_calls == [14]
-        assert svc.resegment_kwargs == [{"override_locked": False}]
-        assert svc.calls == []
-
-    def test_no_resegment_still_calls_regenerate(
-        self,
-        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
-    ) -> None:
-        """Default path (no ``resegment`` key) is byte-for-byte the old
-        behavior: ``regenerate`` is called, ``resegment_storyline`` is
-        never touched."""
-        jobs, notifier = job_ctx
-        svc = _FakeGenerationService(GenerationResult(storyline_id=15))
-        ctx = _build_minimal_ctx(jobs, notifier, generation=svc)
-        params = {"storyline_id": 15, "user_id": 1}
-        job = jobs.create("storyline_generation", params, user_id=1)
-        run_storyline_generation(ctx, job.id, params)
-
-        assert svc.calls == [15]
-        assert svc.resegment_calls == []
-
-    def test_auto_split_forwarded_to_regenerate(
-        self,
-        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
-    ) -> None:
-        """W5: when the payload carries ``auto_split`` the worker forwards
-        ``auto_split=True`` into ``service.regenerate`` (storyline-level
-        path only)."""
-        jobs, notifier = job_ctx
-        svc = _FakeGenerationService(GenerationResult(storyline_id=16))
-        ctx = _build_minimal_ctx(jobs, notifier, generation=svc)
-        params = {"storyline_id": 16, "user_id": 1, "auto_split": True}
-        job = jobs.create("storyline_generation", params, user_id=1)
-        run_storyline_generation(ctx, job.id, params)
-
-        assert svc.calls == [16]
-        assert svc.kwargs == [{"auto_split": True}]
-        assert svc.resegment_calls == []
-        assert svc.chapter_calls == []
-
-    def test_auto_split_ignored_on_chapter_path(
-        self,
-        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
-    ) -> None:
-        """``auto_split`` is only meaningful for the storyline-level
-        default path. A chapter-scoped run ignores it (no error, not
-        forwarded)."""
-        jobs, notifier = job_ctx
-        svc = _FakeGenerationService(GenerationResult(storyline_id=17))
-        ctx = _build_minimal_ctx(jobs, notifier, generation=svc)
-        params = {
-            "storyline_id": 17, "chapter_id": 3,
-            "user_id": 1, "auto_split": True,
-        }
-        job = jobs.create("storyline_generation", params, user_id=1)
-        run_storyline_generation(ctx, job.id, params)
-
-        assert svc.chapter_calls == [3]
-        assert svc.chapter_kwargs == [{}]
-        assert svc.calls == []
-
-    def test_missing_service_marks_failed(
+    def test_worker_refresh_only_routes_to_refresh_draft(
         self,
         job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
     ) -> None:
         jobs, notifier = job_ctx
-        ctx = _build_minimal_ctx(jobs, notifier, generation=None)
+        engine = _FakeStorylineEngine(
+            refresh_result=UpdateResult(storyline_id=11, draft_entry_count=6),
+        )
+        ctx = _build_minimal_ctx(jobs, notifier, engine=engine)
+
+        params = {"storyline_id": 11, "user_id": 1, "refresh_only": True}
+        job = jobs.create("storyline_update", params, user_id=1)
+        run_storyline_update(ctx, job.id, params)
+
+        finished = jobs.get(job.id)
+        assert finished is not None
+        assert finished.status == "succeeded"
+        assert finished.result is not None
+        assert finished.result["draft_entry_count"] == 6
+        assert engine.refresh_calls == [11]
+        assert engine.update_calls == []
+        assert engine.bootstrap_calls == []
+
+    def test_worker_unpublish_folds_then_refreshes(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        """The unpublish branch must fold the newest published chapter
+        back into the draft BEFORE re-narrating it — refresh_draft reads
+        the draft's current membership, so the fold has to land first."""
+        jobs, notifier = job_ctx
+        order: list[str] = []
+        engine = _FakeStorylineEngine(
+            refresh_result=UpdateResult(storyline_id=12), call_order=order,
+        )
+        repo = _FakeStorylineRepository(call_order=order)
+        ctx = _build_minimal_ctx(jobs, notifier, engine=engine, storyline_repo=repo)
+
+        params = {"storyline_id": 12, "user_id": 1, "unpublish": True}
+        job = jobs.create("storyline_update", params, user_id=1)
+        run_storyline_update(ctx, job.id, params)
+
+        finished = jobs.get(job.id)
+        assert finished is not None
+        assert finished.status == "succeeded"
+        assert repo.unpublish_calls == [12]
+        assert engine.refresh_calls == [12]
+        assert order == ["unpublish", "refresh"]
+
+    def test_worker_unconfigured_engine_fails_job(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        jobs, notifier = job_ctx
+        ctx = _build_minimal_ctx(jobs, notifier, engine=None)
         job = jobs.create(
-            "storyline_generation", {"storyline_id": 1, "user_id": 1},
-            user_id=1,
+            "storyline_update", {"storyline_id": 1, "user_id": 1}, user_id=1,
         )
-        run_storyline_generation(
-            ctx, job.id, {"storyline_id": 1, "user_id": 1},
-        )
+        run_storyline_update(ctx, job.id, {"storyline_id": 1, "user_id": 1})
+
         finished = jobs.get(job.id)
         assert finished is not None
         assert finished.status == "failed"
         assert "not configured" in (finished.error_message or "")
+        assert notifier.failures  # failure notification fired
+        assert notifier.chapter_published_calls == []
+
+    def test_worker_engine_exception_marks_failed(
+        self,
+        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
+    ) -> None:
+        jobs, notifier = job_ctx
+        engine = _FakeStorylineEngine(raise_exc=RuntimeError("judge API down"))
+        ctx = _build_minimal_ctx(jobs, notifier, engine=engine)
+
+        job = jobs.create(
+            "storyline_update", {"storyline_id": 2, "user_id": 1}, user_id=1,
+        )
+        run_storyline_update(ctx, job.id, {"storyline_id": 2, "user_id": 1})
+
+        finished = jobs.get(job.id)
+        assert finished is not None
+        assert finished.status == "failed"
+        assert finished.error_message
+        assert notifier.chapter_published_calls == []
 
 
 # ── W6 decider parser ──────────────────────────────────────────
@@ -447,7 +450,7 @@ class TestExtensionDeciderParser:
         assert out.decision == "maybe"
 
 
-# ── W7: extension-check worker + ingestion hook ────────────────
+# ── extension-check worker + ingestion hook ────────────────────
 
 
 class TestEntityExtractionTriggersStorylineCheck:
@@ -505,7 +508,7 @@ class TestEntityExtractionTriggersStorylineCheck:
 
 
 class TestExtensionCheckWorker:
-    def test_yes_decisions_queue_regenerations(
+    def test_yes_decisions_queue_updates(
         self,
         job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
     ) -> None:
@@ -526,12 +529,15 @@ class TestExtensionCheckWorker:
                 ),
             ],
         })
-        ctx = _build_minimal_ctx(jobs, notifier, classifier=classifier)
-        regen_calls: list[int] = []
+        storyline_repo = _FakeStorylineRepository()
+        ctx = _build_minimal_ctx(
+            jobs, notifier, classifier=classifier, storyline_repo=storyline_repo,
+        )
+        update_calls: list[int] = []
 
-        def fake_regen(storyline_id: int, **_: Any) -> Any:  # noqa: ANN401
-            regen_calls.append(storyline_id)
-            return type("J", (), {"id": f"regen-{storyline_id}"})()
+        def fake_submit_update(storyline_id: int, **_: Any) -> Any:  # noqa: ANN401
+            update_calls.append(storyline_id)
+            return type("J", (), {"id": f"update-{storyline_id}"})()
 
         job = jobs.create(
             "storyline_extension_check",
@@ -540,54 +546,18 @@ class TestExtensionCheckWorker:
         run_storyline_extension_check(
             ctx, job.id,
             {"entry_id": 42, "user_id": 1},
-            fake_regen,
+            fake_submit_update,
         )
 
         finished = jobs.get(job.id)
         assert finished is not None
         assert finished.status == "succeeded"
-        assert regen_calls == [1]  # only the "yes" got a regen
+        assert update_calls == [1]  # only the "yes" got an update
+        assert storyline_repo.pending_calls == [(1, 42)]
         assert finished.result is not None
         classifications = finished.result["classifications"]
         decisions = sorted(c["decision"] for c in classifications)
         assert decisions == ["maybe", "no", "yes"]
-
-    def test_yes_decisions_queue_regenerations_with_auto_split(
-        self,
-        job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
-    ) -> None:
-        """W5: the ingest path opts into auto-split — the extension-check
-        worker queues regenerations with ``auto_split=True`` so an
-        over-budget open chapter is re-segmented automatically."""
-        jobs, notifier = job_ctx
-        classifier = _FakeClassifier({
-            42: [
-                ExtensionResult(
-                    storyline_id=1, decision="yes",
-                    reasoning="ok", stage="entity_overlap",
-                ),
-            ],
-        })
-        ctx = _build_minimal_ctx(jobs, notifier, classifier=classifier)
-        regen_kwargs: list[dict[str, Any]] = []
-
-        def fake_regen(storyline_id: int, **kwargs: Any) -> Any:  # noqa: ANN401, ARG001
-            regen_kwargs.append(kwargs)
-            return type("J", (), {"id": "regen"})()
-
-        job = jobs.create(
-            "storyline_extension_check",
-            {"entry_id": 42, "user_id": 1}, user_id=1,
-        )
-        run_storyline_extension_check(
-            ctx, job.id,
-            {"entry_id": 42, "user_id": 1},
-            fake_regen,
-        )
-
-        assert len(regen_kwargs) == 1
-        assert regen_kwargs[0].get("auto_split") is True
-        assert regen_kwargs[0].get("user_id") == 1
 
     def test_missing_classifier_marks_failed(
         self,
@@ -608,13 +578,15 @@ class TestExtensionCheckWorker:
         assert finished is not None
         assert finished.status == "failed"
 
-    def test_coalesces_when_open_regeneration_already_queued(
+    def test_extension_check_yes_adds_pending_and_queues_coalesced(
         self,
         job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
     ) -> None:
-        """W4: a burst ingest must not fire one full regeneration per
-        entry. If a queued open-refresh for the storyline already exists,
-        it will pick up this entry when it runs, so skip queuing another."""
+        """A burst ingest must not fire one full update per entry. Every
+        ``yes`` records the entry as pending regardless of coalescing
+        (lossless), but if a queued update for the storyline already
+        exists, it will pick up the pending entry when it runs, so skip
+        queuing another."""
         jobs, notifier = job_ctx
         classifier = _FakeClassifier({
             42: [
@@ -624,41 +596,47 @@ class TestExtensionCheckWorker:
                 ),
             ],
         })
-        ctx = _build_minimal_ctx(jobs, notifier, classifier=classifier)
-        # A prior entry in this batch already queued an open refresh for
+        storyline_repo = _FakeStorylineRepository()
+        ctx = _build_minimal_ctx(
+            jobs, notifier, classifier=classifier, storyline_repo=storyline_repo,
+        )
+        # A prior entry in this batch already queued a plain update for
         # storyline 1 (still queued — not yet run).
         jobs.create(
-            "storyline_generation",
-            {"storyline_id": 1, "user_id": 1, "auto_split": True},
+            "storyline_update",
+            {"storyline_id": 1, "user_id": 1},
             user_id=1,
         )
-        regen_calls: list[int] = []
+        update_calls: list[int] = []
 
-        def fake_regen(storyline_id: int, **_: Any) -> Any:  # noqa: ANN401
-            regen_calls.append(storyline_id)
-            return type("J", (), {"id": "regen"})()
+        def fake_submit_update(storyline_id: int, **_: Any) -> Any:  # noqa: ANN401
+            update_calls.append(storyline_id)
+            return type("J", (), {"id": "update"})()
 
         job = jobs.create(
             "storyline_extension_check",
             {"entry_id": 42, "user_id": 1}, user_id=1,
         )
         run_storyline_extension_check(
-            ctx, job.id, {"entry_id": 42, "user_id": 1}, fake_regen,
+            ctx, job.id, {"entry_id": 42, "user_id": 1}, fake_submit_update,
         )
 
         finished = jobs.get(job.id)
         assert finished is not None
         assert finished.status == "succeeded"
-        assert regen_calls == []  # coalesced onto the queued regen
+        # Pending was recorded even though the update itself coalesced —
+        # this is what makes the coalescing lossless.
+        assert storyline_repo.pending_calls == [(1, 42)]
+        assert update_calls == []  # coalesced onto the queued update
         assert finished.result is not None
-        assert finished.result["regenerations_queued"] == []
+        assert finished.result["updates_queued"] == []
         assert finished.result["coalesced_storyline_ids"] == [1]
 
-    def test_queues_regeneration_when_no_pending_regeneration(
+    def test_queues_update_when_no_pending_update(
         self,
         job_ctx: tuple[SQLiteJobRepository, _FakeJobNotifier],
     ) -> None:
-        """W4: with nothing pending, the "yes" still queues a regen."""
+        """With nothing queued, the "yes" still queues an update."""
         jobs, notifier = job_ctx
         classifier = _FakeClassifier({
             42: [
@@ -668,24 +646,27 @@ class TestExtensionCheckWorker:
                 ),
             ],
         })
-        ctx = _build_minimal_ctx(jobs, notifier, classifier=classifier)
-        regen_calls: list[int] = []
+        storyline_repo = _FakeStorylineRepository()
+        ctx = _build_minimal_ctx(
+            jobs, notifier, classifier=classifier, storyline_repo=storyline_repo,
+        )
+        update_calls: list[int] = []
 
-        def fake_regen(storyline_id: int, **_: Any) -> Any:  # noqa: ANN401
-            regen_calls.append(storyline_id)
-            return type("J", (), {"id": "regen"})()
+        def fake_submit_update(storyline_id: int, **_: Any) -> Any:  # noqa: ANN401
+            update_calls.append(storyline_id)
+            return type("J", (), {"id": "update"})()
 
         job = jobs.create(
             "storyline_extension_check",
             {"entry_id": 42, "user_id": 1}, user_id=1,
         )
         run_storyline_extension_check(
-            ctx, job.id, {"entry_id": 42, "user_id": 1}, fake_regen,
+            ctx, job.id, {"entry_id": 42, "user_id": 1}, fake_submit_update,
         )
 
         finished = jobs.get(job.id)
         assert finished is not None
-        assert regen_calls == [1]
+        assert update_calls == [1]
         assert finished.result["coalesced_storyline_ids"] == []
 
 
@@ -696,10 +677,11 @@ def _build_minimal_ctx(
     jobs: SQLiteJobRepository,
     notifier: _FakeJobNotifier,
     *,
-    generation: Any = None,  # noqa: ANN401
+    engine: Any = None,  # noqa: ANN401
     classifier: Any = None,  # noqa: ANN401
     extraction: Any = None,  # noqa: ANN401
     queue_storyline_check: Any = None,  # noqa: ANN401
+    storyline_repo: Any = None,  # noqa: ANN401
 ) -> WorkerContext:
     """Build a WorkerContext with only the fields the storyline
     workers touch. Other fields are set to placeholder objects that
@@ -719,8 +701,9 @@ def _build_minimal_ctx(
         pop_pending_audio=lambda _: [],
         queue_post_ingestion_jobs=lambda *_a, **_k: {},
         queue_storyline_extension_check=queue_storyline_check,
-        storyline_generation=generation,
+        storyline_engine=engine,
         storyline_extension_classifier=classifier,
+        storyline_repository=storyline_repo,
     )
     return ctx
 
@@ -729,176 +712,89 @@ def _build_minimal_ctx(
 
 
 class TestJobRunnerStorylineSubmit:
-    def test_submit_generation_refuses_when_service_missing(
+    def test_submit_update_refuses_when_engine_missing(
         self,
         factory: ConnectionFactory,
     ) -> None:
-        runner = _build_minimal_runner(factory, generation=None)
+        runner = _build_minimal_runner(factory, engine=None)
         with pytest.raises(RuntimeError, match="not configured"):
-            runner.submit_storyline_generation(1, user_id=1)
+            runner.submit_storyline_update(1, user_id=1)
         runner.shutdown(wait=True, cancel_futures=False)
 
-    def test_submit_generation_queues_when_service_present(
+    def test_submit_update_queues_when_engine_present(
         self,
         factory: ConnectionFactory,
     ) -> None:
-        svc = _FakeGenerationService(GenerationResult(storyline_id=7))
-        runner = _build_minimal_runner(factory, generation=svc)
-        job = runner.submit_storyline_generation(7, user_id=1)
+        engine = _FakeStorylineEngine(update_result=UpdateResult(storyline_id=7))
+        runner = _build_minimal_runner(factory, engine=engine)
+        job = runner.submit_storyline_update(7, user_id=1)
         runner.shutdown(wait=True, cancel_futures=False)
-        # Run completed: storyline_id 7 was passed through
-        assert svc.calls == [7]
+        assert engine.update_calls == [7]
         finished = runner._jobs.get(job.id)  # type: ignore[attr-defined]
         assert finished is not None
         assert finished.status == "succeeded"
 
-    def test_submit_generation_with_date_range_and_mode_persists_params(
+    def test_submit_rejects_bootstrap_plus_refresh(
         self,
         factory: ConnectionFactory,
     ) -> None:
-        """W6: submit_storyline_generation accepts start_date/end_date/
-        mode kwargs and persists them into the job params dict, which
-        the worker then forwards to the service."""
-        svc = _FakeGenerationService(GenerationResult(storyline_id=8))
-        runner = _build_minimal_runner(factory, generation=svc)
-        job = runner.submit_storyline_generation(
-            8,
-            user_id=1,
-            start_date="2099-04-01",
-            end_date="2099-04-30",
-            mode="append",
+        engine = _FakeStorylineEngine()
+        runner = _build_minimal_runner(factory, engine=engine)
+        try:
+            with pytest.raises(ValueError, match="At most one"):
+                runner.submit_storyline_update(
+                    9, user_id=1, bootstrap=True, refresh_only=True,
+                )
+        finally:
+            runner.shutdown(wait=True, cancel_futures=False)
+
+    def test_submit_rejects_all_three_modes(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        engine = _FakeStorylineEngine()
+        runner = _build_minimal_runner(factory, engine=engine)
+        try:
+            with pytest.raises(ValueError, match="At most one"):
+                runner.submit_storyline_update(
+                    9, user_id=1,
+                    bootstrap=True, refresh_only=True, unpublish=True,
+                )
+        finally:
+            runner.shutdown(wait=True, cancel_futures=False)
+
+    def test_submit_bootstrap_persists_param_and_worker_bootstraps(
+        self,
+        factory: ConnectionFactory,
+    ) -> None:
+        engine = _FakeStorylineEngine(
+            bootstrap_result=UpdateResult(storyline_id=20, chapter_count=3),
         )
+        runner = _build_minimal_runner(factory, engine=engine)
+        job = runner.submit_storyline_update(20, user_id=1, bootstrap=True)
         runner.shutdown(wait=True, cancel_futures=False)
 
         finished = runner._jobs.get(job.id)  # type: ignore[attr-defined]
         assert finished is not None
-        assert finished.params["start_date"] == "2099-04-01"
-        assert finished.params["end_date"] == "2099-04-30"
-        assert finished.params["mode"] == "append"
-        assert svc.calls == [8]
-        assert svc.kwargs == [{
-            "start_date": "2099-04-01",
-            "end_date": "2099-04-30",
-            "mode": "append",
-        }]
+        assert finished.params["bootstrap"] is True
+        assert engine.bootstrap_calls == [20]
+        assert engine.update_calls == []
 
-    def test_submit_generation_rejects_invalid_mode(
+    def test_submit_default_omits_mode_params(
         self,
         factory: ConnectionFactory,
     ) -> None:
-        svc = _FakeGenerationService(GenerationResult(storyline_id=9))
-        runner = _build_minimal_runner(factory, generation=svc)
-        try:
-            with pytest.raises(ValueError, match="Invalid mode"):
-                runner.submit_storyline_generation(
-                    9, user_id=1, mode="lolnope",
-                )
-        finally:
-            runner.shutdown(wait=True, cancel_futures=False)
-
-    def test_submit_resegment_persists_params_and_worker_resegments(
-        self,
-        factory: ConnectionFactory,
-    ) -> None:
-        """W4: ``resegment=True`` (plus ``override_locked=True``) is
-        persisted into the job params and the worker re-segments."""
-        svc = _FakeGenerationService(GenerationResult(storyline_id=20))
-        runner = _build_minimal_runner(factory, generation=svc)
-        job = runner.submit_storyline_generation(
-            20, user_id=1, resegment=True, override_locked=True,
-        )
+        engine = _FakeStorylineEngine(update_result=UpdateResult(storyline_id=21))
+        runner = _build_minimal_runner(factory, engine=engine)
+        job = runner.submit_storyline_update(21, user_id=1)
         runner.shutdown(wait=True, cancel_futures=False)
 
         finished = runner._jobs.get(job.id)  # type: ignore[attr-defined]
         assert finished is not None
-        assert finished.params["resegment"] is True
-        assert finished.params["override_locked"] is True
-        assert svc.resegment_calls == [20]
-        assert svc.resegment_kwargs == [{"override_locked": True}]
-        assert svc.calls == []
-
-    def test_submit_resegment_false_omits_params(
-        self,
-        factory: ConnectionFactory,
-    ) -> None:
-        """The default (no resegment) keeps the params dict clean — no
-        ``resegment``/``override_locked`` keys leak in — and calls
-        regenerate."""
-        svc = _FakeGenerationService(GenerationResult(storyline_id=21))
-        runner = _build_minimal_runner(factory, generation=svc)
-        job = runner.submit_storyline_generation(21, user_id=1)
-        runner.shutdown(wait=True, cancel_futures=False)
-
-        finished = runner._jobs.get(job.id)  # type: ignore[attr-defined]
-        assert finished is not None
-        assert "resegment" not in finished.params
-        assert "override_locked" not in finished.params
-        assert svc.calls == [21]
-        assert svc.resegment_calls == []
-
-    def test_submit_generation_auto_split_persists_param_and_forwards(
-        self,
-        factory: ConnectionFactory,
-    ) -> None:
-        """W5: ``submit_storyline_generation(auto_split=True)`` stores
-        ``auto_split`` in the job params and the worker forwards it into
-        ``regenerate``."""
-        svc = _FakeGenerationService(GenerationResult(storyline_id=24))
-        runner = _build_minimal_runner(factory, generation=svc)
-        job = runner.submit_storyline_generation(24, user_id=1, auto_split=True)
-        runner.shutdown(wait=True, cancel_futures=False)
-
-        finished = runner._jobs.get(job.id)  # type: ignore[attr-defined]
-        assert finished is not None
-        assert finished.params["auto_split"] is True
-        assert svc.calls == [24]
-        assert svc.kwargs == [{"auto_split": True}]
-
-    def test_submit_generation_auto_split_false_omits_param(
-        self,
-        factory: ConnectionFactory,
-    ) -> None:
-        """The default (no ``auto_split``) keeps the params dict clean and
-        forwards no ``auto_split`` kwarg — manual refresh stays opt-out."""
-        svc = _FakeGenerationService(GenerationResult(storyline_id=25))
-        runner = _build_minimal_runner(factory, generation=svc)
-        job = runner.submit_storyline_generation(25, user_id=1)
-        runner.shutdown(wait=True, cancel_futures=False)
-
-        finished = runner._jobs.get(job.id)  # type: ignore[attr-defined]
-        assert finished is not None
-        assert "auto_split" not in finished.params
-        assert svc.kwargs == [{}]
-
-    def test_submit_resegment_with_chapter_id_raises(
-        self,
-        factory: ConnectionFactory,
-    ) -> None:
-        """A chapter-scoped run cannot re-segment the whole storyline."""
-        svc = _FakeGenerationService(GenerationResult(storyline_id=22))
-        runner = _build_minimal_runner(factory, generation=svc)
-        try:
-            with pytest.raises(ValueError, match="resegment"):
-                runner.submit_storyline_generation(
-                    22, user_id=1, chapter_id=5, resegment=True,
-                )
-        finally:
-            runner.shutdown(wait=True, cancel_futures=False)
-
-    def test_submit_resegment_with_append_mode_raises(
-        self,
-        factory: ConnectionFactory,
-    ) -> None:
-        """resegment is incompatible with append mode."""
-        svc = _FakeGenerationService(GenerationResult(storyline_id=23))
-        runner = _build_minimal_runner(factory, generation=svc)
-        try:
-            with pytest.raises(ValueError, match="resegment"):
-                runner.submit_storyline_generation(
-                    23, user_id=1, mode="append", resegment=True,
-                )
-        finally:
-            runner.shutdown(wait=True, cancel_futures=False)
+        assert "bootstrap" not in finished.params
+        assert "refresh_only" not in finished.params
+        assert "unpublish" not in finished.params
+        assert engine.update_calls == [21]
 
     def test_submit_extension_check_refuses_when_classifier_missing(
         self,
@@ -915,7 +811,7 @@ class TestJobRunnerStorylineSubmit:
     ) -> None:
         """W1: the entity-extraction worker's trigger callable queues a
         real storyline_extension_check job when storylines are wired."""
-        classifier = _FakeClassifier({})  # classify → [] (no regens)
+        classifier = _FakeClassifier({})  # classify → [] (no updates)
         runner = _build_minimal_runner(factory, classifier=classifier)
         runner._maybe_queue_storyline_extension_check(5, 1)  # noqa: SLF001
         runner.shutdown(wait=True, cancel_futures=False)
@@ -959,7 +855,7 @@ class TestJobRunnerStorylineSubmit:
 def _build_minimal_runner(
     factory: ConnectionFactory,
     *,
-    generation: Any = None,  # noqa: ANN401
+    engine: Any = None,  # noqa: ANN401
     classifier: Any = None,  # noqa: ANN401
 ) -> JobRunner:
     """Construct a JobRunner with stub collaborators sufficient for
@@ -981,6 +877,6 @@ def _build_minimal_runner(
         mood_backfill_callable=lambda **_: None,
         mood_scoring_service=_StubMood(),  # type: ignore[arg-type]
         entry_repository=object(),  # type: ignore[arg-type]
-        storyline_generation_service=generation,
+        storyline_engine=engine,
         storyline_extension_classifier=classifier,
     )

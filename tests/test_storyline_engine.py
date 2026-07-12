@@ -328,6 +328,31 @@ class TestUpdateContinue:
         second = engine.update(storyline.id)
         assert second.new_entry_count == 3
 
+    def test_stale_pending_id_swept_even_when_nothing_else_new(
+        self,
+        engine: StorylineEngine,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+        entry_ids: list[int],
+        fake_judge: FakeJudge,
+    ) -> None:
+        """A pending id that's already assigned to a chapter (persisted
+        by a previous run whose clear step was skipped) is stale — it
+        must be swept from the pending table at the start of the next
+        update(), even on a run that finds nothing else new (i.e. the
+        sweep can't be gated behind the "any new candidates" check)."""
+        draft = repo.get_draft(storyline.id)
+        assert draft is not None
+        repo.add_entries_to_draft(draft.id, entry_ids)  # all 3 assigned
+        repo.add_pending_entry(storyline.id, entry_ids[0])  # stale
+        assert entry_ids[0] in repo.list_pending_entries(storyline.id)
+
+        result = engine.update(storyline.id)
+
+        assert entry_ids[0] not in repo.list_pending_entries(storyline.id)
+        assert result.new_entry_count == 0
+        assert fake_judge.calls == []  # no-op path still taken
+
     def test_narrator_failure_keeps_old_draft_narrative(
         self,
         engine: StorylineEngine,

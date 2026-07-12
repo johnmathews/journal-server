@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
     from journal.db.jobs_repository import SQLiteJobRepository
     from journal.db.repository import EntryRepository
+    from journal.db.storyline_repository import SQLiteStorylineRepository
     from journal.services.backfill import MoodBackfillResult
     from journal.services.entity_extraction import EntityExtractionService
     from journal.services.fitness.backfill import BackfillResult
@@ -29,11 +30,9 @@ if TYPE_CHECKING:
     from journal.services.jobs.notifier import JobNotifier
     from journal.services.jobs.runner import EntityReembedder
     from journal.services.mood_scoring import MoodScoringService
+    from journal.services.storylines.engine import StorylineEngineProtocol
     from journal.services.storylines.extension import (
         StorylineExtensionClassifierProtocol,
-    )
-    from journal.services.storylines.service import (
-        StorylineGenerationServiceProtocol,
     )
 
 
@@ -95,10 +94,17 @@ class WorkerContext:
     # opt-in gate as the fetch_*/normalize_* callables above).
     backfill_strava: Callable[..., BackfillResult] | None = None
     backfill_garmin: Callable[..., BackfillResult] | None = None
-    # Storylines seams (W5/W7). Both are optional because storylines
-    # is opt-in at server boot — when the providers/services aren't
-    # wired, JobRunner refuses to queue these jobs in the first place.
-    storyline_generation: StorylineGenerationServiceProtocol | None = None
+    # Storylines seams (storylines-redesign). All three are optional
+    # because storylines is opt-in at server boot — when the
+    # engine/classifier aren't wired, JobRunner refuses to queue these
+    # jobs in the first place. ``storyline_repository`` is read
+    # directly by the extension-check worker (``add_pending_entry``)
+    # and the update worker (fetching the storyline name for the
+    # publish notification, and ``unpublish_newest`` on the unpublish
+    # branch) — it's wired alongside the classifier/engine, never on
+    # its own.
+    storyline_engine: StorylineEngineProtocol | None = None
     storyline_extension_classifier: (
         StorylineExtensionClassifierProtocol | None
     ) = None
+    storyline_repository: SQLiteStorylineRepository | None = None

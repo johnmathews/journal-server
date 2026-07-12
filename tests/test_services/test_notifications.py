@@ -428,11 +428,12 @@ class TestGetTopicsForUser:
     ) -> None:
         topics = svc.get_topics_for_user(1, is_admin=False)
         assert all(not t["admin_only"] for t in topics)
-        # 5 success (ingest_images, ingest_audio, save_entry,
-        #            entity_reembed, fitness_sync_success)
+        # 6 success (ingest_images, ingest_audio, save_entry,
+        #            entity_reembed, fitness_sync_success,
+        #            storyline_published)
         # 5 failure (job_retrying, job_failed, job_failed_save_entry,
         #            fitness_auth_broken, fitness_sync_failure)
-        assert len(topics) == 10
+        assert len(topics) == 11
 
     def test_admin_sees_all_topics(
         self, svc: PushoverNotificationService,
@@ -813,6 +814,45 @@ class TestNotifyFitnessAuthBroken:
         mock_user_repo.get_preference.side_effect = pref_side_effect
         with patch("urllib.request.urlopen") as mock_urlopen:
             svc.notify_fitness_auth_broken(1, "strava")
+            mock_urlopen.assert_not_called()
+
+
+class TestNotifyChapterPublished:
+    """notify_chapter_published fires when a storyline_update job
+    publishes a chapter — at most once per publish, per the caller
+    contract in the worker."""
+
+    def test_posts_normal_priority_with_title_and_chapter(
+        self,
+        svc: PushoverNotificationService,
+        mock_user_repo: MagicMock,
+    ) -> None:
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = _make_urlopen_response({"status": 1})
+            svc.notify_chapter_published(
+                user_id=1,
+                storyline_name="Marathon Training",
+                chapter_title="The Long Runs Begin",
+            )
+
+            assert mock_urlopen.called
+            req = mock_urlopen.call_args[0][0]
+            posted_data = req.data.decode()
+            assert "New+chapter%3A+Marathon+Training" in posted_data
+            assert "Long+Runs+Begin" in posted_data
+            assert f"priority={PRIORITY_NORMAL}" in posted_data
+
+    def test_skips_when_topic_disabled(
+        self,
+        svc: PushoverNotificationService,
+        mock_user_repo: MagicMock,
+    ) -> None:
+        def pref_side_effect(user_id: int, key: str):
+            return False if key == "storyline_published" else None
+
+        mock_user_repo.get_preference.side_effect = pref_side_effect
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            svc.notify_chapter_published(1, "Marathon Training", "Chapter Title")
             mock_urlopen.assert_not_called()
 
 

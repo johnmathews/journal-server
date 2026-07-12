@@ -148,70 +148,72 @@ class TestGet:
         assert jobs_repo.get("does-not-exist") is None
 
 
-class TestFindPendingOpenRegeneration:
-    """W4 coalescing: locate a queued full-refresh regeneration for a
+class TestFindPendingStorylineUpdate:
+    """Coalescing: locate a queued plain ``storyline_update`` for a
     storyline so a burst ingest doesn't queue one per entry."""
 
-    def test_finds_queued_open_refresh(self, jobs_repo):
+    def test_finds_queued_plain_update(self, jobs_repo):
         jobs_repo.create(
-            "storyline_generation",
-            {"storyline_id": 5, "user_id": 1, "auto_split": True},
+            "storyline_update",
+            {"storyline_id": 5, "user_id": 1},
             user_id=1,
         )
-        found = jobs_repo.find_pending_open_regeneration(
+        found = jobs_repo.find_pending_storyline_update(
             user_id=1, storyline_id=5,
         )
         assert found is not None
 
     def test_ignores_other_storyline(self, jobs_repo):
         jobs_repo.create(
-            "storyline_generation", {"storyline_id": 5, "user_id": 1},
+            "storyline_update", {"storyline_id": 5, "user_id": 1},
             user_id=1,
         )
-        assert jobs_repo.find_pending_open_regeneration(
+        assert jobs_repo.find_pending_storyline_update(
             user_id=1, storyline_id=6,
         ) is None
 
-    def test_ignores_running_regeneration(self, jobs_repo):
-        """A running regen may already have selected its window, so a new
-        entry still needs its own regeneration — don't coalesce onto it."""
+    def test_ignores_running_update(self, jobs_repo):
+        """A running update may already have read its candidate set, so
+        a newly pended entry still needs its own update — don't
+        coalesce onto it."""
         j = jobs_repo.create(
-            "storyline_generation", {"storyline_id": 5, "user_id": 1},
+            "storyline_update", {"storyline_id": 5, "user_id": 1},
             user_id=1,
         )
         jobs_repo.mark_running(j.id)
-        assert jobs_repo.find_pending_open_regeneration(
+        assert jobs_repo.find_pending_storyline_update(
             user_id=1, storyline_id=5,
         ) is None
 
-    def test_ignores_scoped_regenerations(self, jobs_repo):
-        """Date-ranged, resegment, and chapter-scoped jobs may not cover
-        the new entry, so they don't count as a coalescing target."""
+    def test_ignores_bootstrap_refresh_only_and_unpublish(self, jobs_repo):
+        """Bootstrap, refresh-only, and unpublish jobs don't run the
+        steady-state candidate scan, so they don't count as a
+        coalescing target."""
         jobs_repo.create(
-            "storyline_generation",
-            {"storyline_id": 5, "user_id": 1, "start_date": "2026-06-01"},
+            "storyline_update",
+            {"storyline_id": 5, "user_id": 1, "bootstrap": True},
             user_id=1,
         )
         jobs_repo.create(
-            "storyline_generation",
-            {"storyline_id": 5, "user_id": 1, "resegment": True},
+            "storyline_update",
+            {"storyline_id": 5, "user_id": 1, "refresh_only": True},
             user_id=1,
         )
         jobs_repo.create(
-            "storyline_generation",
-            {"storyline_id": 5, "user_id": 1, "chapter_id": 9},
+            "storyline_update",
+            {"storyline_id": 5, "user_id": 1, "unpublish": True},
             user_id=1,
         )
-        assert jobs_repo.find_pending_open_regeneration(
+        assert jobs_repo.find_pending_storyline_update(
             user_id=1, storyline_id=5,
         ) is None
 
     def test_scoped_to_user(self, jobs_repo):
         jobs_repo.create(
-            "storyline_generation", {"storyline_id": 5, "user_id": 1},
+            "storyline_update", {"storyline_id": 5, "user_id": 1},
             user_id=1,
         )
-        assert jobs_repo.find_pending_open_regeneration(
+        assert jobs_repo.find_pending_storyline_update(
             user_id=2, storyline_id=5,
         ) is None
 

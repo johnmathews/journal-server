@@ -67,6 +67,28 @@ class JobNotifier:
             except Exception:  # noqa: BLE001
                 log.warning("Notification send failed (failure)", exc_info=True)
 
+    def notify_chapter_published(
+        self, user_id: int | None, storyline_name: str, chapter_title: str,
+    ) -> None:
+        """Forward to ``PushoverNotificationService.notify_chapter_published``.
+
+        Callers additionally guard on ``user_id is not None`` before
+        even reaching this (the worker only calls it when
+        ``UpdateResult.published`` is set AND ``user_id`` is known), but
+        the check is repeated here so this method is safe to call
+        unconditionally, matching the other ``notify_*`` wrappers.
+        """
+        if self._notifications is not None and user_id is not None:
+            try:
+                self._notifications.notify_chapter_published(
+                    user_id, storyline_name, chapter_title,
+                )
+            except Exception:  # noqa: BLE001
+                log.warning(
+                    "Notification send failed (chapter published)",
+                    exc_info=True,
+                )
+
     def notify_retrying(
         self,
         user_id: int | None,

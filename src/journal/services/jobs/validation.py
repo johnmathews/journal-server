@@ -81,38 +81,23 @@ FITNESS_BACKFILL_KEYS: dict[str, type | tuple[type, ...]] = {
     "end": str,
 }
 
-# Storylines (W5/W7). storyline_generation regenerates one storyline's
-# panels end-to-end. storyline_extension_check fires after each
-# ingestion to classify whether a new entry extends an active
-# storyline and (optionally) queue a regeneration.
-STORYLINE_GENERATION_KEYS: dict[str, type | tuple[type, ...]] = {
+# Storylines (storylines-redesign). storyline_update drives the
+# StorylineEngine for one storyline: the default steady-state
+# continue-or-break ``update()`` call, or one of the three mutually
+# exclusive alternate modes below. storyline_extension_check fires
+# after each ingestion to classify whether a new entry extends an
+# active storyline and (optionally) queue a coalesced update.
+STORYLINE_UPDATE_KEYS: dict[str, type | tuple[type, ...]] = {
     "storyline_id": int,
     "user_id": int,
     "parent_job_id": str,
-    # Optional: regenerate a single chapter rather than the storyline's
-    # open chapter. When present, the worker calls regenerate_chapter and
-    # the chapter's own date window is authoritative.
-    "chapter_id": int,
-    # Optional date-window overrides + mode ("replace" | "append").
-    # Stored as ISO strings; the service layer parses them.
-    "start_date": str,
-    "end_date": str,
-    "mode": str,
-    # Optional two-mode regenerate (W4). When ``resegment`` is True the
-    # worker re-carves the storyline into titled word-sized chapters via
-    # ``resegment_storyline`` instead of refreshing the open chapter.
-    # ``override_locked`` is only meaningful with ``resegment=True``.
-    "resegment": bool,
-    "override_locked": bool,
-    # Optional ingest-time auto-split (W5). When True the worker forwards
-    # ``auto_split=True`` into ``regenerate`` so an over-budget open
-    # chapter is re-segmented automatically. Only meaningful on the
-    # storyline-level default path; ignored with ``chapter_id`` /
-    # ``resegment``.
-    "auto_split": bool,
+    # At most one of the three may be True (enforced by
+    # JobRunner.submit_storyline_update). Absent → the default
+    # steady-state ``engine.update(storyline_id)`` path.
+    "bootstrap": bool,
+    "refresh_only": bool,
+    "unpublish": bool,
 }
-
-STORYLINE_GENERATION_MODES = frozenset({"replace", "append"})
 
 STORYLINE_EXTENSION_CHECK_KEYS: dict[str, type | tuple[type, ...]] = {
     "entry_id": int,

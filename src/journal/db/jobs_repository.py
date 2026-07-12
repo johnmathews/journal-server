@@ -293,33 +293,34 @@ class SQLiteJobRepository:
         ).fetchone()
         return _row_to_job(row) if row else None
 
-    def find_pending_open_regeneration(
+    def find_pending_storyline_update(
         self, *, user_id: int, storyline_id: int,
     ) -> Job | None:
-        """Return a QUEUED full-refresh ``storyline_generation`` for this
-        storyline, or ``None``.
+        """Return a QUEUED plain ``storyline_update`` for this storyline,
+        or ``None``.
 
-        Used to coalesce auto-regenerations during a burst ingest: if a
-        plain open-chapter refresh for this storyline is already queued
-        (not yet running), it will pick up the just-ingested entry when it
-        runs, so queuing a second regeneration is redundant. Only
-        ``queued`` jobs qualify — a ``running`` one may have already
-        selected its source window, so a fresh regeneration is still
-        needed to include newer entries. Chapter-scoped, date-ranged, and
-        resegment jobs are excluded because they may not cover the new
-        entry.
+        Used to coalesce auto-updates during a burst ingest: if a plain
+        update for this storyline is already queued (not yet running), it
+        will pick up the just-pended entry (recorded via
+        ``StorylineRepository.add_pending_entry``) when it runs, so
+        queuing a second update is redundant — lossless coalescing, not
+        a drop. Only ``queued`` jobs qualify — a ``running`` one may have
+        already read its candidate set, so a fresh update is still
+        needed to pick up entries pended after it started. Bootstrap,
+        refresh-only, and unpublish jobs are excluded: none of them run
+        the steady-state candidate scan that would pick up the new
+        pending entry.
         """
         conn = self._conn()
         row = conn.execute(
             "SELECT * FROM jobs"
             " WHERE user_id = ?"
             "   AND status = 'queued'"
-            "   AND type = 'storyline_generation'"
+            "   AND type = 'storyline_update'"
             "   AND json_extract(params_json, '$.storyline_id') = ?"
-            "   AND json_extract(params_json, '$.chapter_id') IS NULL"
-            "   AND json_extract(params_json, '$.start_date') IS NULL"
-            "   AND json_extract(params_json, '$.end_date') IS NULL"
-            "   AND json_extract(params_json, '$.resegment') IS NULL"
+            "   AND json_extract(params_json, '$.bootstrap') IS NULL"
+            "   AND json_extract(params_json, '$.refresh_only') IS NULL"
+            "   AND json_extract(params_json, '$.unpublish') IS NULL"
             " ORDER BY created_at ASC"
             " LIMIT 1",
             (user_id, storyline_id),
