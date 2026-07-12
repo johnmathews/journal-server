@@ -532,12 +532,71 @@ class TestChapterLifecycle:
         assert merged.state == "draft"
         assert set(repo.chapter_entry_ids(merged.id)) == set(entry_ids)
         assert len(repo.list_chapters(storyline.id)) == 1
+        # Verify stale narrative fields are cleared
+        assert merged.model_used == ""
+        assert merged.draft_embedding is None
 
     def test_unpublish_with_no_published_raises(
         self, repo: SQLiteStorylineRepository, storyline: Storyline,
     ) -> None:
         with pytest.raises(ValueError, match="no published chapter"):
             repo.unpublish_newest(storyline.id)
+
+    def test_rename_chapter_returns_updated(
+        self,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+    ) -> None:
+        draft = repo.get_draft(storyline.id)
+        renamed = repo.rename_chapter(draft.id, "New Title")
+        assert renamed is not None
+        assert renamed.title == "New Title"
+        # Verify persisted
+        refreshed = repo.get_chapter(draft.id)
+        assert refreshed is not None
+        assert refreshed.title == "New Title"
+
+    def test_rename_chapter_unknown_id_returns_none(
+        self,
+        repo: SQLiteStorylineRepository,
+    ) -> None:
+        result = repo.rename_chapter(9999, "Title")
+        assert result is None
+
+    def test_get_chapter_unknown_id_returns_none(
+        self,
+        repo: SQLiteStorylineRepository,
+    ) -> None:
+        result = repo.get_chapter(9999)
+        assert result is None
+
+    def test_assigned_entry_ids(
+        self,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+        seed_user: int,
+        seed_entity: int,
+        entry_ids: list[int],
+    ) -> None:
+        # Create a second storyline to verify isolation
+        other_storyline = repo.create_storyline(
+            seed_user, [seed_entity], "Other Story",
+        )
+        # Add 2 entries to the first storyline's draft
+        draft = repo.get_draft(storyline.id)
+        repo.add_entries_to_draft(draft.id, entry_ids[:2])
+        # Publish with a third entry as new_draft_entry_ids
+        published, new_draft = repo.publish_draft(
+            storyline.id, title="Published",
+            segments=[{"kind": "text", "text": "content"}],
+            source_entry_ids=entry_ids[:2], citation_count=2, model_used="m",
+            new_draft_entry_ids=[entry_ids[2]],
+        )
+        # All three entries should be assigned to the storyline
+        assigned = repo.assigned_entry_ids(storyline.id)
+        assert assigned == set(entry_ids)
+        # Other storyline should have none
+        assert repo.assigned_entry_ids(other_storyline.id) == set()
 
 
 # ── Immutability guards ──────────────────────────────────────────

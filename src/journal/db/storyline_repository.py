@@ -693,6 +693,7 @@ class SQLiteStorylineRepository:
             conn.execute(
                 "UPDATE storyline_chapters SET seq=?, segments_json='[]',"
                 " source_entry_ids_json='[]', citation_count=0,"
+                " model_used='', draft_embedding_json=NULL,"
                 " updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
                 (newest.seq, draft.id),
             )
