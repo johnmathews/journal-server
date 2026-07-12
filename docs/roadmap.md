@@ -171,11 +171,12 @@ correlation views (webapp).
 ### 2. Storylines `[both]` — opened 2026-05-12, core shipped 2026-05-12
 
 LLM-synthesized cross-entry narratives about recurring threads. Each storyline anchors on
-**one or more entities** (1..15) and renders as two parallel panels: a curation panel of
-verbatim entry excerpts in chronological order, and a third-person narrative panel grounded
-via Anthropic's Citations API. The server-side spike, the webapp cycle, the MCP
-discoverability + append + auto-kick follow-up, and the multi-entity follow-up have all
-shipped and are verified in the browser. Current-state references:
+**one or more entities** (1..15). Redesigned 2026-07-12: chapters are now
+**draft/published** with explicit entry membership and LLM-judged semantic boundaries — a
+single third-person narrative per chapter grounded via Anthropic's Citations API (the
+earlier two-panel curation layout and date-window chapter editing were retired; see
+[`superpowers/specs/2026-07-12-storylines-redesign-design.md`](./superpowers/specs/2026-07-12-storylines-redesign-design.md)).
+Current-state references:
 [`storylines.md`](./storylines.md) (server) and
 [`../../webapp/docs/storylines.md`](../../webapp/docs/storylines.md).
 ~~Remaining gap: anchor *edit* UX on the webapp detail view~~ — **CLOSED**,
