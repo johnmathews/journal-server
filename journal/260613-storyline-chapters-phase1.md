@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-13
 **Branch:** `feat/storyline-chapters`
-**Spec:** [`docs/superpowers/specs/2026-06-13-storyline-chapters-design.md`](../docs/superpowers/specs/2026-06-13-storyline-chapters-design.md)
+**Spec:** [`docs/archive/2026-06-13-storyline-chapters-design.md`](../docs/archive/2026-06-13-storyline-chapters-design.md) (superseded 2026-07-12)
 **Plan:** [`docs/superpowers/plans/2026-06-13-storyline-chapters-phase1.md`](../docs/superpowers/plans/2026-06-13-storyline-chapters-phase1.md)
 **Reference doc:** [`docs/storylines.md`](../docs/storylines.md)
 

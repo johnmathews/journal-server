@@ -13,7 +13,7 @@ A single `jobs` table (migration `0006_jobs.sql`) holds one row per submitted ba
 | column             | type    | notes                                                        |
 | ------------------ | ------- | ------------------------------------------------------------ |
 | `id`               | TEXT PK | UUID v4 assigned at submission time                          |
-| `type`             | TEXT    | One of: `entity_extraction`, `mood_backfill`, `mood_score_entry`, `entity_reembed`, `reprocess_embeddings`, `ingest_images`, `ingest_audio`, `save_entry_pipeline`, `fitness_sync_strava`, `fitness_sync_garmin` (10 types as of 2026-05-10). |
+| `type`             | TEXT    | One of: `entity_extraction`, `mood_backfill`, `mood_score_entry`, `entity_reembed`, `reprocess_embeddings`, `ingest_images`, `ingest_audio`, `save_entry_pipeline`, `fitness_sync_strava`, `fitness_sync_garmin`, `fitness_backfill_strava`, `fitness_backfill_garmin`, `storyline_update`, `storyline_extension_check` (14 types as of 2026-07-12). |
 | `status`           | TEXT    | `queued` → `running` → `succeeded` \| `failed`               |
 | `params_json`      | TEXT    | JSON-encoded submission params (e.g. `{"stale_only": true}`) |
 | `progress_current` | INTEGER | Updated after each entry finishes                            |
@@ -44,7 +44,7 @@ subdirectory with one file per job type.) Its contract:
    - **Pool A (ingestion/fast)** — `max_workers = config.job_worker_count` (env `JOB_WORKER_COUNT`, default 4). Runs
      **everything except** storyline jobs, so independent ingestion / mood / fitness / extraction jobs execute in
      parallel.
-   - **Pool B (storyline)** — `max_workers = 1`. Runs **only** `storyline_generation` and
+   - **Pool B (storyline)** — `max_workers = 1`. Runs **only** `storyline_update` and
      `storyline_extension_check`.
 
    The split buys three things: (a) parallel ingestion throughput; (b) ingestion is never starved by slow storyline
@@ -400,7 +400,7 @@ ingestion: it is enqueued by the **entity-extraction worker itself**, after that
 and runs on the single-worker Pool B. This ordering guarantees the classifier's entity-overlap signal reads committed
 mentions — queuing it concurrently with entity extraction (the pre-fix behavior) caused a burst ingest to update zero
 storylines. Because it fires per single-entry extraction, the check coalesces: it skips queuing a regeneration when a
-full-refresh for that storyline is already queued (see [`storylines.md`](storylines.md#ingestion-hook)). The webapp's
+full-refresh for that storyline is already queued (see [`storylines.md`](storylines.md#extension-classifier--jobs)). The webapp's
 notification bell automatically re-hydrates its active jobs list when any tracked job reaches terminal state, so
 server-spawned follow-up jobs (like entity extraction after ingestion) appear in the bell without a page refresh.
 

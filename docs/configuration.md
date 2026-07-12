@@ -216,20 +216,16 @@ for the full model.
 
 Storylines (cross-entry narratives) are gated on `ANTHROPIC_API_KEY`; when it is unset the feature is disabled and
 these vars are inert. All are optional with working defaults. See [`storylines.md`](storylines.md#configuration) for the
-full model (providers, chapter sizing, the extension classifier pipeline).
+full model (providers, the judge-driven chapter engine, the extension classifier pipeline).
 
 | Variable                                   | Default            | Description                                                                                       |
 | ------------------------------------------ | ------------------ | ------------------------------------------------------------------------------------------------ |
-| `STORYLINE_NARRATOR_MODEL`                 | `claude-opus-4-7`  | Model for the narrative panel (Anthropic Citations API).                                         |
-| `STORYLINE_NARRATOR_MAX_TOKENS`            | `4096`             | Max output tokens for narrative generation.                                                      |
-| `STORYLINE_GLUE_MODEL`                     | `claude-haiku-4-5` | Model for the curation panel's transition prose.                                                 |
+| `STORYLINE_NARRATOR_MODEL`                 | `claude-opus-4-7`  | Model for chapter narration (Anthropic Citations API).                                           |
+| `STORYLINE_NARRATOR_MAX_TOKENS`            | `4096`             | Max output tokens for narration.                                                                  |
+| `STORYLINE_JUDGE_MODEL`                    | `claude-haiku-4-5` | Model for the chapter-boundary judge (`judge_extension` / `partition`).                          |
 | `STORYLINE_EXTENSION_DECIDER_MODEL`        | `claude-haiku-4-5` | Model for the extension classifier's LLM decider stage.                                          |
-| `STORYLINE_DEFAULT_WINDOW_DAYS`            | `90`               | Default lookback window when a storyline has no explicit date bounds.                             |
-| `STORYLINE_FTS_FALLBACK_THRESHOLD`         | `3`                | Below this many entity mentions in-window, FTS name-search fallback fires.                        |
-| `STORYLINE_EXTENSION_RELEVANCE_THRESHOLD`  | `0.5`              | Cosine at/above which the classifier's embedding fallback escalates a no-match entry to the decider. |
-| `STORYLINE_CHAPTER_TARGET_WORDS`           | `210`              | Target narrative words per sectioned chapter.                                                     |
-| `STORYLINE_CHAPTER_MIN_WORDS`              | `180`              | Soft lower bound; out-of-band sections are logged.                                                |
-| `STORYLINE_CHAPTER_MAX_WORDS`              | `240`              | Soft upper bound; also the ingest auto-split trigger and the divisor for deterministic chaptering. |
+| `STORYLINE_EXTENSION_RELEVANCE_THRESHOLD`  | `0.5`              | Cosine at/above which the classifier's embedding fallback (vs. the draft chapter's embedding) escalates a no-match entry to the decider. |
+| `STORYLINE_MIN_PUBLISH_ENTRIES`            | `3`                | Guard: a would-be publish below this entry count defers instead of producing a thin chapter.      |
 
 ## Runtime-toggleable settings
 

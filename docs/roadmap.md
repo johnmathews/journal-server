@@ -79,7 +79,7 @@ the top of the linked doc tells you whether it's active, closed, or superseded.
   storylines and panels via migration 0030; panels re-keyed to `chapter_id`; anchors stay
   storyline-level; per-chapter generation; left chapter rail with per-chapter citation
   numbering). Design + plan live at
-  [`superpowers/specs/2026-06-13-storyline-chapters-design.md`](./superpowers/specs/2026-06-13-storyline-chapters-design.md)
+  [`archive/2026-06-13-storyline-chapters-design.md`](./archive/2026-06-13-storyline-chapters-design.md) (superseded 2026-07-12 by the storylines redesign — see [`storylines.md`](./storylines.md))
   and [`superpowers/plans/2026-06-13-storyline-chapters-phase1.md`](./superpowers/plans/2026-06-13-storyline-chapters-phase1.md);
   shipped via journal-server PR #40 + journal-webapp PR #19. **Phase 2 (deferred, separate
   spec):** the LLM "suggest a cut" boundary engine, a draggable timeline editor, true

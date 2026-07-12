@@ -37,7 +37,7 @@ No schema change — built on migration 0030's `storyline_chapters` table.
 The LLM boundary-suggestion engine (Phase B) layers on top of these endpoints.
 Phase A delivers pure deterministic operations that are useful immediately and
 provide the foundation Phase B needs. See the
-[design spec](../docs/superpowers/specs/2026-06-15-storyline-chapter-editing-design.md)
+[design spec](../docs/archive/2026-06-15-storyline-chapter-editing-design.md) (superseded 2026-07-12)
 and [implementation plan](../docs/superpowers/plans/2026-06-15-storyline-chapter-editing.md).
 
 **2. Book-like timeline by default; `allow_gap` override.**

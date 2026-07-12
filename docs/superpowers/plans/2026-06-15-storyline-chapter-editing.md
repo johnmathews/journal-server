@@ -4,7 +4,7 @@
 
 **Goal:** Add manual chapter editing — move boundary, split, merge, add, delete — to storylines, with automatic per-chapter regeneration, exposed over discrete REST + MCP endpoints and an inline chapter-rail UI.
 
-**Architecture:** Phase A of [the design spec](../specs/2026-06-15-storyline-chapter-editing-design.md). Purely additive on migration 0030 — no schema change. New transactional repository methods enforce the invariants (one open chapter, book-like contiguity by default with an `allow_gap` override, no overlaps); new write routes in `api/storylines_write.py` mutate then enqueue the existing `storyline_generation` job per affected chapter; MCP tools mirror the routes; the webapp gains store actions and an inline `⋯`-menu + `+ Add` rail UI.
+**Architecture:** Phase A of [the design spec](../../archive/2026-06-15-storyline-chapter-editing-design.md) (superseded 2026-07-12 — this whole plan describes deleted functionality; see [`docs/storylines.md`](../../storylines.md)). Purely additive on migration 0030 — no schema change. New transactional repository methods enforce the invariants (one open chapter, book-like contiguity by default with an `allow_gap` override, no overlaps); new write routes in `api/storylines_write.py` mutate then enqueue the existing `storyline_generation` job per affected chapter; MCP tools mirror the routes; the webapp gains store actions and an inline `⋯`-menu + `+ Add` rail UI.
 
 **Tech Stack:** Python 3.13 / SQLite / Starlette + FastMCP (server, `uv`, pytest); Vue 3 + TypeScript / Pinia / Vitest (webapp).
 

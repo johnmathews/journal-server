@@ -2,9 +2,9 @@
 
 **Date:** 2026-07-12
 **Status:** approved design, pending implementation plan.
-**Supersedes (on ship):** [2026-06-13-storyline-chapters-design.md](2026-06-13-storyline-chapters-design.md),
-[2026-06-15-storyline-chapter-editing-design.md](2026-06-15-storyline-chapter-editing-design.md), and the
-chapter/panel sections of `docs/storylines.md`.
+**Supersedes (on ship):** [2026-06-13-storyline-chapters-design.md](../../archive/2026-06-13-storyline-chapters-design.md),
+[2026-06-15-storyline-chapter-editing-design.md](../../archive/2026-06-15-storyline-chapter-editing-design.md), and the
+chapter/panel sections of `docs/storylines.md`. **Shipped 2026-07-12** — both specs archived to `docs/archive/`.
 
 ## Why
 

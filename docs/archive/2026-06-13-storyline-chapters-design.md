@@ -1,7 +1,9 @@
+**Status:** superseded by [2026-07-12 storylines redesign](../superpowers/specs/2026-07-12-storylines-redesign-design.md) (2026-07-12).
+
 # Storyline Chapters — Design
 
 **Date:** 2026-06-13
-**Status:** active
+**Status:** superseded — see header above
 **Scope of this spec:** Phase 1 (steps 1–4) — schema, per-chapter generation, and a
 readable chapter rail. The suggestion engine and draggable timeline editor (steps 5–8)
 are deferred to a follow-up spec; their design is recorded here for context but is **not**

@@ -1,6 +1,6 @@
 # Architecture
 
-**Status:** active. **Last updated:** 2026-05-09. **Supersedes:** none.
+**Status:** active. **Last updated:** 2026-07-12 (storylines redesign — panels/glue references replaced). **Supersedes:** none.
 
 ## Overview
 
@@ -30,14 +30,16 @@ happening, just geometric proximity.
 1. **Mood scoring** (see [`mood-scoring.md`](./mood-scoring.md)) — a Haiku tool-use call produces a small set of
    `(dimension, score, rationale)` tuples per entry, stored on `entry_mood_scores`. The service exposes a scalar plus
    short reasoning, not generated prose.
-2. **Storylines** (see [`storylines.md`](./storylines.md)) — a per-storyline Opus + Haiku call produces a multi-paragraph
-   third-person narrative + a curated excerpt list, both stored on `storyline_panels`. This is the first feature to
-   produce LLM-generated *prose* served back to the user. It is grounded via the Anthropic Citations API (custom-content
-   documents; pointers are parsed not generated, so they cannot be fabricated) and is restricted by system-prompt
-   discipline to the corpus of source entries only.
+2. **Storylines** (see [`storylines.md`](./storylines.md)) — a per-chapter Opus narration produces a third-person
+   narrative stored directly on `storyline_chapters` (no separate curation panel or panels table). This is the first
+   feature to produce LLM-generated *prose* served back to the user. It is grounded via the Anthropic Citations API
+   (custom-content documents; pointers are parsed not generated, so they cannot be fabricated) and is restricted by
+   system-prompt discipline to the corpus of source entries only. A separate Haiku judge decides chapter boundaries
+   (continue the draft, start a new chapter, or append an addendum to a published one) — a semantic decision, not a
+   date window or word count.
 
-Both features stay aligned with the brief's "adapter-swappable" mandate — the narrator and glue are concrete classes
-behind `StorylineNarratorProtocol` / `StorylineGlueProtocol`, and providers can be swapped without touching the
+Both features stay aligned with the brief's "adapter-swappable" mandate — the narrator and judge are concrete classes
+behind `StorylineNarratorProtocol` / `StorylineJudgeProtocol`, and providers can be swapped without touching the
 service layer.
 
 The distinction matters because of how the two interfaces work:

@@ -1,7 +1,9 @@
+**Status:** superseded by [2026-07-12 storylines redesign](../superpowers/specs/2026-07-12-storylines-redesign-design.md) (2026-07-12).
+
 # 1. Storyline chapter editing — Design
 
 **Date:** 2026-06-15
-**Status:** active
+**Status:** superseded — see header above
 **Builds on:** [2026-06-13 Storyline Chapters design](2026-06-13-storyline-chapters-design.md)
 (Phase 1 — schema, per-chapter generation, chapter rail — is shipped; prod, local,
 and `main` are all at `user_version = 30`).
