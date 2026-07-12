@@ -599,11 +599,6 @@ def _init_services() -> dict:
     # Anthropic API key is configured. Without these the storyline
     # tools/routes return 503; submit_storyline_* on JobRunner raises.
     storyline_repository = None
-    # TODO(Task 12): wire the real StorylineEngine (judge + narrator +
-    # repo) here and pass it as storyline_engine below. The round-1
-    # StorylineGenerationService this replaced is gone (storylines-
-    # redesign); until Task 12 lands, storyline_update jobs refuse to
-    # queue (JobRunner raises) even when the classifier below is wired.
     storyline_engine = None
     storyline_extension_classifier = None
     if config.anthropic_api_key:
@@ -611,6 +606,9 @@ def _init_services() -> dict:
         from journal.providers.storyline_extension_decider import (
             AnthropicStorylineExtensionDecider,
         )
+        from journal.providers.storyline_judge import AnthropicStorylineJudge
+        from journal.providers.storyline_narrator import AnthropicStorylineNarrator
+        from journal.services.storylines.engine import StorylineEngine
         from journal.services.storylines.extension import (
             StorylineExtensionClassifier,
         )
@@ -628,9 +626,28 @@ def _init_services() -> dict:
             embedder=lambda text: embeddings.embed_texts([text])[0],
             relevance_threshold=config.storyline_extension_relevance_threshold,
         )
+        narrator = AnthropicStorylineNarrator(
+            api_key=config.anthropic_api_key,
+            model=config.storyline_narrator_model,
+            max_tokens=config.storyline_narrator_max_tokens,
+        )
+        judge = AnthropicStorylineJudge(
+            api_key=config.anthropic_api_key,
+            model=config.storyline_judge_model,
+        )
+        storyline_engine = StorylineEngine(
+            entity_store=entity_store,
+            entry_repository=repo,
+            storyline_repository=storyline_repository,
+            narrator=narrator,
+            judge=judge,
+            embedder=lambda text: embeddings.embed_texts([text])[0],
+            min_publish_entries=config.storyline_min_publish_entries,
+        )
         log.info(
-            "  Storylines partially wired (decider=%s); engine pending "
-            "Task 12",
+            "  Storylines wired (narrator=%s, judge=%s, decider=%s)",
+            config.storyline_narrator_model,
+            config.storyline_judge_model,
             config.storyline_extension_decider_model,
         )
     else:
@@ -809,7 +826,7 @@ def _init_services() -> dict:
         # Storylines — None when ANTHROPIC_API_KEY is unset; the API
         # routes and MCP tools detect that and return 503.
         "storyline_repository": storyline_repository,
-        "storyline_generation": storyline_engine,
+        "storyline_engine": storyline_engine,
         "storyline_extension_classifier": storyline_extension_classifier,
         # SQLite connection factory — used by API helpers that run
         # hand-written SQL (pricing reads/writes, fitness integrity)

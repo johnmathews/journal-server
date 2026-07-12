@@ -95,7 +95,7 @@ class ServicesDict(TypedDict, total=False):
 
     # Storylines (None when ANTHROPIC_API_KEY is unset)
     storyline_repository: SQLiteStorylineRepository | None
-    storyline_generation: Any
+    storyline_engine: Any
     storyline_extension_classifier: Any
 
     # Raw SQL escape hatch (pricing reads/writes, fitness integrity)

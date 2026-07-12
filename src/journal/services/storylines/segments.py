@@ -6,9 +6,9 @@ A panel is a list of segment dicts. Each dict is either:
     {"kind": "citation", "entry_id": 42, "quote": "..."}  — cited excerpt
 
 We keep segments as plain dicts (not dataclasses) because they're
-serialised straight to JSON on the wire and into the SQLite
-``storyline_panels.segments_json`` column. Helpers here exist so
-producers (narrator, glue, curation builder) build well-shaped
+serialised straight to JSON on the wire and into the
+``storyline_chapters.segments_json`` column. Helpers here exist so
+producers (the narrator, via ``StorylineEngine``) build well-shaped
 dicts without re-inventing the keys each time.
 """
 

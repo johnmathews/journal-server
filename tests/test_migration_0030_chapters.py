@@ -1,4 +1,14 @@
-"""Migration 0030: storylines split into chapters; panels re-keyed."""
+"""Migration 0030: storylines split into chapters; panels re-keyed.
+
+Pinned to the schema exactly as it stood right after 0030 landed. Migration
+0036 (storylines-redesign) later rebuilt both ``storyline_chapters`` and
+``storyline_panels`` again (open/closed -> draft/published, panels folded
+into the chapter row, ``storyline_panels`` dropped) — see
+``tests/test_db/test_migration_0036.py`` for that end-state. These tests
+build a database that stops at version 30 rather than running the full
+migration chain, so they keep asserting the 0030 end-state instead of
+drifting as later migrations reshape the same tables.
+"""
 
 from __future__ import annotations
 
@@ -11,17 +21,12 @@ from typing import TYPE_CHECKING
 from journal.db.connection import get_connection
 from journal.db.migrations import (
     _executescript_idempotent,
+    get_current_version,
     get_migration_files,
-    run_migrations,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from journal.db.factory import ConnectionFactory
-
-
-_MIGRATION_0030 = "0030_storyline_chapters.sql"
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -30,27 +35,36 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 
 def _run_migrations_up_to(conn: sqlite3.Connection, target_version: int) -> None:
-    """Apply every migration up to and including ``target_version``.
+    """Apply every PENDING migration up to and including ``target_version``.
 
-    Constructs a pre-0030 fixture so the migration-under-test can be applied
-    separately and asserted on. Mirrors ``run_migrations`` but stops once the
-    target is reached.
+    Pins a fixture at ``target_version`` so the migration-under-test can be
+    applied and asserted on in isolation, without later migrations (0036 in
+    particular) reshaping the same tables out from under the assertions.
+    Mirrors ``run_migrations``'s own forward-only skip logic (a migration
+    whose version is <= the connection's current ``PRAGMA user_version`` is
+    never re-executed) but stops once ``target_version`` is reached instead
+    of running to the latest file — so calling this twice at the same
+    target is a genuine no-op re-run, exactly like the real runner.
     """
+    current = get_current_version(conn)
     for migration_file in get_migration_files():
         version = int(migration_file.stem.split("_")[0])
+        if version <= current:
+            continue
         if version > target_version:
             break
         _executescript_idempotent(
             conn, migration_file.read_text(), migration_file.name,
         )
         conn.execute(f"PRAGMA user_version = {version}")
+        current = version
 
 
-def _read_migration_0030() -> str:
-    files = get_migration_files()
-    matches = [f for f in files if f.name == _MIGRATION_0030]
-    assert matches, f"migration {_MIGRATION_0030} missing"
-    return matches[0].read_text()
+def _conn_at_0030(tmp_path: Path, name: str = "m.db") -> sqlite3.Connection:
+    """A fresh DB migrated up to and including 0030, no further."""
+    conn = get_connection(tmp_path / name)
+    _run_migrations_up_to(conn, target_version=30)
+    return conn
 
 
 def _seed_user_entity_storyline(
@@ -77,8 +91,8 @@ def _seed_user_entity_storyline(
     return storyline_id
 
 
-def test_chapters_table_exists_and_panels_rekeyed(factory: ConnectionFactory) -> None:
-    conn = factory.get()
+def test_chapters_table_exists_and_panels_rekeyed(tmp_path: Path) -> None:
+    conn = _conn_at_0030(tmp_path)
     assert "storyline_chapters" in {
         r[0]
         for r in conn.execute(
@@ -140,9 +154,10 @@ def test_migration_moves_old_storyline_keyed_panels_to_chapter(
     )
     conn.commit()
 
-    # Apply ONLY 0030. run_migrations resumes from user_version 29, so it
-    # applies just the remaining 0030 — the real forward-only path.
-    run_migrations(conn)
+    # Apply ONLY 0030 — pin to target_version=30 rather than calling
+    # run_migrations (which would also apply 0031-0036 and reshape these
+    # same tables again before we get to assert on the 0030 end-state).
+    _run_migrations_up_to(conn, target_version=30)
 
     # Exactly one chapter for the storyline: seq 1, state 'open'.
     chapters = conn.execute(
@@ -171,12 +186,11 @@ def test_migration_moves_old_storyline_keyed_panels_to_chapter(
 
 
 def test_backfill_creates_one_open_chapter_and_moves_panels(
-    factory: ConnectionFactory,
+    tmp_path: Path,
 ) -> None:
-    conn = factory.get()
-    # Seed a user + entity + storyline + a panel the way prod looks. The
-    # factory fixture already applied 0030, so this storyline post-dates the
-    # migration and we wire its chapter/panel up at the post-migration schema.
+    conn = _conn_at_0030(tmp_path)
+    # Seed a user + entity + storyline + a panel the way prod looks, at the
+    # post-0030 schema.
     storyline_id = _seed_user_entity_storyline(conn)
     conn.execute(
         "INSERT INTO storyline_chapters (storyline_id, seq, title, start_date,"
@@ -211,11 +225,11 @@ def test_backfill_creates_one_open_chapter_and_moves_panels(
     assert cnt == 1
 
 
-def test_migration_is_rerunnable(factory: ConnectionFactory) -> None:
-    conn = factory.get()
+def test_migration_is_rerunnable(tmp_path: Path) -> None:
+    conn = _conn_at_0030(tmp_path)
     # Seed a storyline so the backfill has something to act on, mirroring
-    # prod. The factory fixture already applied every migration once, so
-    # this storyline post-dates 0030 and has no chapter yet.
+    # prod. Pinned at 0030, so this storyline post-dates 0030 and has no
+    # chapter yet.
     storyline_id = _seed_user_entity_storyline(conn)
     conn.execute(
         "INSERT INTO storyline_chapters (storyline_id, seq, title, start_date,"
@@ -225,12 +239,13 @@ def test_migration_is_rerunnable(factory: ConnectionFactory) -> None:
     )
     conn.commit()
 
-    # The runner is forward-only: a second run version-skips 0030 (it is
-    # already <= PRAGMA user_version). This is exactly how production
-    # behaves on every server restart, so it is the honest re-run to
-    # assert. It must not raise, must not duplicate chapters, and must
-    # not duplicate panels.
-    run_migrations(conn)
+    # The pinned helper mirrors the real runner's forward-only skip logic:
+    # a second call at the same target_version is a genuine no-op (it
+    # skips 0030 since PRAGMA user_version is already 30) rather than
+    # replaying the migration's SQL — the panel rebuild in 0030 reads a
+    # pre-migration column that no longer exists, so raw-script replay is
+    # not itself idempotent (see the 0030 file's own header comment).
+    _run_migrations_up_to(conn, target_version=30)
 
     dupes = conn.execute(
         "SELECT storyline_id, COUNT(*) c FROM storyline_chapters"

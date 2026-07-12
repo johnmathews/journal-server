@@ -54,9 +54,9 @@ src/journal/
                           handlers (lookup/aggregate/temporal/trend) + passages
     entity_extraction/  — Entity extraction service (orchestrator + helpers)
     fitness/            — Strava/Garmin fetch, normalize, backfill + activity-type map
-    storylines/         — Storyline generation service (deterministic time-bucketed
-                          chaptering), extension classifier, segments, backfill + recheck
-                          (the `backfill-storyline-chapters` / `recheck-storylines` CLIs)
+    storylines/         — StorylineEngine (judge-driven continue-or-break chaptering +
+                          narrator), extension classifier, segments; wired via the
+                          `bootstrap-storylines` CLI
     usage.py            — Per-job LLM token-usage collector (contextvar-scoped)
     jobs/               — Background job runner: workers/, runner (two-pool:
                           parallel Pool A + single-worker storyline Pool B),

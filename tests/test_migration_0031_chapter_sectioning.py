@@ -1,4 +1,14 @@
-"""Migration 0031: chapter sectioning columns (locks + word count)."""
+"""Migration 0031: chapter sectioning columns (locks + word count).
+
+Pinned to the schema exactly as it stood right after 0031 landed. Migration
+0036 (storylines-redesign) later rebuilt ``storyline_chapters`` from scratch
+and dropped these three columns (the auto-split chapter-sizing feature they
+supported is gone in the redesign) — see
+``tests/test_db/test_migration_0036.py`` for that end-state. These tests
+build a database that stops at version 31 rather than running the full
+migration chain, so they keep asserting the 0031 end-state instead of
+drifting once 0036 removes the columns again.
+"""
 
 from __future__ import annotations
 
@@ -10,14 +20,12 @@ from typing import TYPE_CHECKING
 from journal.db.connection import get_connection
 from journal.db.migrations import (
     _executescript_idempotent,
+    get_current_version,
     get_migration_files,
-    run_migrations,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from journal.db.factory import ConnectionFactory
 
 
 _MIGRATION_0031 = "0031_storyline_chapter_sectioning.sql"
@@ -30,15 +38,33 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 
 def _run_migrations_up_to(conn: sqlite3.Connection, target_version: int) -> None:
-    """Apply every migration up to and including ``target_version``."""
+    """Apply every PENDING migration up to and including ``target_version``.
+
+    Mirrors ``run_migrations``'s own forward-only skip logic (a migration
+    whose version is <= the connection's current ``PRAGMA user_version`` is
+    never re-executed) but stops once ``target_version`` is reached instead
+    of running to the latest file — so calling this twice at the same
+    target is a genuine no-op re-run, exactly like the real runner.
+    """
+    current = get_current_version(conn)
     for migration_file in get_migration_files():
         version = int(migration_file.stem.split("_")[0])
+        if version <= current:
+            continue
         if version > target_version:
             break
         _executescript_idempotent(
             conn, migration_file.read_text(), migration_file.name,
         )
         conn.execute(f"PRAGMA user_version = {version}")
+        current = version
+
+
+def _conn_at_0031(tmp_path: Path, name: str = "m.db") -> sqlite3.Connection:
+    """A fresh DB migrated up to and including 0031, no further."""
+    conn = get_connection(tmp_path / name)
+    _run_migrations_up_to(conn, target_version=31)
+    return conn
 
 
 def test_migration_0031_file_exists() -> None:
@@ -46,9 +72,9 @@ def test_migration_0031_file_exists() -> None:
     assert _MIGRATION_0031 in files
 
 
-def test_new_columns_exist_with_default_zero(factory: ConnectionFactory) -> None:
-    """On a fully-migrated DB the three columns exist and default to 0."""
-    conn = factory.get()
+def test_new_columns_exist_with_default_zero(tmp_path: Path) -> None:
+    """Right after 0031, the three columns exist and default to 0."""
+    conn = _conn_at_0031(tmp_path)
     cols = _columns(conn, "storyline_chapters")
     assert cols >= _NEW_COLUMNS
 
@@ -84,22 +110,24 @@ def test_migration_0031_applies_cleanly_on_fresh_db(tmp_path: Path) -> None:
     pre_cols = _columns(conn, "storyline_chapters")
     assert not (_NEW_COLUMNS & pre_cols), "columns should not exist pre-0031"
 
-    run_migrations(conn)
+    # Pin to 31 rather than calling the real `run_migrations` — that would
+    # also apply 0032-0036, and 0036 drops these same columns again.
+    _run_migrations_up_to(conn, target_version=31)
 
     post_cols = _columns(conn, "storyline_chapters")
     assert post_cols >= _NEW_COLUMNS
 
 
-def test_migration_0031_is_rerunnable(factory: ConnectionFactory) -> None:
+def test_migration_0031_is_rerunnable(tmp_path: Path) -> None:
     """A forward-only re-run version-skips 0031 and is a clean no-op.
 
     Also assert the additive ALTERs are individually safe by replaying the
     raw script through the idempotent executor on an already-migrated DB:
     the duplicate-column errors must be swallowed, not raised.
     """
-    conn = factory.get()
-    # Forward-only re-run: version-skips, must not raise.
-    run_migrations(conn)
+    conn = _conn_at_0031(tmp_path)
+    # Forward-only re-run pinned at 31: version-skips, must not raise.
+    _run_migrations_up_to(conn, target_version=31)
     assert _columns(conn, "storyline_chapters") >= _NEW_COLUMNS
 
     # Replay the raw 0031 script: each ADD COLUMN duplicates, which the

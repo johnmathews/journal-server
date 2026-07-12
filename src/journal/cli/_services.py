@@ -143,14 +143,9 @@ def build_storyline_stack(config: Config) -> StorylineStack:
         model=config.storyline_narrator_model,
         max_tokens=config.storyline_narrator_max_tokens,
     )
-    # TODO(Task 12): storyline_judge_model / storyline_judge_max_tokens
-    # config knobs land in Task 12 alongside the rest of the judge/engine
-    # config surface. Until then, fall back to the provider's own default
-    # model rather than block this task on a config field that doesn't
-    # exist yet.
     judge = AnthropicStorylineJudge(
         api_key=config.anthropic_api_key,
-        model=getattr(config, "storyline_judge_model", "claude-haiku-4-5"),
+        model=config.storyline_judge_model,
     )
     embedder = lambda text: embeddings.embed_texts([text])[0]  # noqa: E731
     engine = StorylineEngine(
@@ -160,6 +155,7 @@ def build_storyline_stack(config: Config) -> StorylineStack:
         narrator=narrator,
         judge=judge,
         embedder=embedder,
+        min_publish_entries=config.storyline_min_publish_entries,
     )
     return StorylineStack(
         entry_repository=repo,

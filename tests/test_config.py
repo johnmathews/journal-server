@@ -420,3 +420,29 @@ def test_answer_config_from_env(monkeypatch):
     assert cfg.answer_provider == "none"
     assert cfg.answer_model == "claude-haiku-4-5"
     assert cfg.answer_context_entries == 5
+
+
+def test_storyline_judge_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("STORYLINE_JUDGE_MODEL", raising=False)
+    monkeypatch.delenv("STORYLINE_MIN_PUBLISH_ENTRIES", raising=False)
+    cfg = Config()
+    assert cfg.storyline_judge_model == "claude-haiku-4-5"
+    assert cfg.storyline_min_publish_entries == 3
+
+
+def test_storyline_judge_config_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STORYLINE_JUDGE_MODEL", "claude-opus-4-7")
+    monkeypatch.setenv("STORYLINE_MIN_PUBLISH_ENTRIES", "5")
+    cfg = Config()
+    assert cfg.storyline_judge_model == "claude-opus-4-7"
+    assert cfg.storyline_min_publish_entries == 5
+
+
+def test_removed_storyline_knobs_are_gone() -> None:
+    cfg = Config()
+    assert not hasattr(cfg, "storyline_glue_model")
+    assert not hasattr(cfg, "storyline_chapter_target_words")
+    assert not hasattr(cfg, "storyline_chapter_min_words")
+    assert not hasattr(cfg, "storyline_chapter_max_words")
+    assert not hasattr(cfg, "storyline_fts_fallback_threshold")
+    assert not hasattr(cfg, "storyline_default_window_days")

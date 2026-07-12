@@ -400,24 +400,14 @@ class Config:
             os.environ.get("STORYLINE_NARRATOR_MAX_TOKENS", "4096")
         )
     )
-    storyline_glue_model: str = field(
+    storyline_judge_model: str = field(
         default_factory=lambda: os.environ.get(
-            "STORYLINE_GLUE_MODEL", "claude-haiku-4-5",
+            "STORYLINE_JUDGE_MODEL", "claude-haiku-4-5",
         )
     )
     storyline_extension_decider_model: str = field(
         default_factory=lambda: os.environ.get(
             "STORYLINE_EXTENSION_DECIDER_MODEL", "claude-haiku-4-5",
-        )
-    )
-    storyline_default_window_days: int = field(
-        default_factory=lambda: int(
-            os.environ.get("STORYLINE_DEFAULT_WINDOW_DAYS", "90")
-        )
-    )
-    storyline_fts_fallback_threshold: int = field(
-        default_factory=lambda: int(
-            os.environ.get("STORYLINE_FTS_FALLBACK_THRESHOLD", "3")
         )
     )
     # Extension classifier embedding fallback (W6): when neither an entity
@@ -430,23 +420,11 @@ class Config:
             os.environ.get("STORYLINE_EXTENSION_RELEVANCE_THRESHOLD", "0.5")
         )
     )
-    # Auto-split chapter sizing, in words of narrative prose. The
-    # segmenter aims for ``target`` words per chapter and only carves a
-    # new boundary when doing so keeps both sides within
-    # ``[min, max]``. See docs/storyline-chapters-design.md.
-    storyline_chapter_target_words: int = field(
+    # Guards against publishing a chapter with too little material to be
+    # worth reading — see StorylineEngine.
+    storyline_min_publish_entries: int = field(
         default_factory=lambda: int(
-            os.environ.get("STORYLINE_CHAPTER_TARGET_WORDS", "210")
-        )
-    )
-    storyline_chapter_min_words: int = field(
-        default_factory=lambda: int(
-            os.environ.get("STORYLINE_CHAPTER_MIN_WORDS", "180")
-        )
-    )
-    storyline_chapter_max_words: int = field(
-        default_factory=lambda: int(
-            os.environ.get("STORYLINE_CHAPTER_MAX_WORDS", "240")
+            os.environ.get("STORYLINE_MIN_PUBLISH_ENTRIES", "3")
         )
     )
 
