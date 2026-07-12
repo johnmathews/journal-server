@@ -6,15 +6,19 @@ Hybrid pipeline, applied per-(entry, storyline) pair:
    anchor entity_ids appears in the entry's extracted entity
    mentions, return ``yes`` immediately. Zero cost, zero LLM calls.
 2. **Surface form (deterministic).** If *any* anchor entity's
-   ``canonical_name`` appears in the entry text (case-insensitive),
-   fall through to the LLM decider — the surface form is present
-   but the entity wasn't extracted, so pronominal references or
-   extractor gaps are possible.
+   ``canonical_name`` appears in the entry text as a whole word
+   (case-insensitive, word-boundary matched so "Ana" doesn't match
+   "banana"), fall through to the LLM decider — the surface form is
+   present but the entity wasn't extracted, so pronominal references
+   or extractor gaps are possible.
+2.5. **Semantic fallback (embedding).** If neither of the above fires
+   but the entry's embedding is close enough to the storyline's
+   *draft chapter* embedding, also fall through to the LLM decider.
 3. **Haiku decider.** Ask the model whether the entry meaningfully
    extends the storyline. Returns yes/no/maybe with one-sentence
    reasoning that the UI surfaces.
 
-When neither (1) nor (2) fires, the classifier returns ``no``
+When neither (1), (2), nor (2.5) fires, the classifier returns ``no``
 without an LLM call — most ingested entries do not extend most
 storylines, and surfacing every miss to Haiku is wasteful.
 """
@@ -22,6 +26,7 @@ storylines, and surfacing every miss to Haiku is wasteful.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
@@ -51,7 +56,7 @@ class ExtensionResult:
     storyline_id: int
     decision: Decision
     reasoning: str
-    stage: str  # "entity_overlap" | "surface_form_llm" | "no_match"
+    stage: str  # "entity_overlap" | "surface_form_llm" | "embedding_llm" | "no_match"
 
 
 @runtime_checkable
@@ -87,8 +92,10 @@ class StorylineExtensionClassifier:
         # Optional semantic fallback (W6): when set, an entry that matches
         # neither an anchor entity nor a surface form is still escalated to
         # the decider if its embedding is close enough to the storyline's
-        # summary embedding. None → the fallback is skipped entirely
-        # (behaviour identical to before W6).
+        # *draft chapter* embedding (read live via
+        # storyline_repository.get_draft — storylines no longer carry a
+        # standalone summary_embedding, see Task 3). None → the fallback is
+        # skipped entirely (behaviour identical to before W6).
         self._embedder = embedder
         self._relevance_threshold = relevance_threshold
 
@@ -144,6 +151,9 @@ class StorylineExtensionClassifier:
             )
             # Record the per-storyline check timestamp even when
             # decision is "no", so the UI can show "last checked".
+            # record_extension_check commits per call already (it's a
+            # single-row UPDATE), so there's no batching win from moving
+            # this out of the loop — left per-storyline intentionally.
             self._storyline_repository.record_extension_check(storyline.id)
         return results
 
@@ -171,13 +181,19 @@ class StorylineExtensionClassifier:
                 stage="entity_overlap",
             )
 
-        # Stage 2: surface-form match on any anchor → Haiku decider
+        # Stage 2: surface-form match on any anchor → Haiku decider.
+        # Word-boundary match (not a bare substring test) so a short
+        # anchor name like "Ana" doesn't fire on "banana". Compiled per
+        # anchor since canonical names vary per storyline/entity.
         surface_form_hits = False
         for entity_id in anchor_ids:
             entity = self._entity_store.get_entity(entity_id)
             if entity is None:
                 continue
-            if entity.canonical_name.lower() in entry_text_lower:
+            pattern = re.compile(
+                rf"\b{re.escape(entity.canonical_name)}\b", re.IGNORECASE,
+            )
+            if pattern.search(entry_text_lower):
                 surface_form_hits = True
                 break
         if surface_form_hits:
@@ -185,16 +201,18 @@ class StorylineExtensionClassifier:
 
         # Stage 2.5 (W6): semantic fallback. When neither an anchor entity
         # nor a surface form matched, but the entry is semantically close
-        # to the storyline's summary, escalate to the decider rather than
-        # returning an outright "no". Catches entries the extractor missed
-        # (pronouns, paraphrase) where the name never appears verbatim.
-        if (
-            entry_embedding is not None
-            and storyline.summary_embedding is not None
-        ):
-            similarity = cosine_similarity(
-                entry_embedding, storyline.summary_embedding,
-            )
+        # to the storyline's *draft chapter* embedding, escalate to the
+        # decider rather than returning an outright "no". Catches entries
+        # the extractor missed (pronouns, paraphrase) where the name never
+        # appears verbatim. Storylines no longer carry their own embedding
+        # (Task 3 dropped Storyline.summary_embedding) — the live draft
+        # chapter's embedding is the current stand-in, and may be absent
+        # (no draft yet, or a draft never narrated) in which case the
+        # stage is skipped entirely.
+        draft = self._storyline_repository.get_draft(storyline.id)
+        draft_embedding = draft.draft_embedding if draft is not None else None
+        if entry_embedding is not None and draft_embedding is not None:
+            similarity = cosine_similarity(entry_embedding, draft_embedding)
             if similarity >= self._relevance_threshold:
                 return self._decide(storyline, entry, stage="embedding_llm")
 

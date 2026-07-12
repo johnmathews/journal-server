@@ -2,10 +2,10 @@
 
 * W5: ``submit_storyline_generation`` + the ``run_storyline_generation``
   worker — happy path, missing-service guard.
-* W6: ``StorylineExtensionClassifier`` — entity overlap fast path,
-  surface-form → LLM decider path, no-match short-circuit.
 * W6 decider: ``_parse_decision`` extracts the verdict from a
   ``tool_use`` block; falls back to "maybe" on malformed response.
+  (``StorylineExtensionClassifier`` itself is tested in
+  ``tests/test_storyline_extension.py``.)
 * W7: ``_queue_post_ingestion_jobs`` queues a storyline_extension_check
   job when the classifier is wired; skips silently when it isn't.
 * W1: the storyline_extension_check is queued by the entity-extraction
@@ -19,14 +19,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from journal.services.storylines.service import GenerationResult
 
 from journal.db.jobs_repository import SQLiteJobRepository
-from journal.db.storyline_repository import SQLiteStorylineRepository
-from journal.entitystore.store import SQLiteEntityStore
-from journal.models import Entry
 from journal.providers.storyline_extension_decider import (
     AnthropicStorylineExtensionDecider,
-    ExtensionDecision,
     _parse_decision,
 )
 from journal.services.jobs.runner import JobRunner
@@ -40,11 +37,7 @@ from journal.services.jobs.workers.storyline_extension_check import (
 from journal.services.jobs.workers.storyline_generation import (
     run_storyline_generation,
 )
-from journal.services.storylines.extension import (
-    ExtensionResult,
-    StorylineExtensionClassifier,
-)
-from journal.services.storylines.service import GenerationResult
+from journal.services.storylines.extension import ExtensionResult
 
 if TYPE_CHECKING:
     from journal.db.factory import ConnectionFactory
@@ -392,242 +385,6 @@ class TestStorylineGenerationWorker:
         assert finished is not None
         assert finished.status == "failed"
         assert "not configured" in (finished.error_message or "")
-
-
-# ── W6: extension classifier ────────────────────────────────────
-
-
-@pytest.fixture
-def classifier_world(
-    factory: ConnectionFactory,
-) -> dict[str, Any]:
-    """Seed user, entity, entry, mention; build a classifier."""
-    conn = factory.get()
-    cur = conn.execute(
-        "INSERT INTO users (email, password_hash, display_name)"
-        " VALUES (?, ?, ?)", ("c@x.test", "x", "C"),
-    )
-    user_id = cur.lastrowid
-    conn.commit()
-
-    store = SQLiteEntityStore(factory)
-    entity = store.create_entity(
-        entity_type="activity", canonical_name="Running",
-        description="", first_seen="2026-02-15", user_id=user_id,
-    )
-    storyline_repo = SQLiteStorylineRepository(factory)
-    storyline = storyline_repo.create_storyline(
-        user_id=user_id, entity_ids=[entity.id], name="Running",
-    )
-
-    # An entry that mentions Running via entity_mentions (stage 1)
-    body_overlap = "I ran 5km today and it felt great."
-    cur = conn.execute(
-        "INSERT INTO entries"
-        " (entry_date, source_type, raw_text, final_text,"
-        "  word_count, user_id) VALUES (?, ?, ?, ?, ?, ?)",
-        ("2026-03-01", "text", body_overlap, body_overlap, 8, user_id),
-    )
-    entry_overlap_id = cur.lastrowid
-    conn.execute(
-        "INSERT INTO entity_mentions"
-        " (entity_id, entry_id, quote, confidence, extraction_run_id)"
-        " VALUES (?, ?, ?, ?, ?)",
-        (entity.id, entry_overlap_id, body_overlap, 0.95, "r-1"),
-    )
-
-    # An entry that contains the surface form "Running" but has no
-    # entity_mentions linking it (stage 2 path)
-    body_surface = "Running is fun. I do it often."
-    cur = conn.execute(
-        "INSERT INTO entries"
-        " (entry_date, source_type, raw_text, final_text,"
-        "  word_count, user_id) VALUES (?, ?, ?, ?, ?, ?)",
-        ("2026-03-02", "text", body_surface, body_surface, 7, user_id),
-    )
-    entry_surface_id = cur.lastrowid
-
-    # An entry with no mention at all (stage 3 / no_match)
-    body_nope = "Today I baked sourdough bread."
-    cur = conn.execute(
-        "INSERT INTO entries"
-        " (entry_date, source_type, raw_text, final_text,"
-        "  word_count, user_id) VALUES (?, ?, ?, ?, ?, ?)",
-        ("2026-03-03", "text", body_nope, body_nope, 5, user_id),
-    )
-    entry_nope_id = cur.lastrowid
-    conn.commit()
-
-    # Build entry repo helpers — load real Entry objects
-    class _MiniEntryRepo:
-        def get_entry(self, eid: int) -> Entry | None:
-            row = conn.execute(
-                "SELECT * FROM entries WHERE id = ?", (eid,),
-            ).fetchone()
-            if row is None:
-                return None
-            return Entry(
-                id=row["id"], entry_date=row["entry_date"],
-                source_type=row["source_type"],
-                raw_text=row["raw_text"],
-                final_text=row["final_text"] or "",
-                word_count=row["word_count"] or 0,
-                user_id=row["user_id"] or 0,
-            )
-
-        # Used by the generation service, not the classifier; here
-        # so the entry repo is interface-complete for any consumer
-        # that might pick it up later.
-        def search_text(self, **_: Any) -> list[Any]:  # noqa: ANN401
-            return []
-
-    @dataclass
-    class _CannedDecider:
-        verdict: ExtensionDecision
-        calls: list[dict[str, Any]] = field(default_factory=list)
-        model: str = "haiku-fake"
-
-        def decide(self, **kwargs: Any) -> ExtensionDecision:  # noqa: ANN401
-            self.calls.append(kwargs)
-            return self.verdict
-
-    decider = _CannedDecider(
-        verdict=ExtensionDecision(
-            decision="yes", reasoning="Surface form matches.",
-            model_used="haiku-fake",
-        ),
-    )
-    classifier = StorylineExtensionClassifier(
-        entity_store=store,
-        entry_repository=_MiniEntryRepo(),  # type: ignore[arg-type]
-        storyline_repository=storyline_repo,
-        decider=decider,
-    )
-    return {
-        "user_id": user_id,
-        "storyline_id": storyline.id,
-        "entity_id": entity.id,
-        "entry_overlap_id": entry_overlap_id,
-        "entry_surface_id": entry_surface_id,
-        "entry_nope_id": entry_nope_id,
-        "classifier": classifier,
-        "decider": decider,
-        "storyline_repo": storyline_repo,
-        "entity_store": store,
-        "entry_repository": _MiniEntryRepo(),
-    }
-
-
-class TestExtensionClassifier:
-    def test_entity_overlap_yields_yes_without_llm(
-        self, classifier_world: dict[str, Any],
-    ) -> None:
-        results = classifier_world["classifier"].classify_for_entry(
-            entry_id=classifier_world["entry_overlap_id"],
-            user_id=classifier_world["user_id"],
-        )
-        assert len(results) == 1
-        assert results[0].decision == "yes"
-        assert results[0].stage == "entity_overlap"
-        # Decider was not called
-        assert classifier_world["decider"].calls == []
-        # last_extension_check_at recorded
-        s = classifier_world["storyline_repo"].get_storyline(
-            classifier_world["storyline_id"],
-        )
-        assert s is not None
-        assert s.last_extension_check_at is not None
-
-    def test_surface_form_invokes_decider(
-        self, classifier_world: dict[str, Any],
-    ) -> None:
-        results = classifier_world["classifier"].classify_for_entry(
-            entry_id=classifier_world["entry_surface_id"],
-            user_id=classifier_world["user_id"],
-        )
-        assert len(results) == 1
-        assert results[0].stage == "surface_form_llm"
-        assert results[0].decision == "yes"  # canned verdict
-        assert len(classifier_world["decider"].calls) == 1
-
-    def test_no_match_short_circuits(
-        self, classifier_world: dict[str, Any],
-    ) -> None:
-        results = classifier_world["classifier"].classify_for_entry(
-            entry_id=classifier_world["entry_nope_id"],
-            user_id=classifier_world["user_id"],
-        )
-        assert len(results) == 1
-        assert results[0].decision == "no"
-        assert results[0].stage == "no_match"
-        assert classifier_world["decider"].calls == []
-
-    def _classifier_with_embedder(
-        self, world: dict[str, Any], embedder: Any,  # noqa: ANN401
-    ) -> StorylineExtensionClassifier:
-        return StorylineExtensionClassifier(
-            entity_store=world["entity_store"],
-            entry_repository=world["entry_repository"],
-            storyline_repository=world["storyline_repo"],
-            decider=world["decider"],
-            embedder=embedder,
-            relevance_threshold=0.5,
-        )
-
-    def test_embedding_fallback_escalates_to_decider(
-        self, classifier_world: dict[str, Any],
-    ) -> None:
-        """W6: an entry with no entity overlap and no surface-form match,
-        but whose embedding is close to the storyline summary, escalates
-        to the Haiku decider instead of an outright 'no'."""
-        world = classifier_world
-        world["storyline_repo"].update_summary_embedding(
-            world["storyline_id"], [1.0, 0.0, 0.0],
-        )
-        clf = self._classifier_with_embedder(
-            world, lambda _text: [1.0, 0.0, 0.0],  # cosine 1.0 with summary
-        )
-        results = clf.classify_for_entry(
-            entry_id=world["entry_nope_id"], user_id=world["user_id"],
-        )
-        assert len(results) == 1
-        assert results[0].stage == "embedding_llm"
-        assert results[0].decision == "yes"  # canned decider verdict
-        assert len(world["decider"].calls) == 1
-
-    def test_embedding_fallback_below_threshold_stays_no(
-        self, classifier_world: dict[str, Any],
-    ) -> None:
-        world = classifier_world
-        world["storyline_repo"].update_summary_embedding(
-            world["storyline_id"], [1.0, 0.0, 0.0],
-        )
-        clf = self._classifier_with_embedder(
-            world, lambda _text: [0.0, 1.0, 0.0],  # orthogonal → cosine 0
-        )
-        results = clf.classify_for_entry(
-            entry_id=world["entry_nope_id"], user_id=world["user_id"],
-        )
-        assert len(results) == 1
-        assert results[0].decision == "no"
-        assert results[0].stage == "no_match"
-        assert world["decider"].calls == []
-
-    def test_embedding_fallback_skipped_when_no_summary_embedding(
-        self, classifier_world: dict[str, Any],
-    ) -> None:
-        """No storyline summary embedding → the fallback can't run, so the
-        entry stays a no-match (no decider call)."""
-        world = classifier_world  # storyline has no summary embedding
-        clf = self._classifier_with_embedder(
-            world, lambda _text: [1.0, 0.0, 0.0],
-        )
-        results = clf.classify_for_entry(
-            entry_id=world["entry_nope_id"], user_id=world["user_id"],
-        )
-        assert results[0].decision == "no"
-        assert results[0].stage == "no_match"
-        assert world["decider"].calls == []
 
 
 # ── W6 decider parser ──────────────────────────────────────────
