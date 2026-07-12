@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Type annotations everywhere; `uv run pytest` and `uv run ruff check src/ tests/` must pass at every commit.
+- Type annotations everywhere; each task's own tests and `uv run ruff check src/ tests/` must pass at its commit. The FULL `uv run pytest` suite must be green from Task 12 onward (earlier tasks knowingly leave pre-rewrite tests red). Work happens on the `storylines-redesign` branch; nothing is pushed until the suite is green.
 - TDD: every task writes its failing test first.
 - Migrations: re-runnable after partial failure (`DROP IF EXISTS` / `IF NOT EXISTS` guards); tests exercise the data-copy path on prod-shaped state (house rule).
 - No LLM call inside any DB transaction. Provider failures leave state untouched.
