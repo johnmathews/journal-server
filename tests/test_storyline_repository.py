@@ -720,6 +720,38 @@ class TestDerivedFieldsAndUnread:
         repo.set_read(first_published.id, True)
         assert repo.unread_counts(seed_user) == {storyline.id: 1}
 
+    def test_chapter_counts(
+        self,
+        repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+        storyline: Storyline,
+        entry_ids: list[int],
+    ) -> None:
+        # First storyline: publish one, keeping one draft = 2 chapters
+        draft1 = repo.get_draft(storyline.id)
+        repo.add_entries_to_draft(draft1.id, entry_ids[:1])
+        published1, new_draft1 = repo.publish_draft(
+            storyline.id, title="one", segments=[], source_entry_ids=[],
+            citation_count=0, model_used="m", new_draft_entry_ids=[entry_ids[1]],
+        )
+        assert published1.seq == 1 and new_draft1.seq == 2
+        # Second storyline: one draft only = 1 chapter
+        storyline2 = repo.create_storyline(
+            user_id=seed_user, entity_ids=[seed_entity], name="Story 2",
+        )
+        counts = repo.chapter_counts(seed_user)
+        assert counts == {storyline.id: 2, storyline2.id: 1}
+
+    def test_chapter_counts_empty_for_other_user(
+        self,
+        repo: SQLiteStorylineRepository,
+        seed_user: int,
+        storyline: Storyline,
+    ) -> None:
+        counts = repo.chapter_counts(seed_user + 999)
+        assert counts == {}
+
 
 # ── Pending entries ──────────────────────────────────────────────
 

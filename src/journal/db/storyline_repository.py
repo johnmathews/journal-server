@@ -302,6 +302,24 @@ class SQLiteStorylineRepository:
         ).fetchall()
         return {int(r["storyline_id"]): int(r["cnt"]) for r in rows}
 
+    def chapter_counts(self, user_id: int) -> dict[int, int]:
+        """Chapter count per storyline for this user (one query, no JSON).
+
+        Returns ``{storyline_id: total_chapter_count}`` for all storylines
+        belonging to ``user_id``. Counts both draft and published chapters.
+        Storylines with no chapters (shouldn't exist, but graceful default) are
+        omitted — callers should default to 0 for missing storylines.
+        """
+        rows = self._conn().execute(
+            "SELECT c.storyline_id, COUNT(*) AS cnt"
+            " FROM storyline_chapters c"
+            " JOIN storylines s ON s.id = c.storyline_id"
+            " WHERE s.user_id = ?"
+            " GROUP BY c.storyline_id",
+            (user_id,),
+        ).fetchall()
+        return {int(r["storyline_id"]): int(r["cnt"]) for r in rows}
+
     # ── anchors (storyline_entities) ────────────────────────────
 
     def list_anchors(self, storyline_id: int) -> list[int]:

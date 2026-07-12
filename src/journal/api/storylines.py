@@ -79,16 +79,16 @@ def register_storylines_routes(
         )
         total = repo.count_storylines(user_id=user.user_id, status=status)
         entity_store = services.get("entity_store")
-        # Fetch once and join in memory — avoids one unread-count query
-        # per storyline in the list response.
+        # Batch fetch unread and chapter counts — avoids N+1 queries
         unread = repo.unread_counts(user.user_id)
+        chapter_counts = repo.chapter_counts(user.user_id)
         return JSONResponse({
             "items": [
                 _storyline_to_dict(
                     s,
                     _anchors_for(repo, entity_store, s.id),
                     unread.get(s.id, 0),
-                    len(repo.list_chapters(s.id)),
+                    chapter_counts.get(s.id, 0),
                 )
                 for s in rows
             ],
