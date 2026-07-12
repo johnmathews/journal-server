@@ -27,7 +27,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from journal.models import Storyline, StorylineChapter
+from journal.models import DatedEntryExcerpt, Storyline, StorylineChapter
 
 if TYPE_CHECKING:
     import sqlite3
@@ -531,6 +531,39 @@ class SQLiteStorylineRepository:
             (storyline_id, *entry_ids),
         )
         conn.commit()
+
+    def find_entries_mentioning(
+        self, user_id: int, name: str,
+    ) -> list[DatedEntryExcerpt]:
+        """Plain ``LIKE`` scan over entry text for a literal surface form.
+
+        Sparse-storyline recall fallback (spec §3, used by the engine's
+        ``_candidate_entries`` when an anchor's entity-mention union has
+        fewer than a handful of rows): catches pronominal references or
+        extractor misses that ``entity_mentions`` never recorded. Fully
+        parameterised (``name`` only ever appears as a bound ``?``
+        substitution inside the ``%...%`` pattern) — no SQL injection
+        surface. Returns excerpts with no ``quotes`` (there is no
+        ``entity_mentions`` row to quote from on this path).
+        """
+        pattern = f"%{name}%"
+        rows = self._conn().execute(
+            "SELECT id AS entry_id, entry_date,"
+            "  COALESCE(NULLIF(final_text, ''), raw_text) AS body_text"
+            " FROM entries"
+            " WHERE user_id = ? AND (final_text LIKE ? OR raw_text LIKE ?)"
+            " ORDER BY entry_date ASC, id ASC",
+            (user_id, pattern, pattern),
+        ).fetchall()
+        return [
+            DatedEntryExcerpt(
+                entry_id=int(row["entry_id"]),
+                entry_date=row["entry_date"],
+                final_text=row["body_text"] or "",
+                quotes=[],
+            )
+            for row in rows
+        ]
 
     # ── narrative writes ─────────────────────────────────────────
 
