@@ -395,8 +395,12 @@ scoring:
 For image and audio ingestion, mood scoring runs inline inside the ingestion worker (via
 `IngestionService._process_text`). Entity extraction is submitted as a follow-up job after the ingestion job succeeds —
 it is queued onto Pool A once the ingestion job marks itself complete, and (with `JOB_WORKER_COUNT > 1`) can run in
-parallel with other in-flight ingestion work. Storyline extension checks queued as follow-ups run on the dedicated
-single-worker Pool B. The webapp's
+parallel with other in-flight ingestion work. The **storyline extension check** is *not* a sibling follow-up of
+ingestion: it is enqueued by the **entity-extraction worker itself**, after that worker commits the entry's mentions,
+and runs on the single-worker Pool B. This ordering guarantees the classifier's entity-overlap signal reads committed
+mentions — queuing it concurrently with entity extraction (the pre-fix behavior) caused a burst ingest to update zero
+storylines. Because it fires per single-entry extraction, the check coalesces: it skips queuing a regeneration when a
+full-refresh for that storyline is already queued (see [`storylines.md`](storylines.md#ingestion-hook)). The webapp's
 notification bell automatically re-hydrates its active jobs list when any tracked job reaches terminal state, so
 server-spawned follow-up jobs (like entity extraction after ingestion) appear in the bell without a page refresh.
 

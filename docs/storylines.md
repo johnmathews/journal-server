@@ -1,8 +1,11 @@
 # Storylines
 
-**Status:** active reference. Last updated 2026-06-15 (Phase A of chapter
-editing shipped: add, split, merge, update window, delete; 5 new REST endpoints
-+ 5 MCP tools).
+**Status:** active reference. Last updated 2026-07-12 (auto-extension reliability:
+the extension check now fires off entity-extraction completion rather than racing
+it; regeneration coalescing; deterministic time-bucketed chaptering; storyline-level
+`last_generated_at` bumped on chapter regen; embedding-relevance classifier fallback;
+`backfill-storyline-chapters` + `recheck-storylines` CLIs). Previous: 2026-06-15
+(Phase A chapter editing — add/split/merge/update-window/delete; 5 REST + 5 MCP).
 
 A storyline is a synthesized cross-entry narrative anchored on one or
 more entities. Multi-entity anchors are an equal-weight set: an entry
