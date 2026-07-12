@@ -72,3 +72,15 @@ multi-chapter / single-chapter paths.
 - PR #58 — ingestion race fix + user_id + coalescing + backfill/recheck CLIs + embedding fallback.
 - PR #59 — storyline-level `last_generated_at` on chapter regen.
 - PR #60 — deterministic chaptering by time-bucketing.
+- PR #61 — docs for the chaptering + timestamp behaviour.
+- PR #62 — docs staleness fixes found by a post-session adversarial freshness audit
+  (README storylines link; `jobs.md` stale "ingestion follow-up on Pool B" framing;
+  `configuration.md` had no storyline env vars; `CLAUDE.md` structure tree).
+
+## 1.5 Verified live
+
+All four of user 1's storylines went from 1 long chapter → 5–7 titled chapters, with
+`last_generated` timestamps current. Known follow-up (not a bug): individual chapters
+still run ~500–1000 words vs the ~250 target, because the narrator writes verbose prose
+per bucket and a sparse storyline can't bucket below one entry per chapter — tightening
+that means constraining the narrator's per-bucket output length.
