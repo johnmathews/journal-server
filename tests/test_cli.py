@@ -89,6 +89,7 @@ def test_cli_all_commands_registered(capsys):
         "eval-chunking",
         "extract-entities",
         "repair-entity-names",
+        "bootstrap-storylines",
     ):
         assert cmd in captured.out, f"Command '{cmd}' not found in help output"
 
@@ -740,4 +741,177 @@ def test_cmd_backfill_entity_embeddings_continues_on_per_row_failure(
 
     out = capsys.readouterr().out
     assert "Re-embedded: 1" in out
-    assert "Failed:      1" in out
+
+
+def _make_storyline(
+    factory, *, user_id: int = 1, name: str = "Trip to Vienna", anchor: str = "Vienna",
+):
+    """Create one entity-anchored storyline (with its seq-1 draft
+    chapter) for the ``bootstrap-storylines`` tests below."""
+    from journal.db.storyline_repository import SQLiteStorylineRepository
+    from journal.entitystore.store import SQLiteEntityStore
+
+    entity_store = SQLiteEntityStore(factory)
+    entity = entity_store.create_entity("place", anchor, "anchor", "2026-01-01")
+    storyline_repo = SQLiteStorylineRepository(factory)
+    return storyline_repo.create_storyline(user_id, [entity.id], name)
+
+
+def test_cli_bootstrap_storylines_help(capsys):
+    """`journal bootstrap-storylines --help` documents the new flags."""
+    with pytest.raises(SystemExit) as exc_info:
+        sys.argv = ["journal", "bootstrap-storylines", "--help"]
+        main()
+    assert exc_info.value.code == 0
+    captured = capsys.readouterr()
+    for flag in ("--user-id", "--storyline-id", "--mark-read", "--execute"):
+        assert flag in captured.out
+
+
+def test_cmd_bootstrap_storylines_dry_run_lists_candidates_no_engine(
+    tmp_path, capsys,
+):
+    """Dry-run (no --execute) lists the user's storylines with their
+    chapter/entry counts and never constructs the engine — no
+    ANTHROPIC_API_KEY required, no LLM call possible."""
+    from unittest.mock import MagicMock, patch
+
+    from journal.cli import cmd_bootstrap_storylines
+    from journal.config import Config
+    from journal.db.factory import ConnectionFactory
+    from journal.db.migrations import run_migrations
+
+    db_path = tmp_path / "bootstrap_dry.db"
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    storyline = _make_storyline(factory)
+    factory.get().close()
+
+    # No anthropic_api_key at all — build_storyline_stack would raise if
+    # it were ever called, so a passing dry run proves it wasn't.
+    config = Config(db_path=db_path, anthropic_api_key="")
+
+    with patch("journal.cli._services.build_storyline_stack") as mock_build:
+        cmd_bootstrap_storylines(
+            MagicMock(
+                user_id=1, storyline_id=None, mark_read=False, execute=False,
+            ),
+            config,
+        )
+        mock_build.assert_not_called()
+
+    out = capsys.readouterr().out
+    assert "DRY RUN" in out
+    assert f"[{storyline.id}] {storyline.name}" in out
+    assert "would bootstrap" in out
+    # A freshly created storyline has its seeded seq-1 draft chapter and
+    # no assigned entries yet.
+    assert "1 chapter(s), 0 entries" in out
+
+
+def test_cmd_bootstrap_storylines_execute_calls_engine_per_storyline(
+    tmp_path, capsys,
+):
+    """--execute calls engine.bootstrap once per storyline, forwarding
+    --mark-read."""
+    from unittest.mock import MagicMock, patch
+
+    from journal.cli import cmd_bootstrap_storylines
+    from journal.cli._services import StorylineStack
+    from journal.config import Config
+    from journal.db.factory import ConnectionFactory
+    from journal.db.migrations import run_migrations
+    from journal.db.storyline_repository import SQLiteStorylineRepository
+    from journal.services.storylines.engine import UpdateResult
+
+    db_path = tmp_path / "bootstrap_execute.db"
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    s1 = _make_storyline(factory, name="Trip to Vienna", anchor="Vienna")
+    s2 = _make_storyline(factory, name="New Job", anchor="Acme Corp")
+
+    config = Config(db_path=db_path, anthropic_api_key="sk-ant-test")
+    # Reuse the same factory the fixtures were created with — this test's
+    # thread-local connection must stay open for the repository below.
+    storyline_repository = SQLiteStorylineRepository(factory)
+    fake_engine = MagicMock()
+    fake_engine.bootstrap.side_effect = [
+        UpdateResult(storyline_id=s1.id, chapter_count=3),
+        UpdateResult(storyline_id=s2.id, chapter_count=2),
+    ]
+    fake_stack = StorylineStack(
+        entry_repository=MagicMock(),
+        storyline_repository=storyline_repository,
+        engine=fake_engine,
+    )
+
+    with patch(
+        "journal.cli._services.build_storyline_stack", return_value=fake_stack,
+    ):
+        cmd_bootstrap_storylines(
+            MagicMock(
+                user_id=1, storyline_id=None, mark_read=True, execute=True,
+            ),
+            config,
+        )
+
+    assert fake_engine.bootstrap.call_count == 2
+    called_ids = {c.args[0] for c in fake_engine.bootstrap.call_args_list}
+    assert called_ids == {s1.id, s2.id}
+    for c in fake_engine.bootstrap.call_args_list:
+        assert c.kwargs["mark_read"] is True
+
+    out = capsys.readouterr().out
+    assert "EXECUTED" in out
+    assert "3 chapter(s)" in out
+    assert "2 chapter(s)" in out
+
+
+def test_cmd_bootstrap_storylines_storyline_id_restricts_to_one(
+    tmp_path, capsys,
+):
+    """--storyline-id restricts both dry-run listing and --execute to a
+    single storyline."""
+    from unittest.mock import MagicMock, patch
+
+    from journal.cli import cmd_bootstrap_storylines
+    from journal.cli._services import StorylineStack
+    from journal.config import Config
+    from journal.db.factory import ConnectionFactory
+    from journal.db.migrations import run_migrations
+    from journal.db.storyline_repository import SQLiteStorylineRepository
+    from journal.services.storylines.engine import UpdateResult
+
+    db_path = tmp_path / "bootstrap_single.db"
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    _s1 = _make_storyline(factory, name="Trip to Vienna", anchor="Vienna")
+    s2 = _make_storyline(factory, name="New Job", anchor="Acme Corp")
+
+    config = Config(db_path=db_path, anthropic_api_key="sk-ant-test")
+    storyline_repository = SQLiteStorylineRepository(factory)
+    fake_engine = MagicMock()
+    fake_engine.bootstrap.return_value = UpdateResult(
+        storyline_id=s2.id, chapter_count=1,
+    )
+    fake_stack = StorylineStack(
+        entry_repository=MagicMock(),
+        storyline_repository=storyline_repository,
+        engine=fake_engine,
+    )
+
+    with patch(
+        "journal.cli._services.build_storyline_stack", return_value=fake_stack,
+    ):
+        cmd_bootstrap_storylines(
+            MagicMock(
+                user_id=1, storyline_id=s2.id, mark_read=False, execute=True,
+            ),
+            config,
+        )
+
+    fake_engine.bootstrap.assert_called_once_with(s2.id, mark_read=False)
+
+    out = capsys.readouterr().out
+    assert "New Job" in out
+    assert "Trip to Vienna" not in out

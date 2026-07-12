@@ -198,90 +198,95 @@ def cmd_backfill_chunks(args, config):
             print(f"  {err}")
 
 
-def cmd_backfill_storyline_chapters(args, config):
-    """Re-section existing storylines into word-sized chapters.
+def _list_all_storylines(storyline_repository, user_id: int):
+    """Page through every storyline for ``user_id``, any status.
 
-    Storylines generated before the chapter feature (migrations
-    0030/0031) are stuck as a single long chapter; nothing re-carves them
-    automatically. This iterates the user's storylines and calls
-    ``resegment_storyline`` on each. Dry-run by default — pass
-    ``--execute`` to make the (LLM-costed) changes.
+    ``list_storylines`` is limit/offset paginated; this walks every page
+    so the CLI never silently truncates a user with more than one page
+    of storylines.
     """
-    from journal.cli._services import build_storyline_stack
-    from journal.services.storylines.backfill import (
-        backfill_storyline_chapters,
-    )
-
-    stack = build_storyline_stack(config)
-    dry_run = not args.execute
-    result = backfill_storyline_chapters(
-        storyline_repository=stack.storyline_repository,
-        generation_service=stack.generation_service,
-        user_id=args.user_id,
-        status=args.status,
-        storyline_id=args.storyline_id,
-        dry_run=dry_run,
-        only_single_chapter=not args.include_multichapter,
-        override_locked=args.override_locked,
-    )
-
-    mode = "DRY RUN — no changes made" if dry_run else "EXECUTED"
-    print(f"Storyline chapter backfill ({mode})")
-    print(f"Candidates: {len(result.items)}\n")
-    for item in result.items:
-        if dry_run:
-            print(
-                f"  [{item.storyline_id}] {item.name}: "
-                f"{item.chapters_before} chapter(s) → would re-section"
-            )
-        else:
-            print(
-                f"  [{item.storyline_id}] {item.name}: "
-                f"{item.chapters_before} → {item.chapters_after} chapter(s)"
-            )
-            for w in item.warnings:
-                print(f"      warning: {w}")
-    if dry_run and result.items:
-        print("\nRe-run with --execute to apply (one LLM call per span).")
-
-
-def cmd_recheck_storylines(args, config):
-    """Re-classify recent entries and regenerate matched storylines.
-
-    The catch-up for entries ingested while auto-extension wasn't firing
-    (or that predate a storyline): re-runs the extension classifier over
-    every entry since ``--since`` and regenerates each storyline any of
-    them extends. Runs synchronously; dry-run by default.
-    """
-    from journal.cli._services import build_storyline_stack
-    from journal.services.storylines.recheck import recheck_storylines
-
-    stack = build_storyline_stack(config)
-    entries = stack.entry_repository.list_entries(
-        start_date=args.since,
-        limit=args.limit,
-        user_id=args.user_id,
-    )
-    entry_ids = [e.id for e in entries]
-    dry_run = not args.execute
-    result = recheck_storylines(
-        classifier=stack.extension_classifier,
-        generation_service=stack.generation_service,
-        entry_ids=entry_ids,
-        user_id=args.user_id,
-        dry_run=dry_run,
-    )
-
-    mode = "DRY RUN — no changes made" if dry_run else "EXECUTED"
-    print(f"Storyline recheck ({mode})")
-    print(f"Entries checked: {result.entries_checked} (since {args.since})")
-    print(f"Matched storylines: {result.matched_storyline_ids}")
-    if not dry_run:
-        print(f"Regenerated: {result.regenerated_storyline_ids}")
-    elif result.matched_storyline_ids:
-        print(
-            "\nRe-run with --execute to regenerate the matched storylines."
+    storylines = []
+    limit = 100
+    offset = 0
+    while True:
+        page = storyline_repository.list_storylines(
+            user_id, status=None, limit=limit, offset=offset,
         )
+        storylines.extend(page)
+        if len(page) < limit:
+            return storylines
+        offset += limit
+
+
+def _storylines_to_process(storyline_repository, args):
+    """Resolve the storylines this invocation targets: one (via
+    ``--storyline-id``, scoped to ``--user-id``) or all of the user's."""
+    if args.storyline_id is not None:
+        storyline = storyline_repository.get_storyline(
+            args.storyline_id, user_id=args.user_id,
+        )
+        return [storyline] if storyline is not None else []
+    return _list_all_storylines(storyline_repository, args.user_id)
+
+
+def cmd_bootstrap_storylines(args, config):
+    """Partition each of the user's storylines into judge-drawn chapters.
+
+    Replaces the round-1 ``backfill-storyline-chapters`` (deterministic
+    time-bucketed re-sectioning) and ``recheck-storylines`` (extension
+    catch-up) commands, which don't exist under the judge/narrator
+    engine — ``StorylineEngine.bootstrap`` now does a full-history
+    partition in one call, replacing whatever chapters already exist.
+
+    Dry-run by default: lists each storyline with its current chapter
+    and entry counts and "would bootstrap". The dry-run path only opens
+    the storyline repository — no engine, judge, or narrator is
+    constructed and no LLM call is made. Pass ``--execute`` to actually
+    run the (LLM-costed: one judge partition call + one narrator call
+    per resulting chapter) bootstrap. ``--mark-read`` seeds resulting
+    published chapters as already-read — for the one-time migration
+    sweep bootstrapping storylines that predate this engine.
+    """
+    dry_run = not args.execute
+
+    if dry_run:
+        from journal.db.factory import ConnectionFactory
+        from journal.db.migrations import run_migrations
+        from journal.db.storyline_repository import SQLiteStorylineRepository
+
+        db_factory = ConnectionFactory(config.db_path)
+        run_migrations(db_factory.get())
+        storyline_repository = SQLiteStorylineRepository(db_factory)
+        storylines = _storylines_to_process(storyline_repository, args)
+
+        print("Storyline bootstrap (DRY RUN — no changes made)")
+        print(f"Candidates: {len(storylines)}\n")
+        for s in storylines:
+            chapter_count = len(storyline_repository.list_chapters(s.id))
+            entry_count = len(storyline_repository.assigned_entry_ids(s.id))
+            print(
+                f"  [{s.id}] {s.name}: {chapter_count} chapter(s), "
+                f"{entry_count} entries — would bootstrap"
+            )
+        if storylines:
+            print(
+                "\nRe-run with --execute to apply (one judge call + one "
+                "narrator call per resulting chapter, per storyline)."
+            )
+        return
+
+    from journal.cli._services import build_storyline_stack
+
+    stack = build_storyline_stack(config)
+    storylines = _storylines_to_process(stack.storyline_repository, args)
+
+    print("Storyline bootstrap (EXECUTED)")
+    print(f"Candidates: {len(storylines)}\n")
+    for s in storylines:
+        result = stack.engine.bootstrap(s.id, mark_read=args.mark_read)
+        print(f"  [{s.id}] {s.name}: {result.chapter_count} chapter(s)")
+        for w in result.warnings:
+            print(f"      warning: {w}")
 
 
 def cmd_eval_chunking(args, config):
@@ -873,86 +878,43 @@ def main():
         ),
     )
 
-    # backfill-storyline-chapters
-    p_story_backfill = subparsers.add_parser(
-        "backfill-storyline-chapters",
+    # bootstrap-storylines
+    p_bootstrap = subparsers.add_parser(
+        "bootstrap-storylines",
         help=(
-            "Re-section existing storylines into word-sized chapters. "
-            "Fixes storylines generated before the chapter feature that "
-            "are stuck as one long chapter. Dry-run by default."
+            "Partition a user's storylines into judge-drawn chapters via "
+            "StorylineEngine.bootstrap. Replaces the old "
+            "backfill-storyline-chapters / recheck-storylines commands. "
+            "Dry-run by default."
         ),
     )
-    p_story_backfill.add_argument(
+    p_bootstrap.add_argument(
         "--user-id",
         type=int,
-        default=1,
-        help="Owner whose storylines are re-sectioned (default: 1).",
+        required=True,
+        help="Owner whose storylines are bootstrapped (required — no default).",
     )
-    p_story_backfill.add_argument(
+    p_bootstrap.add_argument(
         "--storyline-id",
         type=int,
         default=None,
         help="Restrict to a single storyline (default: all for the user).",
     )
-    p_story_backfill.add_argument(
-        "--status",
-        default=None,
-        help="Only storylines with this status (e.g. 'active').",
+    p_bootstrap.add_argument(
+        "--mark-read",
+        action="store_true",
+        help=(
+            "Seed resulting published chapters as already-read. For the "
+            "one-time migration sweep — leave off for routine re-bootstraps."
+        ),
     )
-    p_story_backfill.add_argument(
+    p_bootstrap.add_argument(
         "--execute",
         action="store_true",
         help=(
-            "Actually re-section (one sectioning LLM call per unlocked "
-            "span). Without this flag the command only reports (dry-run)."
-        ),
-    )
-    p_story_backfill.add_argument(
-        "--include-multichapter",
-        action="store_true",
-        help=(
-            "Also re-section storylines that already have more than one "
-            "chapter (default: skip them — they were already carved)."
-        ),
-    )
-    p_story_backfill.add_argument(
-        "--override-locked",
-        action="store_true",
-        help="Re-carve across hand-painted boundary-locked chapters.",
-    )
-
-    # recheck-storylines
-    p_recheck = subparsers.add_parser(
-        "recheck-storylines",
-        help=(
-            "Re-classify entries since a date and regenerate matched "
-            "storylines. Catch-up for entries that never triggered an "
-            "auto-extension. Dry-run by default."
-        ),
-    )
-    p_recheck.add_argument(
-        "--since",
-        required=True,
-        help="Re-check entries with entry_date >= this (ISO 8601).",
-    )
-    p_recheck.add_argument(
-        "--user-id",
-        type=int,
-        default=1,
-        help="Owner whose storylines are considered (default: 1).",
-    )
-    p_recheck.add_argument(
-        "--limit",
-        type=int,
-        default=1000,
-        help="Max entries to re-check (default: 1000).",
-    )
-    p_recheck.add_argument(
-        "--execute",
-        action="store_true",
-        help=(
-            "Actually regenerate matched storylines. Without this flag "
-            "the command only reports which storylines would update."
+            "Actually bootstrap (LLM-costed: one judge partition call + "
+            "one narrator call per resulting chapter, per storyline). "
+            "Without this flag the command only reports (dry-run)."
         ),
     )
 
@@ -985,7 +947,6 @@ def main():
         "fitness-backfill": cmd_fitness_backfill,
         "fitness-status": cmd_fitness_status,
         "fitness-audit": cmd_fitness_audit,
-        "backfill-storyline-chapters": cmd_backfill_storyline_chapters,
-        "recheck-storylines": cmd_recheck_storylines,
+        "bootstrap-storylines": cmd_bootstrap_storylines,
     }
     commands[args.command](args, config)

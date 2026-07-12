@@ -98,22 +98,25 @@ def build_services(
 
 @dataclass
 class StorylineStack:
-    """Storyline collaborators a CLI command may need."""
+    """Storyline collaborators the ``bootstrap-storylines`` CLI command
+    needs."""
 
     entry_repository: SQLiteEntryRepository
     storyline_repository: object
-    generation_service: object
-    extension_classifier: object
+    engine: object
 
 
 def build_storyline_stack(config: Config) -> StorylineStack:
-    """Build the storyline collaborators for CLI commands (chapter
-    backfill, recheck).
+    """Build the storyline engine + collaborators for CLI commands.
 
-    Mirrors the storyline wiring in ``mcp_server/bootstrap.py``. Requires
-    ``ANTHROPIC_API_KEY`` — storylines are an Anthropic-backed feature and
-    there is no offline fallback, so we fail fast with an actionable error
-    rather than constructing a half-wired stack.
+    Requires ``ANTHROPIC_API_KEY`` — storylines are an Anthropic-backed
+    feature and there is no offline fallback, so we fail fast with an
+    actionable error rather than constructing a half-wired stack.
+
+    Only invoked from the ``--execute`` path of ``bootstrap-storylines``;
+    the dry-run path never calls this (see ``cmd_bootstrap_storylines``),
+    so listing storylines never requires an API key or constructs an LLM
+    client.
     """
     if not config.anthropic_api_key:
         raise RuntimeError(
@@ -121,15 +124,9 @@ def build_storyline_stack(config: Config) -> StorylineStack:
             "cannot run this storyline command without it."
         )
     from journal.db.storyline_repository import SQLiteStorylineRepository
-    from journal.providers.storyline_extension_decider import (
-        AnthropicStorylineExtensionDecider,
-    )
-    from journal.providers.storyline_glue import AnthropicStorylineGlue
+    from journal.providers.storyline_judge import AnthropicStorylineJudge
     from journal.providers.storyline_narrator import AnthropicStorylineNarrator
-    from journal.services.storylines.extension import (
-        StorylineExtensionClassifier,
-    )
-    from journal.services.storylines.service import StorylineGenerationService
+    from journal.services.storylines.engine import StorylineEngine
 
     db_factory = ConnectionFactory(config.db_path)
     run_migrations(db_factory.get())
@@ -146,37 +143,26 @@ def build_storyline_stack(config: Config) -> StorylineStack:
         model=config.storyline_narrator_model,
         max_tokens=config.storyline_narrator_max_tokens,
     )
-    glue = AnthropicStorylineGlue(
+    # TODO(Task 12): storyline_judge_model / storyline_judge_max_tokens
+    # config knobs land in Task 12 alongside the rest of the judge/engine
+    # config surface. Until then, fall back to the provider's own default
+    # model rather than block this task on a config field that doesn't
+    # exist yet.
+    judge = AnthropicStorylineJudge(
         api_key=config.anthropic_api_key,
-        model=config.storyline_glue_model,
-    )
-    decider = AnthropicStorylineExtensionDecider(
-        api_key=config.anthropic_api_key,
-        model=config.storyline_extension_decider_model,
+        model=getattr(config, "storyline_judge_model", "claude-haiku-4-5"),
     )
     embedder = lambda text: embeddings.embed_texts([text])[0]  # noqa: E731
-    service = StorylineGenerationService(
+    engine = StorylineEngine(
         entity_store=entity_store,
         entry_repository=repo,
         storyline_repository=storyline_repository,
         narrator=narrator,
-        glue=glue,
+        judge=judge,
         embedder=embedder,
-        window_days=config.storyline_default_window_days,
-        fts_fallback_threshold=config.storyline_fts_fallback_threshold,
-        max_chapter_words=config.storyline_chapter_max_words,
-    )
-    classifier = StorylineExtensionClassifier(
-        entity_store=entity_store,
-        entry_repository=repo,
-        storyline_repository=storyline_repository,
-        decider=decider,
-        embedder=embedder,
-        relevance_threshold=config.storyline_extension_relevance_threshold,
     )
     return StorylineStack(
         entry_repository=repo,
         storyline_repository=storyline_repository,
-        generation_service=service,
-        extension_classifier=classifier,
+        engine=engine,
     )
