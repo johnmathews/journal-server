@@ -132,6 +132,44 @@ class _SectionPlan:
 
 GenerationMode = Literal["replace", "append"]
 
+# Upper bound on chapters a single resegment can produce, so a pathological
+# word estimate can't fan out into hundreds of LLM narration calls.
+_MAX_CHAPTERS = 20
+
+
+def _split_excerpts_contiguous(
+    excerpts: list[DatedEntryExcerpt], k: int,
+) -> list[list[DatedEntryExcerpt]]:
+    """Split date-ordered ``excerpts`` into ``k`` contiguous groups.
+
+    Groups are as even as possible in count. Boundaries snap forward so a
+    run of same-date excerpts is never split across two groups (keeps
+    chapter date windows distinct and non-overlapping). Returns 1..k
+    groups (fewer than k only if snapping merges groups, e.g. many
+    same-date entries). Assumes ``excerpts`` is sorted by
+    ``(entry_date, entry_id)`` — which ``_fetch_excerpts`` guarantees.
+    """
+    n = len(excerpts)
+    if k <= 1 or n <= 1:
+        return [list(excerpts)]
+    groups: list[list[DatedEntryExcerpt]] = []
+    i = 0
+    remaining_groups = k
+    while i < n and remaining_groups > 0:
+        remaining = n - i
+        # ceil(remaining / remaining_groups) without importing math
+        size = -(-remaining // remaining_groups)
+        j = i + size
+        # Don't split a same-date run across the boundary.
+        while j < n and excerpts[j].entry_date == excerpts[j - 1].entry_date:
+            j += 1
+        groups.append(list(excerpts[i:j]))
+        i = j
+        remaining_groups -= 1
+    if i < n:  # snapping consumed the group budget — fold the tail in
+        groups[-1].extend(excerpts[i:])
+    return groups
+
 
 @runtime_checkable
 class StorylineGenerationServiceProtocol(Protocol):
@@ -629,6 +667,69 @@ class StorylineGenerationService:
             )
         return spans
 
+    def _narrate_bucketed(
+        self,
+        excerpts: list[DatedEntryExcerpt],
+        storyline: Storyline,
+        est_words: int,
+    ) -> tuple[list[Any], str]:
+        """Narrate a span as multiple chapters by time-bucketing.
+
+        The sectioning narrator reliably returns a single section even for
+        very long input (it treats a storyline as one coherent topic), so
+        splitting is done deterministically here rather than left to the
+        model: partition the date-ordered excerpts into
+        ``round(est_words / max_chapter_words)`` contiguous buckets — about
+        one chapter per chapter-worth of narrative — and narrate each
+        bucket separately. The returned sections (in date order) are fed
+        through the existing ``_derive_section_windows`` + plan loop, so
+        each bucket becomes its own chapter with a model-written title.
+
+        ``est_words`` is the estimated total narrative length (the cached
+        word count of the chapters being replaced). When it is unknown
+        (0), one narration over the whole span measures it — and is reused
+        directly when the result is a single chapter, so that path costs no
+        extra call.
+
+        Returns ``(sections, model_used)``; an empty ``sections`` list
+        signals a transient narrator failure the caller must treat as
+        "preserve existing chapters" (never wipe good data on a flaky API
+        call).
+        """
+        target = max(1, self._max_chapter_words)
+
+        def narrate(items: list[DatedEntryExcerpt]) -> Any:  # noqa: ANN401
+            return self._narrator.generate_sectioned_narrative(
+                items, storyline.name, storyline.description,
+            )
+
+        if est_words <= 0:
+            measured = narrate(excerpts)
+            if not measured.sections:
+                return [], measured.model_used
+            est_words = sum(s.word_count for s in measured.sections)
+            k = min(max(1, round(est_words / target)), len(excerpts), _MAX_CHAPTERS)
+            if k <= 1:
+                return list(measured.sections), measured.model_used
+        else:
+            k = min(max(1, round(est_words / target)), len(excerpts), _MAX_CHAPTERS)
+            if k <= 1:
+                single = narrate(excerpts)
+                return list(single.sections), single.model_used
+
+        buckets = _split_excerpts_contiguous(excerpts, k)
+        all_sections: list[Any] = []
+        model_used = self._narrator.model
+        for bucket in buckets:
+            result = narrate(bucket)
+            if not result.sections:
+                # Transient failure mid-rebuild — bail so the caller
+                # preserves the span rather than writing partial chapters.
+                return [], result.model_used
+            model_used = result.model_used
+            all_sections.extend(result.sections)
+        return all_sections, model_used
+
     def _plan_span(
         self,
         storyline: Storyline,
@@ -669,10 +770,19 @@ class StorylineGenerationService:
                 )
             ]
 
-        sectioned = self._narrator.generate_sectioned_narrative(
-            excerpts, storyline.name, storyline.description,
+        # Estimate the storyline's narrative length from the chapters we're
+        # about to replace (their cached word count is fresh right after a
+        # regenerate), then time-bucket into ~one chapter per chapter-worth
+        # of words. The sectioning narrator won't split a long narrative on
+        # its own, so the split is deterministic here.
+        est_words = sum(
+            (chapters[ci].narrative_word_count or 0)
+            for ci in range(span.first_idx, span.last_idx + 1)
         )
-        if not sectioned.sections:
+        sections, model_used = self._narrate_bucketed(
+            excerpts, storyline, est_words,
+        )
+        if not sections:
             log.warning(
                 "Storyline %d span [%s..%s]: sectioned narrator returned zero "
                 "sections for %d excerpts — preserving existing chapters",
@@ -689,7 +799,7 @@ class StorylineGenerationService:
             ex.entry_id: str(ex.entry_date) for ex in excerpts
         }
         windows = _derive_section_windows(
-            sectioned.sections,
+            sections,
             date_by_entry,
             span_start=span.span_start,
             span_end=span.span_end,
@@ -705,9 +815,9 @@ class StorylineGenerationService:
         ]
 
         plans: list[_SectionPlan] = []
-        last_index = len(sectioned.sections) - 1
+        last_index = len(sections) - 1
         for i, (section, (win_start, win_end)) in enumerate(
-            zip(sectioned.sections, windows, strict=True)
+            zip(sections, windows, strict=True)
         ):
             title = section.title
             title_locked = False
@@ -735,7 +845,7 @@ class StorylineGenerationService:
                     segments=section.segments,
                     source_entry_ids=section.source_entry_ids,
                     citation_count=section.citation_count,
-                    model_used=sectioned.model_used,
+                    model_used=model_used,
                     title_locked=title_locked,
                 )
             )
