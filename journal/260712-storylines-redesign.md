@@ -121,3 +121,26 @@ Full unit suite green throughout (task-scoped tests per commit across 12 impleme
 full-suite gate from Task 12 onward): `2956 passed, 11 skipped`. `ruff check src/ tests/` clean.
 Implementation was tracked task-by-task under `.superpowers/sdd/` (13 tasks, `progress.md` +
 per-task briefs/reports); this entry summarizes the branch, not any single task.
+
+## Post-ship addendum (2026-07-13)
+
+- **Final whole-branch review** (after the 13 tasks) found one rollout
+  blocker the per-task reviews couldn't see: bootstrap sent the entire corpus
+  to the judge in one call with `max_tokens=2048`. Fixed in `0529ffd` with
+  50-entry overlapping-window partitioning, a per-run judge batch cap, and an
+  8192-token judge budget. `f02c333` added REST entity-ownership validation
+  on create/anchors (422 on foreign entity ids), a repository membership-
+  uniqueness guard, LIKE-escaping in `find_entries_mentioning`, an addendum
+  empty-prior guard, and per-storyline resilience in the bootstrap CLI sweep.
+- **Deployed 2026-07-12**: merged fast-forward to main, CI green, containers
+  updated on `media`. Migration 0036 applied cleanly (user_version 36, panels
+  preserved as `storyline_panels_legacy`).
+- **Bootstrap sweep**: Simmons & Simmons (3 chapters), Family (7), Atlas (7)
+  regenerated. Fitness initially aborted with **zero writes** when the
+  Anthropic monthly usage limit was hit mid-narration — the fail-before-write
+  policy working as designed — and was re-run successfully the same evening
+  (5 chapters). Operational lesson: run prod sweeps per-storyline
+  (`--storyline-id`); a multi-storyline sweep through one ssh/docker-exec
+  session dies with the session.
+- Remaining: migration 0037 (drop `storyline_panels_legacy`) in a later
+  release — tracked in `docs/rollout-storylines-0036.md`'s status header.
