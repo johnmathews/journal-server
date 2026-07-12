@@ -40,7 +40,7 @@ from journal.services.storylines.engine import (
     StorylineEngine,
     StorylineEngineProtocol,
 )
-from journal.services.storylines.segments import text_segment
+from journal.services.storylines.segments import citation_segment, text_segment
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -815,6 +815,49 @@ class TestAddenda:
         engine.update(storyline.id)
         assert entry_ids[2] in [c.entry_id for c in fake_judge.calls[-1].new_entries]
 
+    def test_addendum_with_citation_only_prior_is_treated_as_failure(
+        self,
+        engine: StorylineEngine,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+        entry_ids: list[int],
+        fake_narrator: FakeNarrator,
+        fake_judge: FakeJudge,
+    ) -> None:
+        """A published chapter whose segments are citation-only (no text
+        segments) has an empty ``_join_text`` — the narrator's own
+        ``mode="addendum"`` guard raises ``ValueError`` on a blank
+        ``prior_narrative``. The engine must catch this upstream (never
+        call the narrator) and treat it as an ordinary addendum
+        failure: a warning, entries left pending, no crash."""
+        draft = repo.get_draft(storyline.id)
+        assert draft is not None
+        repo.add_entries_to_draft(draft.id, entry_ids[:2])
+        published, _new_draft = repo.publish_draft(
+            storyline.id,
+            title="Winter Running",
+            segments=[citation_segment(entry_ids[0], "some quoted text")],
+            source_entry_ids=entry_ids[:2], citation_count=1, model_used="fake",
+            new_draft_entry_ids=[],
+        )
+        fake_judge.judgment = ExtensionJudgment(
+            assignments=[
+                EntryAssignment(entry_ids[2], "published_chapter", published.id),
+            ],
+            draft_arc_complete=False, reasoning="backdated entry",
+        )
+
+        result = engine.update(storyline.id)  # must not raise
+
+        updated = repo.get_chapter(published.id)
+        assert updated is not None
+        assert updated.addenda == []
+        assert any("narrative text" in w.lower() for w in result.warnings)
+        assert not any(c.mode == "addendum" for c in fake_narrator.calls)
+        # entry_ids[2] never landed anywhere → still surfaces as new next run
+        engine.update(storyline.id)
+        assert entry_ids[2] in [c.entry_id for c in fake_judge.calls[-1].new_entries]
+
 
 # ── bootstrap() ──────────────────────────────────────────────────
 
@@ -1045,6 +1088,41 @@ class TestFindEntriesMentioning:
         # value, never concatenated into the query text.
         assert repo.find_entries_mentioning(seed_user, "'; DROP TABLE entries; --") == []
         assert repo.find_entries_mentioning(seed_user, "Alice") == results
+
+    def test_percent_in_name_is_escaped_not_a_wildcard(
+        self,
+        repo: SQLiteStorylineRepository,
+        factory: ConnectionFactory,
+        seed_user: int,
+    ) -> None:
+        """``%``/``_`` are LIKE wildcards — an entity literally named
+        "100%" must match the literal text "100%" but must NOT match
+        "100 percent" (which an unescaped ``%...%``  pattern would
+        wrongly treat "100%" as "100" + any-chars)."""
+        conn = factory.get()
+        cursor = conn.execute(
+            "INSERT INTO entries"
+            " (entry_date, source_type, raw_text, final_text, word_count, user_id)"
+            " VALUES (?, 'text', ?, ?, ?, ?)",
+            (
+                "2026-05-02", "Battery at 100% this morning.",
+                "Battery at 100% this morning.", 5, seed_user,
+            ),
+        )
+        literal_entry_id = cursor.lastrowid
+        conn.execute(
+            "INSERT INTO entries"
+            " (entry_date, source_type, raw_text, final_text, word_count, user_id)"
+            " VALUES (?, 'text', ?, ?, ?, ?)",
+            (
+                "2026-05-03", "Gave it 100 percent effort today.",
+                "Gave it 100 percent effort today.", 6, seed_user,
+            ),
+        )
+        conn.commit()
+
+        results = repo.find_entries_mentioning(seed_user, "100%")
+        assert [e.entry_id for e in results] == [literal_entry_id]
 
 
 class TestSparseRecallFallback:

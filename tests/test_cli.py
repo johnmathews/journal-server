@@ -867,6 +867,66 @@ def test_cmd_bootstrap_storylines_execute_calls_engine_per_storyline(
     assert "2 chapter(s)" in out
 
 
+def test_cmd_bootstrap_storylines_execute_continues_after_one_failure(
+    tmp_path, capsys,
+):
+    """One storyline's ``engine.bootstrap`` raising must not abort the
+    sweep — the rest still get processed — but the command must exit
+    non-zero so a cron/CI caller notices the failure."""
+    from unittest.mock import MagicMock, patch
+
+    from journal.cli import cmd_bootstrap_storylines
+    from journal.cli._services import StorylineStack
+    from journal.config import Config
+    from journal.db.factory import ConnectionFactory
+    from journal.db.migrations import run_migrations
+    from journal.db.storyline_repository import SQLiteStorylineRepository
+    from journal.services.storylines.engine import UpdateResult
+
+    db_path = tmp_path / "bootstrap_partial_failure.db"
+    factory = ConnectionFactory(db_path)
+    run_migrations(factory.get())
+    s1 = _make_storyline(factory, name="Trip to Vienna", anchor="Vienna")
+    s2 = _make_storyline(factory, name="New Job", anchor="Acme Corp")
+
+    config = Config(db_path=db_path, anthropic_api_key="sk-ant-test")
+    storyline_repository = SQLiteStorylineRepository(factory)
+    fake_engine = MagicMock()
+    fake_engine.bootstrap.side_effect = [
+        RuntimeError("judge API down"),
+        UpdateResult(storyline_id=s2.id, chapter_count=2),
+    ]
+    fake_stack = StorylineStack(
+        entry_repository=MagicMock(),
+        storyline_repository=storyline_repository,
+        engine=fake_engine,
+    )
+
+    with (
+        patch(
+            "journal.cli._services.build_storyline_stack", return_value=fake_stack,
+        ),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        cmd_bootstrap_storylines(
+            MagicMock(
+                user_id=1, storyline_id=None, mark_read=False, execute=True,
+            ),
+            config,
+        )
+
+    assert exc_info.value.code != 0
+    # Both storylines were attempted despite the first one raising.
+    assert fake_engine.bootstrap.call_count == 2
+    called_ids = {c.args[0] for c in fake_engine.bootstrap.call_args_list}
+    assert called_ids == {s1.id, s2.id}
+
+    out = capsys.readouterr().out
+    assert "FAILED" in out
+    assert "judge API down" in out
+    assert "2 chapter(s)" in out  # s2 still printed its normal summary
+
+
 def test_cmd_bootstrap_storylines_storyline_id_restricts_to_one(
     tmp_path, capsys,
 ):

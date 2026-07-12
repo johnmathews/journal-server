@@ -509,6 +509,55 @@ class TestChapterLifecycle:
         assert new_draft.state == "draft" and new_draft.seq == published.seq + 1
         assert repo.chapter_entry_ids(new_draft.id) == [entry_ids[2]]
 
+    def test_add_entries_to_draft_rejects_id_already_in_another_chapter(
+        self,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+        entry_ids: list[int],
+    ) -> None:
+        """Membership uniqueness guard (spec §1): an entry belongs to
+        exactly one chapter of a storyline at a time. Assign an entry
+        to the draft, publish it (so the entry now lives in the
+        published chapter), then try to add the SAME entry to the
+        fresh draft that publish seeded — must raise, naming the entry
+        and its current chapter."""
+        draft = repo.get_draft(storyline.id)
+        repo.add_entries_to_draft(draft.id, entry_ids[:1])
+        published, new_draft = repo.publish_draft(
+            storyline.id, title="Chapter One",
+            segments=[{"kind": "text", "text": "prose"}],
+            source_entry_ids=entry_ids[:1], citation_count=1, model_used="m",
+            new_draft_entry_ids=[],
+        )
+
+        with pytest.raises(ValueError, match=str(entry_ids[0])):
+            repo.add_entries_to_draft(new_draft.id, entry_ids[:1])
+
+        # No partial write: the entry is still only in the published chapter.
+        assert repo.chapter_entry_ids(new_draft.id) == []
+        assert repo.chapter_entry_ids(published.id) == entry_ids[:1]
+
+    def test_publish_draft_rejects_new_draft_id_already_in_another_chapter(
+        self,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+        entry_ids: list[int],
+    ) -> None:
+        """Same guard, exercised via ``publish_draft``'s
+        ``new_draft_entry_ids`` path: an id already sitting in the
+        chapter about to be published can't ALSO be routed into the
+        fresh draft being seeded by the same call."""
+        draft = repo.get_draft(storyline.id)
+        repo.add_entries_to_draft(draft.id, entry_ids[:1])
+
+        with pytest.raises(ValueError, match=str(entry_ids[0])):
+            repo.publish_draft(
+                storyline.id, title="Chapter One",
+                segments=[{"kind": "text", "text": "prose"}],
+                source_entry_ids=entry_ids[:1], citation_count=1, model_used="m",
+                new_draft_entry_ids=entry_ids[:1],
+            )
+
     def test_publish_without_draft_raises(
         self, repo: SQLiteStorylineRepository, seed_user: int,
     ) -> None:

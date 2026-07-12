@@ -205,10 +205,12 @@ class AnthropicStorylineNarrator:
 
         Returns a populated ``NarrativeResult``; the segments list is
         in render order (interleaved text + citation). The caller
-        persists segments via ``SQLiteStorylineRepository.upsert_panel``.
-        On empty input or hard API failure, returns an empty result —
-        callers decide whether to retry or surface as "no narrative
-        available".
+        persists segments onto the chapter row via
+        ``SQLiteStorylineRepository`` (``set_draft_narrative`` for a
+        draft, ``publish_draft`` for closure, ``append_addendum`` for
+        an addendum). On empty input or hard API failure, returns an
+        empty result — callers decide whether to retry or surface as
+        "no narrative available".
 
         Raises ``ValueError`` if ``mode="addendum"`` and
         ``prior_narrative`` is missing/blank — an addendum with nothing

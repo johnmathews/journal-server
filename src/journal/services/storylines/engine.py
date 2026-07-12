@@ -476,8 +476,10 @@ class StorylineEngine:
     ) -> list[int]:
         """Apply one published-chapter addendum. Returns ids to fold into
         ``to_draft`` instead when the chapter isn't actually published
-        (defensive fallback). On narration failure, adds ``entry_ids`` to
-        ``failed_ids`` (kept pending for a retry) and returns ``[]``."""
+        (defensive fallback). On narration failure — including an empty
+        prior narrative, which the narrator itself would otherwise raise
+        ``ValueError`` on — adds ``entry_ids`` to ``failed_ids`` (kept
+        pending for a retry) and returns ``[]``."""
         chapter = self._repo.get_chapter(chapter_id)
         if chapter is None or chapter.state != "published":
             result.warnings.append(
@@ -486,10 +488,24 @@ class StorylineEngine:
             )
             return list(entry_ids)
 
+        prior_narrative = _join_text(chapter.segments)
+        if not prior_narrative.strip():
+            # The published chapter's segments are citation-only (no
+            # text segments) — the narrator requires a non-blank
+            # prior_narrative in addendum mode and raises ValueError
+            # without it. Treat this the same as any other addendum
+            # failure rather than letting that exception escape.
+            result.warnings.append(
+                f"Chapter {chapter_id} has no narrative text to append an "
+                "addendum to; entries left pending for the next run.",
+            )
+            failed_ids.update(entry_ids)
+            return []
+
         excerpts = self._excerpts_for(entry_ids, excerpt_by_id)
         narrative = self._narrator.generate_narrative(
             excerpts, storyline.name, storyline.description,
-            mode="addendum", prior_narrative=_join_text(chapter.segments),
+            mode="addendum", prior_narrative=prior_narrative,
         )
         if not narrative.segments:
             result.warnings.append(

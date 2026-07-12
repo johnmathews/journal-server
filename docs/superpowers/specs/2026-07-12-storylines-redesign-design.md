@@ -146,7 +146,9 @@ publish.
   citation→entry_id parsing survive unchanged. Deleted: sectioning prompt, `##` parsing,
   `NarrativeSection`, word-band constants, `prior_narrative` append plumbing. One method
   with `mode: draft | closure | addendum` selecting the framing instruction; `closure`
-  returns the title via a paired tool call (nothing regex-parsed).
+  prompts the model to open with a `# <title>` line, which the narrator parses off the
+  first text segment only — a single bounded first-line regex match, never applied to
+  draft/addendum responses or to any later `#` in the prose.
 - **Judge — new provider** (replaces `storyline_extension_decider` + all boundary logic).
   Two tool-call methods sharing a system prompt: `judge_extension(...)` (Flow 1) and
   `partition(...)` (Flow 2). Forced tool choice, structured output. Model: Haiku, config

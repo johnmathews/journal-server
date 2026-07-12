@@ -495,11 +495,55 @@ class SQLiteStorylineRepository:
         ).fetchall()
         return [int(r["entry_id"]) for r in rows]
 
-    def add_entries_to_draft(self, chapter_id: int, entry_ids: list[int]) -> None:
-        """Assign entries to a draft chapter. Raises if not draft."""
-        self._require_state(chapter_id, "draft")
+    def _reject_cross_chapter_membership(
+        self,
+        storyline_id: int,
+        entry_ids: list[int],
+        *,
+        exclude_chapter_id: int | None = None,
+    ) -> None:
+        """Raise ``ValueError`` if any of ``entry_ids`` is already a member
+        of a DIFFERENT chapter of ``storyline_id`` (spec §1: an entry
+        belongs to exactly one chapter of a storyline at a time).
+
+        ``exclude_chapter_id`` lets a caller check against every OTHER
+        chapter while assigning into a chapter that may already hold
+        some of the same ids (e.g. re-adding an already-assigned id to
+        its own draft is a no-op via ``INSERT OR IGNORE``, not a
+        conflict). One query; the message names the offending entry id
+        and the chapter it's already in.
+        """
         if not entry_ids:
             return
+        placeholders = ", ".join("?" for _ in entry_ids)
+        sql = (
+            "SELECT ce.entry_id, ce.chapter_id FROM storyline_chapter_entries ce"
+            " JOIN storyline_chapters c ON c.id = ce.chapter_id"
+            f" WHERE c.storyline_id = ? AND ce.entry_id IN ({placeholders})"
+        )
+        params: list[object] = [storyline_id, *entry_ids]
+        if exclude_chapter_id is not None:
+            sql += " AND ce.chapter_id != ?"
+            params.append(exclude_chapter_id)
+        sql += " LIMIT 1"
+        row = self._conn().execute(sql, params).fetchone()
+        if row is not None:
+            raise ValueError(
+                f"Entry {row['entry_id']} is already a member of chapter "
+                f"{row['chapter_id']} in storyline {storyline_id}; an "
+                "entry can only belong to one chapter at a time."
+            )
+
+    def add_entries_to_draft(self, chapter_id: int, entry_ids: list[int]) -> None:
+        """Assign entries to a draft chapter. Raises if not draft, or if
+        any entry id already belongs to another chapter of the same
+        storyline (membership uniqueness guard, spec §1)."""
+        chapter = self._require_state(chapter_id, "draft")
+        if not entry_ids:
+            return
+        self._reject_cross_chapter_membership(
+            chapter.storyline_id, entry_ids, exclude_chapter_id=chapter_id,
+        )
         conn = self._conn()
         try:
             conn.executemany(
@@ -561,15 +605,20 @@ class SQLiteStorylineRepository:
         extractor misses that ``entity_mentions`` never recorded. Fully
         parameterised (``name`` only ever appears as a bound ``?``
         substitution inside the ``%...%`` pattern) — no SQL injection
-        surface. Returns excerpts with no ``quotes`` (there is no
+        surface. ``%`` and ``_`` in ``name`` are backslash-escaped
+        (``ESCAPE '\\'``) before being wrapped so a literal entity name
+        like ``"100%"`` is matched as text, not as a LIKE wildcard.
+        Returns excerpts with no ``quotes`` (there is no
         ``entity_mentions`` row to quote from on this path).
         """
-        pattern = f"%{name}%"
+        escaped_name = name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped_name}%"
         rows = self._conn().execute(
             "SELECT id AS entry_id, entry_date,"
             "  COALESCE(NULLIF(final_text, ''), raw_text) AS body_text"
             " FROM entries"
-            " WHERE user_id = ? AND (final_text LIKE ? OR raw_text LIKE ?)"
+            " WHERE user_id = ?"
+            "   AND (final_text LIKE ? ESCAPE '\\' OR raw_text LIKE ? ESCAPE '\\')"
             " ORDER BY entry_date ASC, id ASC",
             (user_id, pattern, pattern),
         ).fetchall()
@@ -675,11 +724,16 @@ class SQLiteStorylineRepository:
     ) -> tuple[StorylineChapter, StorylineChapter]:
         """Publish the storyline's draft and seed the next draft, atomically.
 
-        Raises ``ValueError`` if the storyline has no draft chapter.
+        Raises ``ValueError`` if the storyline has no draft chapter, or
+        if any of ``new_draft_entry_ids`` already belongs to another
+        chapter of this storyline (membership uniqueness guard, spec
+        §1) — the new draft chapter doesn't exist yet, so this checks
+        against every existing chapter, no exclusion.
         """
         draft = self.get_draft(storyline_id)
         if draft is None:
             raise ValueError(f"Storyline {storyline_id} has no draft chapter")
+        self._reject_cross_chapter_membership(storyline_id, new_draft_entry_ids)
         conn = self._conn()
         try:
             conn.execute(

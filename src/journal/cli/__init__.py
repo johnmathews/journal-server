@@ -282,11 +282,20 @@ def cmd_bootstrap_storylines(args, config):
 
     print("Storyline bootstrap (EXECUTED)")
     print(f"Candidates: {len(storylines)}\n")
+    any_failed = False
     for s in storylines:
-        result = stack.engine.bootstrap(s.id, mark_read=args.mark_read)
+        try:
+            result = stack.engine.bootstrap(s.id, mark_read=args.mark_read)
+        except Exception as exc:  # noqa: BLE001 — one storyline's crash must not stop the sweep
+            any_failed = True
+            print(f"  [{s.id}] {s.name}: FAILED — {exc}")
+            continue
         print(f"  [{s.id}] {s.name}: {result.chapter_count} chapter(s)")
         for w in result.warnings:
             print(f"      warning: {w}")
+
+    if any_failed:
+        sys.exit(1)
 
 
 def cmd_eval_chunking(args, config):

@@ -1,6 +1,6 @@
-"""Segment helpers for storyline panels.
+"""Segment helpers for storyline chapters.
 
-A panel is a list of segment dicts. Each dict is either:
+A chapter's narrative is a list of segment dicts. Each dict is either:
 
     {"kind": "text", "text": "..."}                 — plain prose
     {"kind": "citation", "entry_id": 42, "quote": "..."}  — cited excerpt

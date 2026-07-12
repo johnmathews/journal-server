@@ -33,6 +33,21 @@ if TYPE_CHECKING:
 _TEST_USER_ID = 1
 
 
+def _create_other_user(factory: ConnectionFactory) -> int:
+    """Insert a second user row and return its id — entities need a
+    real FK-satisfying owner to test cross-user ownership rejection."""
+    conn = factory.get()
+    cursor = conn.execute(
+        "INSERT INTO users (email, password_hash, display_name)"
+        " VALUES (?, ?, ?)",
+        ("other@example.com", "x", "Other User"),
+    )
+    conn.commit()
+    other_user_id = cursor.lastrowid
+    assert other_user_id is not None
+    return other_user_id
+
+
 class _FakeAuthMiddleware:
     def __init__(self, app: Any) -> None:  # noqa: ANN401
         self.app = app
@@ -232,6 +247,28 @@ class TestCreateStoryline:
         )
         assert resp.status_code == 422
         assert "cap" in resp.json()["error"] or str(MAX_ANCHORS) in resp.json()["error"]
+
+    def test_create_rejects_other_users_entity_with_422(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        store = ctx["entity_store"]
+        other_user_id = _create_other_user(ctx["factory"])
+        other_users_entity = store.create_entity(
+            entity_type="activity", canonical_name="Someone Else's Thing",
+            description="", first_seen="2026-02-15",
+            user_id=other_user_id,
+        )
+        resp = client.post(
+            "/api/storylines",
+            json={
+                "entity_ids": [ctx["entity_id"], other_users_entity.id],
+                "name": "Cross-user",
+            },
+        )
+        assert resp.status_code == 422
+        assert str(other_users_entity.id) in resp.json()["error"]
 
     def test_create_multiple_anchors_returns_anchors_list(
         self,
@@ -670,6 +707,31 @@ class TestSetAnchors:
         ]
         resp = client.put(f"/api/storylines/{sid}/anchors", json={"entity_ids": ids})
         assert resp.status_code == 422
+
+    def test_set_anchors_rejects_other_users_entity_with_422(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        store = ctx["entity_store"]
+        other_user_id = _create_other_user(ctx["factory"])
+        other_users_entity = store.create_entity(
+            entity_type="activity", canonical_name="Someone Else's Thing",
+            description="", first_seen="2026-02-15",
+            user_id=other_user_id,
+        )
+        created = client.post(
+            "/api/storylines",
+            json={"entity_ids": [ctx["entity_id"]], "name": "Z"},
+        ).json()
+        sid = created["storyline"]["id"]
+
+        resp = client.put(
+            f"/api/storylines/{sid}/anchors",
+            json={"entity_ids": [other_users_entity.id]},
+        )
+        assert resp.status_code == 422
+        assert str(other_users_entity.id) in resp.json()["error"]
 
 
 class TestDeletedRoutesNowGone:

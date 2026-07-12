@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from starlette.responses import JSONResponse
 
@@ -65,6 +65,19 @@ MAX_ANCHORS = 15
 #: Statuses allowed by the ``storylines.status`` CHECK constraint
 #: (``db/migrations/0027_storylines.sql`` and friends).
 _VALID_STATUSES = ("active", "archived")
+
+
+def _invalid_entity_ids(
+    entity_store: Any, entity_ids: list[int], user_id: int,
+) -> list[int]:
+    """Return the subset of ``entity_ids`` that don't belong to ``user_id``.
+
+    Mirrors ``journal_create_storyline``/``journal_set_storyline_anchors``
+    in ``mcp_server/tools/storylines.py`` — same ``get_entity(eid,
+    user_id=...)`` ownership check, just returning the invalid-id list
+    instead of a formatted string (REST callers render their own 422).
+    """
+    return [eid for eid in entity_ids if entity_store.get_entity(eid, user_id=user_id) is None]
 
 
 def register_storylines_write_routes(
@@ -143,6 +156,16 @@ def register_storylines_write_routes(
                     "error": (
                         f"entity_ids must have 1..{MAX_ANCHORS} unique "
                         f"anchors (got {len(unique_entity_ids)})"
+                    ),
+                },
+                status_code=422,
+            )
+        invalid_ids = _invalid_entity_ids(entity_store, unique_entity_ids, user.user_id)
+        if invalid_ids:
+            return JSONResponse(
+                {
+                    "error": (
+                        f"entity_ids not found for this user: {invalid_ids}"
                     ),
                 },
                 status_code=422,
@@ -606,6 +629,16 @@ def register_storylines_write_routes(
                     "error": (
                         f"entity_ids has {len(unique_entity_ids)} unique "
                         f"anchors; the cap is {MAX_ANCHORS}"
+                    ),
+                },
+                status_code=422,
+            )
+        invalid_ids = _invalid_entity_ids(entity_store, unique_entity_ids, user.user_id)
+        if invalid_ids:
+            return JSONResponse(
+                {
+                    "error": (
+                        f"entity_ids not found for this user: {invalid_ids}"
                     ),
                 },
                 status_code=422,
