@@ -1,9 +1,15 @@
 """Tests for SQLiteStorylineRepository + the dated-entity-excerpts query.
 
-Covers W3 of the storylines plan:
+Covers the storylines redesign (spec: docs/superpowers/specs/2026-07-12-
+storylines-redesign-design.md), repository rewrite task:
 
 * CRUD on the storylines table (create / get / list / update / delete).
-* Panel upsert + read (curation and narrative kinds).
+* Anchors (storyline_entities join table).
+* Chapter lifecycle: seeded draft, publish/unpublish transactions.
+* Immutability guards (draft-only vs published-only operations).
+* Derived chapter fields (entry_count/first/last entry date) + unread counts.
+* Pending (matched-but-unassigned) entries.
+* Bootstrap replace-all-chapters.
 * The `_MentionsMixin.get_dated_entity_excerpts` query that powers the
   generation service's source-corpus fetch.
 * The segments helpers.
@@ -15,7 +21,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from journal.db.storyline_repository import SQLiteStorylineRepository
+from journal.db.storyline_repository import (
+    BootstrapChapterSpec,
+    SQLiteStorylineRepository,
+)
 from journal.entitystore.store import SQLiteEntityStore
 from journal.services.storylines.segments import (
     citation_segment,
@@ -29,6 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import Generator
 
     from journal.db.factory import ConnectionFactory
+    from journal.models import Storyline
 
 
 # ── Fixtures ──────────────────────────────────────────────────────
@@ -66,10 +76,41 @@ def seed_entity(
 
 
 @pytest.fixture
-def storyline_repo(
+def repo(
     factory: ConnectionFactory,
 ) -> Generator[SQLiteStorylineRepository]:
     yield SQLiteStorylineRepository(factory)
+
+
+@pytest.fixture
+def storyline(
+    repo: SQLiteStorylineRepository, seed_user: int, seed_entity: int,
+) -> Storyline:
+    return repo.create_storyline(seed_user, [seed_entity], "Running")
+
+
+@pytest.fixture
+def entry_ids(factory: ConnectionFactory, seed_user: int) -> list[int]:
+    """Seed three entries spanning 2026-02-20 .. 2026-04-25, in date order."""
+    conn = factory.get()
+    ids: list[int] = []
+    rows = [
+        ("2026-02-20", "I ran 5km today"),
+        ("2026-03-15", "Long Saturday run."),
+        ("2026-04-25", "I ran 11km yesterday."),
+    ]
+    for entry_date, text in rows:
+        cursor = conn.execute(
+            "INSERT INTO entries"
+            " (entry_date, source_type, raw_text, final_text,"
+            "  word_count, user_id)"
+            " VALUES (?, 'text', ?, ?, ?, ?)",
+            (entry_date, text, text, len(text.split()), seed_user),
+        )
+        assert cursor.lastrowid is not None
+        ids.append(cursor.lastrowid)
+    conn.commit()
+    return ids
 
 
 # ── Storyline CRUD ───────────────────────────────────────────────
@@ -78,11 +119,11 @@ def storyline_repo(
 class TestStorylineCRUD:
     def test_create_returns_populated_storyline(
         self,
-        storyline_repo: SQLiteStorylineRepository,
+        repo: SQLiteStorylineRepository,
         seed_user: int,
         seed_entity: int,
     ) -> None:
-        s = storyline_repo.create_storyline(
+        s = repo.create_storyline(
             user_id=seed_user,
             entity_ids=[seed_entity],
             name="Running",
@@ -94,13 +135,12 @@ class TestStorylineCRUD:
         assert s.description == "My running thread"
         assert s.status == "active"
         assert s.created_at != ""
-        assert s.last_generated_at is None
         # Single-anchor create populates storyline_entities.
-        assert storyline_repo.list_anchors(s.id) == [seed_entity]
+        assert repo.list_anchors(s.id) == [seed_entity]
 
     def test_create_with_multiple_anchors(
         self,
-        storyline_repo: SQLiteStorylineRepository,
+        repo: SQLiteStorylineRepository,
         seed_user: int,
         factory: ConnectionFactory,
     ) -> None:
@@ -115,58 +155,58 @@ class TestStorylineCRUD:
             )
             for i in range(3)
         ]
-        s = storyline_repo.create_storyline(
+        s = repo.create_storyline(
             user_id=seed_user,
             entity_ids=[ents[2].id, ents[0].id, ents[1].id],  # unsorted input
             name="Trio",
         )
         # Anchors stored, returned sorted ASC.
-        assert storyline_repo.list_anchors(s.id) == sorted(e.id for e in ents)
+        assert repo.list_anchors(s.id) == sorted(e.id for e in ents)
 
     def test_create_dedupes_repeated_entity_ids(
         self,
-        storyline_repo: SQLiteStorylineRepository,
+        repo: SQLiteStorylineRepository,
         seed_user: int,
         seed_entity: int,
     ) -> None:
-        s = storyline_repo.create_storyline(
+        s = repo.create_storyline(
             user_id=seed_user,
             entity_ids=[seed_entity, seed_entity, seed_entity],
             name="Solo",
         )
-        assert storyline_repo.list_anchors(s.id) == [seed_entity]
+        assert repo.list_anchors(s.id) == [seed_entity]
 
     def test_create_rejects_empty_entity_ids(
         self,
-        storyline_repo: SQLiteStorylineRepository,
+        repo: SQLiteStorylineRepository,
         seed_user: int,
     ) -> None:
         with pytest.raises(ValueError):
-            storyline_repo.create_storyline(
+            repo.create_storyline(
                 user_id=seed_user, entity_ids=[], name="Empty",
             )
 
     def test_get_storyline_with_user_filter(
         self,
-        storyline_repo: SQLiteStorylineRepository,
+        repo: SQLiteStorylineRepository,
         seed_user: int,
         seed_entity: int,
     ) -> None:
-        s = storyline_repo.create_storyline(
+        s = repo.create_storyline(
             user_id=seed_user, entity_ids=[seed_entity], name="A",
         )
         # Found for the right user
-        fetched = storyline_repo.get_storyline(s.id, user_id=seed_user)
+        fetched = repo.get_storyline(s.id, user_id=seed_user)
         assert fetched is not None
         assert fetched.id == s.id
         # Not found for a wrong user
-        assert storyline_repo.get_storyline(s.id, user_id=seed_user + 999) is None
+        assert repo.get_storyline(s.id, user_id=seed_user + 999) is None
         # Found without user filter
-        assert storyline_repo.get_storyline(s.id, user_id=None) is not None
+        assert repo.get_storyline(s.id, user_id=None) is not None
 
     def test_find_by_anchor_set_exact_match_only(
         self,
-        storyline_repo: SQLiteStorylineRepository,
+        repo: SQLiteStorylineRepository,
         seed_user: int,
         factory: ConnectionFactory,
     ) -> None:
@@ -183,33 +223,33 @@ class TestStorylineCRUD:
             entity_type="person", canonical_name="C",
             description="", first_seen="2026-01-01", user_id=seed_user,
         )
-        s_ab = storyline_repo.create_storyline(
+        s_ab = repo.create_storyline(
             user_id=seed_user, entity_ids=[a.id, b.id], name="Pair",
         )
         # Exact match — order-insensitive.
-        assert storyline_repo.find_by_anchor_set(
+        assert repo.find_by_anchor_set(
             seed_user, [b.id, a.id], "Pair",
         ).id == s_ab.id
         # Subset = no match.
-        assert storyline_repo.find_by_anchor_set(
+        assert repo.find_by_anchor_set(
             seed_user, [a.id], "Pair",
         ) is None
         # Superset = no match.
-        assert storyline_repo.find_by_anchor_set(
+        assert repo.find_by_anchor_set(
             seed_user, [a.id, b.id, c.id], "Pair",
         ) is None
         # Different name = no match.
-        assert storyline_repo.find_by_anchor_set(
+        assert repo.find_by_anchor_set(
             seed_user, [a.id, b.id], "Different",
         ) is None
         # Different user = no match.
-        assert storyline_repo.find_by_anchor_set(
+        assert repo.find_by_anchor_set(
             seed_user + 999, [a.id, b.id], "Pair",
         ) is None
 
     def test_list_filters_and_pagination(
         self,
-        storyline_repo: SQLiteStorylineRepository,
+        repo: SQLiteStorylineRepository,
         seed_user: int,
         factory: ConnectionFactory,
     ) -> None:
@@ -223,63 +263,63 @@ class TestStorylineCRUD:
                 first_seen="2026-01-01",
                 user_id=seed_user,
             )
-            s = storyline_repo.create_storyline(
+            s = repo.create_storyline(
                 user_id=seed_user,
                 entity_ids=[ent.id],
                 name=f"Storyline-{i}",
             )
             ids.append(s.id)
 
-        all_list = storyline_repo.list_storylines(seed_user)
+        all_list = repo.list_storylines(seed_user)
         assert len(all_list) == 3
-        assert storyline_repo.count_storylines(seed_user) == 3
+        assert repo.count_storylines(seed_user) == 3
 
         # Archive one
-        storyline_repo.update_storyline_status(ids[0], "archived", seed_user)
-        active = storyline_repo.list_storylines(seed_user, status="active")
-        archived = storyline_repo.list_storylines(seed_user, status="archived")
+        repo.update_storyline_status(ids[0], "archived", seed_user)
+        active = repo.list_storylines(seed_user, status="active")
+        archived = repo.list_storylines(seed_user, status="archived")
         assert len(active) == 2
         assert len(archived) == 1
-        assert storyline_repo.count_storylines(seed_user, status="active") == 2
+        assert repo.count_storylines(seed_user, status="active") == 2
 
         # Pagination
-        page = storyline_repo.list_storylines(seed_user, limit=2, offset=0)
+        page = repo.list_storylines(seed_user, limit=2, offset=0)
         assert len(page) == 2
-        page2 = storyline_repo.list_storylines(seed_user, limit=2, offset=2)
+        page2 = repo.list_storylines(seed_user, limit=2, offset=2)
         assert len(page2) == 1
 
     def test_delete_only_succeeds_for_owner(
         self,
-        storyline_repo: SQLiteStorylineRepository,
+        repo: SQLiteStorylineRepository,
         seed_user: int,
         seed_entity: int,
     ) -> None:
-        s = storyline_repo.create_storyline(
+        s = repo.create_storyline(
             user_id=seed_user, entity_ids=[seed_entity], name="A",
         )
         # Wrong user cannot delete
-        assert storyline_repo.delete_storyline(s.id, user_id=seed_user + 999) is False
-        assert storyline_repo.get_storyline(s.id) is not None
+        assert repo.delete_storyline(s.id, user_id=seed_user + 999) is False
+        assert repo.get_storyline(s.id) is not None
         # Owner deletes
-        assert storyline_repo.delete_storyline(s.id, user_id=seed_user) is True
-        assert storyline_repo.get_storyline(s.id) is None
+        assert repo.delete_storyline(s.id, user_id=seed_user) is True
+        assert repo.get_storyline(s.id) is None
 
     def test_update_storyline_name_renames_and_trims(
         self,
-        storyline_repo: SQLiteStorylineRepository,
+        repo: SQLiteStorylineRepository,
         seed_user: int,
         seed_entity: int,
     ) -> None:
-        s = storyline_repo.create_storyline(
+        s = repo.create_storyline(
             user_id=seed_user, entity_ids=[seed_entity], name="Old name",
         )
-        updated = storyline_repo.update_storyline_name(
+        updated = repo.update_storyline_name(
             s.id, "  New name  ", user_id=seed_user,
         )
         assert updated is not None
         assert updated.name == "New name"
         # Persisted, not just echoed.
-        refreshed = storyline_repo.get_storyline(s.id, user_id=seed_user)
+        refreshed = repo.get_storyline(s.id, user_id=seed_user)
         assert refreshed is not None
         assert refreshed.name == "New name"
         # updated_at is bumped on rename.
@@ -287,59 +327,39 @@ class TestStorylineCRUD:
 
     def test_update_storyline_name_only_for_owner(
         self,
-        storyline_repo: SQLiteStorylineRepository,
+        repo: SQLiteStorylineRepository,
         seed_user: int,
         seed_entity: int,
     ) -> None:
-        s = storyline_repo.create_storyline(
+        s = repo.create_storyline(
             user_id=seed_user, entity_ids=[seed_entity], name="Mine",
         )
         # Wrong user: no row updated, returns None, name unchanged.
         assert (
-            storyline_repo.update_storyline_name(
+            repo.update_storyline_name(
                 s.id, "Hijacked", user_id=seed_user + 999,
             )
             is None
         )
-        refreshed = storyline_repo.get_storyline(s.id)
+        refreshed = repo.get_storyline(s.id)
         assert refreshed is not None
         assert refreshed.name == "Mine"
 
-    def test_record_generation_complete_updates_timestamp(
+    def test_record_extension_check_updates_timestamp(
         self,
-        storyline_repo: SQLiteStorylineRepository,
+        repo: SQLiteStorylineRepository,
         seed_user: int,
         seed_entity: int,
     ) -> None:
-        s = storyline_repo.create_storyline(
+        s = repo.create_storyline(
             user_id=seed_user, entity_ids=[seed_entity], name="A",
         )
-        assert s.last_generated_at is None
-        storyline_repo.record_generation_complete(s.id)
-        refreshed = storyline_repo.get_storyline(s.id)
+        assert s.last_extension_check_at is None
+        repo.record_extension_check(s.id)
+        refreshed = repo.get_storyline(s.id)
         assert refreshed is not None
-        assert refreshed.last_generated_at is not None
-        assert refreshed.last_generated_at.startswith("20")
-
-    def test_summary_embedding_roundtrip(
-        self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        seed_entity: int,
-    ) -> None:
-        s = storyline_repo.create_storyline(
-            user_id=seed_user, entity_ids=[seed_entity], name="A",
-        )
-        assert s.summary_embedding is None
-        storyline_repo.update_summary_embedding(s.id, [0.1, 0.2, 0.3])
-        refreshed = storyline_repo.get_storyline(s.id)
-        assert refreshed is not None
-        assert refreshed.summary_embedding == [0.1, 0.2, 0.3]
-        # Clearing
-        storyline_repo.update_summary_embedding(s.id, None)
-        cleared = storyline_repo.get_storyline(s.id)
-        assert cleared is not None
-        assert cleared.summary_embedding is None
+        assert refreshed.last_extension_check_at is not None
+        assert refreshed.last_extension_check_at.startswith("20")
 
 
 # ── Anchors ──────────────────────────────────────────────────────
@@ -364,117 +384,88 @@ class TestAnchors:
 
     def test_set_anchors_replaces_atomically(
         self,
-        storyline_repo: SQLiteStorylineRepository,
+        repo: SQLiteStorylineRepository,
         seed_user: int,
         three_entities: list[int],
     ) -> None:
         a, b, c = three_entities
-        s = storyline_repo.create_storyline(
+        s = repo.create_storyline(
             user_id=seed_user, entity_ids=[a, b], name="AB",
         )
-        result = storyline_repo.set_anchors(s.id, [b, c])
+        result = repo.set_anchors(s.id, [b, c])
         assert result == sorted([b, c])
-        assert storyline_repo.list_anchors(s.id) == sorted([b, c])
+        assert repo.list_anchors(s.id) == sorted([b, c])
         # No leftover join rows for the dropped anchor.
-        assert a not in storyline_repo.list_anchors(s.id)
+        assert a not in repo.list_anchors(s.id)
 
     def test_set_anchors_rejects_empty(
         self,
-        storyline_repo: SQLiteStorylineRepository,
+        repo: SQLiteStorylineRepository,
         seed_user: int,
         seed_entity: int,
     ) -> None:
-        s = storyline_repo.create_storyline(
+        s = repo.create_storyline(
             user_id=seed_user, entity_ids=[seed_entity], name="A",
         )
         with pytest.raises(ValueError):
-            storyline_repo.set_anchors(s.id, [])
-
-    def test_add_anchor_is_idempotent(
-        self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        three_entities: list[int],
-    ) -> None:
-        a, b, c = three_entities
-        s = storyline_repo.create_storyline(
-            user_id=seed_user, entity_ids=[a], name="A",
-        )
-        storyline_repo.add_anchor(s.id, b)
-        storyline_repo.add_anchor(s.id, b)  # re-add, no duplicate
-        assert storyline_repo.list_anchors(s.id) == sorted([a, b])
-
-    def test_remove_anchor_returns_deletion_flag(
-        self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        three_entities: list[int],
-    ) -> None:
-        a, b, _ = three_entities
-        s = storyline_repo.create_storyline(
-            user_id=seed_user, entity_ids=[a, b], name="AB",
-        )
-        assert storyline_repo.remove_anchor(s.id, a) is True
-        # Re-removing returns False — already gone.
-        assert storyline_repo.remove_anchor(s.id, a) is False
-        assert storyline_repo.list_anchors(s.id) == [b]
+            repo.set_anchors(s.id, [])
 
     def test_list_storylines_with_anchor_returns_all_relevant(
         self,
-        storyline_repo: SQLiteStorylineRepository,
+        repo: SQLiteStorylineRepository,
         seed_user: int,
         three_entities: list[int],
     ) -> None:
         a, b, c = three_entities
-        s_ab = storyline_repo.create_storyline(
+        s_ab = repo.create_storyline(
             user_id=seed_user, entity_ids=[a, b], name="AB",
         )
-        s_bc = storyline_repo.create_storyline(
+        s_bc = repo.create_storyline(
             user_id=seed_user, entity_ids=[b, c], name="BC",
         )
-        s_a = storyline_repo.create_storyline(
+        s_a = repo.create_storyline(
             user_id=seed_user, entity_ids=[a], name="A-only",
         )
         # b is in both s_ab and s_bc, not in s_a.
-        rows = storyline_repo.list_storylines_with_anchor(seed_user, b)
+        rows = repo.list_storylines_with_anchor(seed_user, b)
         assert {r.id for r in rows} == {s_ab.id, s_bc.id}
         # a is in s_ab and s_a, not s_bc.
-        rows = storyline_repo.list_storylines_with_anchor(seed_user, a)
+        rows = repo.list_storylines_with_anchor(seed_user, a)
         assert {r.id for r in rows} == {s_ab.id, s_a.id}
 
     def test_list_storylines_with_anchor_filters_by_status(
         self,
-        storyline_repo: SQLiteStorylineRepository,
+        repo: SQLiteStorylineRepository,
         seed_user: int,
         three_entities: list[int],
     ) -> None:
         a, b, _ = three_entities
-        s_active = storyline_repo.create_storyline(
+        s_active = repo.create_storyline(
             user_id=seed_user, entity_ids=[a, b], name="active",
         )
-        s_arch = storyline_repo.create_storyline(
+        s_arch = repo.create_storyline(
             user_id=seed_user, entity_ids=[a, b], name="archived",
         )
-        storyline_repo.update_storyline_status(s_arch.id, "archived", seed_user)
+        repo.update_storyline_status(s_arch.id, "archived", seed_user)
 
-        active_only = storyline_repo.list_storylines_with_anchor(
+        active_only = repo.list_storylines_with_anchor(
             seed_user, a, status="active",
         )
         assert [r.id for r in active_only] == [s_active.id]
 
     def test_delete_storyline_cascades_to_anchors(
         self,
-        storyline_repo: SQLiteStorylineRepository,
+        repo: SQLiteStorylineRepository,
         seed_user: int,
         three_entities: list[int],
         factory: ConnectionFactory,
     ) -> None:
         a, b, _ = three_entities
-        s = storyline_repo.create_storyline(
+        s = repo.create_storyline(
             user_id=seed_user, entity_ids=[a, b], name="AB",
         )
         factory.get().execute("PRAGMA foreign_keys=ON")
-        storyline_repo.delete_storyline(s.id, user_id=seed_user)
+        repo.delete_storyline(s.id, user_id=seed_user)
         row = factory.get().execute(
             "SELECT COUNT(*) AS cnt FROM storyline_entities"
             " WHERE storyline_id = ?",
@@ -483,127 +474,246 @@ class TestAnchors:
         assert int(row["cnt"]) == 0
 
 
-# ── Panels ───────────────────────────────────────────────────────
+# ── Chapter lifecycle ────────────────────────────────────────────
 
 
-class TestStorylinePanels:
-    def test_upsert_curation_panel(
+class TestChapterLifecycle:
+    def test_create_storyline_seeds_one_draft(
         self,
-        storyline_repo: SQLiteStorylineRepository,
+        repo: SQLiteStorylineRepository,
         seed_user: int,
         seed_entity: int,
     ) -> None:
-        s = storyline_repo.create_storyline(
-            user_id=seed_user, entity_ids=[seed_entity], name="A",
-        )
-        ch = storyline_repo.create_chapter(storyline_id=s.id, seq=1, title="Ch1")
-        segs = [
-            text_segment("On the 1st:"),
-            citation_segment(101, "I ran 5km today"),
-            text_segment("Three days later:"),
-            citation_segment(102, "I ran 8km, felt great"),
-        ]
-        panel = storyline_repo.upsert_panel(
-            chapter_id=ch.id,
-            panel_kind="curation",
-            segments=segs,
-            source_entry_ids=[101, 102],
-            citation_count=2,
-            model_used="claude-haiku-4-5",
-        )
-        assert panel.chapter_id == ch.id
-        assert panel.panel_kind == "curation"
-        assert panel.segments == segs
-        assert panel.source_entry_ids == [101, 102]
-        assert panel.citation_count == 2
-        assert panel.model_used == "claude-haiku-4-5"
+        s = repo.create_storyline(seed_user, [seed_entity], "Running")
+        chapters = repo.list_chapters(s.id)
+        assert len(chapters) == 1
+        assert chapters[0].state == "draft" and chapters[0].seq == 1
+        assert repo.get_draft(s.id).id == chapters[0].id
 
-    def test_upsert_is_idempotent_per_kind(
+    def test_publish_draft_is_atomic_and_seeds_new_draft(
         self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        seed_entity: int,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+        entry_ids: list[int],
     ) -> None:
-        s = storyline_repo.create_storyline(
-            user_id=seed_user, entity_ids=[seed_entity], name="A",
+        draft = repo.get_draft(storyline.id)
+        repo.add_entries_to_draft(draft.id, entry_ids[:2])
+        published, new_draft = repo.publish_draft(
+            storyline.id, title="The Start",
+            segments=[{"kind": "text", "text": "prose"}],
+            source_entry_ids=entry_ids[:2], citation_count=2, model_used="m",
+            new_draft_entry_ids=[entry_ids[2]],
         )
-        ch = storyline_repo.create_chapter(storyline_id=s.id, seq=1, title="Ch1")
-        v1 = [text_segment("First version")]
-        v2 = [text_segment("Second version")]
-        storyline_repo.upsert_panel(
-            ch.id, "narrative", v1, [], 0, "claude-opus-4-7",
-        )
-        storyline_repo.upsert_panel(
-            ch.id, "narrative", v2, [], 0, "claude-opus-4-7",
-        )
-        panel = storyline_repo.get_panel(ch.id, "narrative")
-        assert panel is not None
-        assert panel.segments == v2
+        assert published.state == "published" and published.title == "The Start"
+        assert published.published_at is not None and published.read_at is None
+        assert new_draft.state == "draft" and new_draft.seq == published.seq + 1
+        assert repo.chapter_entry_ids(new_draft.id) == [entry_ids[2]]
 
-    def test_list_panels_returns_both_kinds(
-        self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        seed_entity: int,
+    def test_publish_without_draft_raises(
+        self, repo: SQLiteStorylineRepository, seed_user: int,
     ) -> None:
-        s = storyline_repo.create_storyline(
-            user_id=seed_user, entity_ids=[seed_entity], name="A",
-        )
-        ch = storyline_repo.create_chapter(storyline_id=s.id, seq=1, title="Ch1")
-        storyline_repo.upsert_panel(ch.id, "curation", [], [], 0, "haiku")
-        storyline_repo.upsert_panel(ch.id, "narrative", [], [], 0, "opus")
-        panels = storyline_repo.list_panels(ch.id)
-        kinds = sorted(p.panel_kind for p in panels)
-        assert kinds == ["curation", "narrative"]
+        with pytest.raises(ValueError, match="no draft"):
+            repo.publish_draft(9999, title="x", segments=[], source_entry_ids=[],
+                               citation_count=0, model_used="m", new_draft_entry_ids=[])
 
-    def test_upsert_and_get_panel_by_chapter(
+    def test_unpublish_newest_folds_members_into_draft(
         self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        seed_entity: int,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+        entry_ids: list[int],
     ) -> None:
-        sl = storyline_repo.create_storyline(
-            user_id=seed_user, entity_ids=[seed_entity], name="X",
+        draft = repo.get_draft(storyline.id)
+        repo.add_entries_to_draft(draft.id, entry_ids[:2])
+        published, new_draft = repo.publish_draft(
+            storyline.id, title="t", segments=[], source_entry_ids=[],
+            citation_count=0, model_used="m", new_draft_entry_ids=[entry_ids[2]],
         )
-        ch = storyline_repo.create_chapter(storyline_id=sl.id, seq=1, title="Ch1")
-        panel = storyline_repo.upsert_panel(
-            chapter_id=ch.id,
-            panel_kind="narrative",
-            segments=[{"kind": "text", "text": "hi"}],
-            source_entry_ids=[1],
-            citation_count=0,
-            model_used="m",
-        )
-        assert panel.chapter_id == ch.id
-        got = storyline_repo.get_panel(ch.id, "narrative")
-        assert got is not None and got.segments[0]["text"] == "hi"
-        assert [p.panel_kind for p in storyline_repo.list_panels(ch.id)] == [
-            "narrative"
-        ]
+        merged = repo.unpublish_newest(storyline.id)
+        assert merged.state == "draft"
+        assert set(repo.chapter_entry_ids(merged.id)) == set(entry_ids)
+        assert len(repo.list_chapters(storyline.id)) == 1
 
-    def test_delete_storyline_cascades_to_panels(
+    def test_unpublish_with_no_published_raises(
+        self, repo: SQLiteStorylineRepository, storyline: Storyline,
+    ) -> None:
+        with pytest.raises(ValueError, match="no published chapter"):
+            repo.unpublish_newest(storyline.id)
+
+
+# ── Immutability guards ──────────────────────────────────────────
+
+
+class TestImmutability:
+    def test_set_draft_narrative_refuses_published(
         self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        seed_entity: int,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+        entry_ids: list[int],
+    ) -> None:
+        draft = repo.get_draft(storyline.id)
+        repo.add_entries_to_draft(draft.id, entry_ids[:2])
+        published, _ = repo.publish_draft(
+            storyline.id, title="t", segments=[], source_entry_ids=[],
+            citation_count=0, model_used="m", new_draft_entry_ids=[],
+        )
+        with pytest.raises(ValueError, match="published"):
+            repo.set_draft_narrative(published.id, segments=[], source_entry_ids=[],
+                                     citation_count=0, model_used="m", embedding=None)
+
+    def test_add_entries_refuses_published(
+        self,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+        entry_ids: list[int],
+    ) -> None:
+        draft = repo.get_draft(storyline.id)
+        repo.add_entries_to_draft(draft.id, entry_ids[:2])
+        published, _ = repo.publish_draft(
+            storyline.id, title="t", segments=[], source_entry_ids=[],
+            citation_count=0, model_used="m", new_draft_entry_ids=[],
+        )
+        with pytest.raises(ValueError, match="published"):
+            repo.add_entries_to_draft(published.id, [entry_ids[2]])
+
+    def test_addendum_refuses_draft(
+        self, repo: SQLiteStorylineRepository, storyline: Storyline,
+    ) -> None:
+        draft = repo.get_draft(storyline.id)
+        with pytest.raises(ValueError, match="draft"):
+            repo.append_addendum(draft.id, segments=[], entry_ids=[])
+
+    def test_addendum_clears_read_and_marks_late(
+        self,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+        entry_ids: list[int],
         factory: ConnectionFactory,
     ) -> None:
-        s = storyline_repo.create_storyline(
-            user_id=seed_user, entity_ids=[seed_entity], name="A",
+        draft = repo.get_draft(storyline.id)
+        repo.add_entries_to_draft(draft.id, entry_ids[:2])
+        published, _ = repo.publish_draft(
+            storyline.id, title="t", segments=[], source_entry_ids=[],
+            citation_count=0, model_used="m", new_draft_entry_ids=[],
         )
-        ch = storyline_repo.create_chapter(storyline_id=s.id, seq=1, title="Ch1")
-        storyline_repo.upsert_panel(ch.id, "curation", [], [], 0, "haiku")
-        # FK cascade requires PRAGMA foreign_keys=ON for SQLite. Ensure it.
-        # Deleting the storyline cascades to its chapters, which cascades to
-        # the chapter's panels.
-        factory.get().execute("PRAGMA foreign_keys=ON")
-        storyline_repo.delete_storyline(s.id, user_id=seed_user)
+        repo.set_read(published.id, True)
+        assert repo.get_chapter(published.id).read_at is not None
+
+        repo.append_addendum(
+            published.id,
+            segments=[{"kind": "text", "text": "update"}],
+            entry_ids=[entry_ids[2]],
+        )
+        refreshed = repo.get_chapter(published.id)
+        assert refreshed is not None
+        assert refreshed.read_at is None
+        assert len(refreshed.addenda) == 1
         row = factory.get().execute(
-            "SELECT COUNT(*) AS cnt FROM storyline_panels"
-            " WHERE chapter_id = ?",
-            (ch.id,),
+            "SELECT added_late FROM storyline_chapter_entries"
+            " WHERE chapter_id = ? AND entry_id = ?",
+            (published.id, entry_ids[2]),
         ).fetchone()
-        assert int(row["cnt"]) == 0
+        assert row is not None
+        assert int(row["added_late"]) == 1
+
+    def test_set_read_refuses_draft(
+        self, repo: SQLiteStorylineRepository, storyline: Storyline,
+    ) -> None:
+        draft = repo.get_draft(storyline.id)
+        with pytest.raises(ValueError, match="draft"):
+            repo.set_read(draft.id, True)
+
+
+# ── Derived fields + unread ──────────────────────────────────────
+
+
+class TestDerivedFieldsAndUnread:
+    def test_list_chapters_derives_dates_and_counts(
+        self,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+        entry_ids: list[int],
+    ) -> None:
+        draft = repo.get_draft(storyline.id)
+        repo.add_entries_to_draft(draft.id, entry_ids)  # dates 2026-02-20 .. 2026-04-25
+        ch = repo.list_chapters(storyline.id)[0]
+        assert (ch.entry_count, ch.first_entry_date, ch.last_entry_date) == (
+            3, "2026-02-20", "2026-04-25")
+
+    def test_unread_counts(
+        self,
+        repo: SQLiteStorylineRepository,
+        seed_user: int,
+        storyline: Storyline,
+        entry_ids: list[int],
+    ) -> None:
+        draft = repo.get_draft(storyline.id)
+        repo.add_entries_to_draft(draft.id, entry_ids[:1])
+        first_published, _ = repo.publish_draft(
+            storyline.id, title="one", segments=[], source_entry_ids=[],
+            citation_count=0, model_used="m", new_draft_entry_ids=[entry_ids[1]],
+        )
+        draft2 = repo.get_draft(storyline.id)
+        second_published, _ = repo.publish_draft(
+            storyline.id, title="two", segments=[], source_entry_ids=[],
+            citation_count=0, model_used="m", new_draft_entry_ids=[entry_ids[2]],
+        )
+        assert draft2.id == second_published.id
+        repo.set_read(first_published.id, True)
+        assert repo.unread_counts(seed_user) == {storyline.id: 1}
+
+
+# ── Pending entries ──────────────────────────────────────────────
+
+
+class TestPendingEntries:
+    def test_pending_roundtrip(
+        self,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+        entry_ids: list[int],
+    ) -> None:
+        repo.add_pending_entry(storyline.id, entry_ids[0])
+        repo.add_pending_entry(storyline.id, entry_ids[0])  # idempotent
+        assert repo.list_pending_entries(storyline.id) == [entry_ids[0]]
+        repo.clear_pending_entries(storyline.id, [entry_ids[0]])
+        assert repo.list_pending_entries(storyline.id) == []
+
+
+# ── Bootstrap replace-all ─────────────────────────────────────────
+
+
+class TestBootstrapReplace:
+    def test_replace_all_chapters(
+        self,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+        entry_ids: list[int],
+    ) -> None:
+        specs = [
+            BootstrapChapterSpec(title="One", state="published", segments=[],
+                                 source_entry_ids=[], citation_count=0,
+                                 model_used="m", entry_ids=entry_ids[:2],
+                                 mark_read=True),
+            BootstrapChapterSpec(title="", state="draft", segments=[],
+                                 source_entry_ids=[], citation_count=0,
+                                 model_used="m", entry_ids=[entry_ids[2]]),
+        ]
+        chapters = repo.replace_all_chapters(storyline.id, specs)
+        assert [c.state for c in chapters] == ["published", "draft"]
+        assert chapters[0].read_at is not None
+        assert repo.chapter_entry_ids(chapters[1].id) == [entry_ids[2]]
+
+    def test_replace_rejects_non_final_draft(
+        self, repo: SQLiteStorylineRepository, storyline: Storyline,
+    ) -> None:
+        specs = [BootstrapChapterSpec(title="", state="draft", segments=[],
+                                      source_entry_ids=[], citation_count=0,
+                                      model_used="m", entry_ids=[]),
+                 BootstrapChapterSpec(title="x", state="published", segments=[],
+                                      source_entry_ids=[], citation_count=0,
+                                      model_used="m", entry_ids=[])]
+        with pytest.raises(ValueError, match="draft must be the final"):
+            repo.replace_all_chapters(storyline.id, specs)
 
 
 # ── get_dated_entity_excerpts ────────────────────────────────────
@@ -777,245 +887,3 @@ class TestSegments:
     )
     def test_is_valid_segment(self, value: object, expected: bool) -> None:  # noqa: ANN401
         assert is_valid_segment(value) is expected
-
-
-# ── Chapter CRUD ─────────────────────────────────────────────────
-
-
-class TestChapterCRUD:
-    def test_create_and_list_chapters(
-        self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        seed_entity: int,
-    ) -> None:
-        sl = storyline_repo.create_storyline(
-            user_id=seed_user,
-            entity_ids=[seed_entity],
-            name="Run thread",
-            start_date="2026-01-01",
-            end_date="2026-03-01",
-        )
-        # create_storyline does not auto-create a chapter; create it explicitly.
-        ch = storyline_repo.create_chapter(
-            storyline_id=sl.id,
-            seq=1,
-            title="Ch 1",
-            start_date="2026-01-01",
-            end_date="2026-03-01",
-            state="open",
-        )
-        assert ch.seq == 1
-        assert ch.state == "open"
-        assert ch.start_date == "2026-01-01"
-        assert ch.end_date == "2026-03-01"
-        assert ch.created_at != ""
-        chapters = storyline_repo.list_chapters(sl.id)
-        assert [c.id for c in chapters] == [ch.id]
-        open_chapter = storyline_repo.get_open_chapter(sl.id)
-        assert open_chapter is not None
-        assert open_chapter.id == ch.id
-
-    def test_get_open_chapter(
-        self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        seed_entity: int,
-    ) -> None:
-        sl = storyline_repo.create_storyline(
-            user_id=seed_user, entity_ids=[seed_entity], name="X",
-        )
-        # No chapters yet → no open chapter.
-        assert storyline_repo.get_open_chapter(sl.id) is None
-        closed = storyline_repo.create_chapter(
-            storyline_id=sl.id, seq=1, title="Old", state="closed",
-        )
-        # Still no open chapter while only a closed one exists.
-        assert storyline_repo.get_open_chapter(sl.id) is None
-        open_ch = storyline_repo.create_chapter(
-            storyline_id=sl.id, seq=2, title="New", state="open",
-        )
-        got = storyline_repo.get_open_chapter(sl.id)
-        assert got is not None
-        assert got.id == open_ch.id
-        assert got.id != closed.id
-
-    def test_rename_chapter(
-        self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        seed_entity: int,
-    ) -> None:
-        sl = storyline_repo.create_storyline(
-            user_id=seed_user, entity_ids=[seed_entity], name="X",
-        )
-        ch = storyline_repo.create_chapter(storyline_id=sl.id, seq=1, title="Old")
-        updated = storyline_repo.rename_chapter(ch.id, "New Title")
-        assert updated is not None
-        assert updated.title == "New Title"
-        # Unknown chapter id returns None.
-        assert storyline_repo.rename_chapter(999_999, "Nope") is None
-
-    def test_record_chapter_generation_complete(
-        self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        seed_entity: int,
-    ) -> None:
-        sl = storyline_repo.create_storyline(
-            user_id=seed_user, entity_ids=[seed_entity], name="X",
-        )
-        ch = storyline_repo.create_chapter(storyline_id=sl.id, seq=1)
-        assert ch.last_generated_at is None
-        assert storyline_repo.get_storyline(sl.id).last_generated_at is None
-        storyline_repo.record_chapter_generation_complete(ch.id)
-        refreshed = storyline_repo.get_chapter(ch.id)
-        assert refreshed is not None
-        assert refreshed.last_generated_at is not None
-        # The parent storyline's timestamp is bumped too, so the UI's
-        # "last generated" column reflects the fresh chapter content
-        # rather than showing a stale date forever.
-        parent = storyline_repo.get_storyline(sl.id)
-        assert parent is not None
-        assert parent.last_generated_at is not None
-
-    def test_update_chapter_summary_embedding(
-        self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        seed_entity: int,
-    ) -> None:
-        sl = storyline_repo.create_storyline(
-            user_id=seed_user, entity_ids=[seed_entity], name="X",
-        )
-        ch = storyline_repo.create_chapter(storyline_id=sl.id, seq=1)
-        assert ch.summary_embedding is None
-        storyline_repo.update_chapter_summary_embedding(ch.id, [0.1, 0.2, 0.3])
-        refreshed = storyline_repo.get_chapter(ch.id)
-        assert refreshed is not None
-        assert refreshed.summary_embedding == [0.1, 0.2, 0.3]
-        # Clearing it back to None.
-        storyline_repo.update_chapter_summary_embedding(ch.id, None)
-        cleared = storyline_repo.get_chapter(ch.id)
-        assert cleared is not None
-        assert cleared.summary_embedding is None
-
-    def test_get_chapter_unknown_returns_none(
-        self,
-        storyline_repo: SQLiteStorylineRepository,
-    ) -> None:
-        assert storyline_repo.get_chapter(999_999) is None
-
-
-class TestChapterSectioning:
-    """W1: title/boundary locks + cached narrative word count."""
-
-    def _storyline(
-        self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        seed_entity: int,
-    ) -> int:
-        sl = storyline_repo.create_storyline(
-            user_id=seed_user, entity_ids=[seed_entity], name="X",
-        )
-        return sl.id
-
-    def test_new_fields_default_false_and_zero(
-        self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        seed_entity: int,
-    ) -> None:
-        sid = self._storyline(storyline_repo, seed_user, seed_entity)
-        # A plain create_chapter is NOT a hand-paint, so it does not lock
-        # the boundary — only the dedicated "add chapter" op does.
-        ch = storyline_repo.create_chapter(storyline_id=sid, seq=1)
-        assert ch.title_locked is False
-        assert ch.boundary_locked is False
-        assert ch.narrative_word_count == 0
-        refreshed = storyline_repo.get_chapter(ch.id)
-        assert refreshed is not None
-        assert refreshed.title_locked is False
-        assert refreshed.boundary_locked is False
-        assert refreshed.narrative_word_count == 0
-
-    def test_rename_chapter_sets_title_locked(
-        self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        seed_entity: int,
-    ) -> None:
-        sid = self._storyline(storyline_repo, seed_user, seed_entity)
-        ch = storyline_repo.create_chapter(storyline_id=sid, seq=1, title="Old")
-        assert ch.title_locked is False
-        updated = storyline_repo.rename_chapter(ch.id, "New Title")
-        assert updated is not None
-        assert updated.title == "New Title"
-        assert updated.title_locked is True
-
-    def test_add_chapter_sets_boundary_locked(
-        self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        seed_entity: int,
-    ) -> None:
-        sid = self._storyline(storyline_repo, seed_user, seed_entity)
-        # Seed an open chapter, then hand-paint a later one via add_chapter.
-        storyline_repo.create_chapter(
-            storyline_id=sid, seq=1, start_date="2026-01-01", state="open",
-        )
-        added = storyline_repo.add_chapter(sid, start_date="2026-02-01")
-        assert added.boundary_locked is True
-
-    def test_split_chapter_locks_both_boundaries(
-        self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        seed_entity: int,
-    ) -> None:
-        sid = self._storyline(storyline_repo, seed_user, seed_entity)
-        ch = storyline_repo.create_chapter(
-            storyline_id=sid,
-            seq=1,
-            start_date="2026-01-01",
-            end_date="2026-03-01",
-            state="closed",
-        )
-        left, right = storyline_repo.split_chapter(ch.id, "2026-02-01")
-        assert left.boundary_locked is True
-        assert right.boundary_locked is True
-
-    def test_update_chapter_window_locks_boundary(
-        self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        seed_entity: int,
-    ) -> None:
-        sid = self._storyline(storyline_repo, seed_user, seed_entity)
-        ch = storyline_repo.create_chapter(
-            storyline_id=sid,
-            seq=1,
-            start_date="2026-01-01",
-            end_date="2026-03-01",
-            state="closed",
-        )
-        changed = storyline_repo.update_chapter_window(
-            ch.id, start_date="2026-01-05", end_date="2026-03-01",
-        )
-        edited = next(c for c in changed if c.id == ch.id)
-        assert edited.boundary_locked is True
-
-    def test_set_chapter_word_count_persists(
-        self,
-        storyline_repo: SQLiteStorylineRepository,
-        seed_user: int,
-        seed_entity: int,
-    ) -> None:
-        sid = self._storyline(storyline_repo, seed_user, seed_entity)
-        ch = storyline_repo.create_chapter(storyline_id=sid, seq=1)
-        assert ch.narrative_word_count == 0
-        storyline_repo.set_chapter_word_count(ch.id, 212)
-        refreshed = storyline_repo.get_chapter(ch.id)
-        assert refreshed is not None
-        assert refreshed.narrative_word_count == 212
