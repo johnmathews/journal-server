@@ -1,11 +1,12 @@
-"""REST API tests for the storylines endpoints (W8).
+"""REST API tests for the storylines read-side endpoints (Task 9).
 
-Covers GET list/detail and the POST create/regenerate/delete routes
-on a real Starlette test client wired to a real SQLite db. The
-JobRunner is built with a stub StorylineGenerationService whose
-``regenerate`` returns a recorded call, so we can assert that
-``POST /regenerate`` queued the job rather than running it
-synchronously.
+Covers ``GET /api/storylines`` (list), ``GET /api/storylines/{id}``
+(summary + chapter meta), and ``GET /api/storylines/{id}/chapters/{cid}``
+(chapter detail: segments + addenda) on a real Starlette test client
+wired to a real SQLite db. The JobRunner is built with a fake
+``StorylineEngine`` on Pool B so create/refresh/unpublish routes (write
+side) can be exercised without a real judge/narrator; the read routes
+in this file only touch the repository directly.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.storyline_repository import SQLiteStorylineRepository
 from journal.entitystore.store import SQLiteEntityStore
 from journal.services.jobs import JobRunner
-from journal.services.storylines.service import GenerationResult
+from journal.services.storylines.engine import UpdateResult
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -32,6 +33,37 @@ if TYPE_CHECKING:
 
 
 _TEST_USER_ID = 1
+
+
+def _insert_user(factory: ConnectionFactory, email: str) -> int:
+    """Insert a minimal user row (satisfies the ``storylines.user_id`` FK)."""
+    conn = factory.get()
+    cursor = conn.execute(
+        "INSERT INTO users (email, password_hash, display_name)"
+        " VALUES (?, ?, ?)",
+        (email, "x", "Other User"),
+    )
+    conn.commit()
+    user_id = cursor.lastrowid
+    assert user_id is not None
+    return user_id
+
+
+def _insert_entry(factory: ConnectionFactory, user_id: int, entry_date: str) -> int:
+    """Insert a minimal entry row (satisfies the ``storyline_chapter_entries``
+    FK to ``entries``)."""
+    conn = factory.get()
+    text = f"Entry on {entry_date}"
+    cursor = conn.execute(
+        "INSERT INTO entries"
+        " (entry_date, source_type, raw_text, final_text, word_count, user_id)"
+        " VALUES (?, 'text', ?, ?, ?, ?)",
+        (entry_date, text, text, len(text.split()), user_id),
+    )
+    conn.commit()
+    entry_id = cursor.lastrowid
+    assert entry_id is not None
+    return entry_id
 
 
 class _FakeAuthMiddleware:
@@ -57,31 +89,44 @@ class _FakeAuthMiddleware:
             await self.app(scope, receive, send)
 
 
-class _FakeGenerationService:
-    def __init__(self) -> None:
-        self.calls: list[int] = []
-        self.kwargs: list[dict[str, Any]] = []
+class _FakeStorylineEngine:
+    """Records every call; returns an empty :class:`UpdateResult`."""
 
-    def regenerate(
-        self,
-        storyline_id: int,
-        **kwargs: Any,  # noqa: ANN401
-    ) -> GenerationResult:
-        self.calls.append(storyline_id)
-        self.kwargs.append(kwargs)
-        return GenerationResult(storyline_id=storyline_id, entry_count=0)
+    def __init__(self) -> None:
+        self.update_calls: list[int] = []
+        self.bootstrap_calls: list[int] = []
+        self.refresh_calls: list[int] = []
+
+    def update(self, storyline_id: int) -> UpdateResult:
+        self.update_calls.append(storyline_id)
+        return UpdateResult(storyline_id=storyline_id)
+
+    def bootstrap(
+        self, storyline_id: int, *, mark_read: bool = False,  # noqa: ARG002
+    ) -> UpdateResult:
+        self.bootstrap_calls.append(storyline_id)
+        return UpdateResult(storyline_id=storyline_id)
+
+    def refresh_draft(self, storyline_id: int) -> UpdateResult:
+        self.refresh_calls.append(storyline_id)
+        return UpdateResult(storyline_id=storyline_id)
 
 
 @pytest.fixture
 def app_with_storylines(
     tmp_path: Path,
 ) -> Generator[tuple[TestClient, dict[str, Any]]]:
+    """Wire a Starlette TestClient against a real SQLite db + fake engine.
+
+    ``runner.shutdown(wait=True, cancel_futures=False)`` runs in teardown
+    so the ThreadPoolExecutor is flushed before the process exits —
+    missed shutdown causes CI segfaults (per project memory).
+    """
     db_path = tmp_path / "api.db"
     factory = ConnectionFactory(db_path)
     from journal.db.migrations import run_migrations
     run_migrations(factory.get())
 
-    # Migration 0011 seeds an admin user with id=1, which matches _TEST_USER_ID.
     entity_store = SQLiteEntityStore(factory)
     entity = entity_store.create_entity(
         entity_type="activity", canonical_name="Running",
@@ -91,7 +136,7 @@ def app_with_storylines(
 
     storyline_repo = SQLiteStorylineRepository(factory)
     job_repo = SQLiteJobRepository(factory)
-    gen_service = _FakeGenerationService()
+    engine = _FakeStorylineEngine()
 
     class _StubExtraction:
         def reembed_entity_for_description(
@@ -109,7 +154,8 @@ def app_with_storylines(
         mood_backfill_callable=lambda **_: None,
         mood_scoring_service=_StubMood(),  # type: ignore[arg-type]
         entry_repository=object(),  # type: ignore[arg-type]
-        storyline_generation_service=gen_service,
+        storyline_engine=engine,
+        storyline_repository=storyline_repo,
     )
 
     services_dict: dict[str, Any] = {
@@ -132,7 +178,7 @@ def app_with_storylines(
             "repo": storyline_repo,
             "entity_store": entity_store,
             "entity_id": entity.id,
-            "gen_service": gen_service,
+            "engine": engine,
             "runner": runner,
         }
     finally:
@@ -141,100 +187,33 @@ def app_with_storylines(
 
 
 @pytest.fixture
-def seed_storyline(
+def seeded_storyline(
     app_with_storylines: tuple[TestClient, dict[str, Any]],
-) -> tuple[int, int]:
-    """Create a storyline + its seq-1 open chapter + two panels.
+) -> tuple[int, int, int]:
+    """Create a storyline with one published chapter + a fresh draft.
 
-    Returns ``(storyline_id, chapter_id)``. The create route already
-    seeds the open chapter; we look it up and upsert two panels so the
-    chapter has citation counts and renderable content.
+    Returns ``(storyline_id, published_chapter_id, draft_chapter_id)``.
+    Written directly through the repository (not the API) so read
+    tests don't depend on the write routes / job runner.
     """
     _client, ctx = app_with_storylines
-    repo = ctx["repo"]
+    repo: SQLiteStorylineRepository = ctx["repo"]
     sl = repo.create_storyline(
-        user_id=_TEST_USER_ID, entity_ids=[ctx["entity_id"]],
-        name="Seeded", start_date="2026-01-01", end_date="2026-03-01",
+        user_id=_TEST_USER_ID, entity_ids=[ctx["entity_id"]], name="Seeded",
     )
-    chapter = repo.create_chapter(
-        storyline_id=sl.id, seq=1, title="Chapter 1",
-        start_date="2026-01-01", end_date="2026-03-01", state="open",
+    published, new_draft = repo.publish_draft(
+        sl.id,
+        title="Chapter One",
+        segments=[{"kind": "text", "text": "It happened."}],
+        source_entry_ids=[1],
+        citation_count=2,
+        model_used="test-model",
+        new_draft_entry_ids=[],
     )
-    repo.upsert_panel(
-        chapter_id=chapter.id, panel_kind="narrative",
-        segments=[{"kind": "text", "text": "prose"}],
-        source_entry_ids=[1], citation_count=2, model_used="m",
-    )
-    repo.upsert_panel(
-        chapter_id=chapter.id, panel_kind="curation",
-        segments=[{"kind": "text", "text": "timeline"}],
-        source_entry_ids=[1], citation_count=3, model_used="m",
-    )
-    return sl.id, chapter.id
+    return sl.id, published.id, new_draft.id
 
 
-class TestStorylineChaptersAPI:
-    def test_detail_includes_chapters_and_backcompat_panels(
-        self,
-        app_with_storylines: tuple[TestClient, dict[str, Any]],
-        seed_storyline: tuple[int, int],
-    ) -> None:
-        client, _ = app_with_storylines
-        sid, _chapter_id = seed_storyline
-        resp = client.get(f"/api/storylines/{sid}")
-        assert resp.status_code == 200
-        body = resp.json()
-        assert isinstance(body["chapters"], list)
-        assert len(body["chapters"]) == 1
-        ch = body["chapters"][0]
-        assert ch["state"] == "open"
-        assert ch["seq"] == 1
-        # citation_count = sum of the chapter's panels (2 + 3).
-        assert ch["citation_count"] == 5
-        # Back-compat: storyline-level panels = the open chapter's panels.
-        assert "panels" in body
-        assert "narrative" in body["panels"]
-        assert "curation" in body["panels"]
-
-    def test_get_single_chapter_returns_panels(
-        self,
-        app_with_storylines: tuple[TestClient, dict[str, Any]],
-        seed_storyline: tuple[int, int],
-    ) -> None:
-        client, _ = app_with_storylines
-        sid, chapter_id = seed_storyline
-        resp = client.get(f"/api/storylines/{sid}/chapters/{chapter_id}")
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["id"] == chapter_id
-        assert body["storyline_id"] == sid
-        assert "panels" in body
-        assert "narrative" in body["panels"]
-        assert body["panels"]["narrative"]["segments"][0]["text"] == "prose"
-
-    def test_get_chapter_404_for_wrong_storyline(
-        self,
-        app_with_storylines: tuple[TestClient, dict[str, Any]],
-        seed_storyline: tuple[int, int],
-    ) -> None:
-        client, _ = app_with_storylines
-        _sid, chapter_id = seed_storyline
-        # Right chapter id but a storyline that doesn't own it / 404.
-        resp = client.get(f"/api/storylines/99999/chapters/{chapter_id}")
-        assert resp.status_code == 404
-
-    def test_get_chapter_404_for_unknown_chapter(
-        self,
-        app_with_storylines: tuple[TestClient, dict[str, Any]],
-        seed_storyline: tuple[int, int],
-    ) -> None:
-        client, _ = app_with_storylines
-        sid, _chapter_id = seed_storyline
-        resp = client.get(f"/api/storylines/{sid}/chapters/99999")
-        assert resp.status_code == 404
-
-
-class TestStorylinesAPI:
+class TestListStorylines:
     def test_list_returns_empty_envelope(
         self,
         app_with_storylines: tuple[TestClient, dict[str, Any]],
@@ -245,313 +224,181 @@ class TestStorylinesAPI:
         body = resp.json()
         assert body == {"items": [], "total": 0, "limit": 50, "offset": 0}
 
-    def test_create_then_list_then_detail(
+    def test_list_includes_unread_count_via_publish_and_set_read(
         self,
         app_with_storylines: tuple[TestClient, dict[str, Any]],
+        seeded_storyline: tuple[int, int, int],
     ) -> None:
         client, ctx = app_with_storylines
-        # Create
-        resp = client.post(
-            "/api/storylines",
-            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
-        )
-        assert resp.status_code == 201
-        created = resp.json()
-        sid = created["id"]
-        assert created["name"] == "Running"
-
-        # List
+        sid, published_id, _draft_id = seeded_storyline
         resp = client.get("/api/storylines")
+        assert resp.status_code == 200
         body = resp.json()
         assert body["total"] == 1
-        assert body["items"][0]["id"] == sid
+        item = body["items"][0]
+        assert item["id"] == sid
+        assert item["unread_count"] == 1
+        assert item["chapter_count"] == 2  # published + draft
+        assert item["status"] == "active"
+        assert item["name"] == "Seeded"
+        assert item["description"] == ""
+        assert {"entity_id", "canonical_name"} <= item["anchors"][0].keys()
 
-        # Detail
-        resp = client.get(f"/api/storylines/{sid}")
+        ctx["repo"].set_read(published_id, True)
+        resp2 = client.get("/api/storylines")
+        assert resp2.json()["items"][0]["unread_count"] == 0
+
+    def test_list_respects_pagination_params(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        repo: SQLiteStorylineRepository = ctx["repo"]
+        for i in range(3):
+            repo.create_storyline(
+                user_id=_TEST_USER_ID, entity_ids=[ctx["entity_id"]],
+                name=f"S{i}",
+            )
+        resp = client.get("/api/storylines?limit=1&offset=1")
         assert resp.status_code == 200
-        detail = resp.json()
-        assert detail["id"] == sid
-        # No panels yet (haven't regenerated)
-        assert detail["panels"] == {}
+        body = resp.json()
+        assert body["total"] == 3
+        assert body["limit"] == 1
+        assert body["offset"] == 1
+        assert len(body["items"]) == 1
 
-    def test_create_rejects_missing_fields(
+    def test_list_bad_pagination_params_returns_400(
         self,
         app_with_storylines: tuple[TestClient, dict[str, Any]],
     ) -> None:
         client, _ = app_with_storylines
-        resp = client.post("/api/storylines", json={})
+        resp = client.get("/api/storylines?limit=nope")
         assert resp.status_code == 400
 
-    def test_create_returns_409_on_duplicate(
-        self,
-        app_with_storylines: tuple[TestClient, dict[str, Any]],
-    ) -> None:
-        client, ctx = app_with_storylines
-        client.post(
-            "/api/storylines",
-            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
-        )
-        resp = client.post(
-            "/api/storylines",
-            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
-        )
-        assert resp.status_code == 409
-        assert "storyline_id" in resp.json()
 
-    def test_create_with_multiple_anchors_returns_anchors_list(
+class TestStorylineDetail:
+    def test_detail_returns_chapters_seq_asc_draft_last(
         self,
         app_with_storylines: tuple[TestClient, dict[str, Any]],
+        seeded_storyline: tuple[int, int, int],
     ) -> None:
-        client, ctx = app_with_storylines
-        store = ctx["entity_store"]
-        ent_b = store.create_entity(
-            entity_type="person", canonical_name="Sara",
-            description="", first_seen="2026-02-15",
-            user_id=_TEST_USER_ID,
-        )
-        ent_c = store.create_entity(
-            entity_type="place", canonical_name="Vienna",
-            description="", first_seen="2026-02-15",
-            user_id=_TEST_USER_ID,
-        )
-        resp = client.post(
-            "/api/storylines",
-            json={
-                "entity_ids": [ent_c.id, ctx["entity_id"], ent_b.id],
-                "name": "Trio",
-            },
-        )
-        assert resp.status_code == 201
+        client, _ = app_with_storylines
+        sid, published_id, draft_id = seeded_storyline
+        resp = client.get(f"/api/storylines/{sid}")
+        assert resp.status_code == 200
         body = resp.json()
-        ids = sorted(a["id"] for a in body["anchors"])
-        assert ids == sorted([ent_c.id, ctx["entity_id"], ent_b.id])
-        names = {a["canonical_name"] for a in body["anchors"]}
-        assert names == {"Running", "Sara", "Vienna"}
+        assert body["id"] == sid
+        assert body["chapter_count"] == 2
+        assert body["unread_count"] == 1
+        chapters = body["chapters"]
+        assert [c["id"] for c in chapters] == [published_id, draft_id]
+        assert chapters[0]["state"] == "published"
+        assert chapters[0]["seq"] == 1
+        assert chapters[0]["citation_count"] == 2
+        assert chapters[0]["first_entry_date"] is None  # entry_id=1 doesn't exist
+        assert chapters[1]["state"] == "draft"
+        assert chapters[1]["seq"] == 2
+        # Chapter meta must not leak narrative content.
+        assert "segments" not in chapters[0]
+        assert "addenda" not in chapters[0]
 
-    def test_create_rejects_empty_entity_ids(
+    def test_detail_404_unknown_storyline(
         self,
         app_with_storylines: tuple[TestClient, dict[str, Any]],
     ) -> None:
         client, _ = app_with_storylines
-        resp = client.post(
-            "/api/storylines",
-            json={"entity_ids": [], "name": "Empty"},
-        )
-        assert resp.status_code == 400
+        resp = client.get("/api/storylines/99999")
+        assert resp.status_code == 404
 
-    def test_create_rejects_above_cap(
+    def test_detail_404_wrong_user(
         self,
         app_with_storylines: tuple[TestClient, dict[str, Any]],
     ) -> None:
         client, ctx = app_with_storylines
-        store = ctx["entity_store"]
-        ids = [
-            store.create_entity(
-                entity_type="person", canonical_name=f"P{i}",
-                description="", first_seen="2026-02-15",
-                user_id=_TEST_USER_ID,
-            ).id
-            for i in range(20)
-        ]
-        resp = client.post(
-            "/api/storylines",
-            json={"entity_ids": ids, "name": "Too many"},
+        other_user_id = _insert_user(ctx["factory"], "other@example.com")
+        other = ctx["repo"].create_storyline(
+            user_id=other_user_id, entity_ids=[ctx["entity_id"]], name="Not yours",
         )
-        assert resp.status_code == 422
-        assert "cap" in resp.json()["error"]
+        resp = client.get(f"/api/storylines/{other.id}")
+        assert resp.status_code == 404
 
-    def test_set_anchors_replaces_anchor_set(
+
+class TestStorylineChapterDetail:
+    def test_chapter_detail_returns_segments_and_addenda(
         self,
         app_with_storylines: tuple[TestClient, dict[str, Any]],
+        seeded_storyline: tuple[int, int, int],
     ) -> None:
         client, ctx = app_with_storylines
-        store = ctx["entity_store"]
-        ent_b = store.create_entity(
-            entity_type="person", canonical_name="Bob",
-            description="", first_seen="2026-02-15",
-            user_id=_TEST_USER_ID,
+        sid, published_id, _draft_id = seeded_storyline
+        addendum_entry_id = _insert_entry(ctx["factory"], _TEST_USER_ID, "2026-05-01")
+        ctx["repo"].append_addendum(
+            published_id,
+            segments=[{"kind": "text", "text": "Later:"}],
+            entry_ids=[addendum_entry_id],
         )
-        ent_c = store.create_entity(
-            entity_type="person", canonical_name="Carol",
-            description="", first_seen="2026-02-15",
-            user_id=_TEST_USER_ID,
-        )
-        created = client.post(
-            "/api/storylines",
-            json={"entity_ids": [ctx["entity_id"]], "name": "Set-test"},
-        ).json()
-        sid = created["id"]
-
-        resp = client.put(
-            f"/api/storylines/{sid}/anchors",
-            json={"entity_ids": [ent_b.id, ent_c.id]},
-        )
+        resp = client.get(f"/api/storylines/{sid}/chapters/{published_id}")
         assert resp.status_code == 200
         body = resp.json()
-        assert sorted(a["id"] for a in body["anchors"]) == sorted(
-            [ent_b.id, ent_c.id]
-        )
+        assert body["id"] == published_id
+        assert body["segments"] == [{"kind": "text", "text": "It happened."}]
+        assert len(body["addenda"]) == 1
+        assert body["addenda"][0]["entry_ids"] == [addendum_entry_id]
+        assert body["model_used"] == "test-model"
+        assert body["generated_at"] is not None
+        # Meta fields present too.
+        assert body["state"] == "published"
+        assert body["citation_count"] == 2
 
-        # Subsequent GET reflects the new anchors.
-        detail = client.get(f"/api/storylines/{sid}").json()
-        assert sorted(a["id"] for a in detail["anchors"]) == sorted(
-            [ent_b.id, ent_c.id]
-        )
-
-    def test_set_anchors_404_for_unknown_storyline(
+    def test_chapter_detail_404_cross_storyline_cid(
         self,
         app_with_storylines: tuple[TestClient, dict[str, Any]],
+        seeded_storyline: tuple[int, int, int],
     ) -> None:
         client, ctx = app_with_storylines
-        resp = client.put(
-            "/api/storylines/99999/anchors",
-            json={"entity_ids": [ctx["entity_id"]]},
+        _sid, published_id, _draft_id = seeded_storyline
+        other = ctx["repo"].create_storyline(
+            user_id=_TEST_USER_ID, entity_ids=[ctx["entity_id"]], name="Other",
         )
+        resp = client.get(f"/api/storylines/{other.id}/chapters/{published_id}")
         assert resp.status_code == 404
 
-    def test_set_anchors_rejects_empty(
+    def test_chapter_detail_404_unknown_chapter(
         self,
         app_with_storylines: tuple[TestClient, dict[str, Any]],
+        seeded_storyline: tuple[int, int, int],
     ) -> None:
-        client, ctx = app_with_storylines
-        created = client.post(
-            "/api/storylines",
-            json={"entity_ids": [ctx["entity_id"]], "name": "X"},
-        ).json()
-        resp = client.put(
-            f"/api/storylines/{created['id']}/anchors",
-            json={"entity_ids": []},
-        )
-        assert resp.status_code == 400
-
-    def test_regenerate_queues_job(
-        self,
-        app_with_storylines: tuple[TestClient, dict[str, Any]],
-    ) -> None:
-        client, ctx = app_with_storylines
-        created = client.post(
-            "/api/storylines",
-            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
-        ).json()
-        sid = created["id"]
-
-        resp = client.post(f"/api/storylines/{sid}/regenerate")
-        assert resp.status_code == 202
-        body = resp.json()
-        assert "job_id" in body
-
-        # Flush the executor and check the fake was called for both
-        # the auto-kicked create job (W7) and the explicit regen.
-        ctx["runner"].shutdown(wait=True, cancel_futures=False)
-        assert ctx["gen_service"].calls == [sid, sid]
-
-    def test_regenerate_404_on_unknown(
-        self,
-        app_with_storylines: tuple[TestClient, dict[str, Any]],
-    ) -> None:
-        client, _ = app_with_storylines
-        resp = client.post("/api/storylines/99999/regenerate")
+        client, _ctx = app_with_storylines
+        sid, _published_id, _draft_id = seeded_storyline
+        resp = client.get(f"/api/storylines/{sid}/chapters/99999")
         assert resp.status_code == 404
 
-    def test_detail_panel_segments_carry_entry_date_through_serialization(
+    def test_chapter_detail_404_unknown_storyline(
         self,
         app_with_storylines: tuple[TestClient, dict[str, Any]],
+        seeded_storyline: tuple[int, int, int],
     ) -> None:
-        """End-to-end through the DB and the API: a citation segment
-        stored with entry_date must come back through GET
-        /api/storylines/{id} with the entry_date field intact. The
-        webapp's curation date toggle and narrative date eyebrows
-        depend on this contract."""
-        client, ctx = app_with_storylines
-        created = client.post(
-            "/api/storylines",
-            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
-        ).json()
-        sid = created["id"]
-        # Inject a curation panel with entry_date stamped on its
-        # citations — emulating what _build_curation_segments now
-        # produces. Panels are keyed on the open chapter.
-        open_chapter = ctx["repo"].get_open_chapter(sid)
-        ctx["repo"].upsert_panel(
-            chapter_id=open_chapter.id,
-            panel_kind="curation",
-            segments=[
-                {"kind": "text", "text": "It begins on 2026-02-15:"},
-                {
-                    "kind": "citation",
-                    "entry_id": 1,
-                    "quote": "q1",
-                    "entry_date": "2026-02-15",
-                },
-                {"kind": "text", "text": "Two weeks later:"},
-                {
-                    "kind": "citation",
-                    "entry_id": 2,
-                    "quote": "q2",
-                    "entry_date": "2026-03-01",
-                },
-            ],
-            source_entry_ids=[1, 2],
-            citation_count=2,
-            model_used="test",
-        )
-        resp = client.get(f"/api/storylines/{sid}")
-        assert resp.status_code == 200
-        panels = resp.json()["panels"]
-        assert "curation" in panels
-        citations = [
-            s for s in panels["curation"]["segments"] if s["kind"] == "citation"
-        ]
-        assert len(citations) == 2
-        assert citations[0]["entry_date"] == "2026-02-15"
-        assert citations[1]["entry_date"] == "2026-03-01"
-
-    def test_detail_handles_legacy_panels_without_entry_date(
-        self,
-        app_with_storylines: tuple[TestClient, dict[str, Any]],
-    ) -> None:
-        """Storylines generated before the server added entry_date
-        must still serve cleanly. The webapp's fallback hides the
-        absolute-date toggle for those panels."""
-        client, ctx = app_with_storylines
-        created = client.post(
-            "/api/storylines",
-            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
-        ).json()
-        sid = created["id"]
-        open_chapter = ctx["repo"].get_open_chapter(sid)
-        ctx["repo"].upsert_panel(
-            chapter_id=open_chapter.id,
-            panel_kind="curation",
-            segments=[
-                {"kind": "text", "text": "It begins:"},
-                {"kind": "citation", "entry_id": 1, "quote": "q"},
-            ],
-            source_entry_ids=[1],
-            citation_count=1,
-            model_used="test",
-        )
-        resp = client.get(f"/api/storylines/{sid}")
-        assert resp.status_code == 200
-        citation = next(
-            s
-            for s in resp.json()["panels"]["curation"]["segments"]
-            if s["kind"] == "citation"
-        )
-        assert "entry_date" not in citation
-
-    def test_delete_removes_storyline(
-        self,
-        app_with_storylines: tuple[TestClient, dict[str, Any]],
-    ) -> None:
-        client, ctx = app_with_storylines
-        created = client.post(
-            "/api/storylines",
-            json={"entity_ids": [ctx["entity_id"]], "name": "Running"},
-        ).json()
-        sid = created["id"]
-        resp = client.delete(f"/api/storylines/{sid}")
-        assert resp.status_code == 200
-        # Now 404
-        resp = client.get(f"/api/storylines/{sid}")
+        client, _ctx = app_with_storylines
+        _sid, published_id, _draft_id = seeded_storyline
+        resp = client.get(f"/api/storylines/99999/chapters/{published_id}")
         assert resp.status_code == 404
+
+
+class TestStorylines503WhenUnwired:
+    def test_list_503_when_repo_missing(self) -> None:
+        mcp = FastMCP("test-storylines-unwired")
+        register_storylines_routes(mcp, lambda: {})
+        app = mcp.streamable_http_app()
+        app.add_middleware(_FakeAuthMiddleware)
+        client = TestClient(app)
+        resp = client.get("/api/storylines")
+        assert resp.status_code == 503
+
+    def test_detail_503_when_repo_missing(self) -> None:
+        mcp = FastMCP("test-storylines-unwired-2")
+        register_storylines_routes(mcp, lambda: {})
+        app = mcp.streamable_http_app()
+        app.add_middleware(_FakeAuthMiddleware)
+        client = TestClient(app)
+        resp = client.get("/api/storylines/1")
+        assert resp.status_code == 503

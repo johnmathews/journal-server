@@ -3,25 +3,22 @@
 This module is part of the write/job-creation routing override documented
 in ``code-quality-principles.md`` § "Routing rules for src/journal/api/".
 The storyline write routes are job-creation routes (create kicks off a
-generation job; regenerate queues one explicitly), so they follow the
-override rather than living beside the reads in ``api/storylines.py``.
-They were originally bundled into ``api/ingestion.py`` with the rest of
-the override family, and were carved into this sibling module when that
-file outgrew the ~800-line size rule — a sanctioned split of the
-override, not a new deviation category.
+bootstrap job; refresh/unpublish queue one explicitly), so they follow
+the override rather than living beside the reads in ``api/storylines.py``.
 
 Concretely, this module owns:
 
-- ``POST /api/storylines``                                      — create + auto-queue generation
-- ``POST /api/storylines/{storyline_id}/regenerate``            — queue a regeneration job
-- ``PATCH /api/storylines/{storyline_id}``                      — update editable metadata (name)
-- ``DELETE /api/storylines/{storyline_id}``                     — delete a storyline
-- ``PUT /api/storylines/{storyline_id}/anchors``                — replace the anchor set
-- ``POST /api/storylines/{storyline_id}/chapters``              — add a chapter
-- ``POST /api/storylines/{storyline_id}/chapters/merge``        — merge chapters
-- ``DELETE /api/storylines/{storyline_id}/chapters/{cid}``      — delete a chapter
-- ``PATCH /api/storylines/{storyline_id}/chapters/{cid}``       — rename or edit date window
-- ``POST /api/storylines/{storyline_id}/chapters/{cid}/split``  — split a chapter at a date
+- ``POST /api/storylines``                                        — create + auto-queue bootstrap
+- ``POST /api/storylines/{storyline_id}/refresh``                 — queue a draft re-narration job
+- ``POST /api/storylines/{sid}/chapters/{cid}/read``               — mark a published chapter read
+- ``POST /api/storylines/{sid}/chapters/{cid}/unread``             — mark a published chapter unread
+- ``PATCH /api/storylines/{sid}/chapters/{cid}``                   — rename a chapter (title only)
+- ``POST /api/storylines/{storyline_id}/chapters/unpublish``       — fold the newest published
+                                                                      chapter back into the draft
+- ``PATCH /api/storylines/{storyline_id}``                         — update editable metadata
+                                                                      (name and/or status)
+- ``DELETE /api/storylines/{storyline_id}``                        — delete a storyline
+- ``PUT /api/storylines/{storyline_id}/anchors``                   — replace the anchor set
 
 Read routes (``GET /api/storylines*``) live in ``api/storylines.py`` per
 the default URL-resource rule.
@@ -36,12 +33,17 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from starlette.responses import JSONResponse
 
 from journal.api._handler import handler
-from journal.api.storylines import _chapter_to_dict
+from journal.api.storylines import (
+    _anchors_for,
+    _chapter_meta_to_dict,
+    _storyline_to_dict,
+    _unread_count,
+)
 from journal.auth import get_authenticated_user
 
 if TYPE_CHECKING:
@@ -55,49 +57,14 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: Storylines are anchored on 1..MAX_ANCHORS entities. Previously lived
+#: in ``services/storylines/service.py`` (deleted in the storylines
+#: redesign — see docs/superpowers/specs/2026-07-12-storylines-redesign-design.md §8).
+MAX_ANCHORS = 15
 
-def _enqueue_chapter_regens(
-    job_runner,
-    storyline_id: int,
-    user_id: int,
-    chapters: list,
-) -> list[str]:
-    """Queue one generation job per affected chapter; return job ids.
-
-    Closed chapters regenerate with ``mode="replace"``; the open chapter
-    omits ``mode`` so the worker's default append/replace behaviour applies
-    (mirrors the per-chapter regenerate route).
-    """
-    job_ids: list[str] = []
-    for ch in chapters:
-        kwargs: dict[str, Any] = {"user_id": user_id, "chapter_id": ch.id}
-        if ch.state != "open":
-            kwargs["mode"] = "replace"
-        try:
-            job = job_runner.submit_storyline_generation(storyline_id, **kwargs)
-            job_ids.append(job.id)
-        except (ValueError, RuntimeError) as exc:
-            log.warning("could not queue regen for chapter %d: %s", ch.id, exc)
-    return job_ids
-
-
-def _anchors_for(repo, entity_store, storyline_id: int) -> list[dict[str, Any]]:
-    """Build the ``anchors`` field for an API response.
-
-    Returns ``[{id, canonical_name}, ...]`` sorted by anchor id ASC.
-    Missing entities (deleted out from under the storyline) render as
-    an empty canonical_name so the response shape stays stable.
-    """
-    anchor_ids = repo.list_anchors(storyline_id)
-    out: list[dict[str, Any]] = []
-    for entity_id in anchor_ids:
-        if entity_store is not None:
-            entity = entity_store.get_entity(entity_id)
-            canonical_name = entity.canonical_name if entity else ""
-        else:
-            canonical_name = ""
-        out.append({"id": entity_id, "canonical_name": canonical_name})
-    return out
+#: Statuses allowed by the ``storylines.status`` CHECK constraint
+#: (``db/migrations/0027_storylines.sql`` and friends).
+_VALID_STATUSES = ("active", "archived")
 
 
 def register_storylines_write_routes(
@@ -115,24 +82,27 @@ def register_storylines_write_routes(
     def create_storyline(
         request: Request, services: ServicesDict, raw: bytes
     ) -> JSONResponse:
-        """Create a new storyline.
+        """Create a new storyline and queue its bootstrap job.
 
-        Body: ``{entity_ids: list[int], name: str, description?: str,
-        start_date?: ISO, end_date?: ISO}``. ``entity_ids`` must have
-        1..MAX_ANCHORS entries (current cap = 15). Returns 201 with
-        the new storyline dict including an ``anchors`` list (one
-        entry per anchor with ``id`` + ``canonical_name``), plus
-        ``generation_job_id`` if a generation job was kicked off.
-        409 if a storyline with the same name and the same exact
-        anchor set already exists. 400 on bad input. 503 if
+        Body: ``{entity_ids: list[int], name: str, description?: str}``.
+        ``entity_ids`` must have 1..MAX_ANCHORS unique entries (current
+        cap = 15). Returns 201 with ``{"storyline": <detail shape>,
+        "bootstrap_job_id"}``. 409 if a storyline with the same name and
+        the same exact anchor set already exists. 400 on malformed
+        input; 422 if the anchor count is 0 or exceeds the cap. 503 if
         storylines are not wired.
 
-        On successful create, immediately queues a
-        ``storyline_generation`` job so the new storyline's panels
-        start populating without a separate regenerate call.
+        On successful create, immediately queues a ``storyline_update``
+        bootstrap job so the new storyline's chapters start populating
+        without a separate refresh call. A missing/unwired
+        ``StorylineEngine`` is tolerated here (mirrors the historical
+        behavior): the storyline is still created, ``bootstrap_job_id``
+        is ``None``, and a warning is logged — the caller can retry via
+        ``POST /{id}/refresh`` once the engine is wired.
         """
         repo = services.get("storyline_repository")
-        if repo is None:
+        job_runner: JobRunner | None = services.get("job_runner")
+        if repo is None or job_runner is None:
             return JSONResponse(
                 {"error": "Storylines feature not configured"},
                 status_code=503,
@@ -155,38 +125,33 @@ def register_storylines_write_routes(
         name = (body.get("name") or "").strip()
         if (
             not isinstance(entity_ids, list)
-            or not entity_ids
             or not all(isinstance(e, int) for e in entity_ids)
             or not name
         ):
             return JSONResponse(
                 {
                     "error": (
-                        "entity_ids (non-empty list[int]) and name (str) "
-                        "are required"
+                        "entity_ids (list[int]) and name (str) are required"
                     ),
                 },
                 status_code=400,
             )
-        from journal.services.storylines.service import MAX_ANCHORS
         unique_entity_ids = sorted(set(entity_ids))
-        if len(unique_entity_ids) > MAX_ANCHORS:
+        if not (1 <= len(unique_entity_ids) <= MAX_ANCHORS):
             return JSONResponse(
                 {
                     "error": (
-                        f"entity_ids has {len(unique_entity_ids)} unique "
-                        f"anchors; the cap is {MAX_ANCHORS}"
+                        f"entity_ids must have 1..{MAX_ANCHORS} unique "
+                        f"anchors (got {len(unique_entity_ids)})"
                     ),
                 },
                 status_code=422,
             )
         description = body.get("description", "") or ""
-        start_date = body.get("start_date")
-        end_date = body.get("end_date")
 
         # Refuse if a storyline with this exact name + anchor set
         # already exists for this user — caller can GET the existing
-        # one or regenerate.
+        # one or refresh it.
         existing = repo.find_by_anchor_set(
             user_id=user.user_id,
             entity_ids=unique_entity_ids,
@@ -205,71 +170,55 @@ def register_storylines_write_routes(
             entity_ids=unique_entity_ids,
             name=name,
             description=description,
-            start_date=start_date,
-            end_date=end_date,
-        )
-        # Seed the storyline's first (open) chapter so the auto-kicked
-        # generation job — which resolves the open chapter — has a
-        # target. Migrated storylines get theirs via migration 0030.
-        repo.create_chapter(
-            storyline_id=storyline.id, seq=1, title=storyline.name,
-            start_date=storyline.start_date, end_date=storyline.end_date,
-            state="open",
         )
 
-        generation_job_id: str | None = None
-        job_runner: JobRunner | None = services.get("job_runner")
-        if job_runner is not None:
-            try:
-                job = job_runner.submit_storyline_generation(
-                    storyline.id, user_id=user.user_id,
-                )
-                generation_job_id = job.id
-            except RuntimeError as exc:
-                log.warning(
-                    "POST /api/storylines — created storyline %d but "
-                    "could not queue generation: %s",
-                    storyline.id, exc,
-                )
+        bootstrap_job_id: str | None = None
+        try:
+            job = job_runner.submit_storyline_update(
+                storyline.id, user_id=user.user_id, bootstrap=True,
+            )
+            bootstrap_job_id = job.id
+        except RuntimeError as exc:
+            log.warning(
+                "POST /api/storylines — created storyline %d but "
+                "could not queue bootstrap: %s",
+                storyline.id, exc,
+            )
 
         log.info(
             "POST /api/storylines — created storyline %d "
-            "(anchors=%s, generation_job_id=%s)",
-            storyline.id, unique_entity_ids, generation_job_id,
+            "(anchors=%s, bootstrap_job_id=%s)",
+            storyline.id, unique_entity_ids, bootstrap_job_id,
         )
+        chapters = repo.list_chapters(storyline.id)
         anchors = _anchors_for(repo, entity_store, storyline.id)
-        response_body: dict[str, Any] = {
-            "id": storyline.id,
-            "user_id": storyline.user_id,
-            "anchors": anchors,
-            "name": storyline.name,
-            "description": storyline.description,
-            "status": storyline.status,
-            "created_at": storyline.created_at,
+        detail = {
+            **_storyline_to_dict(
+                storyline, anchors, _unread_count(chapters), len(chapters),
+            ),
+            "chapters": [_chapter_meta_to_dict(c) for c in chapters],
         }
-        if generation_job_id is not None:
-            response_body["generation_job_id"] = generation_job_id
-        return JSONResponse(response_body, status_code=201)
+        return JSONResponse(
+            {"storyline": detail, "bootstrap_job_id": bootstrap_job_id},
+            status_code=201,
+        )
 
     @mcp.custom_route(
-        "/api/storylines/{storyline_id:int}/regenerate",
+        "/api/storylines/{storyline_id:int}/refresh",
         methods=["POST"],
-        name="api_regenerate_storyline",
+        name="api_refresh_storyline",
     )
-    @handler(services_getter, parse_json="raw")
-    def regenerate_storyline(
-        request: Request, services: ServicesDict, raw_body: bytes
+    @handler(services_getter)
+    def refresh_storyline(
+        request: Request, services: ServicesDict, body: None
     ) -> JSONResponse:
-        """Queue a regeneration job for one storyline.
+        """Queue a re-narration of the storyline's draft chapter.
 
-        Optional JSON body: ``{start_date?: ISO, end_date?: ISO,
-        mode?: "replace" | "append"}``. Empty body (no JSON at all
-        or ``{}``) is allowed and preserves the original
-        replace-with-stored-window behavior. Returns 202 with
-        ``{"job_id", "status"}``. Clients poll ``GET /api/jobs/{job_id}``
-        to observe progress. 400 on a malformed body (wrong types or
-        invalid mode); 404 if the storyline doesn't belong to the
-        caller; 503 if the StorylineGenerationService isn't wired.
+        Returns 202 with ``{"job_id", "status"}``. Clients poll
+        ``GET /api/jobs/{job_id}`` to observe progress. 404 if the
+        storyline doesn't belong to the caller; 503 if the
+        StorylineEngine isn't wired; 400 if the job runner rejects
+        the request.
         """
         repo = services.get("storyline_repository")
         job_runner: JobRunner | None = services.get("job_runner")
@@ -285,97 +234,111 @@ def register_storylines_write_routes(
             return JSONResponse(
                 {"error": "Storyline not found"}, status_code=404,
             )
-
-        # Parse and validate optional body ("raw" mode: parse must stay
-        # after the 404 check above). Missing body / empty body ==
-        # replace mode with the storyline row's stored window — same
-        # shape as the original W6 contract.
         try:
-            body: dict[str, Any]
-            if not raw_body:
-                body = {}
-            else:
-                parsed = json.loads(raw_body)
-                if not isinstance(parsed, dict):
-                    return JSONResponse(
-                        {"error": "Request body must be a JSON object"},
-                        status_code=400,
-                    )
-                body = parsed
-        except (json.JSONDecodeError, ValueError):
-            return JSONResponse(
-                {"error": "Request body must be valid JSON"},
-                status_code=400,
+            job = job_runner.submit_storyline_update(
+                sid, user_id=user.user_id, refresh_only=True,
             )
-
-        submit_kwargs: dict[str, Any] = {"user_id": user.user_id}
-        for key in ("start_date", "end_date", "mode"):
-            if key not in body:
-                continue
-            value = body[key]
-            if not isinstance(value, str):
-                return JSONResponse(
-                    {"error": f"{key} must be a string"},
-                    status_code=400,
-                )
-            submit_kwargs[key] = value
-        # Optional two-mode regenerate (W4): ``resegment`` re-carves the
-        # storyline into titled word-sized chapters; ``override_locked``
-        # (only meaningful with resegment) lets it cross hand-painted
-        # boundaries. Both default False — an empty body is the legacy
-        # open-chapter refresh.
-        for key in ("resegment", "override_locked"):
-            if key not in body:
-                continue
-            value = body[key]
-            if not isinstance(value, bool):
-                return JSONResponse(
-                    {"error": f"{key} must be a boolean"},
-                    status_code=400,
-                )
-            submit_kwargs[key] = value
-
-        try:
-            job = job_runner.submit_storyline_generation(sid, **submit_kwargs)
         except ValueError as e:
-            log.warning("POST /api/storylines/%d/regenerate — %s", sid, e)
+            log.warning("POST /api/storylines/%d/refresh — %s", sid, e)
             return JSONResponse({"error": str(e)}, status_code=400)
         except RuntimeError as e:
-            log.warning("POST /api/storylines/%d/regenerate — %s", sid, e)
+            log.warning("POST /api/storylines/%d/refresh — %s", sid, e)
             return JSONResponse({"error": str(e)}, status_code=503)
         log.info(
-            "POST /api/storylines/%d/regenerate — queued job %s "
-            "(start=%s, end=%s, mode=%s)",
-            sid, job.id,
-            submit_kwargs.get("start_date"),
-            submit_kwargs.get("end_date"),
-            submit_kwargs.get("mode"),
+            "POST /api/storylines/%d/refresh — queued job %s", sid, job.id,
         )
         return JSONResponse(
-            {"job_id": job.id, "status": job.status},
-            status_code=202,
+            {"job_id": job.id, "status": job.status}, status_code=202,
         )
 
     @mcp.custom_route(
-        "/api/storylines/{storyline_id:int}/chapters/{chapter_id:int}/regenerate",
+        "/api/storylines/{storyline_id:int}/chapters/unpublish",
         methods=["POST"],
-        name="api_regenerate_storyline_chapter",
+        name="api_unpublish_storyline_chapter",
     )
     @handler(services_getter)
-    def regenerate_storyline_chapter(
+    def unpublish_storyline_chapter(
         request: Request, services: ServicesDict, body: None
     ) -> JSONResponse:
-        """Queue a regeneration job for a single chapter.
+        """Fold the newest published chapter back into the draft.
 
-        The chapter's own date window is authoritative, so the worker
-        always runs ``mode="replace"`` (``regenerate_chapter`` supports
-        replace only). Returns 202 with ``{"job_id", "status"}``. 404
-        if the chapter doesn't belong to the caller's storyline; 503 if
-        storylines aren't wired.
+        Validates that a published chapter exists before queueing (400
+        if not — the repo-level fold happens inside the worker, see
+        Task 8). Returns 202 with ``{"job_id", "status"}``. 404 if the
+        storyline doesn't belong to the caller; 503 if the
+        StorylineEngine isn't wired.
         """
         repo = services.get("storyline_repository")
         job_runner: JobRunner | None = services.get("job_runner")
         if repo is None or job_runner is None:
+            return JSONResponse(
+                {"error": "Storylines feature not configured"},
+                status_code=503,
+            )
+        user = get_authenticated_user(request)
+        sid = int(request.path_params["storyline_id"])
+        storyline = repo.get_storyline(sid, user_id=user.user_id)
+        if storyline is None:
+            return JSONResponse(
+                {"error": "Storyline not found"}, status_code=404,
+            )
+        chapters = repo.list_chapters(sid)
+        if not any(c.state == "published" for c in chapters):
+            return JSONResponse(
+                {"error": "Storyline has no published chapter to unpublish"},
+                status_code=400,
+            )
+        try:
+            job = job_runner.submit_storyline_update(
+                sid, user_id=user.user_id, unpublish=True,
+            )
+        except ValueError as e:
+            log.warning(
+                "POST /api/storylines/%d/chapters/unpublish — %s", sid, e,
+            )
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except RuntimeError as e:
+            log.warning(
+                "POST /api/storylines/%d/chapters/unpublish — %s", sid, e,
+            )
+            return JSONResponse({"error": str(e)}, status_code=503)
+        log.info(
+            "POST /api/storylines/%d/chapters/unpublish — queued job %s",
+            sid, job.id,
+        )
+        return JSONResponse(
+            {"job_id": job.id, "status": job.status}, status_code=202,
+        )
+
+    @mcp.custom_route(
+        "/api/storylines/{storyline_id:int}/chapters/{chapter_id:int}/read",
+        methods=["POST"],
+        name="api_read_storyline_chapter",
+    )
+    @handler(services_getter)
+    def read_storyline_chapter(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
+        """Mark a published chapter read. Returns the updated chapter meta."""
+        return _set_chapter_read(request, services, read=True)
+
+    @mcp.custom_route(
+        "/api/storylines/{storyline_id:int}/chapters/{chapter_id:int}/unread",
+        methods=["POST"],
+        name="api_unread_storyline_chapter",
+    )
+    @handler(services_getter)
+    def unread_storyline_chapter(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
+        """Mark a published chapter unread. Returns the updated chapter meta."""
+        return _set_chapter_read(request, services, read=False)
+
+    def _set_chapter_read(
+        request: Request, services: ServicesDict, *, read: bool
+    ) -> JSONResponse:
+        repo = services.get("storyline_repository")
+        if repo is None:
             return JSONResponse(
                 {"error": "Storylines feature not configured"},
                 status_code=503,
@@ -394,29 +357,15 @@ def register_storylines_write_routes(
                 {"error": "Chapter not found"}, status_code=404,
             )
         try:
-            job = job_runner.submit_storyline_generation(
-                sid, user_id=user.user_id, chapter_id=cid, mode="replace",
-            )
+            updated = repo.set_read(cid, read)
         except ValueError as e:
-            log.warning(
-                "POST /api/storylines/%d/chapters/%d/regenerate — %s",
-                sid, cid, e,
-            )
             return JSONResponse({"error": str(e)}, status_code=400)
-        except RuntimeError as e:
-            log.warning(
-                "POST /api/storylines/%d/chapters/%d/regenerate — %s",
-                sid, cid, e,
-            )
-            return JSONResponse({"error": str(e)}, status_code=503)
+        assert updated is not None
         log.info(
-            "POST /api/storylines/%d/chapters/%d/regenerate — queued job %s",
-            sid, cid, job.id,
+            "POST /api/storylines/%d/chapters/%d/%s",
+            sid, cid, "read" if read else "unread",
         )
-        return JSONResponse(
-            {"job_id": job.id, "status": job.status},
-            status_code=202,
-        )
+        return JSONResponse(_chapter_meta_to_dict(updated), status_code=200)
 
     @mcp.custom_route(
         "/api/storylines/{storyline_id:int}/chapters/{chapter_id:int}",
@@ -427,24 +376,12 @@ def register_storylines_write_routes(
     def rename_storyline_chapter(
         request: Request, services: ServicesDict, raw: bytes
     ) -> JSONResponse:
-        """Edit a single chapter's title and/or date window.
+        """Rename a single chapter's title.
 
-        Body: ``{title?: str, start_date?: ISO, end_date?: ISO,
-        allow_gap?: bool}``.
-
-        Rename-only (back-compat): supply ``title`` without any date fields.
-        Returns 200 with the flat chapter dict.
-
-        Date-edit path: supply ``start_date`` and/or ``end_date`` (with
-        optional ``allow_gap``). Ripples the shared edge of adjacent chapters
-        unless ``allow_gap`` is true. Returns 200 with
-        ``{"chapters": [affected...], "job_ids": [...]}``.
-
-        Both title and date fields may be combined; the title rename executes
-        first and the date edit follows.
-
-        Returns 404 if the chapter isn't found for this user, 400 on a
-        malformed body or invalid values, 503 if storylines aren't wired.
+        Body: ``{title: str}`` — non-empty after trimming. Returns 200
+        with the chapter meta dict. 404 if the chapter isn't found for
+        this user, 400 on a missing/empty title, 503 if storylines
+        aren't wired.
         """
         repo = services.get("storyline_repository")
         if repo is None:
@@ -476,48 +413,21 @@ def register_storylines_write_routes(
                 {"error": "Request body must be a JSON object"},
                 status_code=400,
             )
-        title_raw = parsed.get("title")
-        has_dates = "start_date" in parsed or "end_date" in parsed
-        # Rename-only path (back-compat): title present, no date fields.
-        if title_raw is not None and not has_dates:
-            title = (title_raw or "").strip()
-            if not title:
-                return JSONResponse(
-                    {"error": "title (non-empty str) is required"},
-                    status_code=400,
-                )
-            updated = repo.rename_chapter(cid, title)
-            if updated is None:
-                return JSONResponse(
-                    {"error": "Chapter not found"}, status_code=404,
-                )
-            log.info(
-                "PATCH /api/storylines/%d/chapters/%d — title=%r", sid, cid, title,
-            )
-            return JSONResponse(_chapter_to_dict(repo, updated), status_code=200)
-        if not has_dates:
+        title = (parsed.get("title") or "").strip()
+        if not title:
             return JSONResponse(
-                {"error": "provide title and/or start_date/end_date"},
+                {"error": "title (non-empty str) is required"},
                 status_code=400,
             )
-        job_runner = services.get("job_runner")
-        start_date = parsed.get("start_date", chapter.start_date)
-        end_date = parsed.get("end_date", chapter.end_date)
-        allow_gap = bool(parsed.get("allow_gap"))
-        try:
-            changed = repo.update_chapter_window(cid, start_date, end_date, allow_gap=allow_gap)
-        except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=400)
-        job_ids = (
-            _enqueue_chapter_regens(job_runner, sid, user.user_id, changed)
-            if job_runner is not None
-            else []
+        updated = repo.rename_chapter(cid, title)
+        if updated is None:
+            return JSONResponse(
+                {"error": "Chapter not found"}, status_code=404,
+            )
+        log.info(
+            "PATCH /api/storylines/%d/chapters/%d — title=%r", sid, cid, title,
         )
-        log.info("PATCH /api/storylines/%d/chapters/%d — window edit", sid, cid)
-        return JSONResponse(
-            {"chapters": [_chapter_to_dict(repo, c) for c in changed], "job_ids": job_ids},
-            status_code=200,
-        )
+        return JSONResponse(_chapter_meta_to_dict(updated), status_code=200)
 
     @mcp.custom_route(
         "/api/storylines/{storyline_id:int}",
@@ -530,15 +440,15 @@ def register_storylines_write_routes(
     ) -> JSONResponse:
         """Update a storyline's editable metadata.
 
-        Body: ``{name: str}`` — non-empty after trimming. Currently
-        only the name (title) is editable; a rename is metadata-only
-        and does NOT touch the stored panels or kick a regeneration,
-        so the curated/narrative text is preserved across a rename.
+        Body: ``{name?: str, status?: "active" | "archived"}`` — at
+        least one of the two. ``name`` must be non-empty after
+        trimming; a rename is metadata-only and does NOT touch chapters
+        or kick a job. ``status`` must be one of the two CHECK-
+        constrained values.
 
-        Returns 200 with the updated storyline summary (id, name,
-        anchors, ...). 404 if the storyline is not found for this user,
-        400 on a malformed body or empty name, 503 if storylines are
-        not wired.
+        Returns 200 with the updated storyline summary. 404 if the
+        storyline is not found for this user, 400 on a malformed body,
+        empty name, or invalid status, 503 if storylines are not wired.
         """
         repo = services.get("storyline_repository")
         if repo is None:
@@ -565,27 +475,49 @@ def register_storylines_write_routes(
                 {"error": "Request body must be a JSON object"},
                 status_code=400,
             )
-        name = (body.get("name") or "").strip()
-        if not name:
+        has_name = "name" in body
+        has_status = "status" in body
+        if not has_name and not has_status:
             return JSONResponse(
-                {"error": "name (non-empty str) is required"},
-                status_code=400,
+                {"error": "provide name and/or status"}, status_code=400,
             )
-        updated = repo.update_storyline_name(sid, name, user_id=user.user_id)
-        assert updated is not None  # 404 already handled above
+        if has_name:
+            name = (body.get("name") or "").strip()
+            if not name:
+                return JSONResponse(
+                    {"error": "name (non-empty str) is required"},
+                    status_code=400,
+                )
+            updated = repo.update_storyline_name(sid, name, user_id=user.user_id)
+            assert updated is not None  # 404 already handled above
+            storyline = updated
+        if has_status:
+            status = body.get("status")
+            if status not in _VALID_STATUSES:
+                return JSONResponse(
+                    {
+                        "error": (
+                            "status must be one of "
+                            f"{', '.join(_VALID_STATUSES)}"
+                        ),
+                    },
+                    status_code=400,
+                )
+            updated = repo.update_storyline_status(
+                sid, status, user_id=user.user_id,
+            )
+            assert updated is not None  # 404 already handled above
+            storyline = updated
+        chapters = repo.list_chapters(sid)
         anchors = _anchors_for(repo, entity_store, sid)
-        log.info("PATCH /api/storylines/%d — name=%r", sid, name)
+        log.info(
+            "PATCH /api/storylines/%d — name=%r status=%r",
+            sid, body.get("name"), body.get("status"),
+        )
         return JSONResponse(
-            {
-                "id": updated.id,
-                "user_id": updated.user_id,
-                "anchors": anchors,
-                "name": updated.name,
-                "description": updated.description,
-                "status": updated.status,
-                "created_at": updated.created_at,
-                "updated_at": updated.updated_at,
-            },
+            _storyline_to_dict(
+                storyline, anchors, _unread_count(chapters), len(chapters),
+            ),
             status_code=200,
         )
 
@@ -617,229 +549,6 @@ def register_storylines_write_routes(
         return JSONResponse({"deleted": True}, status_code=200)
 
     @mcp.custom_route(
-        "/api/storylines/{storyline_id:int}/chapters",
-        methods=["POST"],
-        name="api_add_storyline_chapter",
-    )
-    @handler(services_getter, parse_json="raw")
-    def add_storyline_chapter(
-        request: Request, services: ServicesDict, raw: bytes
-    ) -> JSONResponse:
-        """Add a chapter to an existing storyline.
-
-        Body: ``{start_date: ISO, end_date?: ISO}``.
-        New-latest flavor (no end_date): closes the current open chapter and
-        appends a new open chapter. Ranged flavor (end_date present): inserts a
-        closed chapter into a free date window.
-
-        Returns 201 with ``{"chapter": ..., "job_ids": [...]}``. 503 if
-        storylines are not wired; 404 if the storyline is not found for this
-        user; 400 on missing/invalid body or if the repo rejects the window.
-        """
-        repo = services.get("storyline_repository")
-        job_runner = services.get("job_runner")
-        if repo is None or job_runner is None:
-            return JSONResponse(
-                {"error": "Storylines feature not configured"}, status_code=503,
-            )
-        user = get_authenticated_user(request)
-        sid = int(request.path_params["storyline_id"])
-        if repo.get_storyline(sid, user_id=user.user_id) is None:
-            return JSONResponse({"error": "Storyline not found"}, status_code=404)
-        try:
-            body = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
-            body = {}
-        if not isinstance(body, dict) or not isinstance(body.get("start_date"), str):
-            return JSONResponse(
-                {"error": "start_date (ISO str) is required"}, status_code=400,
-            )
-        end_date = body.get("end_date")
-        if end_date is not None and not isinstance(end_date, str):
-            return JSONResponse(
-                {"error": "end_date must be a string"}, status_code=400,
-            )
-        try:
-            chapter = repo.add_chapter(sid, body["start_date"], end_date)
-        except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=400)
-        job_ids = _enqueue_chapter_regens(job_runner, sid, user.user_id, [chapter])
-        log.info("POST /api/storylines/%d/chapters — added chapter %d", sid, chapter.id)
-        return JSONResponse(
-            {"chapter": _chapter_to_dict(repo, chapter), "job_ids": job_ids},
-            status_code=201,
-        )
-
-    @mcp.custom_route(
-        "/api/storylines/{storyline_id:int}/chapters/{chapter_id:int}/split",
-        methods=["POST"],
-        name="api_split_storyline_chapter",
-    )
-    @handler(services_getter, parse_json="raw")
-    def split_storyline_chapter(
-        request: Request, services: ServicesDict, raw: bytes
-    ) -> JSONResponse:
-        """Split a chapter into two at a given date.
-
-        Body: ``{date: ISO}``.  Left half keeps the original row with
-        ``end_date = day_before(date)``; right half is a new row starting at
-        ``date``. Both halves are enqueued for regeneration.
-
-        Returns 200 with ``{"chapters": [left, right], "job_ids": [...]}``.
-        503 if storylines are not wired; 404 if the storyline or chapter are
-        not found for this user; 400 on missing/invalid body or if the repo
-        rejects the split date (out of window, etc.).
-        """
-        repo = services.get("storyline_repository")
-        job_runner = services.get("job_runner")
-        if repo is None or job_runner is None:
-            return JSONResponse(
-                {"error": "Storylines feature not configured"}, status_code=503,
-            )
-        user = get_authenticated_user(request)
-        sid = int(request.path_params["storyline_id"])
-        cid = int(request.path_params["chapter_id"])
-        if repo.get_storyline(sid, user_id=user.user_id) is None:
-            return JSONResponse({"error": "Storyline not found"}, status_code=404)
-        chapter = repo.get_chapter(cid)
-        if chapter is None or chapter.storyline_id != sid:
-            return JSONResponse({"error": "Chapter not found"}, status_code=404)
-        try:
-            body = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
-            body = {}
-        if not isinstance(body, dict) or not isinstance(body.get("date"), str):
-            return JSONResponse(
-                {"error": "date (ISO str) is required"}, status_code=400,
-            )
-        try:
-            left, right = repo.split_chapter(cid, body["date"])
-        except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=400)
-        job_ids = _enqueue_chapter_regens(
-            job_runner, sid, user.user_id, [left, right],
-        )
-        log.info(
-            "POST /api/storylines/%d/chapters/%d/split @ %s",
-            sid, cid, body["date"],
-        )
-        return JSONResponse(
-            {
-                "chapters": [
-                    _chapter_to_dict(repo, left),
-                    _chapter_to_dict(repo, right),
-                ],
-                "job_ids": job_ids,
-            },
-            status_code=200,
-        )
-
-    @mcp.custom_route(
-        "/api/storylines/{storyline_id:int}/chapters/merge",
-        methods=["POST"],
-        name="api_merge_storyline_chapters",
-    )
-    @handler(services_getter, parse_json="raw")
-    def merge_storyline_chapters(
-        request: Request, services: ServicesDict, raw: bytes
-    ) -> JSONResponse:
-        """Merge a contiguous run of chapters into a single chapter.
-
-        Body: ``{chapter_ids: list[int]}`` — at least 2 ids belonging to
-        this storyline. The survivor is the lowest-seq row; its window spans
-        the full range of the merged set. Returns 200 with
-        ``{"chapter": ..., "job_ids": [...]}``.  503 if storylines are not
-        wired; 404 if the storyline or any chapter isn't owned by the caller;
-        400 if chapter_ids is invalid or the repo rejects the merge (e.g.
-        non-contiguous).
-        """
-        repo = services.get("storyline_repository")
-        job_runner = services.get("job_runner")
-        if repo is None or job_runner is None:
-            return JSONResponse(
-                {"error": "Storylines feature not configured"}, status_code=503,
-            )
-        user = get_authenticated_user(request)
-        sid = int(request.path_params["storyline_id"])
-        if repo.get_storyline(sid, user_id=user.user_id) is None:
-            return JSONResponse({"error": "Storyline not found"}, status_code=404)
-        try:
-            body = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
-            body = {}
-        ids = body.get("chapter_ids") if isinstance(body, dict) else None
-        if not isinstance(ids, list) or len(ids) < 2 or not all(isinstance(i, int) for i in ids):
-            return JSONResponse(
-                {"error": "chapter_ids must be a list of >= 2 integers"}, status_code=400,
-            )
-        for i in ids:
-            ch = repo.get_chapter(i)
-            if ch is None or ch.storyline_id != sid:
-                return JSONResponse({"error": "Chapter not found"}, status_code=404)
-        try:
-            merged = repo.merge_chapters(ids)
-        except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=400)
-        job_ids = _enqueue_chapter_regens(job_runner, sid, user.user_id, [merged])
-        log.info("POST /api/storylines/%d/chapters/merge — ids=%s", sid, ids)
-        return JSONResponse(
-            {"chapter": _chapter_to_dict(repo, merged), "job_ids": job_ids},
-            status_code=200,
-        )
-
-    @mcp.custom_route(
-        "/api/storylines/{storyline_id:int}/chapters/{chapter_id:int}",
-        methods=["DELETE"],
-        name="api_delete_storyline_chapter",
-    )
-    @handler(services_getter, parse_json="raw")
-    def delete_storyline_chapter(
-        request: Request, services: ServicesDict, raw: bytes
-    ) -> JSONResponse:
-        """Delete a chapter, absorbing its range into a neighbor by default.
-
-        Optional body: ``{allow_gap?: bool}``. With ``allow_gap=True`` the
-        neighboring chapters are not adjusted (a gap is left). With
-        ``allow_gap=False`` (the default), the shared edge of a neighbor is
-        extended to cover the deleted chapter's window.
-
-        Returns 200 with ``{"deleted": True, "job_ids": [...]}`` — the
-        affected neighboring chapters are enqueued for regeneration.  503 if
-        storylines are not wired; 404 if the storyline or chapter isn't
-        owned by the caller; 400 if the repo rejects the deletion (e.g.
-        deleting the only chapter).
-        """
-        repo = services.get("storyline_repository")
-        job_runner = services.get("job_runner")
-        if repo is None or job_runner is None:
-            return JSONResponse(
-                {"error": "Storylines feature not configured"}, status_code=503,
-            )
-        user = get_authenticated_user(request)
-        sid = int(request.path_params["storyline_id"])
-        cid = int(request.path_params["chapter_id"])
-        if repo.get_storyline(sid, user_id=user.user_id) is None:
-            return JSONResponse({"error": "Storyline not found"}, status_code=404)
-        chapter = repo.get_chapter(cid)
-        if chapter is None or chapter.storyline_id != sid:
-            return JSONResponse({"error": "Chapter not found"}, status_code=404)
-        try:
-            body = json.loads(raw) if raw else {}
-        except (json.JSONDecodeError, ValueError):
-            body = {}
-        allow_gap = bool(body.get("allow_gap")) if isinstance(body, dict) else False
-        try:
-            affected_ids = repo.delete_chapter(cid, allow_gap=allow_gap)
-        except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=400)
-        affected = [c for c in repo.list_chapters(sid) if c.id in affected_ids]
-        job_ids = _enqueue_chapter_regens(job_runner, sid, user.user_id, affected)
-        log.info(
-            "DELETE /api/storylines/%d/chapters/%d (allow_gap=%s)", sid, cid, allow_gap,
-        )
-        return JSONResponse({"deleted": True, "job_ids": job_ids}, status_code=200)
-
-    @mcp.custom_route(
         "/api/storylines/{storyline_id:int}/anchors",
         methods=["PUT"],
         name="api_set_storyline_anchors",
@@ -851,13 +560,9 @@ def register_storylines_write_routes(
         """Replace the anchor set on an existing storyline.
 
         Body: ``{entity_ids: list[int]}`` — 1..MAX_ANCHORS entries.
-        Returns 200 with the updated ``anchors`` list. 404 if the
-        storyline is not found for this user, 400 on malformed body,
-        422 if the cap is exceeded, 503 if storylines are not wired.
-
-        Anchor *editing* on the webapp is deferred to a follow-up;
-        this endpoint is available via REST + MCP so Claude and
-        scripted clients can manage anchors today.
+        Returns 200 with ``{"id", "anchors"}``. 404 if the storyline is
+        not found for this user, 400 on malformed/empty body, 422 if
+        the cap is exceeded, 503 if storylines are not wired.
         """
         repo = services.get("storyline_repository")
         if repo is None:
@@ -894,7 +599,6 @@ def register_storylines_write_routes(
                 {"error": "entity_ids must be a non-empty list of integers"},
                 status_code=400,
             )
-        from journal.services.storylines.service import MAX_ANCHORS
         unique_entity_ids = sorted(set(entity_ids))
         if len(unique_entity_ids) > MAX_ANCHORS:
             return JSONResponse(
