@@ -1,4 +1,4 @@
--- Storylines redesign (spec: docs/superpowers/plans/../specs/2026-07-12-storylines-redesign-design.md).
+-- Storylines redesign (spec: docs/superpowers/specs/2026-07-12-storylines-redesign-design.md).
 --
 -- Chapters become draft/published with explicit entry membership; the
 -- narrative panel folds directly into the chapter row (segments_json,
@@ -31,17 +31,24 @@
 -- already in the NEW shape (no `last_generated_at`, `state` already
 -- 'draft'/'published', `storyline_panels` already dropped), so a query
 -- written against the OLD columns would fail to even compile. The fix is
--- the same trick already required for `storyline_panels_legacy`: freeze
--- read-only snapshots of the OLD-shaped `storyline_chapters` and
--- `storyline_panels` via `CREATE TABLE IF NOT EXISTS ... AS SELECT`
--- *before* touching anything, and have the transform below read from
--- those frozen snapshots instead of the live tables. Because `CREATE
--- TABLE IF NOT EXISTS x AS SELECT ...` short-circuits without even
--- evaluating the SELECT once `x` exists, the snapshot step is a silent
--- no-op on a second pass — it does not require `storyline_panels` (long
--- gone by then) to still exist. Everything downstream then reads
--- unconditionally-valid columns, so the whole file — not just the
--- additive steps — is safe to force-replay.
+-- to freeze a read-only snapshot of the OLD-shaped `storyline_chapters`
+-- via `CREATE TEMP TABLE IF NOT EXISTS ... AS SELECT` *before* touching
+-- anything, and have the transform below read from that frozen snapshot
+-- instead of the live table. It is TEMP (connection-scoped, not written
+-- to the on-disk schema) because in real deployments a forced re-apply
+-- always runs on a fresh connection after the runner has rolled back a
+-- failed attempt (see above), which leaves `storyline_chapters` genuinely
+-- OLD-shaped again — no snapshot is needed for that case, and a
+-- permanent table would just be dead weight. The only scenario that
+-- exercises the snapshot is a synthetic same-connection double-run (see
+-- `test_rerunnable_after_partial_failure`), where TEMP's connection
+-- lifetime is exactly what makes `CREATE TEMP TABLE IF NOT EXISTS`
+-- short-circuit as a no-op on the second pass, so the second pass keeps
+-- reading the first pass's OLD-shaped snapshot instead of the by-then
+-- NEW-shaped live table. `storyline_panels_legacy` below is a *separate*,
+-- deliberately permanent table: the spec requires both panel kinds to
+-- survive on disk, verbatim, until a later post-bootstrap cleanup
+-- migration drops them — it is not part of this re-apply mechanism.
 
 PRAGMA foreign_keys = OFF;
 
@@ -51,7 +58,7 @@ BEGIN TRANSACTION;
 --    SQL has no conditional execution, so this is what makes the
 --    transform safe to force-replay after it has already fully
 --    succeeded once (see the header comment).
-CREATE TABLE IF NOT EXISTS storyline_chapters_legacy AS
+CREATE TEMP TABLE IF NOT EXISTS storyline_chapters_legacy AS
     SELECT * FROM storyline_chapters;
 CREATE TABLE IF NOT EXISTS storyline_panels_legacy AS
     SELECT * FROM storyline_panels;
@@ -120,7 +127,7 @@ SELECT
     COALESCE(p.source_entry_ids_json, '[]'),
     COALESCE(p.citation_count, 0),
     COALESCE(p.model_used, ''),
-    c.last_generated_at,
+    COALESCE(p.generated_at, c.last_generated_at),
     CASE c.state WHEN 'closed' THEN COALESCE(c.last_generated_at, c.updated_at) END,
     -- Pre-existing published chapters start read: the migration must not
     -- manufacture a wall of unread badges for content the user has

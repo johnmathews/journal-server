@@ -76,7 +76,11 @@ def pre_0036(tmp_path: Path) -> sqlite3.Connection:
     conn.execute(
         "INSERT INTO storyline_panels (chapter_id, panel_kind, segments_json,"
         " source_entry_ids_json, citation_count, model_used, generated_at)"
-        " VALUES (1, 'narrative', ?, '[1]', 1, 'm', '2026-02-01T00:00:00Z'),"
+        # Chapter 1's panel generated_at ('2026-01-20T09:30:00Z') is
+        # deliberately different from chapter 1's last_generated_at
+        # ('2026-02-01T00:00:00Z') below, so the migration test can tell
+        # apart which column each folded field is sourced from.
+        " VALUES (1, 'narrative', ?, '[1]', 1, 'm', '2026-01-20T09:30:00Z'),"
         "        (1, 'curation',  '[]', '[]', 0, 'm', '2026-02-01T00:00:00Z'),"
         "        (2, 'narrative', ?, '[2]', 1, 'm', '2026-02-11T08:00:00Z')",
         (
@@ -97,10 +101,14 @@ class TestMigration0036:
     def test_states_mapped_and_content_folded_in(self, pre_0036: sqlite3.Connection) -> None:
         run_migrations(pre_0036)
         rows = pre_0036.execute(
-            "SELECT id, seq, state, title, segments_json, published_at, read_at"
-            " FROM storyline_chapters ORDER BY seq"
+            "SELECT id, seq, state, title, segments_json, generated_at,"
+            " published_at, read_at FROM storyline_chapters ORDER BY seq"
         ).fetchall()
         assert [r["state"] for r in rows] == ["published", "draft"]
+        # generated_at is folded from the narrative panel, not the chapter's
+        # last_generated_at (its four sibling folded columns all come from
+        # the panel too); published_at still comes from last_generated_at.
+        assert rows[0]["generated_at"] == "2026-01-20T09:30:00Z"  # from panel.generated_at
         assert rows[0]["published_at"] == "2026-02-01T00:00:00Z"  # from last_generated_at
         assert rows[0]["read_at"] is not None  # pre-read: no fake unread badges
         assert rows[1]["published_at"] is None
@@ -142,6 +150,7 @@ class TestMigration0036:
             "PRAGMA table_info(storylines)"
         )}
         assert "start_date" not in cols
+        assert "end_date" not in cols
         assert "summary_embedding_json" not in cols
         assert "last_generated_at" not in cols
         assert "last_extension_check_at" in cols
@@ -169,3 +178,15 @@ class TestMigration0036:
         # Simulate a re-run: reset user_version and run again — must not raise.
         pre_0036.execute("PRAGMA user_version = 35")
         run_migrations(pre_0036)
+        # The re-run must land in the same end state, not duplicate or
+        # corrupt chapters: still one published + one draft per storyline,
+        # and the one-draft-per-storyline invariant still enforced.
+        states = [r[0] for r in pre_0036.execute(
+            "SELECT state FROM storyline_chapters WHERE storyline_id = 1 ORDER BY seq"
+        )]
+        assert states == ["published", "draft"]
+        with pytest.raises(sqlite3.IntegrityError):
+            pre_0036.execute(
+                "INSERT INTO storyline_chapters (storyline_id, seq, state)"
+                " VALUES (1, 99, 'draft')"
+            )
