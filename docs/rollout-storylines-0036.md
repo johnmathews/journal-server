@@ -1,6 +1,9 @@
 # Rollout: storylines redesign (migration 0036)
 
-**Status:** active runbook. **Date:** 2026-07-12. Companion to [`storylines.md`](storylines.md) and
+**Status:** steps 1–3 completed 2026-07-12/13 (deployed, all four storylines bootstrapped and
+verified — storyline 3's sweep initially aborted on an Anthropic usage limit with zero writes, as
+designed, and was re-run successfully). **Step 4 (migration 0037, drop legacy tables) is still
+pending and must ship in a LATER release.** Companion to [`storylines.md`](storylines.md) and
 [`superpowers/specs/2026-07-12-storylines-redesign-design.md`](superpowers/specs/2026-07-12-storylines-redesign-design.md).
 
 Migration `0036_storylines_draft_published.sql` reshapes the storylines schema (draft/published

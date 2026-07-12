@@ -1,5 +1,7 @@
 # Storylines Redesign (Server) Implementation Plan
 
+**Status:** closed 2026-07-12 — all 13 tasks executed, merged to main (f02c333), deployed, bootstrap sweep completed. Current reference: [`../../storylines.md`](../../storylines.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the date-window chapter engine with draft/published chapters whose boundaries are decided by LLM judgment over explicit entry-id membership, per `docs/superpowers/specs/2026-07-12-storylines-redesign-design.md`.
