@@ -1,11 +1,27 @@
 """Storyline narrative generation provider (Opus, Citations API).
 
-Generates the third-person narrative panel for a storyline. The
-input is the chronological corpus of journal entries that mention
-the storyline's anchor entity; the output is a list of segment
-dicts (per ``services/storylines/segments.py``) where each citation
-segment carries an integer ``entry_id`` parsed from the Anthropic
-Citations API response.
+Generates the third-person narrative for a storyline chapter. The
+input is the chronological corpus of journal entries assigned to the
+chapter; the output is a list of segment dicts (per
+``services/storylines/segments.py``) where each citation segment
+carries an integer ``entry_id`` parsed from the Anthropic Citations
+API response.
+
+Chapter boundaries are decided upstream by the judge provider
+(``storyline_judge.py``) — this narrator always produces a single flat
+narrative for whatever excerpts it's given. It has three modes,
+selected by the caller and expressed as a framing sentence appended
+to the user query:
+
+* ``draft`` — the chapter's arc is still ongoing; narrate what's
+  there without forcing a sense of resolution.
+* ``closure`` — the chapter is complete; the model is asked to give
+  the narrative a proper ending and open with a ``# <title>`` line,
+  which this provider parses off and returns as ``NarrativeResult.title``.
+* ``addendum`` — the chapter has already been published and new
+  entries surfaced later that belong to its period; the model writes
+  a short postscript rather than retelling the chapter. Requires
+  ``prior_narrative``.
 
 The provider does three things differently from `formatter.py` /
 `mood_scorer.py`:
@@ -37,7 +53,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from journal.services import usage
 from journal.services.storylines.segments import (
@@ -85,67 +101,35 @@ verbatim — synthesize them into prose, with citations carrying the link back.
 """
 
 
-SECTIONING_SYSTEM_PROMPT = """\
-You are a journal narrator. The user keeps a stream-of-consciousness journal in the
-first person. You are given a chronologically ordered set of journal entries that
-mention a specific subject (an entity — a person, place, activity, or topic). Your
-job is to compose a faithful, third-person narrative about that subject using only
-the material in the provided entries.
+NarratorMode = Literal["draft", "closure", "addendum"]
 
-Rules — all are load-bearing:
+# Framing sentence appended to the base user query, selected by ``mode``.
+# ``addendum`` carries a ``{prior}`` placeholder filled in with the
+# published chapter's prose at request time.
+_MODE_FRAMING: dict[str, str] = {
+    "draft": (
+        "This chapter's arc is ongoing. Narrate what is here; do not force "
+        "an ending or a sense of resolution the entries do not contain."
+    ),
+    "closure": (
+        "This chapter is complete. Give the narrative a proper ending, and "
+        "begin your response with a single title line of the form "
+        "'# <short chapter title>' (3-6 words) before the prose. Do not use "
+        "any other headings."
+    ),
+    "addendum": (
+        "The chapter below has already been written and published. The new "
+        "entries surfaced later but belong to its period. Write a brief "
+        "addendum (2-4 sentences, cited) that reads as a postscript; do not "
+        "retell the chapter.\n\nPUBLISHED CHAPTER:\n{prior}"
+    ),
+}
 
-* Third person. Never write as if you are the journal's author. Refer to the author
-  as "he", "the author", "John" if a name appears in the entries — but do not
-  invent a name if none is given.
-* Use only information present in the provided entries. Do not draw on outside
-  knowledge about parenting, running, relationships, software, or any other
-  topic. If the entries do not say something, do not say it.
-* Cite every factual claim. Every concrete event, quote, place, time, or feeling
-  attributed to the subject must come from a specific entry. The Citations API
-  will attach the source automatically when you ground a claim in the entries.
-* Stay restrained. Do not invent dialogue, interior monologue, or emotional states
-  that are not directly attested in the source text. "He felt frustrated" is OK
-  only if an entry says he felt frustrated; "He must have been lonely" is not.
-* You may say "the entries do not show". This is preferable to filling a gap
-  with plausible-sounding generic content.
-* Plan before composing. Before you write the narrative, internally list the
-  specific entries you will draw on and the quotes that ground each claim. Use
-  the Citations API to attach those quotes — do not fabricate quotes inline.
-
-Divide the narrative into MULTIPLE chronological sections — think of them as the
-chapters of a short book. A storyline that spans several weeks, or draws on more than
-a couple of entries, must NOT be returned as a single long section. Begin each section
-with a line `## <short title>` (a few words) on its own line, and break at natural
-shifts in time or topic: a new phase, month, event, milestone, or development.
-
-Target roughly 200 words per section. A section must not exceed ~280 words: when a
-topic genuinely runs longer than that, split it into consecutive sub-sections, each
-with its own title, rather than emitting one oversized section. Do not pad a short,
-genuinely self-contained topic just to reach the target — but when in doubt, prefer
-more, shorter sections over one long one. As a rule of thumb, a narrative of N total
-words should have roughly N/200 sections.
-
-Sections must be in chronological order. Do not add any preamble before the first
-`## ` heading, and do not duplicate the verbatim excerpts — synthesize them into
-prose, with citations carrying the link back.
-"""
-
-
-# Section-marker regex. A text segment whose first line is heading-shaped opens
-# a new section. ``^\s*##\s+(.+)$`` with MULTILINE so the heading can be the
-# first line of a multi-line block; the remainder of the block (after the first
-# newline) becomes the new section's opening prose.
-_HEADING_RE = re.compile(r"^\s*##\s+(.+?)\s*$", re.MULTILINE)
-
-# Soft word band per section. Sections outside [WORD_BAND_MIN, WORD_BAND_MAX]
-# are logged as warnings but still returned — semantics win over word count.
-WORD_BAND_MIN = 180
-WORD_BAND_MAX = 240
-# Hard ceiling. A section this long means the model failed to split a long
-# narrative into chapters (the prompt asks it to cap sections at ~280 words).
-# We still return it — never wipe content — but log it at a higher severity
-# so the failure is visible in ops, and it's the signal to iterate the prompt.
-WORD_BAND_HARD_MAX = 280
+# Closure-mode title line. Matched ONLY against the first line of the
+# first text segment of a closure-mode response — never inspected in
+# draft or addendum mode, and never matched against anything but the
+# first line (a ``# `` later in the prose is left alone).
+_TITLE_LINE_RE = re.compile(r"^#\s+(.+)$")
 
 
 @dataclass
@@ -155,6 +139,10 @@ class NarrativeResult:
     segments: list[dict[str, Any]] = field(default_factory=list)
     source_entry_ids: list[int] = field(default_factory=list)
     citation_count: int = 0
+    title: str | None = None
+    """Parsed chapter title. Only ever set in closure mode, and only when
+    the response opened with a ``# <title>`` line; ``None`` otherwise —
+    callers fall back to the judge's working title or ``"Chapter {seq}"``."""
     model_used: str = ""
     raw_usage: dict[str, Any] | None = None
     """Anthropic usage block (input_tokens, output_tokens,
@@ -162,58 +150,13 @@ class NarrativeResult:
     callers to log cache-hit performance after generation."""
 
 
-@dataclass
-class NarrativeSection:
-    """One titled section of a sectioned narrative.
-
-    ``segments`` are the section's interleaved text + citation segments
-    (per ``services/storylines/segments.py``), EXCLUDING the ``## title``
-    heading marker itself — the heading is captured into ``title``.
-    ``word_count`` is computed from the section's text segments only
-    (whitespace-split), excluding citation ``quote`` text.
-    """
-
-    title: str
-    segments: list[dict[str, Any]] = field(default_factory=list)
-    source_entry_ids: list[int] = field(default_factory=list)
-    citation_count: int = 0
-    word_count: int = 0
-
-
-@dataclass
-class SectionedNarrativeResult:
-    """The output of a sectioned narrative generation call."""
-
-    sections: list[NarrativeSection] = field(default_factory=list)
-    model_used: str = ""
-    raw_usage: dict[str, Any] | None = None
-
-    @property
-    def citation_count(self) -> int:
-        """Total citation segments across all sections."""
-        return sum(s.citation_count for s in self.sections)
-
-    @property
-    def source_entry_ids(self) -> list[int]:
-        """Deduplicated, first-seen-order entry ids across all sections."""
-        seen: set[int] = set()
-        out: list[int] = []
-        for section in self.sections:
-            for eid in section.source_entry_ids:
-                if eid not in seen:
-                    seen.add(eid)
-                    out.append(eid)
-        return out
-
-
 @runtime_checkable
 class StorylineNarratorProtocol(Protocol):
-    """Narrative generation protocol (one method).
+    """Narrative generation protocol (one method, three modes).
 
-    ``prior_narrative`` is an optional string of previously-written
-    narrative prose. When non-empty, the narrator is asked to produce
-    a *continuation* (new segments to append after the prior text),
-    not a from-scratch retelling. Used by append-mode regeneration.
+    ``prior_narrative`` is required when ``mode="addendum"`` — it's the
+    previously-published chapter prose the model writes a postscript
+    against. It's ignored in ``draft``/``closure`` mode.
     """
 
     def generate_narrative(
@@ -221,15 +164,10 @@ class StorylineNarratorProtocol(Protocol):
         excerpts: list[DatedEntryExcerpt],
         storyline_name: str,
         storyline_description: str = "",
+        *,
+        mode: NarratorMode = "draft",
         prior_narrative: str | None = None,
     ) -> NarrativeResult: ...
-
-    def generate_sectioned_narrative(
-        self,
-        excerpts: list[DatedEntryExcerpt],
-        storyline_name: str,
-        storyline_description: str = "",
-    ) -> SectionedNarrativeResult: ...
 
 
 class AnthropicStorylineNarrator:
@@ -259,6 +197,8 @@ class AnthropicStorylineNarrator:
         excerpts: list[DatedEntryExcerpt],
         storyline_name: str,
         storyline_description: str = "",
+        *,
+        mode: NarratorMode = "draft",
         prior_narrative: str | None = None,
     ) -> NarrativeResult:
         """Generate a third-person narrative grounded in ``excerpts``.
@@ -270,15 +210,15 @@ class AnthropicStorylineNarrator:
         callers decide whether to retry or surface as "no narrative
         available".
 
-        When ``prior_narrative`` is non-empty, the user-query block is
-        prefixed with the prior text and the model is instructed to
-        produce a *continuation* — used by append-mode regeneration so
-        the new segments narrate only the newly-arrived excerpts
-        without re-summarising what has already been written. We chose
-        an extra kwarg (rather than a separate method) so the cache-
-        breakpointed system prompt + document layout stays identical
-        between modes; only the user-query text changes.
+        Raises ``ValueError`` if ``mode="addendum"`` and
+        ``prior_narrative`` is missing/blank — an addendum with nothing
+        to postscript is a caller bug, not a degraded-but-valid request.
         """
+        if mode == "addendum" and not (prior_narrative and prior_narrative.strip()):
+            raise ValueError(
+                "prior_narrative is required when mode='addendum'"
+            )
+
         if not excerpts:
             log.info("Narrator called with empty corpus — returning empty result")
             return NarrativeResult(model_used=self._model)
@@ -288,6 +228,7 @@ class AnthropicStorylineNarrator:
             storyline_name=storyline_name,
             storyline_description=storyline_description,
             entry_count=len(excerpts),
+            mode=mode,
             prior_narrative=prior_narrative,
         )
 
@@ -300,75 +241,17 @@ class AnthropicStorylineNarrator:
         segments = _parse_narrative_response(
             response, document_to_entry, document_to_date
         )
-        source_entry_ids: list[int] = []
-        seen: set[int] = set()
-        citation_count = 0
-        for seg in segments:
-            if seg.get("kind") != "citation":
-                continue
-            citation_count += 1
-            eid = int(seg.get("entry_id", 0))
-            if eid and eid not in seen:
-                seen.add(eid)
-                source_entry_ids.append(eid)
 
-        usage = _extract_usage(response)
+        title = _extract_closure_title(segments) if mode == "closure" else None
+
+        raw_usage = _extract_usage(response)
         return NarrativeResult(
             segments=segments,
-            source_entry_ids=source_entry_ids,
-            citation_count=citation_count,
+            source_entry_ids=_source_entry_ids(segments),
+            citation_count=_citation_count(segments),
+            title=title,
             model_used=self._model,
-            raw_usage=usage,
-        )
-
-    def generate_sectioned_narrative(
-        self,
-        excerpts: list[DatedEntryExcerpt],
-        storyline_name: str,
-        storyline_description: str = "",
-    ) -> SectionedNarrativeResult:
-        """Generate a third-person narrative split into titled sections.
-
-        Builds the same Citations-API documents + index maps as
-        ``generate_narrative`` (via the shared ``_build_index_maps`` /
-        ``_call_api`` helpers), but sends the SECTIONING system prompt
-        and parses the response into ordered ``NarrativeSection``s. The
-        model begins each section with a ``## <title>`` heading line; the
-        parser opens a new section on each heading-shaped text segment.
-
-        On empty input or hard API failure, returns an empty result —
-        callers decide whether to retry or surface as "no narrative
-        available".
-        """
-        if not excerpts:
-            log.info(
-                "Sectioned narrator called with empty corpus — empty result"
-            )
-            return SectionedNarrativeResult(model_used=self._model)
-
-        document_to_entry, document_to_date = _build_index_maps(excerpts)
-        user_query = _build_user_query(
-            storyline_name=storyline_name,
-            storyline_description=storyline_description,
-            entry_count=len(excerpts),
-        )
-
-        try:
-            response = self._call_api(
-                excerpts, user_query, SECTIONING_SYSTEM_PROMPT
-            )
-        except Exception:  # noqa: BLE001 — provider failures surface as empty
-            log.exception("Sectioned storyline narrator API call failed")
-            return SectionedNarrativeResult(model_used=self._model)
-
-        sections = _parse_sectioned_response(
-            response, document_to_entry, document_to_date
-        )
-        usage = _extract_usage(response)
-        return SectionedNarrativeResult(
-            sections=sections,
-            model_used=self._model,
-            raw_usage=usage,
+            raw_usage=raw_usage,
         )
 
     def _call_api(
@@ -377,10 +260,7 @@ class AnthropicStorylineNarrator:
         user_query: str,
         system_prompt: str,
     ) -> Any:  # noqa: ANN401
-        """Shared Anthropic Citations-API call.
-
-        Identical request shape for both the flat and sectioned paths —
-        only the system prompt differs. The corpus documents and the
+        """Anthropic Citations-API call. The corpus documents and the
         user-query text block ride in a single user message; the system
         prompt is cache-breakpointed.
         """
@@ -467,6 +347,7 @@ def _build_user_query(
     storyline_name: str,
     storyline_description: str,
     entry_count: int,
+    mode: NarratorMode = "draft",
     prior_narrative: str | None = None,
 ) -> str:
     desc = storyline_description.strip() or storyline_name
@@ -478,23 +359,51 @@ def _build_user_query(
         f"every claim. Write naturally and concisely — quality of grounding "
         f"matters more than length."
     )
-    if prior_narrative and prior_narrative.strip():
-        # Append-mode addendum: the model sees the existing narrative
-        # as "previous chapters" context. It should continue the
-        # storyline from that point — narrating only the new entries
-        # — rather than re-stating ground already covered.
-        return (
-            f"{base}\n\n"
-            "Here is what has been written about this storyline so far. "
-            "Continue the narrative from where it leaves off — narrate "
-            "ONLY the newly-attached entries and do not repeat content "
-            "already covered. The continuation will be concatenated "
-            "directly onto the prior text, so begin in the same "
-            "third-person voice and tense.\n\n"
-            "PREVIOUS CHAPTERS:\n"
-            f"{prior_narrative.strip()}"
-        )
-    return base
+    framing = _MODE_FRAMING[mode]
+    if mode == "addendum":
+        framing = framing.format(prior=(prior_narrative or "").strip())
+    return f"{base}\n\n{framing}"
+
+
+def _extract_closure_title(segments: list[dict[str, Any]]) -> str | None:
+    """Pop a leading ``# <title>`` line off the FIRST text segment, if
+    present, and return the title. Mutates ``segments`` in place (either
+    rewriting segment 0's text or dropping it if the heading was the
+    entire segment). Callers MUST only invoke this in closure mode — it
+    is the single bounded title parse in the module; draft/addendum
+    responses never have their headings inspected.
+    """
+    if not segments or segments[0].get("kind") != "text":
+        return None
+    first_text = segments[0].get("text", "")
+    first_line, _sep, rest = first_text.partition("\n")
+    match = _TITLE_LINE_RE.match(first_line)
+    if match is None:
+        return None
+    title = match.group(1).strip()
+    if rest:
+        segments[0] = text_segment(rest)
+    else:
+        segments.pop(0)
+    return title
+
+
+def _source_entry_ids(segments: list[dict[str, Any]]) -> list[int]:
+    """Deduplicated, first-seen-order entry ids cited across ``segments``."""
+    seen: set[int] = set()
+    out: list[int] = []
+    for seg in segments:
+        if seg.get("kind") != "citation":
+            continue
+        eid = int(seg.get("entry_id", 0))
+        if eid and eid not in seen:
+            seen.add(eid)
+            out.append(eid)
+    return out
+
+
+def _citation_count(segments: list[dict[str, Any]]) -> int:
+    return sum(1 for seg in segments if seg.get("kind") == "citation")
 
 
 def _parse_narrative_response(
@@ -563,121 +472,6 @@ def _parse_narrative_response(
                 citation_segment(entry_id, cited_text, entry_date=entry_date)
             )
     return segments
-
-
-def _split_heading(text: str) -> tuple[str | None, str]:
-    """If ``text`` opens with a ``## <title>`` heading line, return
-    ``(title, remainder)`` where remainder is the prose after the first
-    line (with the heading line stripped). Otherwise return
-    ``(None, text)``.
-
-    Only a heading on the FIRST line opens a section — a ``##`` later in
-    the block is treated as ordinary prose (it would be a within-section
-    artefact, not a section boundary).
-    """
-    first_line, sep, rest = text.partition("\n")
-    match = _HEADING_RE.match(first_line)
-    if match is None:
-        return None, text
-    return match.group(1).strip(), rest
-
-
-def _parse_sectioned_response(
-    response: Any,  # noqa: ANN401
-    document_to_entry: dict[int, int],
-    document_to_date: dict[int, str] | None = None,
-) -> list[NarrativeSection]:
-    """Parse the Anthropic response into ordered titled sections.
-
-    Reuses ``_parse_narrative_response`` to get the flat, render-order
-    list of text + citation segments (so citation→entry_id mapping and
-    date stamping stay in one place), then groups that flat list into
-    sections. A text segment whose first line matches the ``## <title>``
-    heading pattern opens a NEW section with that title; the remainder
-    of that block (after the heading line) becomes the section's first
-    prose segment, and subsequent segments accrue to the current
-    section.
-
-    Pre-first-heading text (model preamble — ideally none, the prompt
-    forbids it) is NOT dropped: it goes into an implicit leading section
-    with an empty title. We chose a leading section over attaching it to
-    the first real section so a stray preamble never silently merges
-    into — and corrupts the word count / title of — the first authored
-    section. If there are no headings at all, the whole narrative
-    becomes one untitled (``title == ""``) section.
-
-    Per-section ``word_count`` is computed from text segments only
-    (whitespace-split), excluding citation ``quote`` text. Sections
-    outside the soft ``[WORD_BAND_MIN, WORD_BAND_MAX]`` band are logged
-    as warnings but still returned.
-    """
-    flat = _parse_narrative_response(
-        response, document_to_entry, document_to_date
-    )
-
-    sections: list[NarrativeSection] = []
-    current: NarrativeSection | None = None
-
-    def _open(title: str) -> NarrativeSection:
-        section = NarrativeSection(title=title)
-        sections.append(section)
-        return section
-
-    for seg in flat:
-        if seg.get("kind") == "text":
-            title, remainder = _split_heading(seg.get("text", ""))
-            if title is not None:
-                # Heading line opens a new section. Remainder (if any)
-                # becomes the new section's first prose segment.
-                current = _open(title)
-                if remainder.strip():
-                    current.segments.append(text_segment(remainder))
-                continue
-        # Non-heading segment (prose or citation). If we haven't opened a
-        # section yet, open an implicit leading section for the preamble.
-        if current is None:
-            current = _open("")
-        current.segments.append(seg)
-
-    for section in sections:
-        _finalize_section(section)
-    return sections
-
-
-def _finalize_section(section: NarrativeSection) -> None:
-    """Compute ``word_count``, ``source_entry_ids``, and
-    ``citation_count`` for a section, then warn if it's out of band."""
-    word_count = 0
-    citation_count = 0
-    seen: set[int] = set()
-    source_entry_ids: list[int] = []
-    for seg in section.segments:
-        if seg.get("kind") == "text":
-            word_count += len((seg.get("text") or "").split())
-        elif seg.get("kind") == "citation":
-            citation_count += 1
-            eid = int(seg.get("entry_id", 0))
-            if eid and eid not in seen:
-                seen.add(eid)
-                source_entry_ids.append(eid)
-    section.word_count = word_count
-    section.citation_count = citation_count
-    section.source_entry_ids = source_entry_ids
-    # Empty sections (heading with no prose) are tolerated silently —
-    # only flag sections that have content but miss the word band.
-    if word_count > WORD_BAND_HARD_MAX:
-        log.warning(
-            "Narrative section %r has %d words, over the hard cap of %d "
-            "— the model did not split a long narrative into chapters; "
-            "returning anyway",
-            section.title, word_count, WORD_BAND_HARD_MAX,
-        )
-    elif word_count and not (WORD_BAND_MIN <= word_count <= WORD_BAND_MAX):
-        log.warning(
-            "Narrative section %r has %d words, outside band [%d, %d] "
-            "— returning anyway (semantics win over word count)",
-            section.title, word_count, WORD_BAND_MIN, WORD_BAND_MAX,
-        )
 
 
 def _attr_or_key(obj: Any, key: str) -> Any:  # noqa: ANN401
