@@ -22,6 +22,18 @@ failed are NOT cleared from the pending table (unlike every other new
 entry that run) so they retry next update. Publishing never happens
 with an empty closure, and at most one publish happens per ``update()``
 call (there is exactly one call site).
+
+Within ``update()``, draft *membership* writes (``add_entries_to_draft``)
+happen before the closure/draft narration calls that follow — the
+narrator needs to see the up-to-date membership it's narrating. The
+*pending-table* clear is different: it is the last mutating step of
+``update()``, run only after the publish-or-renarrate branch returns
+normally. If that branch raises (an unhandled narrator/publish
+exception), the clear is never reached and every id computed for this
+run — including ones already folded into draft membership — stays in
+the pending table for the next run to pick up; nothing is lost, at
+worst an already-assigned id lingers harmlessly in ``pending`` until
+the next successful pass clears it.
 """
 
 from __future__ import annotations
@@ -192,15 +204,20 @@ class StorylineEngine:
 
         if to_draft:
             self._repo.add_entries_to_draft(draft.id, to_draft)
-        # Clear every new id from pending EXCEPT ones whose addendum
-        # narration just failed — those must survive to be retried.
-        ids_to_clear = [eid for eid in new_ids if eid not in failed_addendum_ids]
-        self._repo.clear_pending_entries(storyline_id, ids_to_clear)
 
         if wants_publish:
             self._publish(storyline, draft.id, to_new, excerpt_by_id, result)
         else:
             self._renarrate_draft(storyline, draft.id, excerpt_by_id, result)
+
+        # Clear every new id from pending EXCEPT ones whose addendum
+        # narration just failed — those must survive to be retried. This
+        # runs last, after the publish-or-renarrate step above returns
+        # normally: an unhandled exception there propagates out of
+        # update() without reaching this line, so pending ids are never
+        # lost (see the module docstring's failure-policy section).
+        ids_to_clear = [eid for eid in new_ids if eid not in failed_addendum_ids]
+        self._repo.clear_pending_entries(storyline_id, ids_to_clear)
         self._stamp_draft_entry_count(storyline_id, result)
         return result
 

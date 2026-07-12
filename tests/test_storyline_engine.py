@@ -72,6 +72,7 @@ class FakeNarrator:
     def __init__(self) -> None:
         self.calls: list[_NarratorCall] = []
         self.results: dict[str, NarrativeResult] = {}
+        self.raises: dict[str, Exception] = {}
         self.default_result = NarrativeResult(
             segments=[text_segment("Narrated.")],
             source_entry_ids=[],
@@ -97,6 +98,8 @@ class FakeNarrator:
                 prior_narrative=prior_narrative,
             ),
         )
+        if mode in self.raises:
+            raise self.raises[mode]
         return self.results.get(mode, self.default_result)
 
 
@@ -494,6 +497,94 @@ class TestUpdatePublish:
             c for c in repo.list_chapters(storyline.id) if c.state == "published"
         ][-1]
         assert published.title == f"Chapter {draft.seq}"
+
+    def test_closure_exception_propagates_and_leaves_entries_pending(
+        self,
+        engine: StorylineEngine,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+        entry_ids: list[int],
+        fake_narrator: FakeNarrator,
+        fake_judge: FakeJudge,
+        factory: ConnectionFactory,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        """A narrator exception during closure is not caught anywhere in
+        the engine, so it propagates out of update(). The binding
+        failure policy requires that the pending-clear write never runs
+        in that case — verify the about-to-publish id survives."""
+        draft = repo.get_draft(storyline.id)
+        assert draft is not None
+        repo.add_entries_to_draft(draft.id, entry_ids)  # 3 members, meets the floor
+        new_entry_id = _seed_entry_with_mention(
+            factory, seed_user, seed_entity, "2026-05-10", "Ran a marathon!",
+        )
+        # Simulate this id already being tracked as pending from an
+        # earlier partial run — the exact scenario the ordering fix
+        # protects against.
+        repo.add_pending_entry(storyline.id, new_entry_id)
+        fake_judge.judgment = ExtensionJudgment(
+            assignments=[EntryAssignment(new_entry_id, "new_chapter")],
+            draft_arc_complete=True, reasoning="arc complete",
+        )
+        fake_narrator.raises["closure"] = RuntimeError("narrator exploded")
+
+        with pytest.raises(RuntimeError, match="narrator exploded"):
+            engine.update(storyline.id)
+
+        # Nothing published, and the entry destined for the new chapter
+        # is neither published nor silently dropped from pending.
+        assert not [c for c in repo.list_chapters(storyline.id) if c.state == "published"]
+        assert new_entry_id in repo.list_pending_entries(storyline.id)
+
+    def test_publish_commits_but_new_draft_narration_empty(
+        self,
+        engine: StorylineEngine,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+        entry_ids: list[int],
+        fake_narrator: FakeNarrator,
+        fake_judge: FakeJudge,
+        factory: ConnectionFactory,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        """Closure succeeds and publish_draft commits the new chapter and
+        the new draft's membership; the *subsequent* narration call for
+        the new draft then returns empty segments. The published chapter
+        must still exist with its title, the new draft must still carry
+        the membership recorded by publish_draft, and a warning must be
+        recorded — nothing about the earlier successful publish is undone."""
+        draft = repo.get_draft(storyline.id)
+        assert draft is not None
+        repo.add_entries_to_draft(draft.id, entry_ids)  # 3 members, meets the floor
+        new_entry_id = _seed_entry_with_mention(
+            factory, seed_user, seed_entity, "2026-05-10", "Ran a marathon!",
+        )
+        fake_judge.judgment = ExtensionJudgment(
+            assignments=[EntryAssignment(new_entry_id, "new_chapter")],
+            draft_arc_complete=True, reasoning="arc complete",
+        )
+        fake_narrator.results["closure"] = NarrativeResult(
+            segments=[text_segment("It concluded.")],
+            source_entry_ids=entry_ids, citation_count=3,
+            title="The End of Winter", model_used="fake-narrator",
+        )
+        fake_narrator.results["draft"] = NarrativeResult(segments=[], model_used="fake")
+
+        result = engine.update(storyline.id)
+
+        chapters = repo.list_chapters(storyline.id)
+        published = [c for c in chapters if c.state == "published"]
+        assert len(published) == 1
+        assert published[0].title == "The End of Winter"
+        new_draft = repo.get_draft(storyline.id)
+        assert new_draft is not None
+        assert new_draft.id != published[0].id
+        assert new_entry_id in repo.chapter_entry_ids(new_draft.id)
+        assert new_draft.segments == []
+        assert any("after publish" in w.lower() for w in result.warnings)
 
     def test_closure_empty_defers_publish_and_folds_new_into_draft(
         self,
