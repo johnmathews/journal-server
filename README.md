@@ -92,6 +92,7 @@ All external APIs are behind provider-agnostic interfaces (Python Protocols), ma
 - [Development](docs/development.md) — Local setup and contributing
 - [API Reference](docs/api.md) — MCP tool documentation
 - [Async Batch Jobs](docs/jobs.md) — Two-pool job runner, restart recovery, per-job token/cost capture
+- [Storylines](docs/storylines.md) — Cross-entry narratives: chapters, generation pipeline, extension classifier, and the `backfill-storyline-chapters` / `recheck-storylines` CLIs
 - [Conversations](docs/conversations.md) — Multi-turn chat: intent routing (lookup/aggregate/temporal/trend) over journal retrieval
 
 ## Cost
