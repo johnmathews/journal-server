@@ -56,7 +56,11 @@ if TYPE_CHECKING:
     from journal.db.storyline_repository import SQLiteStorylineRepository
     from journal.entitystore.protocol import EntityStore
     from journal.models import Storyline, StorylineChapter
-    from journal.providers.storyline_judge import EntryAssignment, StorylineJudgeProtocol
+    from journal.providers.storyline_judge import (
+        EntryAssignment,
+        PartitionChapter,
+        StorylineJudgeProtocol,
+    )
     from journal.providers.storyline_narrator import (
         NarrativeResult,
         StorylineNarratorProtocol,
@@ -80,6 +84,19 @@ _NEW_ENTRY_TRUNCATE_CHARS = 6_000
 # Sparse-storyline recall fallback threshold (spec §3): below this many
 # entity-mention-based candidates, supplement with a literal LIKE scan.
 _SPARSE_RECALL_THRESHOLD = 3
+
+# Bootstrap partitions the candidate corpus in overlapping windows of
+# this many chronological entries per judge.partition call, rather than
+# sending the entire history in one shot (rollout blocker: unbounded
+# corpora blow past the judge's output budget). See
+# ``StorylineEngine._partition_in_windows``.
+_PARTITION_WINDOW = 50
+
+# update() caps the new-entry set sent to judge.judge_extension per run
+# at this many chronological entries; any remainder is deferred to a
+# later update() call (safe — deferred ids simply surface as "new"
+# again next time, per the existing candidacy logic).
+_JUDGE_BATCH = 50
 
 
 @dataclass
@@ -173,12 +190,25 @@ class StorylineEngine:
         new_ids += [eid for eid in pending if eid not in assigned and eid not in new_ids]
         if not new_ids:
             return result
-        result.new_entry_count = len(new_ids)
+
+        # Cap the batch sent to the judge this run; any remainder is
+        # deferred to a subsequent update() call rather than blowing
+        # past the judge's output budget. Deferred ids are simply left
+        # out of this run's judge input and pending-clear — they still
+        # match as candidates (or remain in the pending table) next
+        # time, so nothing needs to be written to persist the deferral.
+        batch_ids = new_ids[:_JUDGE_BATCH]
+        deferred_ids = new_ids[_JUDGE_BATCH:]
+        if deferred_ids:
+            result.warnings.append(
+                f"{len(deferred_ids)} entries deferred to next update run.",
+            )
+        result.new_entry_count = len(batch_ids)
 
         excerpt_by_id = {e.entry_id: e for e in candidates}
         new_entries = [
             self._to_judge_entry(eid, excerpt_by_id, truncate=_NEW_ENTRY_TRUNCATE_CHARS)
-            for eid in new_ids
+            for eid in batch_ids
         ]
         draft_member_ids = self._repo.chapter_entry_ids(draft.id)
         draft_entries = [
@@ -230,7 +260,7 @@ class StorylineEngine:
         # normally: an unhandled exception there propagates out of
         # update() without reaching this line, so pending ids are never
         # lost (see the module docstring's failure-policy section).
-        ids_to_clear = [eid for eid in new_ids if eid not in failed_addendum_ids]
+        ids_to_clear = [eid for eid in batch_ids if eid not in failed_addendum_ids]
         self._repo.clear_pending_entries(storyline_id, ids_to_clear)
         self._stamp_draft_entry_count(storyline_id, result)
         return result
@@ -255,21 +285,13 @@ class StorylineEngine:
             )
             return result
 
-        judge_entries = [
-            self._to_judge_entry(eid, excerpt_by_id, truncate=_NEW_ENTRY_TRUNCATE_CHARS)
-            for eid in all_ids
-        ]
-        partition = self._judge.partition(
-            storyline_name=storyline.name, storyline_description=storyline.description,
-            entries=judge_entries,
-        )
-        if partition.failed or not partition.chapters:
-            result.warnings.append("Partition unavailable; bootstrap aborted.")
-            return result
+        final_chapters = self._partition_in_windows(storyline, all_ids, excerpt_by_id, result)
+        if final_chapters is None:
+            return result  # abort warning already recorded
 
         specs: list[BootstrapChapterSpec] = []
-        chapter_count = len(partition.chapters)
-        for i, chapter in enumerate(partition.chapters):
+        chapter_count = len(final_chapters)
+        for i, chapter in enumerate(final_chapters):
             is_last = i == chapter_count - 1
             excerpts = self._excerpts_for(chapter.entry_ids, excerpt_by_id)
             narrative = self._narrator.generate_narrative(
@@ -297,6 +319,56 @@ class StorylineEngine:
         self._repo.clear_pending_entries(storyline_id, all_ids)
         result.chapter_count = chapter_count
         return result
+
+    def _partition_in_windows(
+        self, storyline: Storyline, all_ids: list[int],
+        excerpt_by_id: dict[int, DatedEntryExcerpt], result: UpdateResult,
+    ) -> list[PartitionChapter] | None:
+        """Partition ``all_ids`` (chronological) across one or more
+        ``judge.partition`` calls, each covering at most
+        ``_PARTITION_WINDOW`` fresh entries.
+
+        Every window's chapters except the last are final and go
+        straight into the returned list. The last chapter's entry_ids
+        carry forward to seed (prepend to) the next window, so the
+        judge sees continuity across the window boundary instead of an
+        arbitrary hard cut; after the final window, that trailing
+        chapter is final too (it becomes the eventual draft). A corpus
+        at or under the window size makes exactly one call, matching
+        prior single-shot behavior.
+
+        Returns ``None`` if any window's partition call fails or
+        returns no chapters — the caller aborts with no writes; a
+        warning is already appended to ``result``.
+        """
+        windows = [
+            all_ids[i:i + _PARTITION_WINDOW]
+            for i in range(0, len(all_ids), _PARTITION_WINDOW)
+        ]
+        final_chapters: list[PartitionChapter] = []
+        carry_ids: list[int] = []
+        for window_index, window in enumerate(windows):
+            window_ids = carry_ids + window
+            judge_entries = [
+                self._to_judge_entry(eid, excerpt_by_id, truncate=_NEW_ENTRY_TRUNCATE_CHARS)
+                for eid in window_ids
+            ]
+            partition = self._judge.partition(
+                storyline_name=storyline.name,
+                storyline_description=storyline.description,
+                entries=judge_entries,
+            )
+            if partition.failed or not partition.chapters:
+                result.warnings.append("Partition unavailable; bootstrap aborted.")
+                return None
+            is_final_window = window_index == len(windows) - 1
+            if is_final_window:
+                final_chapters.extend(partition.chapters)
+                carry_ids = []
+            else:
+                final_chapters.extend(partition.chapters[:-1])
+                carry_ids = partition.chapters[-1].entry_ids
+        return final_chapters
 
     def refresh_draft(self, storyline_id: int) -> UpdateResult:
         """Re-narrate the current draft from its existing membership,

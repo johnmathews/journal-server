@@ -279,6 +279,20 @@ def test_partition_api_failure_returns_failed() -> None:
     assert result.failed
 
 
+def test_default_max_tokens_is_8192() -> None:
+    """Large partition-window outputs (up to 50 entries/window, see
+    ``engine._PARTITION_WINDOW``) need headroom beyond the historical
+    2048-token default — raised as part of the rollout-blocker fix."""
+    resp = _tool_response("record_judgment", {
+        "assignments": [], "draft_arc_complete": False, "reasoning": "x"})
+    client = _FakeClient(resp)
+    judge = AnthropicStorylineJudge(api_key="k", client=client)
+    judge.judge_extension(storyline_name="R", storyline_description="",
+                           draft_narrative="", draft_entries=[],
+                           new_entries=[], published_chapters=[])
+    assert client.calls[0]["max_tokens"] == 8192
+
+
 def test_model_property_and_tool_choice_forced() -> None:
     resp = _tool_response("record_judgment", {
         "assignments": [], "draft_arc_complete": False, "reasoning": "x"})

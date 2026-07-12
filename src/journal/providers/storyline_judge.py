@@ -187,7 +187,7 @@ class AnthropicStorylineJudge:
         self,
         api_key: str,
         model: str = "claude-haiku-4-5",
-        max_tokens: int = 2048,
+        max_tokens: int = 8192,
         client: Any | None = None,
     ) -> None:
         if client is not None:

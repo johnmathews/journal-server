@@ -43,6 +43,8 @@ from journal.services.storylines.engine import (
 from journal.services.storylines.segments import text_segment
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from journal.db.factory import ConnectionFactory
     from journal.models import DatedEntryExcerpt, Storyline
     from journal.providers.storyline_judge import EntryForJudge
@@ -123,6 +125,10 @@ class FakeJudge:
             assignments=[], draft_arc_complete=False, reasoning="",
         )
         self.partition_result = PartitionResult(chapters=[])
+        #: When set, overrides ``partition_result`` — called with the
+        #: per-window entries so a test can react to what's actually
+        #: in each window (e.g. the bootstrap-windowing seeding tests).
+        self.partition_result_fn: Callable[[list[EntryForJudge]], PartitionResult] | None = None
 
     def judge_extension(
         self,
@@ -147,6 +153,8 @@ class FakeJudge:
         entries: list[EntryForJudge],
     ) -> PartitionResult:
         self.partition_calls.append(list(entries))
+        if self.partition_result_fn is not None:
+            return self.partition_result_fn(entries)
         return self.partition_result
 
 
@@ -225,6 +233,26 @@ def _seed_entry_with_mention(
     )
     conn.commit()
     return entry_id
+
+
+def _seed_many_entries(
+    factory: ConnectionFactory, user_id: int, entity_id: int, count: int,
+) -> list[int]:
+    """Seed ``count`` entries mentioning ``entity_id``, one per day
+    starting 2026-01-01, in chronological order — used by the
+    bootstrap-windowing and update-batching tests, which need corpora
+    larger than the window/batch size (50)."""
+    from datetime import date, timedelta
+
+    base = date(2026, 1, 1)
+    return [
+        _seed_entry_with_mention(
+            factory, user_id, entity_id,
+            (base + timedelta(days=i)).isoformat(),
+            f"Entry number {i} about running.",
+        )
+        for i in range(count)
+    ]
 
 
 @pytest.fixture
@@ -384,6 +412,52 @@ class TestUpdateContinue:
         assert any("narrat" in w.lower() for w in result.warnings)
         # membership still applied even though narration failed
         assert entry_ids[0] in repo.chapter_entry_ids(refreshed.id)
+
+
+# ── update(): batching (_JUDGE_BATCH) ────────────────────────────
+
+
+class TestUpdateBatching:
+    def test_60_new_entries_batches_50_and_defers_the_rest(
+        self,
+        engine: StorylineEngine,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+        factory: ConnectionFactory,
+        seed_user: int,
+        seed_entity: int,
+        fake_judge: FakeJudge,
+    ) -> None:
+        seeded_ids = _seed_many_entries(factory, seed_user, seed_entity, 60)
+        fake_judge.judgment = ExtensionJudgment(
+            assignments=[EntryAssignment(eid, "draft") for eid in seeded_ids[:50]],
+            draft_arc_complete=False, reasoning="continues",
+        )
+
+        result = engine.update(storyline.id)
+
+        assert len(fake_judge.calls[-1].new_entries) == 50
+        assert {e.entry_id for e in fake_judge.calls[-1].new_entries} == set(seeded_ids[:50])
+        assert result.new_entry_count == 50
+        assert any(
+            "10" in w and "deferred" in w.lower() for w in result.warnings
+        )
+        draft = repo.get_draft(storyline.id)
+        assert draft is not None
+        assert sorted(repo.chapter_entry_ids(draft.id)) == sorted(seeded_ids[:50])
+
+        # Second update() picks up the remaining 10 — nothing was lost.
+        fake_judge.judgment = ExtensionJudgment(
+            assignments=[EntryAssignment(eid, "draft") for eid in seeded_ids[50:]],
+            draft_arc_complete=False, reasoning="continues",
+        )
+        second = engine.update(storyline.id)
+
+        assert second.new_entry_count == 10
+        assert {e.entry_id for e in fake_judge.calls[-1].new_entries} == set(seeded_ids[50:])
+        draft = repo.get_draft(storyline.id)
+        assert draft is not None
+        assert sorted(repo.chapter_entry_ids(draft.id)) == sorted(seeded_ids)
 
 
 # ── update(): publish ────────────────────────────────────────────
@@ -839,6 +913,83 @@ class TestBootstrap:
         after = [(c.id, c.state) for c in repo.list_chapters(storyline.id)]
         assert after == before
         assert any("narrat" in w.lower() for w in result.warnings)
+
+
+class TestBootstrapWindowing:
+    """Overlapping-window partitioning (spec §2 Flow 2, _PARTITION_WINDOW=50)."""
+
+    def test_large_corpus_partitions_in_overlapping_windows(
+        self,
+        engine: StorylineEngine,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+        factory: ConnectionFactory,
+        seed_user: int,
+        seed_entity: int,
+        fake_narrator: FakeNarrator,
+        fake_judge: FakeJudge,
+    ) -> None:
+        seeded_ids = _seed_many_entries(factory, seed_user, seed_entity, 120)
+
+        def splitting_partition(entries: list[EntryForJudge]) -> PartitionResult:
+            """Deterministic fake partitioner: everything but the last
+            entry in the window becomes one chapter, the last entry
+            becomes a second, single-entry chapter — the one that
+            carries forward to seed the next window."""
+            ids = [e.entry_id for e in entries]
+            if len(ids) == 1:
+                return PartitionResult(chapters=[PartitionChapter(ids, "Solo")])
+            return PartitionResult(
+                chapters=[
+                    PartitionChapter(ids[:-1], "Bulk"),
+                    PartitionChapter(ids[-1:], "Tail"),
+                ],
+            )
+
+        fake_judge.partition_result_fn = splitting_partition
+        fake_narrator.results["closure"] = NarrativeResult(
+            segments=[text_segment("Closed.")], model_used="fake", title="T",
+        )
+
+        engine.bootstrap(storyline.id)
+
+        # 120 entries / window 50 → 3 windows, so ≥3 partition calls.
+        assert len(fake_judge.partition_calls) >= 3
+
+        # Seeding: the carried (last) chapter of window N is exactly
+        # window N+1's leading entry.
+        for call_n, call_n1 in zip(
+            fake_judge.partition_calls, fake_judge.partition_calls[1:], strict=False,
+        ):
+            assert call_n1[0].entry_id == call_n[-1].entry_id
+
+        # Every entry id is covered exactly once across the final
+        # chapters actually written — nothing lost, nothing duplicated.
+        chapters = repo.list_chapters(storyline.id)
+        written_ids = [eid for c in chapters for eid in repo.chapter_entry_ids(c.id)]
+        assert sorted(written_ids) == sorted(seeded_ids)
+        assert len(written_ids) == len(set(written_ids))
+        assert chapters[-1].state == "draft"
+        assert all(c.state == "published" for c in chapters[:-1])
+
+    def test_small_corpus_uses_a_single_partition_call(
+        self,
+        engine: StorylineEngine,
+        repo: SQLiteStorylineRepository,
+        storyline: Storyline,
+        entry_ids: list[int],
+        fake_judge: FakeJudge,
+    ) -> None:
+        fake_judge.partition_result = PartitionResult(
+            chapters=[PartitionChapter(entry_ids, "One Chapter")],
+        )
+
+        engine.bootstrap(storyline.id)
+
+        assert len(fake_judge.partition_calls) == 1
+        chapters = repo.list_chapters(storyline.id)
+        assert [c.state for c in chapters] == ["draft"]
+        assert repo.chapter_entry_ids(chapters[0].id) == entry_ids
 
 
 # ── refresh_draft() ──────────────────────────────────────────────
