@@ -436,11 +436,12 @@ class ApiKeyInfo:
 
 # ── Storylines ──────────────────────────────────────────────────────
 #
-# Persistence dataclasses for the storylines feature. Schema lives in
-# migration 0027; design rationale in docs/storylines-plan.md.
+# Persistence dataclasses for the storylines redesign. Schema lives in
+# migrations 0027 and 0036; design rationale in docs/storylines-redesign.md
+# (2026-07-12 spec).
 
 StorylineStatus = Literal["active", "archived"]
-StorylinePanelKind = Literal["curation", "narrative"]
+StorylineChapterState = Literal["draft", "published"]
 
 
 @dataclass
@@ -458,12 +459,8 @@ class Storyline:
     user_id: int
     name: str
     description: str = ""
-    start_date: str | None = None
-    end_date: str | None = None
     status: str = "active"
-    last_generated_at: str | None = None
     last_extension_check_at: str | None = None
-    summary_embedding: list[float] | None = None
     created_at: str = ""
     updated_at: str = ""
 
@@ -472,46 +469,36 @@ class Storyline:
 class StorylineChapter:
     """One time-windowed chapter of a storyline.
 
-    Each chapter owns its two panels and is generated over its own date
-    window. Exactly one chapter per storyline is ``open`` (the live,
-    append-extended chapter); the rest are ``closed`` and stable.
+    Each chapter progresses through ``draft`` (being written) to
+    ``published`` (finalized). Draft chapters accumulate ``addenda``
+    (updates after publishing a non-leaf chapter) and include
+    ``draft_embedding`` for the current narrative. Published chapters
+    have ``published_at`` and read tracking via ``read_at``.
+
+    Addendum dict shape (stored in ``addenda_json``):
+    ``{"added_at": str, "segments": list[segment], "entry_ids": list[int]}``.
     """
 
     id: int
     storyline_id: int
     seq: int
     title: str = ""
-    start_date: str | None = None
-    end_date: str | None = None
-    state: str = "open"
-    last_generated_at: str | None = None
-    summary_embedding: list[float] | None = None
-    title_locked: bool = False
-    boundary_locked: bool = False
-    narrative_word_count: int = 0
-    created_at: str = ""
-    updated_at: str = ""
-
-
-@dataclass
-class StorylinePanel:
-    """One rendered panel of a storyline (curation or narrative).
-
-    `segments` follows the `Segment` shape in
-    `services/storylines/segments.py` — a JSON-serialisable list of
-    text-and-citation dicts. `source_entry_ids` is the deduplicated list
-    of entry IDs referenced by citations within this panel; useful for
-    UI badges ("3 entries cited") without scanning the segments list.
-    """
-
-    chapter_id: int
-    panel_kind: str
+    state: str = "draft"
     segments: list[dict[str, Any]] = field(default_factory=list)
     source_entry_ids: list[int] = field(default_factory=list)
     citation_count: int = 0
     model_used: str = ""
-    generated_at: str = ""
-    id: int | None = None
+    generated_at: str | None = None
+    published_at: str | None = None
+    read_at: str | None = None
+    addenda: list[dict[str, Any]] = field(default_factory=list)
+    draft_embedding: list[float] | None = None
+    # Derived from membership by the repository (not columns):
+    entry_count: int = 0
+    first_entry_date: str | None = None
+    last_entry_date: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
 
 
 @dataclass
