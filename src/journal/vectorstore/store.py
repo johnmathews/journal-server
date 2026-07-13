@@ -46,6 +46,10 @@ class VectorStore(Protocol):
 
     def delete_entry(self, entry_id: int) -> None: ...
 
+    def update_entry_metadata(
+        self, entry_id: int, metadata: dict[str, Any]
+    ) -> None: ...
+
     def count(self) -> int: ...
 
     def get_chunks_for_entry(self, entry_id: int) -> list[ChunkRecord]: ...
@@ -115,6 +119,27 @@ class ChromaVectorStore:
     def delete_entry(self, entry_id: int) -> None:
         self._collection.delete(where={"entry_id": entry_id})
         log.info("Deleted chunks for entry %d", entry_id)
+
+    def update_entry_metadata(
+        self, entry_id: int, metadata: dict[str, Any]
+    ) -> None:
+        """Merge ``metadata`` keys into every stored chunk of an entry.
+
+        Used by date edits to keep per-chunk ``entry_date`` consistent
+        without re-embedding. No-op when the entry has no chunks.
+        """
+        existing = self._collection.get(
+            where={"entry_id": entry_id}, include=["metadatas"],
+        )
+        ids = existing.get("ids") or []
+        if not ids:
+            return
+        merged = [{**m, **metadata} for m in existing["metadatas"]]
+        self._collection.update(ids=ids, metadatas=merged)
+        log.info(
+            "Updated metadata %s on %d chunks for entry %d",
+            sorted(metadata), len(ids), entry_id,
+        )
 
     def count(self) -> int:
         return self._collection.count()
@@ -204,6 +229,13 @@ class InMemoryVectorStore:
         to_delete = [k for k, v in self._entries.items() if v["entry_id"] == entry_id]
         for k in to_delete:
             del self._entries[k]
+
+    def update_entry_metadata(
+        self, entry_id: int, metadata: dict[str, Any]
+    ) -> None:
+        for doc in self._entries.values():
+            if doc["entry_id"] == entry_id:
+                doc["metadata"].update(metadata)
 
     def count(self) -> int:
         return len(self._entries)
