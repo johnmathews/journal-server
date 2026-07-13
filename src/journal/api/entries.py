@@ -178,6 +178,8 @@ def register_entries_routes(
             )
 
         updated = entry
+        date_released = False
+        storyline_bootstrap_job_ids: list[str] = []
 
         # Update date if provided
         if new_date is not None:
@@ -196,18 +198,48 @@ def register_entries_routes(
                     status_code=400,
                 )
             try:
-                updated, _released = ingestion_svc.update_entry_date(
+                updated, date_released = ingestion_svc.update_entry_date(
                     entry_id, new_date, user_id=user_id,
                 )
             except EntryDateError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=400)
+
+            # A date change invalidates the judge's chronology for any
+            # storyline whose chapters contain this entry — queue one
+            # re-bootstrap per affected storyline on Pool B. Duplicate
+            # suppression across requests is deliberately omitted: date
+            # edits are rare, Pool B is single-worker, and bootstrap is
+            # idempotent (replace_all_chapters).
+            date_job_runner: JobRunner | None = services.get("job_runner")
+            storyline_repo = services.get("storyline_repository")
+            if (
+                updated is not None
+                and date_job_runner is not None
+                and storyline_repo is not None
+            ):
+                for sid in storyline_repo.find_storyline_ids_for_entry(entry_id):
+                    try:
+                        job = date_job_runner.submit_storyline_update(
+                            sid, user_id=user_id, bootstrap=True,
+                        )
+                    except RuntimeError:
+                        # Storyline engine not configured — nothing to queue.
+                        break
+                    storyline_bootstrap_job_ids.append(job.id)
+                    log.info(
+                        "PATCH /api/entries/%d — queued storyline %d re-bootstrap %s"
+                        " after date change",
+                        entry_id, sid, job.id,
+                    )
 
         # Update text if provided
         entity_extraction_job_id: str | None = None
         reprocess_job_id: str | None = None
         mood_job_id: str | None = None
         pipeline_job_id: str | None = None
-        should_queue_pipeline = False
+        # A quarantine release runs the deferred save pipeline — the entry
+        # was held from chunking/embedding/extraction at ingest.
+        should_queue_pipeline = date_released
 
         if final_text is not None:
             if not isinstance(final_text, str):
@@ -340,6 +372,8 @@ def register_entries_routes(
             resp["mood_job_id"] = mood_job_id
         if pipeline_job_id is not None:
             resp["pipeline_job_id"] = pipeline_job_id
+        if storyline_bootstrap_job_ids:
+            resp["storyline_bootstrap_job_ids"] = storyline_bootstrap_job_ids
         return JSONResponse(resp)
 
     def _delete_entry(

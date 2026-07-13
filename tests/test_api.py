@@ -578,6 +578,87 @@ class TestUpdateEntry:
         assert "pipeline_job_id" not in body
         mock_runner.submit_save_entry_pipeline.assert_not_called()
 
+    def test_patch_date_queues_bootstrap_for_affected_storylines(
+        self,
+        client: TestClient,
+        repo: SQLiteEntryRepository,
+        services: dict,
+    ) -> None:
+        """A date edit auto-queues one re-bootstrap per storyline whose
+        chapters contain the entry (spec 2026-07-13, component 4)."""
+        job = MagicMock()
+        job.id = "sl-job-1"
+        mock_runner = MagicMock()
+        mock_runner.submit_storyline_update = MagicMock(return_value=job)
+        services["job_runner"] = mock_runner
+        mock_sl_repo = MagicMock()
+        mock_sl_repo.find_storyline_ids_for_entry.return_value = [4, 6]
+        services["storyline_repository"] = mock_sl_repo
+
+        entry = repo.create_entry("2026-03-22", "photo", "Hello world", 2)
+        response = client.patch(
+            f"/api/entries/{entry.id}", json={"entry_date": "2026-03-23"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["storyline_bootstrap_job_ids"] == [
+            "sl-job-1", "sl-job-1",
+        ]
+        mock_sl_repo.find_storyline_ids_for_entry.assert_called_once_with(entry.id)
+        calls = mock_runner.submit_storyline_update.call_args_list
+        assert [c.args[0] for c in calls] == [4, 6]
+        assert all(c.kwargs["bootstrap"] is True for c in calls)
+
+    def test_patch_date_no_memberships_no_bootstrap_key(
+        self,
+        client: TestClient,
+        repo: SQLiteEntryRepository,
+        services: dict,
+    ) -> None:
+        mock_runner = MagicMock()
+        services["job_runner"] = mock_runner
+        mock_sl_repo = MagicMock()
+        mock_sl_repo.find_storyline_ids_for_entry.return_value = []
+        services["storyline_repository"] = mock_sl_repo
+
+        entry = repo.create_entry("2026-03-22", "photo", "Hello world", 2)
+        response = client.patch(
+            f"/api/entries/{entry.id}", json={"entry_date": "2026-03-23"},
+        )
+
+        assert response.status_code == 200
+        assert "storyline_bootstrap_job_ids" not in response.json()
+        mock_runner.submit_storyline_update.assert_not_called()
+
+    def test_patch_date_release_queues_save_pipeline(
+        self,
+        client: TestClient,
+        repo: SQLiteEntryRepository,
+        services: dict,
+    ) -> None:
+        """Confirming a quarantined entry's date runs the deferred save
+        pipeline (chunk/embed → extraction → storyline checks)."""
+        mock_parent = MagicMock()
+        mock_parent.id = "pipe-1"
+        mock_runner = MagicMock()
+        mock_runner.submit_save_entry_pipeline = MagicMock(
+            return_value=(mock_parent, {}),
+        )
+        services["job_runner"] = mock_runner
+
+        entry = repo.create_entry(
+            "2019-07-09", "photo", "raw", 1, date_confirmed=False,
+        )
+        response = client.patch(
+            f"/api/entries/{entry.id}", json={"entry_date": "2026-07-09"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["date_confirmed"] is True
+        assert data["pipeline_job_id"] == "pipe-1"
+        mock_runner.submit_save_entry_pipeline.assert_called_once()
+
 
 class TestVerifyDoubts:
     def test_verify_doubts_clears_spans_in_response(
