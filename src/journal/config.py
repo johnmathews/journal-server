@@ -534,6 +534,14 @@ class Config:
         ).lower() in ("1", "true", "yes", "on")
     )
 
+    # Hard floor for entry dates (services/entry_dates.py). No entry may
+    # be created or re-dated before this ISO date; the ceiling is always
+    # today + 1 day. 2026-01-01 is the start of real journal data — any
+    # earlier detected date is a handwriting/OCR error.
+    min_entry_date: str = field(
+        default_factory=lambda: os.environ.get("MIN_ENTRY_DATE", "2026-01-01")
+    )
+
     # Background job runner worker pool (services/jobs/runner.py).
     # Sizes Pool A, which runs everything except storyline jobs in
     # parallel. The storyline pool is always single-worker (ingestion
@@ -544,6 +552,15 @@ class Config:
     )
 
     def __post_init__(self) -> None:
+        import datetime as _dt
+
+        try:
+            _dt.date.fromisoformat(self.min_entry_date)
+        except ValueError as exc:
+            raise ValueError(
+                "MIN_ENTRY_DATE must be an ISO date (YYYY-MM-DD),"
+                f" got {self.min_entry_date!r}"
+            ) from exc
         valid_providers = {"openai", "gemini"}
         if self.transcription_provider not in valid_providers:
             raise ValueError(

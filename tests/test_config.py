@@ -446,3 +446,16 @@ def test_removed_storyline_knobs_are_gone() -> None:
     assert not hasattr(cfg, "storyline_chapter_max_words")
     assert not hasattr(cfg, "storyline_fts_fallback_threshold")
     assert not hasattr(cfg, "storyline_default_window_days")
+
+
+def test_min_entry_date_default_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MIN_ENTRY_DATE", raising=False)
+    assert Config().min_entry_date == "2026-01-01"
+    monkeypatch.setenv("MIN_ENTRY_DATE", "2026-03-01")
+    assert Config().min_entry_date == "2026-03-01"
+
+
+def test_min_entry_date_invalid_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIN_ENTRY_DATE", "March 2026")
+    with pytest.raises(ValueError, match="MIN_ENTRY_DATE"):
+        Config()
