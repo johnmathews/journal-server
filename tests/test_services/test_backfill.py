@@ -356,6 +356,28 @@ class TestBackfillMoodScores:
         assert result2.scored == 1
         assert scorer2.score.call_count == 1
 
+    def test_quarantined_entries_skipped_in_both_modes(self, repo, dims):
+        """Final-review fix (2026-07-13): mood backfill must not score
+        quarantined entries — they carry provisional, possibly-wrong
+        dates and are excluded from every derived pipeline."""
+        from journal.services.backfill import backfill_mood_scores
+
+        confirmed = repo.create_entry("2026-04-01", "photo", "real entry", 2)
+        repo.create_entry(
+            "2019-04-01", "photo", "held entry", 2, date_confirmed=False,
+        )
+
+        assert repo.get_entries_missing_mood_scores(
+            ["joy_sadness", "agency"]
+        ) == [confirmed.id]
+
+        svc, scorer = self._make_service(repo, dims)
+        result = backfill_mood_scores(
+            repository=repo, mood_scoring=svc, mode="force"
+        )
+        assert result.scored == 1
+        assert scorer.score.call_count == 1
+
     def test_force_rescores_every_entry_even_if_complete(
         self, repo, dims
     ):

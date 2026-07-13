@@ -274,7 +274,9 @@ def backfill_mood_scores(
             limit=1_000_000,
             user_id=user_id,
         )
-        entry_ids = [e.id for e in entries]
+        # Quarantined entries (unconfirmed date) never get derived data,
+        # backfill included (spec 2026-07-13).
+        entry_ids = [e.id for e in entries if e.date_confirmed]
 
     # Apply date window to stale-only mode too — cheaper as a
     # post-filter than a second SQL query.

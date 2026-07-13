@@ -134,7 +134,8 @@ class _MoodMixin:
             f"""
             SELECT e.id AS id
             FROM entries e
-            WHERE (
+            WHERE e.date_confirmed = 1
+              AND (
                 (SELECT COUNT(DISTINCT m.dimension)
                  FROM mood_scores m
                  WHERE m.entry_id = e.id

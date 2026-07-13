@@ -992,7 +992,7 @@ class FakeIngestionService:
         self.ingest_image_calls: list[tuple[bytes, str, str]] = []
         self.multi_page_calls: list[int] = []
         self.multi_voice_calls: list[int] = []
-        self.reprocess_calls: list[int] = []
+        self.reprocess_calls: list[tuple[int, int]] = []
 
     def ingest_image(
         self, image_data: bytes, media_type: str, date: str,
@@ -1033,8 +1033,8 @@ class FakeIngestionService:
                 on_progress(i + 1, len(recordings))
         return self._entry
 
-    def reprocess_embeddings(self, entry_id: int) -> int:
-        self.reprocess_calls.append(entry_id)
+    def reprocess_embeddings(self, entry_id: int, *, user_id: int = 1) -> int:
+        self.reprocess_calls.append((entry_id, user_id))
         return 5  # fake chunk count
 
 
@@ -1451,7 +1451,29 @@ class TestReprocessEmbeddings:
         assert final.progress_current == 1
         assert final.progress_total == 1
         assert final.result == {"entry_id": 42, "chunk_count": 5}
-        assert ingestion.reprocess_calls == [42]
+        assert ingestion.reprocess_calls == [(42, 1)]
+
+    def test_reprocess_forwards_user_id(
+        self, runner_factory, jobs_repo, threadsafe_factory,
+    ):
+        """Final-review fix (2026-07-13): the worker must thread the job's
+        user_id into IngestionService.reprocess_embeddings, else a
+        quarantine release for user N tags fresh chunks user_id=1."""
+        conn = threadsafe_factory.get()
+        conn.execute(
+            "INSERT INTO users (id, email, password_hash, display_name)"
+            " VALUES (5, 'u5@x.dev', 'h', 'U5')"
+        )
+        conn.commit()
+        ingestion = FakeIngestionService()
+        runner = runner_factory(ingestion=ingestion)
+
+        job = runner.submit_reprocess_embeddings(42, user_id=5)
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None and final.status == "succeeded"
+        assert ingestion.reprocess_calls == [(42, 5)]
 
     def test_reprocess_without_ingestion_service_fails(
         self, runner_factory, jobs_repo
@@ -1915,7 +1937,7 @@ class TestSaveEntryPipeline:
                 # Replace reprocess_embeddings to raise. This monkey-patch
                 # is fine for a fake — we don't want to add a knob to the
                 # real fake just for one test path.
-                def boom(_entry_id: int) -> int:
+                def boom(_entry_id: int, *, user_id: int = 1) -> int:
                     raise ingestion_raises
                 ingestion_service.reprocess_embeddings = boom  # type: ignore[method-assign]
         runner = JobRunner(

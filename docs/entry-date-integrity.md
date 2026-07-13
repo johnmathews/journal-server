@@ -26,14 +26,17 @@ at the API and a typed `EntryDateError` in services.
 
 OCR/voice *detected* dates aren't hard-rejected — they go through
 `repair_entry_date`, which cross-checks the heading's weekday word
-against the written date:
+against the written date. The weekday token is only taken from the
+entry's **first line, and only when that line contains a digit** — a
+date heading always carries day/year digits, so body prose that merely
+mentions a weekday ("On Monday she flew…") can't hijack the check.
 
 - date in range, weekday consistent (or absent) → **ok**.
-- weekday contradicts the date and exactly one candidate year in the
-  window makes it consistent → **repaired** silently (logged, and the
-  heading region is recorded as a reviewable uncertain span so the UI
-  highlights it).
-- in-range date, contradicting weekday, no unique repair → **doubtful**:
+- **out-of-range** date whose weekday matches exactly one candidate year
+  in the window → **repaired** silently (logged, and the heading region
+  is recorded as a reviewable uncertain span so the UI highlights it).
+- in-range date with a contradicting weekday → **doubtful**: an in-range
+  date is *never rewritten* (the weekday word is as likely the mistake);
   date kept, span recorded.
 - out-of-range date, no unique repair → **unrepairable** → quarantine.
 
@@ -47,10 +50,15 @@ single/multi-recording).
 
 An unrepairable date still creates the entry (OCR text intact, the bad
 date stored verbatim as a provisional display value, `date_confirmed = 0`)
-but **nothing derived is produced**: no chunks, no embeddings, no FTS,
-no mood score, and the ingestion workers skip the post-ingestion
-follow-ups (entity extraction → storyline checks). Storyline candidate
-queries additionally filter `date_confirmed = 1` as defense in depth.
+but **nothing derived is produced**: no chunks, no embeddings, no mood
+score, and the ingestion workers skip the post-ingestion follow-ups
+(entity extraction → storyline checks). Because the `entries_ai` SQL
+trigger indexes `raw_text` into FTS unconditionally, the keyword-search
+queries (`search_text`, `search_text_with_snippets`,
+`count_text_matches`) filter `date_confirmed = 1` explicitly — as do
+the storyline candidate queries and the mood-backfill entry selection
+(defense in depth; a quarantined entry must be invisible to search,
+chat citations, storylines, and batch scoring alike).
 The system invariant: **no confirmed entry ever carries an out-of-range
 date, and only confirmed entries reach any pipeline.**
 

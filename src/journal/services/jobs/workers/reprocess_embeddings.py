@@ -36,7 +36,12 @@ def run_reprocess_embeddings(
                 )
             return
 
-        chunk_count = ctx.ingestion.reprocess_embeddings(entry_id)
+        # Thread the job's user through to the chunk/embed write so fresh
+        # vector metadata is attributed to the entry's owner, not user 1
+        # (final-review fix, 2026-07-13 — bit the quarantine-release path).
+        chunk_count = ctx.ingestion.reprocess_embeddings(
+            entry_id, user_id=params.get("user_id") or 1,
+        )
         ctx.jobs.update_progress(job_id, 1, 1)
         result = {"entry_id": entry_id, "chunk_count": chunk_count}
         ctx.jobs.mark_succeeded(job_id, result)

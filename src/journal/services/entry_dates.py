@@ -58,11 +58,23 @@ def validate_entry_date(
 
 
 def find_weekday_token(text: str) -> tuple[str, tuple[int, int]] | None:
-    """Return ``(weekday_lowercase, (start, end))`` for the first weekday
-    word in the head of ``text``, or ``None``. The span is in the original
+    """Return ``(weekday_lowercase, (start, end))`` for a weekday word in
+    the entry's *heading line*, or ``None``. The span is in the original
     text's coordinates, suitable for an uncertain-span audit marker.
+
+    Scoped to the first line (capped at ``_HEAD_WINDOW`` chars), and the
+    line must contain a digit — a date heading always carries day/year
+    digits, while body prose that merely mentions a weekday ("On Monday
+    she flew to Paris…") usually doesn't. Without this scoping an
+    incidental body weekday would contradict a perfectly good date and
+    spuriously flag it (final-review finding, 2026-07-13).
     """
-    match = _WEEKDAY_RE.search(text[:_HEAD_WINDOW])
+    newline = text.find("\n")
+    end = min(newline if newline != -1 else len(text), _HEAD_WINDOW)
+    heading_line = text[:end]
+    if not any(ch.isdigit() for ch in heading_line):
+        return None
+    match = _WEEKDAY_RE.search(heading_line)
     if match is None:
         return None
     return match.group(1).lower(), match.span()
@@ -73,9 +85,10 @@ class DateRepairResult:
     """Outcome of :func:`repair_entry_date`.
 
     ``ok``           — date in range, weekday (if any) consistent.
-    ``repaired``     — exactly one candidate year fixed a contradiction.
-    ``doubtful``     — in-range date contradicts the weekday but no unique
-                       repair exists; keep the date, flag for review.
+    ``repaired``     — out-of-range date; exactly one candidate year makes
+                       the weekday consistent and lands in range.
+    ``doubtful``     — in-range date contradicts the weekday; the date is
+                       kept (never rewritten) and flagged for review.
     ``unrepairable`` — out-of-range date with no unique repair; the entry
                        must be quarantined.
     """
@@ -113,6 +126,14 @@ def repair_entry_date(
     if in_range and candidate.weekday() == target:
         return DateRepairResult("ok", date_iso, date_iso)
 
+    if in_range:
+        # An in-range date is never rewritten: a weekday contradiction is
+        # as likely a wrong weekday word as a wrong year, so keep the
+        # plausible date and flag it for review (final-review finding —
+        # a multi-year candidate window could otherwise silently re-year
+        # a correct date off an incidental weekday match).
+        return DateRepairResult("doubtful", date_iso, date_iso)
+
     matches: list[dt.date] = []
     for year in range(lower.year, upper.year + 1):
         try:
@@ -130,6 +151,4 @@ def repair_entry_date(
             date_iso,
             note=f"date auto-corrected from {date_iso}",
         )
-    if in_range:
-        return DateRepairResult("doubtful", date_iso, date_iso)
     return DateRepairResult("unrepairable", date_iso, date_iso)

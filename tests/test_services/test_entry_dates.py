@@ -103,3 +103,30 @@ class TestRepairEntryDate:
     def test_feb_29_candidate_years_skipped_safely(self) -> None:
         r = repair_entry_date("2025-02-29", "saturday", min_date=MIN, today=TODAY)
         assert r.status == "unrepairable"  # invalid original date, no crash
+
+
+class TestFindWeekdayTokenScoping:
+    """Final-review fixes: token must come from a digit-bearing heading
+    line, not incidental body prose."""
+
+    def test_ignores_weekday_in_body_lines(self) -> None:
+        assert find_weekday_token("9 July 2026\nOn Monday she flew out.") is None
+
+    def test_ignores_digitless_first_line(self) -> None:
+        assert find_weekday_token("On Monday I went out\n9 July 2026") is None
+
+    def test_accepts_digit_bearing_heading(self) -> None:
+        token = find_weekday_token("Monday 29 June 2025 11:40 pm\nBody text.")
+        assert token is not None and token[0] == "monday"
+
+
+class TestInRangeDatesNeverRewritten:
+    def test_unique_other_year_candidate_stays_doubtful(self) -> None:
+        # 2026-07-09 is a Thursday; "friday" matches 2027-07-09 uniquely
+        # in a [2026..2028] window — but the date is in range, so it is
+        # flagged, never re-yeared.
+        r = repair_entry_date(
+            "2026-07-09", "friday", min_date=MIN, today=dt.date(2027, 7, 13)
+        )
+        assert r.status == "doubtful"
+        assert r.date_iso == "2026-07-09"
