@@ -111,6 +111,9 @@ class _MentionsMixin:
             " FROM entity_mentions m"
             " JOIN entries e ON e.id = m.entry_id"
             " WHERE m.entity_id = ? AND e.user_id = ?"
+            # Quarantined entries (unconfirmed date) never reach the
+            # storyline corpus (spec 2026-07-13).
+            " AND e.date_confirmed = 1"
         )
         params: list[object] = [entity_id, user_id]
         if start_date is not None:

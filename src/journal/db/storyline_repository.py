@@ -633,6 +633,7 @@ class SQLiteStorylineRepository:
             "  COALESCE(NULLIF(final_text, ''), raw_text) AS body_text"
             " FROM entries"
             " WHERE user_id = ?"
+            "   AND date_confirmed = 1"
             "   AND (final_text LIKE ? ESCAPE '\\' OR raw_text LIKE ? ESCAPE '\\')"
             " ORDER BY entry_date ASC, id ASC",
             (user_id, pattern, pattern),

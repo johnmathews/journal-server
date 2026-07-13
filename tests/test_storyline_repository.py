@@ -1052,3 +1052,80 @@ class TestFindStorylineIdsForEntry:
         )
         assert repo.find_storyline_ids_for_entry(entry_ids[1]) == [s1.id]
         assert repo.find_storyline_ids_for_entry(entry_ids[2]) == []
+
+
+class TestUnconfirmedEntriesExcludedFromCandidacy:
+    """Quarantined entries never reach the storyline corpus
+    (spec 2026-07-13, component 3 defense-in-depth)."""
+
+    def _seed_entry(
+        self,
+        factory: ConnectionFactory,
+        user_id: int,
+        *,
+        entry_date: str,
+        text: str,
+        date_confirmed: int,
+    ) -> int:
+        conn = factory.get()
+        cur = conn.execute(
+            "INSERT INTO entries"
+            " (entry_date, source_type, raw_text, final_text,"
+            "  word_count, user_id, date_confirmed)"
+            " VALUES (?, 'text', ?, ?, ?, ?, ?)",
+            (entry_date, text, text, len(text.split()), user_id, date_confirmed),
+        )
+        conn.commit()
+        assert cur.lastrowid is not None
+        return cur.lastrowid
+
+    def test_find_entries_mentioning_excludes_unconfirmed(
+        self,
+        factory: ConnectionFactory,
+        repo: SQLiteStorylineRepository,
+        seed_user: int,
+    ) -> None:
+        confirmed_id = self._seed_entry(
+            factory, seed_user,
+            entry_date="2026-07-01", text="Atlas played football",
+            date_confirmed=1,
+        )
+        self._seed_entry(
+            factory, seed_user,
+            entry_date="2019-07-01", text="Atlas at the beach",
+            date_confirmed=0,
+        )
+        hits = repo.find_entries_mentioning(seed_user, "Atlas")
+        assert [h.entry_id for h in hits] == [confirmed_id]
+
+    def test_dated_entity_excerpts_exclude_unconfirmed(
+        self,
+        factory: ConnectionFactory,
+        seed_user: int,
+        seed_entity: int,
+    ) -> None:
+        confirmed_id = self._seed_entry(
+            factory, seed_user,
+            entry_date="2026-07-01", text="I ran 5km today",
+            date_confirmed=1,
+        )
+        held_id = self._seed_entry(
+            factory, seed_user,
+            entry_date="2019-07-01", text="I ran 8km once",
+            date_confirmed=0,
+        )
+        conn = factory.get()
+        for eid, quote in ((confirmed_id, "ran 5km"), (held_id, "ran 8km")):
+            conn.execute(
+                "INSERT INTO entity_mentions"
+                " (entity_id, entry_id, quote, confidence, extraction_run_id)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (seed_entity, eid, quote, 0.95, "run-1"),
+            )
+        conn.commit()
+
+        store = SQLiteEntityStore(factory)
+        excerpts = store.get_dated_entity_excerpts(
+            entity_id=seed_entity, user_id=seed_user,
+        )
+        assert [e.entry_id for e in excerpts] == [confirmed_id]
