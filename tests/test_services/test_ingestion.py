@@ -1731,14 +1731,46 @@ class TestIngestionPublicAPI:
         entry = ingestion_service.ingest_text(
             text="some text", date="2026-03-22", source_type="text_entry",
         )
-        updated = ingestion_service.update_entry_date(entry.id, "2026-04-15")
+        updated, released = ingestion_service.update_entry_date(entry.id, "2026-04-15")
         assert updated is not None
         assert updated.entry_date == "2026-04-15"
+        assert released is False
 
     def test_update_entry_date_returns_none_for_missing_entry(
         self, ingestion_service,
     ):
-        assert ingestion_service.update_entry_date(999_999, "2026-04-15") is None
+        updated, released = ingestion_service.update_entry_date(999_999, "2026-04-15")
+        assert updated is None
+        assert released is False
+
+    def test_update_entry_date_refreshes_chunk_metadata(self, ingestion_service):
+        """Motivating bug (2026-07-13): a date edit left per-chunk
+        ``entry_date`` metadata stale in the vector store."""
+        entry = ingestion_service.ingest_text(
+            text="hello world body", date="2026-07-01", source_type="text_entry",
+        )
+        updated, released = ingestion_service.update_entry_date(entry.id, "2026-07-02")
+        assert updated is not None and released is False
+        results = [
+            r
+            for r in ingestion_service.vector_store.search([0.1, 0.2, 0.3], limit=50)
+            if r.entry_id == entry.id
+        ]
+        assert results
+        assert all(r.metadata["entry_date"] == "2026-07-02" for r in results)
+
+    def test_update_entry_date_releases_quarantined_entry(
+        self, ingestion_service, repo,
+    ):
+        held = repo.create_entry(
+            "2019-07-09", "photo", "raw", 1, user_id=1, date_confirmed=False,
+        )
+        updated, released = ingestion_service.update_entry_date(
+            held.id, "2026-07-09", user_id=1,
+        )
+        assert updated is not None
+        assert released is True
+        assert repo.get_entry(held.id, 1).date_confirmed is True
 
     def test_verify_doubts_marks_entry_verified(self, ingestion_service):
         entry = ingestion_service.ingest_text(

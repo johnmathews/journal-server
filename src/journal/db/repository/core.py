@@ -155,6 +155,24 @@ class _CoreMixin:
         log.info("Updated entry_date for entry %d to %s", entry_id, entry_date)
         return self.get_entry(entry_id, user_id)
 
+    def set_date_confirmed(
+        self, entry_id: int, user_id: int | None = None,
+    ) -> None:
+        conn = self._conn()
+        with conn:
+            if user_id is not None:
+                conn.execute(
+                    "UPDATE entries SET date_confirmed = 1"
+                    " WHERE id = ? AND user_id = ?",
+                    (entry_id, user_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE entries SET date_confirmed = 1 WHERE id = ?",
+                    (entry_id,),
+                )
+        log.info("Marked entry %d date_confirmed", entry_id)
+
     def delete_entry(self, entry_id: int, user_id: int | None = None) -> bool:
         """Delete an entry and all cascading rows. Returns True if a row was deleted."""
         conn = self._conn()

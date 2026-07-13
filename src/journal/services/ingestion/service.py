@@ -439,16 +439,32 @@ class IngestionService(
 
     def update_entry_date(
         self, entry_id: int, entry_date: str, *, user_id: int | None = None,
-    ) -> Entry | None:
-        """Update an entry's date. Write — lives on IngestionService rather
-        than QueryService so api/ routes use the service that owns mutating
-        operations (Unit 1b carryover from refactor-follow-ups item 5).
+    ) -> "tuple[Entry | None, bool]":
+        """Update an entry's date and propagate it (spec 2026-07-13).
+
+        Returns ``(entry, released)``: ``released`` is True when the entry
+        was quarantined (``date_confirmed`` false) and this edit confirmed
+        it — the API layer queues the deferred save pipeline in that case.
+        A confirmed entry with existing chunks gets its per-chunk
+        ``entry_date`` metadata refreshed in the vector store so date
+        filters stay correct without re-embedding.
 
         Raises :class:`journal.services.entry_dates.EntryDateError` when
         the date is outside ``[MIN_ENTRY_DATE, today + 1 day]``.
         """
         validate_entry_date(entry_date, min_date=self._min_entry_date)
-        return self._repo.update_entry_date(entry_id, entry_date, user_id=user_id)
+        prior = self._repo.get_entry(entry_id, user_id)
+        if prior is None:
+            return None, False
+        self._repo.update_entry_date(entry_id, entry_date, user_id=user_id)
+        released = not prior.date_confirmed
+        if released:
+            self._repo.set_date_confirmed(entry_id, user_id=user_id)
+        if prior.chunk_count > 0:
+            self._vector_store.update_entry_metadata(
+                entry_id, {"entry_date": entry_date},
+            )
+        return self._repo.get_entry(entry_id, user_id), released
 
     def verify_doubts(
         self, entry_id: int, *, user_id: int | None = None,

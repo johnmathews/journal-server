@@ -116,6 +116,10 @@ class EntryRepository(Protocol):
         self, entry_id: int, entry_date: str, user_id: int | None = None,
     ) -> Entry | None: ...
 
+    def set_date_confirmed(
+        self, entry_id: int, user_id: int | None = None,
+    ) -> None: ...
+
     def delete_entry(self, entry_id: int, user_id: int | None = None) -> bool: ...
 
     def add_entry_page(

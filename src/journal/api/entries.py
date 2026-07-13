@@ -196,7 +196,7 @@ def register_entries_routes(
                     status_code=400,
                 )
             try:
-                updated = ingestion_svc.update_entry_date(
+                updated, _released = ingestion_svc.update_entry_date(
                     entry_id, new_date, user_id=user_id,
                 )
             except EntryDateError as exc:
