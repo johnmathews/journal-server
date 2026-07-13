@@ -26,17 +26,18 @@ class _CoreMixin:
         user_id: int = 1,
         content_start_char: int | None = None,
         content_end_char: int | None = None,
+        date_confirmed: bool = True,
     ) -> Entry:
         actual_final = final_text if final_text is not None else raw_text
         sql = (
             "INSERT INTO entries"
             " (user_id, entry_date, source_type, raw_text, final_text, word_count,"
-            "  content_start_char, content_end_char)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            "  content_start_char, content_end_char, date_confirmed)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         params = (
             user_id, entry_date, source_type, raw_text, actual_final, word_count,
-            content_start_char, content_end_char,
+            content_start_char, content_end_char, int(date_confirmed),
         )
         conn = self._conn()
         with conn:

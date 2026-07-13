@@ -1229,3 +1229,12 @@ class TestFactoryPathSemantics:
         written.wait(timeout=5.0)
         t.join()
         assert repo_via_factory.count_entries() == 2
+
+
+def test_create_entry_date_confirmed_flag(repo) -> None:
+    confirmed = repo.create_entry("2026-07-01", "photo", "raw", 1, user_id=1)
+    held = repo.create_entry(
+        "2025-07-09", "photo", "raw", 1, user_id=1, date_confirmed=False
+    )
+    assert repo.get_entry(confirmed.id).date_confirmed is True
+    assert repo.get_entry(held.id).date_confirmed is False
