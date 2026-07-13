@@ -1027,3 +1027,28 @@ class TestSegments:
     )
     def test_is_valid_segment(self, value: object, expected: bool) -> None:  # noqa: ANN401
         assert is_valid_segment(value) is expected
+
+
+class TestFindStorylineIdsForEntry:
+    """Reverse entry → storyline lookup (spec 2026-07-13, component 4)."""
+
+    def test_returns_distinct_storylines_ascending(
+        self,
+        repo: SQLiteStorylineRepository,
+        seed_user: int,
+        seed_entity: int,
+        entry_ids: list[int],
+    ) -> None:
+        s1 = repo.create_storyline(seed_user, [seed_entity], "Running")
+        s2 = repo.create_storyline(seed_user, [seed_entity], "Body")
+        d1 = repo.get_draft(s1.id)
+        d2 = repo.get_draft(s2.id)
+        assert d1 is not None and d2 is not None
+        repo.add_entries_to_draft(d1.id, [entry_ids[0], entry_ids[1]])
+        repo.add_entries_to_draft(d2.id, [entry_ids[0]])
+
+        assert repo.find_storyline_ids_for_entry(entry_ids[0]) == sorted(
+            [s1.id, s2.id]
+        )
+        assert repo.find_storyline_ids_for_entry(entry_ids[1]) == [s1.id]
+        assert repo.find_storyline_ids_for_entry(entry_ids[2]) == []
