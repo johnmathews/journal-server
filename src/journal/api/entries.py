@@ -37,6 +37,7 @@ from journal.api._shared import (
     _token_encoder,
 )
 from journal.auth import get_authenticated_user
+from journal.services.entry_dates import EntryDateError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -194,7 +195,12 @@ def register_entries_routes(
                     {"error": "'entry_date' must be a valid ISO 8601 date (YYYY-MM-DD)"},
                     status_code=400,
                 )
-            updated = ingestion_svc.update_entry_date(entry_id, new_date, user_id=user_id)
+            try:
+                updated = ingestion_svc.update_entry_date(
+                    entry_id, new_date, user_id=user_id,
+                )
+            except EntryDateError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
 
         # Update text if provided
         entity_extraction_job_id: str | None = None

@@ -91,3 +91,10 @@ class TestIngestText:
     def test_skip_mood_false(self, ingestion_with_mood, mock_mood_scoring):
         ingestion_with_mood.ingest_text("Hello world", "2026-04-12", skip_mood=False)
         mock_mood_scoring.score_entry.assert_called_once()
+
+
+def test_ingest_text_rejects_out_of_range_date(ingestion_service) -> None:
+    from journal.services.entry_dates import EntryDateError
+
+    with pytest.raises(EntryDateError):
+        ingestion_service.ingest_text("some body text", date="2025-07-09")

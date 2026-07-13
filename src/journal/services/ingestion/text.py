@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from journal.services.entry_dates import validate_entry_date
+
 if TYPE_CHECKING:
     from journal.models import Entry
 
@@ -46,6 +48,9 @@ class _TextIngestMixin:
         text = text.strip()
         if not text:
             raise ValueError("Text must not be empty")
+        # Caller-supplied dates are hard-bounded (spec 2026-07-13); only
+        # OCR/voice *detected* dates go through repair/quarantine instead.
+        validate_entry_date(date, min_date=self._min_entry_date)  # type: ignore[attr-defined]
 
         log.info(
             "Ingesting text entry for date %s (source=%s, %d chars)",

@@ -554,6 +554,7 @@ def _init_services() -> dict:
         mood_scoring=mood_scoring_service,
         formatter=_build_formatter(config, runtime_settings),
         heading_detector=_build_heading_detector(config, runtime_settings),
+        min_entry_date=config.min_entry_date,
     )
 
     # Pushover notification service — optional, only when credentials

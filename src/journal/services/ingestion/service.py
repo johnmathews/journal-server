@@ -10,6 +10,7 @@ from journal.providers.embeddings import EmbeddingsProvider
 from journal.providers.ocr import OCRProvider
 from journal.providers.transcription import TranscriptionProvider
 from journal.services.chunking import ChunkingStrategy
+from journal.services.entry_dates import validate_entry_date
 from journal.services.ingestion.image import _ImageIngestMixin
 from journal.services.ingestion.text import _TextIngestMixin
 from journal.services.ingestion.url_sources import _UrlIngestMixin
@@ -59,6 +60,7 @@ class IngestionService(
         mood_scoring: "MoodScoringService | None" = None,
         formatter: "FormatterProtocol | None" = None,
         heading_detector: "HeadingDetector | None" = None,
+        min_entry_date: str = "2026-01-01",
     ) -> None:
         self._repo = repository
         self._vector_store = vector_store
@@ -67,6 +69,10 @@ class IngestionService(
         self._embeddings = embeddings_provider
         self._chunker = chunker
         self._slack_bot_token = slack_bot_token
+        # Hard floor for entry dates (spec 2026-07-13). Explicit dates
+        # below it are rejected; detected dates go through repair /
+        # quarantine in the per-media mixins.
+        self._min_entry_date = min_entry_date
         self._embed_metadata_prefix = embed_metadata_prefix
         self._preprocess_images = preprocess_images
         # Optional mood scoring. When `None`, ingestion and update
@@ -437,7 +443,11 @@ class IngestionService(
         """Update an entry's date. Write — lives on IngestionService rather
         than QueryService so api/ routes use the service that owns mutating
         operations (Unit 1b carryover from refactor-follow-ups item 5).
+
+        Raises :class:`journal.services.entry_dates.EntryDateError` when
+        the date is outside ``[MIN_ENTRY_DATE, today + 1 day]``.
         """
+        validate_entry_date(entry_date, min_date=self._min_entry_date)
         return self._repo.update_entry_date(entry_id, entry_date, user_id=user_id)
 
     def verify_doubts(
