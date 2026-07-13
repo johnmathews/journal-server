@@ -75,9 +75,20 @@ def run_audio_ingestion(
         # Queue follow-up jobs: mood scoring + entity extraction (the
         # latter fires the storyline check). Attributed to the resolved
         # user so the storyline trigger is scoped, not skipped.
-        follow_up_ids = ctx.queue_post_ingestion_jobs(
-            job_id, "Audio", entry.id, resolved_user_id,
-        )
+        # Quarantined entries (unconfirmable date, spec 2026-07-13) get NO
+        # follow-ups — they run when the date is confirmed and the
+        # deferred save pipeline fires.
+        if entry.date_confirmed:
+            follow_up_ids = ctx.queue_post_ingestion_jobs(
+                job_id, "Audio", entry.id, resolved_user_id,
+            )
+        else:
+            follow_up_ids = {}
+            log.warning(
+                "Audio ingestion %s: entry %d quarantined (date %s unconfirmed);"
+                " skipping post-ingestion follow-ups",
+                job_id, entry.id, entry.entry_date,
+            )
 
         result: dict[str, Any] = {
             "entry_id": entry.id,
@@ -88,6 +99,8 @@ def run_audio_ingestion(
             "recording_count": total,
             "follow_up_jobs": follow_up_ids,
         }
+        if not entry.date_confirmed:
+            result["quarantined"] = True
         ctx.jobs.mark_succeeded(job_id, result)
         if not follow_up_ids:
             # No follow-ups were queued (e.g. executor shutting down) —

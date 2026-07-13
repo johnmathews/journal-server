@@ -145,3 +145,26 @@ class TestGetChunksForEntry:
         assert len(rec2) == 1
         assert all(r.entry_id == 1 for r in rec1)
         assert all(r.entry_id == 2 for r in rec2)
+
+
+class TestUpdateEntryMetadata:
+    """In-place chunk-metadata refresh (spec 2026-07-13, component 4)."""
+
+    def test_merges_into_all_chunks(self) -> None:
+        store = InMemoryVectorStore()
+        store.add_entry(
+            1,
+            ["a", "b"],
+            [[0.1, 0.2, 0.3], [0.2, 0.3, 0.4]],
+            {"entry_date": "2025-07-09", "user_id": 1},
+        )
+        store.update_entry_metadata(1, {"entry_date": "2026-07-09"})
+        results = store.search([0.1, 0.2, 0.3], limit=10)
+        assert len(results) == 2
+        assert all(r.metadata["entry_date"] == "2026-07-09" for r in results)
+        # Untouched keys survive the merge.
+        assert all(r.metadata["user_id"] == 1 for r in results)
+
+    def test_missing_entry_is_noop(self) -> None:
+        store = InMemoryVectorStore()
+        store.update_entry_metadata(999, {"entry_date": "2026-01-01"})  # no raise

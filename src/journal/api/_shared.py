@@ -115,6 +115,7 @@ def _entry_to_dict(
         "created_at": entry.created_at,
         "updated_at": entry.updated_at,
         "doubts_verified": verified,
+        "date_confirmed": getattr(entry, "date_confirmed", True),
         "uncertain_spans": []
         if verified
         else [{"char_start": start, "char_end": end} for start, end in (uncertain_spans or [])],
@@ -240,6 +241,7 @@ def _entry_summary(
         "page_count": page_count,
         "uncertain_span_count": uncertain_span_count,
         "doubts_verified": getattr(entry, "doubts_verified", False),
+        "date_confirmed": getattr(entry, "date_confirmed", True),
         "created_at": entry.created_at,
         "language": getattr(entry, "language", "en"),
         "updated_at": getattr(entry, "updated_at", ""),

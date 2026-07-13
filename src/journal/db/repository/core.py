@@ -26,17 +26,18 @@ class _CoreMixin:
         user_id: int = 1,
         content_start_char: int | None = None,
         content_end_char: int | None = None,
+        date_confirmed: bool = True,
     ) -> Entry:
         actual_final = final_text if final_text is not None else raw_text
         sql = (
             "INSERT INTO entries"
             " (user_id, entry_date, source_type, raw_text, final_text, word_count,"
-            "  content_start_char, content_end_char)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            "  content_start_char, content_end_char, date_confirmed)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         params = (
             user_id, entry_date, source_type, raw_text, actual_final, word_count,
-            content_start_char, content_end_char,
+            content_start_char, content_end_char, int(date_confirmed),
         )
         conn = self._conn()
         with conn:
@@ -153,6 +154,24 @@ class _CoreMixin:
                 )
         log.info("Updated entry_date for entry %d to %s", entry_id, entry_date)
         return self.get_entry(entry_id, user_id)
+
+    def set_date_confirmed(
+        self, entry_id: int, user_id: int | None = None,
+    ) -> None:
+        conn = self._conn()
+        with conn:
+            if user_id is not None:
+                conn.execute(
+                    "UPDATE entries SET date_confirmed = 1"
+                    " WHERE id = ? AND user_id = ?",
+                    (entry_id, user_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE entries SET date_confirmed = 1 WHERE id = ?",
+                    (entry_id,),
+                )
+        log.info("Marked entry %d date_confirmed", entry_id)
 
     def delete_entry(self, entry_id: int, user_id: int | None = None) -> bool:
         """Delete an entry and all cascading rows. Returns True if a row was deleted."""

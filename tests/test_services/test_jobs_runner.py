@@ -976,7 +976,7 @@ class FakeIngestionService:
     on_progress callback for multi-page ingestion.
     """
 
-    def __init__(self, *, entry_id: int = 1) -> None:
+    def __init__(self, *, entry_id: int = 1, date_confirmed: bool = True) -> None:
         from journal.models import Entry
 
         self._entry = Entry(
@@ -987,11 +987,12 @@ class FakeIngestionService:
             final_text="fake text",
             word_count=2,
             chunk_count=1,
+            date_confirmed=date_confirmed,
         )
         self.ingest_image_calls: list[tuple[bytes, str, str]] = []
         self.multi_page_calls: list[int] = []
         self.multi_voice_calls: list[int] = []
-        self.reprocess_calls: list[int] = []
+        self.reprocess_calls: list[tuple[int, int]] = []
 
     def ingest_image(
         self, image_data: bytes, media_type: str, date: str,
@@ -1032,8 +1033,8 @@ class FakeIngestionService:
                 on_progress(i + 1, len(recordings))
         return self._entry
 
-    def reprocess_embeddings(self, entry_id: int) -> int:
-        self.reprocess_calls.append(entry_id)
+    def reprocess_embeddings(self, entry_id: int, *, user_id: int = 1) -> int:
+        self.reprocess_calls.append((entry_id, user_id))
         return 5  # fake chunk count
 
 
@@ -1450,7 +1451,29 @@ class TestReprocessEmbeddings:
         assert final.progress_current == 1
         assert final.progress_total == 1
         assert final.result == {"entry_id": 42, "chunk_count": 5}
-        assert ingestion.reprocess_calls == [42]
+        assert ingestion.reprocess_calls == [(42, 1)]
+
+    def test_reprocess_forwards_user_id(
+        self, runner_factory, jobs_repo, threadsafe_factory,
+    ):
+        """Final-review fix (2026-07-13): the worker must thread the job's
+        user_id into IngestionService.reprocess_embeddings, else a
+        quarantine release for user N tags fresh chunks user_id=1."""
+        conn = threadsafe_factory.get()
+        conn.execute(
+            "INSERT INTO users (id, email, password_hash, display_name)"
+            " VALUES (5, 'u5@x.dev', 'h', 'U5')"
+        )
+        conn.commit()
+        ingestion = FakeIngestionService()
+        runner = runner_factory(ingestion=ingestion)
+
+        job = runner.submit_reprocess_embeddings(42, user_id=5)
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        final = jobs_repo.get(job.id)
+        assert final is not None and final.status == "succeeded"
+        assert ingestion.reprocess_calls == [(42, 5)]
 
     def test_reprocess_without_ingestion_service_fails(
         self, runner_factory, jobs_repo
@@ -1914,7 +1937,7 @@ class TestSaveEntryPipeline:
                 # Replace reprocess_embeddings to raise. This monkey-patch
                 # is fine for a fake — we don't want to add a knob to the
                 # real fake just for one test path.
-                def boom(_entry_id: int) -> int:
+                def boom(_entry_id: int, *, user_id: int = 1) -> int:
                     raise ingestion_raises
                 ingestion_service.reprocess_embeddings = boom  # type: ignore[method-assign]
         runner = JobRunner(
@@ -2514,3 +2537,71 @@ class TestFitnessBackfill:
             runner.submit_fitness_backfill_strava(
                 user_id=1, start=123,  # type: ignore[arg-type]
             )
+
+
+class TestQuarantinedIngestSkipsFollowUps:
+    """A quarantined entry (date_confirmed=False) must not get
+    post-ingestion follow-up jobs — no extraction, no storyline checks
+    (spec 2026-07-13, component 3)."""
+
+    def _make_runner(
+        self, jobs_repo: SQLiteJobRepository, *, date_confirmed: bool,
+    ) -> tuple[JobRunner, FakeNotificationService]:
+        notif = FakeNotificationService()
+        extraction = FakeEntityExtractionService(
+            single_result=_make_extraction_result(
+                1, entities_created=1, mentions_created=1,
+            ),
+        )
+        runner = JobRunner(
+            job_repository=jobs_repo,
+            entity_extraction_service=extraction,
+            mood_backfill_callable=FakeMoodBackfill(),
+            mood_scoring_service=FakeMoodScoringService(scores=7),
+            entry_repository=FakeEntryRepository(),
+            ingestion_service=FakeIngestionService(date_confirmed=date_confirmed),
+            notification_service=notif,  # type: ignore[arg-type]
+        )
+        return runner, notif
+
+    def test_image_worker_skips_follow_ups_for_quarantined_entry(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        runner, _notif = self._make_runner(jobs_repo, date_confirmed=False)
+        images = [(b"img1", "image/jpeg", "page1.jpg")]
+        job = runner.submit_image_ingestion(images, "2026-04-25", user_id=1)
+        _wait_terminal(jobs_repo, job.id)
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        parent = jobs_repo.get(job.id)
+        assert parent is not None and parent.result is not None
+        assert parent.result["follow_up_jobs"] == {}
+        assert parent.result.get("quarantined") is True
+
+    def test_image_worker_queues_follow_ups_for_confirmed_entry(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        runner, _notif = self._make_runner(jobs_repo, date_confirmed=True)
+        images = [(b"img1", "image/jpeg", "page1.jpg")]
+        job = runner.submit_image_ingestion(images, "2026-04-25", user_id=1)
+        _wait_terminal(jobs_repo, job.id)
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        parent = jobs_repo.get(job.id)
+        assert parent is not None and parent.result is not None
+        assert parent.result["follow_up_jobs"] != {}
+        assert "quarantined" not in parent.result
+
+    def test_audio_worker_skips_follow_ups_for_quarantined_entry(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        runner, _notif = self._make_runner(jobs_repo, date_confirmed=False)
+        recordings = [(b"audio1", "audio/webm", "rec.webm")]
+        job = runner.submit_audio_ingestion(recordings, "2026-04-25", user_id=1)
+        _wait_terminal(jobs_repo, job.id)
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        parent = jobs_repo.get(job.id)
+        assert parent is not None and parent.result is not None
+        assert parent.result["follow_up_jobs"] == {}
+        assert parent.result.get("quarantined") is True

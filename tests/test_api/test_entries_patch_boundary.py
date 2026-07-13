@@ -250,3 +250,33 @@ class TestPatchBoundary:
         )
         # Pipeline should have been queued exactly once despite two triggers.
         assert mock_runner.submit_save_entry_pipeline.call_count == 1
+
+
+class TestPatchDateBounds:
+    """MIN_ENTRY_DATE enforcement on PATCH date edits (spec 2026-07-13)."""
+
+    def test_patch_rejects_date_below_floor(
+        self, client: TestClient, seeded_entry: object
+    ) -> None:
+        resp = client.patch(
+            f"/api/entries/{seeded_entry.id}", json={"entry_date": "2025-07-09"}
+        )
+        assert resp.status_code == 400
+        assert "allowed range" in resp.json()["error"]
+
+    def test_patch_rejects_far_future_date(
+        self, client: TestClient, seeded_entry: object
+    ) -> None:
+        resp = client.patch(
+            f"/api/entries/{seeded_entry.id}", json={"entry_date": "2031-01-01"}
+        )
+        assert resp.status_code == 400
+
+    def test_patch_accepts_in_range_date(
+        self, client: TestClient, seeded_entry: object
+    ) -> None:
+        resp = client.patch(
+            f"/api/entries/{seeded_entry.id}", json={"entry_date": "2026-03-23"}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["entry_date"] == "2026-03-23"

@@ -97,6 +97,7 @@ class EntryRepository(Protocol):
         user_id: int = 1,
         content_start_char: int | None = None,
         content_end_char: int | None = None,
+        date_confirmed: bool = True,
     ) -> Entry: ...
 
     def get_entry(self, entry_id: int, user_id: int | None = None) -> Entry | None: ...
@@ -114,6 +115,10 @@ class EntryRepository(Protocol):
     def update_entry_date(
         self, entry_id: int, entry_date: str, user_id: int | None = None,
     ) -> Entry | None: ...
+
+    def set_date_confirmed(
+        self, entry_id: int, user_id: int | None = None,
+    ) -> None: ...
 
     def delete_entry(self, entry_id: int, user_id: int | None = None) -> bool: ...
 
@@ -298,6 +303,7 @@ def _row_to_entry(row: sqlite3.Row) -> Entry:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         doubts_verified=bool(row["doubts_verified"]),
+        date_confirmed=bool(row["date_confirmed"]),
         content_start_char=row["content_start_char"],
         content_end_char=row["content_end_char"],
     )

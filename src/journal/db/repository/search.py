@@ -68,6 +68,7 @@ class _SearchMixin:
             SELECT e.* FROM entries_fts
             JOIN entries e ON e.id = entries_fts.rowid
             WHERE entries_fts MATCH ?
+              AND e.date_confirmed = 1
         """
         params: list[str | int] = [match]
         if user_id is not None:
@@ -116,6 +117,7 @@ class _SearchMixin:
             FROM entries_fts
             JOIN entries e ON e.id = entries_fts.rowid
             WHERE entries_fts MATCH ?
+              AND e.date_confirmed = 1
         """
         params: list[str | int] = [match]
         if user_id is not None:
@@ -147,6 +149,7 @@ class _SearchMixin:
             SELECT COUNT(*) AS cnt FROM entries_fts
             JOIN entries e ON e.id = entries_fts.rowid
             WHERE entries_fts MATCH ?
+              AND e.date_confirmed = 1
         """
         params: list[str | int] = [match]
         if user_id is not None:

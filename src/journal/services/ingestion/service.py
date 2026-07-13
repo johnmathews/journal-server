@@ -10,6 +10,11 @@ from journal.providers.embeddings import EmbeddingsProvider
 from journal.providers.ocr import OCRProvider
 from journal.providers.transcription import TranscriptionProvider
 from journal.services.chunking import ChunkingStrategy
+from journal.services.entry_dates import (
+    find_weekday_token,
+    repair_entry_date,
+    validate_entry_date,
+)
 from journal.services.ingestion.image import _ImageIngestMixin
 from journal.services.ingestion.text import _TextIngestMixin
 from journal.services.ingestion.url_sources import _UrlIngestMixin
@@ -59,6 +64,7 @@ class IngestionService(
         mood_scoring: "MoodScoringService | None" = None,
         formatter: "FormatterProtocol | None" = None,
         heading_detector: "HeadingDetector | None" = None,
+        min_entry_date: str = "2026-01-01",
     ) -> None:
         self._repo = repository
         self._vector_store = vector_store
@@ -67,6 +73,10 @@ class IngestionService(
         self._embeddings = embeddings_provider
         self._chunker = chunker
         self._slack_bot_token = slack_bot_token
+        # Hard floor for entry dates (spec 2026-07-13). Explicit dates
+        # below it are rejected; detected dates go through repair /
+        # quarantine in the per-media mixins.
+        self._min_entry_date = min_entry_date
         self._embed_metadata_prefix = embed_metadata_prefix
         self._preprocess_images = preprocess_images
         # Optional mood scoring. When `None`, ingestion and update
@@ -86,6 +96,45 @@ class IngestionService(
         # paths lift a leading date in the input into a markdown
         # heading on final_text. raw_text is never touched.
         self._heading_detector = heading_detector
+
+    def _apply_date_repair(
+        self, content: str, date: str,
+    ) -> tuple[str, bool, tuple[int, int] | None]:
+        """Cross-check a *detected* entry date against the content's
+        weekday word and the [MIN_ENTRY_DATE, today+1] bounds (spec
+        2026-07-13). Returns ``(date, quarantined, doubt_span)``:
+
+        - ``date`` — possibly year-repaired ISO date to file under.
+        - ``quarantined`` — True when the date is out of range with no
+          unique repair; the caller must create the entry with
+          ``date_confirmed=False`` and skip all derived processing.
+        - ``doubt_span`` — heading region (weekday token → end of line)
+          in ``content`` coordinates to record as a reviewable uncertain
+          span, or ``None``. Callers slice/shift as needed.
+        """
+        weekday_token = find_weekday_token(content)
+        repair = repair_entry_date(
+            date,
+            weekday_token[0] if weekday_token else None,
+            min_date=self._min_entry_date,
+        )
+        doubt_span: tuple[int, int] | None = None
+        if repair.status in ("repaired", "doubtful") and weekday_token is not None:
+            line_end = content.find("\n", weekday_token[1][1])
+            span_end = line_end if line_end != -1 else len(content)
+            doubt_span = (weekday_token[1][0], span_end)
+        if repair.status == "repaired":
+            log.info(
+                "Entry date auto-corrected %s -> %s (weekday cross-check)",
+                repair.original, repair.date_iso,
+            )
+        elif repair.status == "unrepairable":
+            log.warning(
+                "Detected entry date %s failed bounds and repair —"
+                " quarantining (held from pipelines until confirmed)",
+                repair.date_iso,
+            )
+        return repair.date_iso, repair.status == "unrepairable", doubt_span
 
     @property
     def vector_store(self) -> "VectorStore":
@@ -433,12 +482,32 @@ class IngestionService(
 
     def update_entry_date(
         self, entry_id: int, entry_date: str, *, user_id: int | None = None,
-    ) -> Entry | None:
-        """Update an entry's date. Write — lives on IngestionService rather
-        than QueryService so api/ routes use the service that owns mutating
-        operations (Unit 1b carryover from refactor-follow-ups item 5).
+    ) -> "tuple[Entry | None, bool]":
+        """Update an entry's date and propagate it (spec 2026-07-13).
+
+        Returns ``(entry, released)``: ``released`` is True when the entry
+        was quarantined (``date_confirmed`` false) and this edit confirmed
+        it — the API layer queues the deferred save pipeline in that case.
+        A confirmed entry with existing chunks gets its per-chunk
+        ``entry_date`` metadata refreshed in the vector store so date
+        filters stay correct without re-embedding.
+
+        Raises :class:`journal.services.entry_dates.EntryDateError` when
+        the date is outside ``[MIN_ENTRY_DATE, today + 1 day]``.
         """
-        return self._repo.update_entry_date(entry_id, entry_date, user_id=user_id)
+        validate_entry_date(entry_date, min_date=self._min_entry_date)
+        prior = self._repo.get_entry(entry_id, user_id)
+        if prior is None:
+            return None, False
+        self._repo.update_entry_date(entry_id, entry_date, user_id=user_id)
+        released = not prior.date_confirmed
+        if released:
+            self._repo.set_date_confirmed(entry_id, user_id=user_id)
+        if prior.chunk_count > 0:
+            self._vector_store.update_entry_metadata(
+                entry_id, {"entry_date": entry_date},
+            )
+        return self._repo.get_entry(entry_id, user_id), released
 
     def verify_doubts(
         self, entry_id: int, *, user_id: int | None = None,

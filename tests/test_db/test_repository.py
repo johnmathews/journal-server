@@ -1229,3 +1229,42 @@ class TestFactoryPathSemantics:
         written.wait(timeout=5.0)
         t.join()
         assert repo_via_factory.count_entries() == 2
+
+
+def test_create_entry_date_confirmed_flag(repo) -> None:
+    confirmed = repo.create_entry("2026-07-01", "photo", "raw", 1, user_id=1)
+    held = repo.create_entry(
+        "2025-07-09", "photo", "raw", 1, user_id=1, date_confirmed=False
+    )
+    assert repo.get_entry(confirmed.id).date_confirmed is True
+    assert repo.get_entry(held.id).date_confirmed is False
+
+
+class TestSearchExcludesQuarantined:
+    """FTS reaches quarantined rows via the entries_ai trigger even though
+    they have no chunks — the SQL filter is the gate (spec 2026-07-13,
+    final-review blocker)."""
+
+    def _seed(self, repo):
+        confirmed = repo.create_entry(
+            "2026-07-01", "photo", "the waveboard arrived today", 4, user_id=1,
+        )
+        repo.create_entry(
+            "2019-07-01", "photo", "an old waveboard memory", 4,
+            user_id=1, date_confirmed=False,
+        )
+        return confirmed
+
+    def test_search_text_excludes_unconfirmed(self, repo) -> None:
+        confirmed = self._seed(repo)
+        hits = repo.search_text("waveboard", user_id=1)
+        assert [e.id for e in hits] == [confirmed.id]
+
+    def test_search_snippets_excludes_unconfirmed(self, repo) -> None:
+        confirmed = self._seed(repo)
+        hits = repo.search_text_with_snippets("waveboard", user_id=1)
+        assert [e.id for e, _snippet in hits] == [confirmed.id]
+
+    def test_count_matches_excludes_unconfirmed(self, repo) -> None:
+        self._seed(repo)
+        assert repo.count_text_matches("waveboard", user_id=1) == 1

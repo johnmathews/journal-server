@@ -796,17 +796,19 @@ class TestMetadataPrefix:
         embed_inputs = mock_embeddings.embed_texts.call_args.args[0]
         assert "Sunday" in embed_inputs[0]
 
-    def test_malformed_date_falls_back_gracefully(
+    def test_malformed_date_quarantines_instead_of_crashing(
         self, service_with_prefix, mock_embeddings
     ):
-        # An invalid date shouldn't crash ingestion — fall back to a
-        # prefix without a weekday.
-        service_with_prefix.ingest_image(b"fake image", "image/jpeg", "not-a-date")
-        embed_inputs = mock_embeddings.embed_texts.call_args.args[0]
-        assert embed_inputs[0].startswith("Date: not-a-date.\n\n")
-        # No weekday component when the date can't be parsed.
-        assert "Monday" not in embed_inputs[0]
-        assert "Sunday" not in embed_inputs[0]
+        # An invalid date still doesn't crash ingestion, but since the
+        # date-integrity work (spec 2026-07-13) it quarantines: the entry
+        # is created with the provisional date and nothing is embedded
+        # until the date is confirmed.
+        entry = service_with_prefix.ingest_image(
+            b"fake image", "image/jpeg", "not-a-date"
+        )
+        assert entry.date_confirmed is False
+        assert entry.chunk_count == 0
+        mock_embeddings.embed_texts.assert_not_called()
 
 
 class TestRechunkEntry:
@@ -1731,14 +1733,46 @@ class TestIngestionPublicAPI:
         entry = ingestion_service.ingest_text(
             text="some text", date="2026-03-22", source_type="text_entry",
         )
-        updated = ingestion_service.update_entry_date(entry.id, "2026-04-15")
+        updated, released = ingestion_service.update_entry_date(entry.id, "2026-04-15")
         assert updated is not None
         assert updated.entry_date == "2026-04-15"
+        assert released is False
 
     def test_update_entry_date_returns_none_for_missing_entry(
         self, ingestion_service,
     ):
-        assert ingestion_service.update_entry_date(999_999, "2026-04-15") is None
+        updated, released = ingestion_service.update_entry_date(999_999, "2026-04-15")
+        assert updated is None
+        assert released is False
+
+    def test_update_entry_date_refreshes_chunk_metadata(self, ingestion_service):
+        """Motivating bug (2026-07-13): a date edit left per-chunk
+        ``entry_date`` metadata stale in the vector store."""
+        entry = ingestion_service.ingest_text(
+            text="hello world body", date="2026-07-01", source_type="text_entry",
+        )
+        updated, released = ingestion_service.update_entry_date(entry.id, "2026-07-02")
+        assert updated is not None and released is False
+        results = [
+            r
+            for r in ingestion_service.vector_store.search([0.1, 0.2, 0.3], limit=50)
+            if r.entry_id == entry.id
+        ]
+        assert results
+        assert all(r.metadata["entry_date"] == "2026-07-02" for r in results)
+
+    def test_update_entry_date_releases_quarantined_entry(
+        self, ingestion_service, repo,
+    ):
+        held = repo.create_entry(
+            "2019-07-09", "photo", "raw", 1, user_id=1, date_confirmed=False,
+        )
+        updated, released = ingestion_service.update_entry_date(
+            held.id, "2026-07-09", user_id=1,
+        )
+        assert updated is not None
+        assert released is True
+        assert repo.get_entry(held.id, 1).date_confirmed is True
 
     def test_verify_doubts_marks_entry_verified(self, ingestion_service):
         entry = ingestion_service.ingest_text(
@@ -1750,3 +1784,112 @@ class TestIngestionPublicAPI:
         self, ingestion_service,
     ):
         assert ingestion_service.verify_doubts(999_999) is False
+
+
+def _year_off_fixture() -> tuple[str, str, str]:
+    """(heading, correct_iso, wrong_iso): a heading whose weekday matches
+    TODAY's date but whose written year is last year — the entries
+    112/116 incident shape, computed live so the test never rots."""
+    import calendar
+    import datetime as dt
+
+    today = dt.date.today()
+    try:
+        wrong = today.replace(year=today.year - 1)
+    except ValueError:  # 29 Feb
+        today = today - dt.timedelta(days=1)
+        wrong = today.replace(year=today.year - 1)
+    heading = (
+        f"{calendar.day_name[today.weekday()]} {today.day}"
+        f" {calendar.month_name[today.month]} {wrong.year} 9:40"
+    )
+    return heading, today.isoformat(), wrong.isoformat()
+
+
+class TestIngestDateRepair:
+    """Weekday auto-repair + quarantine at image ingest (spec 2026-07-13)."""
+
+    def test_repairs_year_off_heading(self, ingestion_service, mock_ocr, repo):
+        heading, correct_iso, _wrong_iso = _year_off_fixture()
+        mock_ocr.extract.return_value = _ocr_result(
+            f"{heading}\nWe played football in the park today."
+        )
+        entry = ingestion_service.ingest_image(
+            image_data=b"repair-img", media_type="image/jpeg", date="2026-01-15",
+        )
+        assert entry.entry_date == correct_iso
+        assert entry.date_confirmed is True
+        assert entry.chunk_count > 0  # processed normally
+        assert repo.get_uncertain_spans(entry.id)  # reviewable audit marker
+
+    def test_quarantines_unrepairable_date(self, ingestion_service, mock_ocr, repo):
+        mock_ocr.extract.return_value = _ocr_result(
+            "9 July 2019\nAn old page with no weekday word at all."
+        )
+        entry = ingestion_service.ingest_image(
+            image_data=b"quarantine-img", media_type="image/jpeg", date="2026-01-15",
+        )
+        assert entry.date_confirmed is False
+        assert entry.entry_date == "2019-07-09"  # provisional display value
+        assert entry.chunk_count == 0  # held from all derived pipelines
+
+    def test_in_range_heading_unchanged(self, ingestion_service, mock_ocr):
+        import calendar
+        import datetime as dt
+
+        today = dt.date.today()
+        heading = (
+            f"{calendar.day_name[today.weekday()]} {today.day}"
+            f" {calendar.month_name[today.month]} {today.year} 9:40"
+        )
+        mock_ocr.extract.return_value = _ocr_result(f"{heading}\nA normal day.")
+        entry = ingestion_service.ingest_image(
+            image_data=b"ok-img", media_type="image/jpeg", date="2026-01-15",
+        )
+        assert entry.entry_date == today.isoformat()
+        assert entry.date_confirmed is True
+
+
+class TestVoiceDateRepair:
+    """Weekday auto-repair + quarantine at voice ingest (spec 2026-07-13)."""
+
+    def test_repairs_year_off_spoken_heading(
+        self, ingestion_service, mock_transcription, repo
+    ):
+        heading, correct_iso, _wrong_iso = _year_off_fixture()
+        mock_transcription.transcribe.return_value = TranscriptionResult(
+            text=f"{heading}. Today was a good day for a run.",
+        )
+        entry = ingestion_service.ingest_voice(
+            b"audio-repair", "audio/mp3", "2026-01-15",
+        )
+        assert entry.entry_date == correct_iso
+        assert entry.date_confirmed is True
+        assert entry.chunk_count > 0
+        assert repo.get_uncertain_spans(entry.id)
+
+    def test_quarantines_unrepairable_spoken_date(
+        self, ingestion_service, mock_transcription,
+    ):
+        mock_transcription.transcribe.return_value = TranscriptionResult(
+            text="9 July 2019. A recording with an impossible date.",
+        )
+        entry = ingestion_service.ingest_voice(
+            b"audio-quarantine", "audio/mp3", "2026-01-15",
+        )
+        assert entry.date_confirmed is False
+        assert entry.entry_date == "2019-07-09"
+        assert entry.chunk_count == 0
+
+    def test_multi_voice_quarantines_unrepairable_date(
+        self, ingestion_service, mock_transcription,
+    ):
+        mock_transcription.transcribe.return_value = TranscriptionResult(
+            text="9 July 2019. First segment of an old recording.",
+        )
+        entry = ingestion_service.ingest_multi_voice(
+            [(b"audio-mv-1", "audio/mp3"), (b"audio-mv-2", "audio/mp3")],
+            "2026-01-15",
+        )
+        assert entry.date_confirmed is False
+        assert entry.chunk_count == 0

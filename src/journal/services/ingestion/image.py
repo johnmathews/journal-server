@@ -146,12 +146,28 @@ class _ImageIngestMixin:
             date = det.date_iso
         final_text = det.body if det.has_heading else content
 
+        # Detected dates are cross-checked against the heading's weekday
+        # and the [MIN_ENTRY_DATE, today+1] bounds (spec 2026-07-13). A
+        # unique year-off repair is applied silently; an unrepairable
+        # out-of-range date quarantines the entry (created, but held from
+        # every derived pipeline until the date is confirmed). The doubt
+        # span comes back in `content` coordinates; uncertain spans are
+        # stored in raw_text coordinates, hence the window.start shift.
+        date, quarantined, doubt_span = self._apply_date_repair(  # type: ignore[attr-defined]
+            content, date,
+        )
+        if doubt_span is not None:
+            window.spans.append(
+                (window.start + doubt_span[0], window.start + doubt_span[1])
+            )
+
         trimmed = window.start != 0 or window.end != len(raw_text)
         entry = self._repo.create_entry(  # type: ignore[attr-defined]
             date, "photo", raw_text, word_count, user_id=user_id,
             final_text=final_text,
             content_start_char=window.start if trimmed else None,
             content_end_char=window.end if trimmed else None,
+            date_confirmed=not quarantined,
         )
 
         for i, (_image_data, _) in enumerate(images):
@@ -164,11 +180,18 @@ class _ImageIngestMixin:
             )
 
         self._repo.add_uncertain_spans(entry.id, window.spans)  # type: ignore[attr-defined]
-        chunk_count = self._process_text(  # type: ignore[attr-defined]
-            entry.id, entry.final_text, date,
-            skip_mood=skip_mood, user_id=user_id,
-        )
-        self._repo.update_chunk_count(entry.id, chunk_count)  # type: ignore[attr-defined]
+        if quarantined:
+            log.warning(
+                "Entry %d quarantined: date %s failed bounds and repair;"
+                " held from chunking/embedding until confirmed",
+                entry.id, date,
+            )
+        else:
+            chunk_count = self._process_text(  # type: ignore[attr-defined]
+                entry.id, entry.final_text, date,
+                skip_mood=skip_mood, user_id=user_id,
+            )
+            self._repo.update_chunk_count(entry.id, chunk_count)  # type: ignore[attr-defined]
         log.info(
             "Ingested entry %d: %d page(s), %d words, date %s, window=%s",
             entry.id, len(images), word_count, date,

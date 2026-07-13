@@ -37,6 +37,7 @@ from journal.api._shared import (
     _token_encoder,
 )
 from journal.auth import get_authenticated_user
+from journal.services.entry_dates import EntryDateError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -177,6 +178,8 @@ def register_entries_routes(
             )
 
         updated = entry
+        date_released = False
+        storyline_bootstrap_job_ids: list[str] = []
 
         # Update date if provided
         if new_date is not None:
@@ -194,14 +197,62 @@ def register_entries_routes(
                     {"error": "'entry_date' must be a valid ISO 8601 date (YYYY-MM-DD)"},
                     status_code=400,
                 )
-            updated = ingestion_svc.update_entry_date(entry_id, new_date, user_id=user_id)
+            try:
+                updated, date_released = ingestion_svc.update_entry_date(
+                    entry_id, new_date, user_id=user_id,
+                )
+            except EntryDateError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            if updated is None:
+                # Entry vanished between the existence check and the
+                # update (concurrent DELETE) — mirror the initial 404
+                # rather than crash serialization downstream.
+                return JSONResponse(
+                    {"error": f"Entry {entry_id} not found"}, status_code=404,
+                )
+
+            # A date change invalidates the judge's chronology for any
+            # storyline whose chapters contain this entry — queue one
+            # re-bootstrap per affected storyline on Pool B. Duplicate
+            # suppression across requests is deliberately omitted: date
+            # edits are rare, Pool B is single-worker, and bootstrap is
+            # idempotent (replace_all_chapters). The date write has
+            # already committed, so queueing failures must never fail
+            # the request — log and keep whatever ids were queued.
+            date_job_runner: JobRunner | None = services.get("job_runner")
+            storyline_repo = services.get("storyline_repository")
+            if date_job_runner is not None and storyline_repo is not None:
+                for sid in storyline_repo.find_storyline_ids_for_entry(entry_id):
+                    try:
+                        job = date_job_runner.submit_storyline_update(
+                            sid, user_id=user_id, bootstrap=True,
+                        )
+                    except RuntimeError:
+                        # Storyline engine not configured — nothing to queue.
+                        break
+                    except Exception:
+                        log.warning(
+                            "PATCH /api/entries/%d — failed to queue storyline %d"
+                            " re-bootstrap after date change",
+                            entry_id, sid,
+                            exc_info=True,
+                        )
+                        continue
+                    storyline_bootstrap_job_ids.append(job.id)
+                    log.info(
+                        "PATCH /api/entries/%d — queued storyline %d re-bootstrap %s"
+                        " after date change",
+                        entry_id, sid, job.id,
+                    )
 
         # Update text if provided
         entity_extraction_job_id: str | None = None
         reprocess_job_id: str | None = None
         mood_job_id: str | None = None
         pipeline_job_id: str | None = None
-        should_queue_pipeline = False
+        # A quarantine release runs the deferred save pipeline — the entry
+        # was held from chunking/embedding/extraction at ingest.
+        should_queue_pipeline = date_released
 
         if final_text is not None:
             if not isinstance(final_text, str):
@@ -334,6 +385,8 @@ def register_entries_routes(
             resp["mood_job_id"] = mood_job_id
         if pipeline_job_id is not None:
             resp["pipeline_job_id"] = pipeline_job_id
+        if storyline_bootstrap_job_ids:
+            resp["storyline_bootstrap_job_ids"] = storyline_bootstrap_job_ids
         return JSONResponse(resp)
 
     def _delete_entry(

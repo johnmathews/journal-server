@@ -485,6 +485,21 @@ class SQLiteStorylineRepository:
         ).fetchall()
         return {int(r["entry_id"]) for r in rows}
 
+    def find_storyline_ids_for_entry(self, entry_id: int) -> list[int]:
+        """Distinct storylines whose chapters (draft or published) contain
+        the entry — the reverse lookup used by date-edit propagation
+        (spec 2026-07-13). Served by idx_storyline_chapter_entries_entry.
+        """
+        rows = self._conn().execute(
+            "SELECT DISTINCT c.storyline_id"
+            " FROM storyline_chapter_entries ce"
+            " JOIN storyline_chapters c ON c.id = ce.chapter_id"
+            " WHERE ce.entry_id = ?"
+            " ORDER BY c.storyline_id ASC",
+            (entry_id,),
+        ).fetchall()
+        return [int(r["storyline_id"]) for r in rows]
+
     def chapter_entry_ids(self, chapter_id: int) -> list[int]:
         rows = self._conn().execute(
             "SELECT ce.entry_id FROM storyline_chapter_entries ce"
@@ -618,6 +633,7 @@ class SQLiteStorylineRepository:
             "  COALESCE(NULLIF(final_text, ''), raw_text) AS body_text"
             " FROM entries"
             " WHERE user_id = ?"
+            "   AND date_confirmed = 1"
             "   AND (final_text LIKE ? ESCAPE '\\' OR raw_text LIKE ? ESCAPE '\\')"
             " ORDER BY entry_date ASC, id ASC",
             (user_id, pattern, pattern),
