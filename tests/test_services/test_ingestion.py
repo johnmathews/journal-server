@@ -1782,3 +1782,67 @@ class TestIngestionPublicAPI:
         self, ingestion_service,
     ):
         assert ingestion_service.verify_doubts(999_999) is False
+
+
+def _year_off_fixture() -> tuple[str, str, str]:
+    """(heading, correct_iso, wrong_iso): a heading whose weekday matches
+    TODAY's date but whose written year is last year — the entries
+    112/116 incident shape, computed live so the test never rots."""
+    import calendar
+    import datetime as dt
+
+    today = dt.date.today()
+    try:
+        wrong = today.replace(year=today.year - 1)
+    except ValueError:  # 29 Feb
+        today = today - dt.timedelta(days=1)
+        wrong = today.replace(year=today.year - 1)
+    heading = (
+        f"{calendar.day_name[today.weekday()]} {today.day}"
+        f" {calendar.month_name[today.month]} {wrong.year} 9:40"
+    )
+    return heading, today.isoformat(), wrong.isoformat()
+
+
+class TestIngestDateRepair:
+    """Weekday auto-repair + quarantine at image ingest (spec 2026-07-13)."""
+
+    def test_repairs_year_off_heading(self, ingestion_service, mock_ocr, repo):
+        heading, correct_iso, _wrong_iso = _year_off_fixture()
+        mock_ocr.extract.return_value = _ocr_result(
+            f"{heading}\nWe played football in the park today."
+        )
+        entry = ingestion_service.ingest_image(
+            image_data=b"repair-img", media_type="image/jpeg", date="2026-01-15",
+        )
+        assert entry.entry_date == correct_iso
+        assert entry.date_confirmed is True
+        assert entry.chunk_count > 0  # processed normally
+        assert repo.get_uncertain_spans(entry.id)  # reviewable audit marker
+
+    def test_quarantines_unrepairable_date(self, ingestion_service, mock_ocr, repo):
+        mock_ocr.extract.return_value = _ocr_result(
+            "9 July 2019\nAn old page with no weekday word at all."
+        )
+        entry = ingestion_service.ingest_image(
+            image_data=b"quarantine-img", media_type="image/jpeg", date="2026-01-15",
+        )
+        assert entry.date_confirmed is False
+        assert entry.entry_date == "2019-07-09"  # provisional display value
+        assert entry.chunk_count == 0  # held from all derived pipelines
+
+    def test_in_range_heading_unchanged(self, ingestion_service, mock_ocr):
+        import calendar
+        import datetime as dt
+
+        today = dt.date.today()
+        heading = (
+            f"{calendar.day_name[today.weekday()]} {today.day}"
+            f" {calendar.month_name[today.month]} {today.year} 9:40"
+        )
+        mock_ocr.extract.return_value = _ocr_result(f"{heading}\nA normal day.")
+        entry = ingestion_service.ingest_image(
+            image_data=b"ok-img", media_type="image/jpeg", date="2026-01-15",
+        )
+        assert entry.entry_date == today.isoformat()
+        assert entry.date_confirmed is True

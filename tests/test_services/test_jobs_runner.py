@@ -976,7 +976,7 @@ class FakeIngestionService:
     on_progress callback for multi-page ingestion.
     """
 
-    def __init__(self, *, entry_id: int = 1) -> None:
+    def __init__(self, *, entry_id: int = 1, date_confirmed: bool = True) -> None:
         from journal.models import Entry
 
         self._entry = Entry(
@@ -987,6 +987,7 @@ class FakeIngestionService:
             final_text="fake text",
             word_count=2,
             chunk_count=1,
+            date_confirmed=date_confirmed,
         )
         self.ingest_image_calls: list[tuple[bytes, str, str]] = []
         self.multi_page_calls: list[int] = []
@@ -2514,3 +2515,57 @@ class TestFitnessBackfill:
             runner.submit_fitness_backfill_strava(
                 user_id=1, start=123,  # type: ignore[arg-type]
             )
+
+
+class TestQuarantinedIngestSkipsFollowUps:
+    """A quarantined entry (date_confirmed=False) must not get
+    post-ingestion follow-up jobs — no extraction, no storyline checks
+    (spec 2026-07-13, component 3)."""
+
+    def _make_runner(
+        self, jobs_repo: SQLiteJobRepository, *, date_confirmed: bool,
+    ) -> tuple[JobRunner, FakeNotificationService]:
+        notif = FakeNotificationService()
+        extraction = FakeEntityExtractionService(
+            single_result=_make_extraction_result(
+                1, entities_created=1, mentions_created=1,
+            ),
+        )
+        runner = JobRunner(
+            job_repository=jobs_repo,
+            entity_extraction_service=extraction,
+            mood_backfill_callable=FakeMoodBackfill(),
+            mood_scoring_service=FakeMoodScoringService(scores=7),
+            entry_repository=FakeEntryRepository(),
+            ingestion_service=FakeIngestionService(date_confirmed=date_confirmed),
+            notification_service=notif,  # type: ignore[arg-type]
+        )
+        return runner, notif
+
+    def test_image_worker_skips_follow_ups_for_quarantined_entry(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        runner, _notif = self._make_runner(jobs_repo, date_confirmed=False)
+        images = [(b"img1", "image/jpeg", "page1.jpg")]
+        job = runner.submit_image_ingestion(images, "2026-04-25", user_id=1)
+        _wait_terminal(jobs_repo, job.id)
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        parent = jobs_repo.get(job.id)
+        assert parent is not None and parent.result is not None
+        assert parent.result["follow_up_jobs"] == {}
+        assert parent.result.get("quarantined") is True
+
+    def test_image_worker_queues_follow_ups_for_confirmed_entry(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        runner, _notif = self._make_runner(jobs_repo, date_confirmed=True)
+        images = [(b"img1", "image/jpeg", "page1.jpg")]
+        job = runner.submit_image_ingestion(images, "2026-04-25", user_id=1)
+        _wait_terminal(jobs_repo, job.id)
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        parent = jobs_repo.get(job.id)
+        assert parent is not None and parent.result is not None
+        assert parent.result["follow_up_jobs"] != {}
+        assert "quarantined" not in parent.result

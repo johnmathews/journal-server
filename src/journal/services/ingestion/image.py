@@ -12,6 +12,8 @@ import hashlib
 import logging
 from typing import TYPE_CHECKING
 
+from journal.services.entry_dates import find_weekday_token, repair_entry_date
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -146,12 +148,42 @@ class _ImageIngestMixin:
             date = det.date_iso
         final_text = det.body if det.has_heading else content
 
+        # Detected dates are cross-checked against the heading's weekday
+        # and the [MIN_ENTRY_DATE, today+1] bounds (spec 2026-07-13). A
+        # unique year-off repair is applied silently; an unrepairable
+        # out-of-range date quarantines the entry (created, but held from
+        # every derived pipeline until the date is confirmed).
+        weekday_token = find_weekday_token(content)
+        repair = repair_entry_date(
+            date,
+            weekday_token[0] if weekday_token else None,
+            min_date=self._min_entry_date,  # type: ignore[attr-defined]
+        )
+        date = repair.date_iso
+        quarantined = repair.status == "unrepairable"
+        if repair.status in ("repaired", "doubtful") and weekday_token is not None:
+            # Mark the heading (weekday token → end of its line) as a
+            # reviewable doubt so the UI highlights the suspicious or
+            # corrected date. Spans are in raw_text coordinates; the
+            # token was found in `content`, so shift by window.start.
+            line_end = content.find("\n", weekday_token[1][1])
+            span_end = line_end if line_end != -1 else len(content)
+            window.spans.append(
+                (window.start + weekday_token[1][0], window.start + span_end)
+            )
+        if repair.status == "repaired":
+            log.info(
+                "Entry date auto-corrected %s -> %s (weekday cross-check)",
+                repair.original, repair.date_iso,
+            )
+
         trimmed = window.start != 0 or window.end != len(raw_text)
         entry = self._repo.create_entry(  # type: ignore[attr-defined]
             date, "photo", raw_text, word_count, user_id=user_id,
             final_text=final_text,
             content_start_char=window.start if trimmed else None,
             content_end_char=window.end if trimmed else None,
+            date_confirmed=not quarantined,
         )
 
         for i, (_image_data, _) in enumerate(images):
@@ -164,11 +196,18 @@ class _ImageIngestMixin:
             )
 
         self._repo.add_uncertain_spans(entry.id, window.spans)  # type: ignore[attr-defined]
-        chunk_count = self._process_text(  # type: ignore[attr-defined]
-            entry.id, entry.final_text, date,
-            skip_mood=skip_mood, user_id=user_id,
-        )
-        self._repo.update_chunk_count(entry.id, chunk_count)  # type: ignore[attr-defined]
+        if quarantined:
+            log.warning(
+                "Entry %d quarantined: date %s failed bounds and repair;"
+                " held from chunking/embedding until confirmed",
+                entry.id, repair.date_iso,
+            )
+        else:
+            chunk_count = self._process_text(  # type: ignore[attr-defined]
+                entry.id, entry.final_text, date,
+                skip_mood=skip_mood, user_id=user_id,
+            )
+            self._repo.update_chunk_count(entry.id, chunk_count)  # type: ignore[attr-defined]
         log.info(
             "Ingested entry %d: %d page(s), %d words, date %s, window=%s",
             entry.id, len(images), word_count, date,

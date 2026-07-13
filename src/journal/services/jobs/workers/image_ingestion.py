@@ -93,9 +93,20 @@ def run_image_ingestion(
         # Follow-ups are attributed to the same resolved user as the entry
         # so the storyline extension check (fired by entity extraction) is
         # scoped to a real user rather than silently skipped.
-        follow_up_ids = ctx.queue_post_ingestion_jobs(
-            job_id, "Image", entry.id, resolved_user_id,
-        )
+        # Quarantined entries (unconfirmable date, spec 2026-07-13) get NO
+        # follow-ups — extraction/storyline checks run when the date is
+        # confirmed and the deferred save pipeline fires.
+        if entry.date_confirmed:
+            follow_up_ids = ctx.queue_post_ingestion_jobs(
+                job_id, "Image", entry.id, resolved_user_id,
+            )
+        else:
+            follow_up_ids = {}
+            log.warning(
+                "Image ingestion %s: entry %d quarantined (date %s unconfirmed);"
+                " skipping post-ingestion follow-ups",
+                job_id, entry.id, entry.entry_date,
+            )
 
         result: dict[str, Any] = {
             "entry_id": entry.id,
@@ -106,6 +117,8 @@ def run_image_ingestion(
             "page_count": total,
             "follow_up_jobs": follow_up_ids,
         }
+        if not entry.date_confirmed:
+            result["quarantined"] = True
         ctx.jobs.mark_succeeded(job_id, result)
         if not follow_up_ids:
             # No follow-ups were queued (e.g. executor shutting down) —
