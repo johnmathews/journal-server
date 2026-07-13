@@ -203,20 +203,25 @@ def register_entries_routes(
                 )
             except EntryDateError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=400)
+            if updated is None:
+                # Entry vanished between the existence check and the
+                # update (concurrent DELETE) — mirror the initial 404
+                # rather than crash serialization downstream.
+                return JSONResponse(
+                    {"error": f"Entry {entry_id} not found"}, status_code=404,
+                )
 
             # A date change invalidates the judge's chronology for any
             # storyline whose chapters contain this entry — queue one
             # re-bootstrap per affected storyline on Pool B. Duplicate
             # suppression across requests is deliberately omitted: date
             # edits are rare, Pool B is single-worker, and bootstrap is
-            # idempotent (replace_all_chapters).
+            # idempotent (replace_all_chapters). The date write has
+            # already committed, so queueing failures must never fail
+            # the request — log and keep whatever ids were queued.
             date_job_runner: JobRunner | None = services.get("job_runner")
             storyline_repo = services.get("storyline_repository")
-            if (
-                updated is not None
-                and date_job_runner is not None
-                and storyline_repo is not None
-            ):
+            if date_job_runner is not None and storyline_repo is not None:
                 for sid in storyline_repo.find_storyline_ids_for_entry(entry_id):
                     try:
                         job = date_job_runner.submit_storyline_update(
@@ -225,6 +230,14 @@ def register_entries_routes(
                     except RuntimeError:
                         # Storyline engine not configured — nothing to queue.
                         break
+                    except Exception:
+                        log.warning(
+                            "PATCH /api/entries/%d — failed to queue storyline %d"
+                            " re-bootstrap after date change",
+                            entry_id, sid,
+                            exc_info=True,
+                        )
+                        continue
                     storyline_bootstrap_job_ids.append(job.id)
                     log.info(
                         "PATCH /api/entries/%d — queued storyline %d re-bootstrap %s"

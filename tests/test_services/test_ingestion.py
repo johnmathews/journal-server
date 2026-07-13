@@ -796,17 +796,19 @@ class TestMetadataPrefix:
         embed_inputs = mock_embeddings.embed_texts.call_args.args[0]
         assert "Sunday" in embed_inputs[0]
 
-    def test_malformed_date_falls_back_gracefully(
+    def test_malformed_date_quarantines_instead_of_crashing(
         self, service_with_prefix, mock_embeddings
     ):
-        # An invalid date shouldn't crash ingestion — fall back to a
-        # prefix without a weekday.
-        service_with_prefix.ingest_image(b"fake image", "image/jpeg", "not-a-date")
-        embed_inputs = mock_embeddings.embed_texts.call_args.args[0]
-        assert embed_inputs[0].startswith("Date: not-a-date.\n\n")
-        # No weekday component when the date can't be parsed.
-        assert "Monday" not in embed_inputs[0]
-        assert "Sunday" not in embed_inputs[0]
+        # An invalid date still doesn't crash ingestion, but since the
+        # date-integrity work (spec 2026-07-13) it quarantines: the entry
+        # is created with the provisional date and nothing is embedded
+        # until the date is confirmed.
+        entry = service_with_prefix.ingest_image(
+            b"fake image", "image/jpeg", "not-a-date"
+        )
+        assert entry.date_confirmed is False
+        assert entry.chunk_count == 0
+        mock_embeddings.embed_texts.assert_not_called()
 
 
 class TestRechunkEntry:

@@ -659,6 +659,56 @@ class TestUpdateEntry:
         assert data["pipeline_job_id"] == "pipe-1"
         mock_runner.submit_save_entry_pipeline.assert_called_once()
 
+    def test_patch_date_bootstrap_failure_does_not_fail_request(
+        self,
+        client: TestClient,
+        repo: SQLiteEntryRepository,
+        services: dict,
+    ) -> None:
+        """Review fix (2026-07-13): the date write has already committed
+        when bootstraps are queued — a job-submission failure must not
+        turn a successful PATCH into a 500, and ids queued before the
+        failure stay in the response."""
+        job = MagicMock()
+        job.id = "sl-job-1"
+        mock_runner = MagicMock()
+        mock_runner.submit_storyline_update = MagicMock(
+            side_effect=[job, ValueError("database is locked")],
+        )
+        services["job_runner"] = mock_runner
+        mock_sl_repo = MagicMock()
+        mock_sl_repo.find_storyline_ids_for_entry.return_value = [4, 6]
+        services["storyline_repository"] = mock_sl_repo
+
+        entry = repo.create_entry("2026-03-22", "photo", "Hello world", 2)
+        response = client.patch(
+            f"/api/entries/{entry.id}", json={"entry_date": "2026-03-23"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["entry_date"] == "2026-03-23"
+        assert data["storyline_bootstrap_job_ids"] == ["sl-job-1"]
+
+    def test_patch_date_entry_vanishing_mid_update_returns_404(
+        self,
+        client: TestClient,
+        repo: SQLiteEntryRepository,
+        services: dict,
+    ) -> None:
+        """Review fix (2026-07-13): if the entry disappears between the
+        handler's existence check and the service update (concurrent
+        DELETE), respond 404 instead of crashing serialization."""
+        entry = repo.create_entry("2026-03-22", "photo", "Hello world", 2)
+        mock_ingestion = MagicMock()
+        mock_ingestion.update_entry_date = MagicMock(return_value=(None, False))
+        services["ingestion"] = mock_ingestion
+
+        response = client.patch(
+            f"/api/entries/{entry.id}", json={"entry_date": "2026-03-23"},
+        )
+        assert response.status_code == 404
+
 
 class TestVerifyDoubts:
     def test_verify_doubts_clears_spans_in_response(
