@@ -2569,3 +2569,17 @@ class TestQuarantinedIngestSkipsFollowUps:
         assert parent is not None and parent.result is not None
         assert parent.result["follow_up_jobs"] != {}
         assert "quarantined" not in parent.result
+
+    def test_audio_worker_skips_follow_ups_for_quarantined_entry(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        runner, _notif = self._make_runner(jobs_repo, date_confirmed=False)
+        recordings = [(b"audio1", "audio/webm", "rec.webm")]
+        job = runner.submit_audio_ingestion(recordings, "2026-04-25", user_id=1)
+        _wait_terminal(jobs_repo, job.id)
+        runner.shutdown(wait=True, cancel_futures=False)
+
+        parent = jobs_repo.get(job.id)
+        assert parent is not None and parent.result is not None
+        assert parent.result["follow_up_jobs"] == {}
+        assert parent.result.get("quarantined") is True

@@ -1848,3 +1848,48 @@ class TestIngestDateRepair:
         )
         assert entry.entry_date == today.isoformat()
         assert entry.date_confirmed is True
+
+
+class TestVoiceDateRepair:
+    """Weekday auto-repair + quarantine at voice ingest (spec 2026-07-13)."""
+
+    def test_repairs_year_off_spoken_heading(
+        self, ingestion_service, mock_transcription, repo
+    ):
+        heading, correct_iso, _wrong_iso = _year_off_fixture()
+        mock_transcription.transcribe.return_value = TranscriptionResult(
+            text=f"{heading}. Today was a good day for a run.",
+        )
+        entry = ingestion_service.ingest_voice(
+            b"audio-repair", "audio/mp3", "2026-01-15",
+        )
+        assert entry.entry_date == correct_iso
+        assert entry.date_confirmed is True
+        assert entry.chunk_count > 0
+        assert repo.get_uncertain_spans(entry.id)
+
+    def test_quarantines_unrepairable_spoken_date(
+        self, ingestion_service, mock_transcription,
+    ):
+        mock_transcription.transcribe.return_value = TranscriptionResult(
+            text="9 July 2019. A recording with an impossible date.",
+        )
+        entry = ingestion_service.ingest_voice(
+            b"audio-quarantine", "audio/mp3", "2026-01-15",
+        )
+        assert entry.date_confirmed is False
+        assert entry.entry_date == "2019-07-09"
+        assert entry.chunk_count == 0
+
+    def test_multi_voice_quarantines_unrepairable_date(
+        self, ingestion_service, mock_transcription,
+    ):
+        mock_transcription.transcribe.return_value = TranscriptionResult(
+            text="9 July 2019. First segment of an old recording.",
+        )
+        entry = ingestion_service.ingest_multi_voice(
+            [(b"audio-mv-1", "audio/mp3"), (b"audio-mv-2", "audio/mp3")],
+            "2026-01-15",
+        )
+        assert entry.date_confirmed is False
+        assert entry.chunk_count == 0

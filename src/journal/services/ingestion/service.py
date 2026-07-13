@@ -10,7 +10,11 @@ from journal.providers.embeddings import EmbeddingsProvider
 from journal.providers.ocr import OCRProvider
 from journal.providers.transcription import TranscriptionProvider
 from journal.services.chunking import ChunkingStrategy
-from journal.services.entry_dates import validate_entry_date
+from journal.services.entry_dates import (
+    find_weekday_token,
+    repair_entry_date,
+    validate_entry_date,
+)
 from journal.services.ingestion.image import _ImageIngestMixin
 from journal.services.ingestion.text import _TextIngestMixin
 from journal.services.ingestion.url_sources import _UrlIngestMixin
@@ -92,6 +96,45 @@ class IngestionService(
         # paths lift a leading date in the input into a markdown
         # heading on final_text. raw_text is never touched.
         self._heading_detector = heading_detector
+
+    def _apply_date_repair(
+        self, content: str, date: str,
+    ) -> tuple[str, bool, tuple[int, int] | None]:
+        """Cross-check a *detected* entry date against the content's
+        weekday word and the [MIN_ENTRY_DATE, today+1] bounds (spec
+        2026-07-13). Returns ``(date, quarantined, doubt_span)``:
+
+        - ``date`` — possibly year-repaired ISO date to file under.
+        - ``quarantined`` — True when the date is out of range with no
+          unique repair; the caller must create the entry with
+          ``date_confirmed=False`` and skip all derived processing.
+        - ``doubt_span`` — heading region (weekday token → end of line)
+          in ``content`` coordinates to record as a reviewable uncertain
+          span, or ``None``. Callers slice/shift as needed.
+        """
+        weekday_token = find_weekday_token(content)
+        repair = repair_entry_date(
+            date,
+            weekday_token[0] if weekday_token else None,
+            min_date=self._min_entry_date,
+        )
+        doubt_span: tuple[int, int] | None = None
+        if repair.status in ("repaired", "doubtful") and weekday_token is not None:
+            line_end = content.find("\n", weekday_token[1][1])
+            span_end = line_end if line_end != -1 else len(content)
+            doubt_span = (weekday_token[1][0], span_end)
+        if repair.status == "repaired":
+            log.info(
+                "Entry date auto-corrected %s -> %s (weekday cross-check)",
+                repair.original, repair.date_iso,
+            )
+        elif repair.status == "unrepairable":
+            log.warning(
+                "Detected entry date %s failed bounds and repair —"
+                " quarantining (held from pipelines until confirmed)",
+                repair.date_iso,
+            )
+        return repair.date_iso, repair.status == "unrepairable", doubt_span
 
     @property
     def vector_store(self) -> "VectorStore":

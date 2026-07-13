@@ -12,8 +12,6 @@ import hashlib
 import logging
 from typing import TYPE_CHECKING
 
-from journal.services.entry_dates import find_weekday_token, repair_entry_date
-
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -152,29 +150,15 @@ class _ImageIngestMixin:
         # and the [MIN_ENTRY_DATE, today+1] bounds (spec 2026-07-13). A
         # unique year-off repair is applied silently; an unrepairable
         # out-of-range date quarantines the entry (created, but held from
-        # every derived pipeline until the date is confirmed).
-        weekday_token = find_weekday_token(content)
-        repair = repair_entry_date(
-            date,
-            weekday_token[0] if weekday_token else None,
-            min_date=self._min_entry_date,  # type: ignore[attr-defined]
+        # every derived pipeline until the date is confirmed). The doubt
+        # span comes back in `content` coordinates; uncertain spans are
+        # stored in raw_text coordinates, hence the window.start shift.
+        date, quarantined, doubt_span = self._apply_date_repair(  # type: ignore[attr-defined]
+            content, date,
         )
-        date = repair.date_iso
-        quarantined = repair.status == "unrepairable"
-        if repair.status in ("repaired", "doubtful") and weekday_token is not None:
-            # Mark the heading (weekday token → end of its line) as a
-            # reviewable doubt so the UI highlights the suspicious or
-            # corrected date. Spans are in raw_text coordinates; the
-            # token was found in `content`, so shift by window.start.
-            line_end = content.find("\n", weekday_token[1][1])
-            span_end = line_end if line_end != -1 else len(content)
+        if doubt_span is not None:
             window.spans.append(
-                (window.start + weekday_token[1][0], window.start + span_end)
-            )
-        if repair.status == "repaired":
-            log.info(
-                "Entry date auto-corrected %s -> %s (weekday cross-check)",
-                repair.original, repair.date_iso,
+                (window.start + doubt_span[0], window.start + doubt_span[1])
             )
 
         trimmed = window.start != 0 or window.end != len(raw_text)
@@ -200,7 +184,7 @@ class _ImageIngestMixin:
             log.warning(
                 "Entry %d quarantined: date %s failed bounds and repair;"
                 " held from chunking/embedding until confirmed",
-                entry.id, repair.date_iso,
+                entry.id, date,
             )
         else:
             chunk_count = self._process_text(  # type: ignore[attr-defined]

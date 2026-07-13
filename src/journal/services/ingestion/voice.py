@@ -84,26 +84,38 @@ class _VoiceIngestMixin:
             else det.body
         )
 
+        # Detected spoken dates get the same weekday/bounds cross-check
+        # as OCR headings (spec 2026-07-13); spans here are already in
+        # raw_text coordinates.
+        date, quarantined, doubt_span = self._apply_date_repair(  # type: ignore[attr-defined]
+            raw_text, date,
+        )
+
         word_count = len(raw_text.split())
         entry = self._repo.create_entry(  # type: ignore[attr-defined]
             date, source_type, raw_text, word_count, user_id=user_id,
             final_text=formatted_body if formatted_body != raw_text else None,
+            date_confirmed=not quarantined,
         )
         self.store_source_file(  # type: ignore[attr-defined]
             entry.id, f"voice_{date}", media_type, file_hash,
         )
 
-        # Record uncertain spans from transcription confidence data.
-        uncertain_spans = getattr(result, "uncertain_spans", [])
+        # Record uncertain spans from transcription confidence data,
+        # plus the repaired/doubtful heading region when present.
+        uncertain_spans = list(getattr(result, "uncertain_spans", []))
+        if doubt_span is not None:
+            uncertain_spans.append(doubt_span)
         if uncertain_spans:
             self._repo.add_uncertain_spans(entry.id, uncertain_spans)  # type: ignore[attr-defined]
 
-        # Chunk, embed, and store in vector DB
-        chunk_count = self._process_text(  # type: ignore[attr-defined]
-            entry.id, entry.final_text, date,
-            skip_mood=skip_mood, user_id=user_id,
-        )
-        self._repo.update_chunk_count(entry.id, chunk_count)  # type: ignore[attr-defined]
+        if not quarantined:
+            # Chunk, embed, and store in vector DB
+            chunk_count = self._process_text(  # type: ignore[attr-defined]
+                entry.id, entry.final_text, date,
+                skip_mood=skip_mood, user_id=user_id,
+            )
+            self._repo.update_chunk_count(entry.id, chunk_count)  # type: ignore[attr-defined]
 
         log.info(
             "Ingested voice entry %d: %d words, date %s",
@@ -223,10 +235,17 @@ class _VoiceIngestMixin:
             else det.body
         )
 
+        # Same weekday/bounds cross-check as single-voice; spans are in
+        # combined raw_text coordinates (spec 2026-07-13).
+        date, quarantined, doubt_span = self._apply_date_repair(  # type: ignore[attr-defined]
+            raw_text, date,
+        )
+
         word_count = len(raw_text.split())
         entry = self._repo.create_entry(  # type: ignore[attr-defined]
             date, source_type, raw_text, word_count, user_id=user_id,
             final_text=formatted_body if formatted_body != raw_text else None,
+            date_confirmed=not quarantined,
         )
 
         # Store source file records for each recording
@@ -253,15 +272,18 @@ class _VoiceIngestMixin:
             if i < len(transcripts) - 1:
                 cumulative_offset += 2  # the "\n\n" separator
 
+        if doubt_span is not None:
+            combined_spans.append(doubt_span)
         if combined_spans:
             self._repo.add_uncertain_spans(entry.id, combined_spans)  # type: ignore[attr-defined]
 
-        # Chunk, embed, and store in vector DB
-        chunk_count = self._process_text(  # type: ignore[attr-defined]
-            entry.id, entry.final_text, date,
-            skip_mood=skip_mood, user_id=user_id,
-        )
-        self._repo.update_chunk_count(entry.id, chunk_count)  # type: ignore[attr-defined]
+        if not quarantined:
+            # Chunk, embed, and store in vector DB
+            chunk_count = self._process_text(  # type: ignore[attr-defined]
+                entry.id, entry.final_text, date,
+                skip_mood=skip_mood, user_id=user_id,
+            )
+            self._repo.update_chunk_count(entry.id, chunk_count)  # type: ignore[attr-defined]
 
         log.info(
             "Ingested multi-voice entry %d: %d recordings, %d words, date %s",
