@@ -131,6 +131,17 @@ every call (ones already present in chapter membership from a prior run whose fi
 pending" step didn't get reached because an exception propagated first) — nothing is lost, and
 nothing lingers past one extra call.
 
+### Date integrity interactions (2026-07-13)
+
+Two hooks from [entry-date-integrity](entry-date-integrity.md): the
+candidate corpus excludes quarantined entries (`date_confirmed = 0` —
+both the entity-mention excerpt query and the `find_entries_mentioning`
+recall fallback filter on it), and a `PATCH` that changes an entry's
+date auto-queues one `storyline_update(bootstrap=True)` per storyline
+whose chapters contain that entry (reverse lookup:
+`find_storyline_ids_for_entry`). A re-bootstrap redraws the whole
+storyline — fresh titles/narratives, published chapters arrive unread.
+
 ## Extension classifier + jobs
 
 `services/storylines/extension.py::StorylineExtensionClassifier.classify_for_entry` is unchanged
