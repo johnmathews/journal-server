@@ -1,8 +1,10 @@
 # Journal Tool — Consolidated Roadmap
 
-**Status:** active. **Last updated:** 2026-06-10 (quality round: fitness final mile merged +
+**Status:** active. **Last updated:** 2026-07-13 (fitness W14 multi-user verification
+suspended — Strava's API went subscriber-paywalled 2026-06-30, integration suspended, see
+Item 1 and D8; previous update 2026-06-10, quality round: fitness final mile merged +
 deployed, storylines anchor-edit UX shipped, security/test/deploy hardening across ~20 PRs —
-see `journal/260610-quality-round.md`; W14 multi-user verification is the remaining open gate).
+see `journal/260610-quality-round.md`).
 **Supersedes:**
 [`archive/phase-2-brief.md`](./archive/phase-2-brief.md) (2026-03-23) and
 `webapp/docs/archive/future-features.md`.
@@ -46,8 +48,9 @@ the top of the linked doc tells you whether it's active, closed, or superseded.
   shipped over 2026-05-09..05-11; the final-mile work
   (cross-user integrity tests, `--code` flag, watermark-race fix,
   `STRAVA_REFRESH_TOKEN` audit, `row` canonical activity type) shipped
-  2026-06-04. W14 end-to-end verification with user 2 follows as a
-  separate staged walkthrough.
+  2026-06-04. W14 end-to-end verification with user 2 was planned as a
+  separate staged walkthrough but suspended 2026-07-13 (Strava API paywall —
+  see Item 1 and D8).
 - [`archive/fitness-followup-plan.md`](./archive/fitness-followup-plan.md) — **closed 2026-05-11**,
   all eight work units (F1–F8) shipped same-day and verified post-deploy. Fixed `rows_normalized`
   always-0, switched workout dedup to time-window overlap (the 2026-05-09 case now collapses
@@ -150,11 +153,20 @@ orchestrator + first live smoke (W13), operator + engineer documentation
 2026-05-09. The multi-user final mile (server PR #21 + webapp PR #11)
 merged and deployed 2026-06-10.
 
-**Remaining open item:** the fitness-multiuser **W14 end-to-end
-verification with user 2** (staged walkthrough per
+**W14 verification gate — suspended 2026-07-13.** The fitness-multiuser
+**W14 end-to-end verification with user 2** (staged walkthrough per
 [`archive/fitness-multiuser-plan.md`](./archive/fitness-multiuser-plan.md) W7/W14)
-has never been executed — it is the acceptance gate for the multi-user
-initiative and needs a human-driven prod session.
+was never executed and is now suspended: Strava paywalled Standard-tier API
+access behind an active Strava subscription effective **2026-06-30**
+([announcement](https://communityhub.strava.com/insider-journal-9/an-update-to-our-developer-program-13428)),
+so the Strava integration is suspended and a Strava OAuth connect for user 2
+is no longer possible without paying. Garmin-only verification remains
+possible but was deliberately skipped (user decision 2026-07-13). Moved to
+**D8**. Prod state at suspension (2026-07-13 `fitness-audit`: PASS, 0
+violations): all fitness rows belong to user 1 (295 activities, 193 daily,
+78 sync runs, 140 raw Strava, 1408 raw Garmin); user 1's auth state is
+`garmin: broken` with no Strava row (`STRAVA_REFRESH_TOKEN` removed from
+prod env 2026-06-10, never reconnected via the in-app flow).
 
 **Deferred follow-ups (independent, ad-hoc):**
 ~~`--code <code>` CLI flag for headless Strava re-auth~~ (shipped
@@ -475,6 +487,34 @@ was followed by the **multi-user auth + tier-1 data isolation** workstream that 
 hashed sessions, per-user data isolation, an Admin/Settings split, and an API-keys view at
 `/api-keys`. See [`security-roadmap.md`](./security-roadmap.md) (Tier 1 closed; later tiers
 remain).
+
+---
+
+### D8. Fitness W14 multi-user verification + Strava integration `[both]` — suspended 2026-07-13
+
+Strava paywalled Standard-tier API access behind an active Strava subscription
+(~$11.99/mo) effective **2026-06-30**
+([announcement](https://communityhub.strava.com/insider-journal-9/an-update-to-our-developer-program-13428),
+[API policy](https://www.strava.com/legal/api_policy)). Without a subscription the
+journal's Strava app can no longer complete OAuth or sync, so:
+
+1. **Strava integration is suspended.** Code stays in place (providers, workers,
+   endpoints, webapp panels) but no active Strava connection exists — user 1's
+   `STRAVA_REFRESH_TOKEN` was removed from prod env 2026-06-10 and never
+   reconnected. Revoking that old token in Strava's web UI is still pending
+   (hygiene). Resume path if ever wanted: subscribe to Strava, reconnect via
+   Settings → Fitness.
+2. **W14 end-to-end verification with user 2 is suspended.** The Strava half is
+   impossible without paying; the Garmin-only half was deliberately skipped
+   (user decision 2026-07-13). Baseline captured that day: `fitness-audit`
+   PASS, 0 violations, all rows user 1. If multi-user fitness ever gets a
+   second real user, run the Garmin side of the
+   [`archive/fitness-multiuser-plan.md`](./archive/fitness-multiuser-plan.md)
+   W14 walkthrough then.
+3. **User 1's own Garmin auth is `broken`** as of 2026-07-13 — reconnect via
+   the split-IP mint/import runbook
+   ([`fitness-operations.md`](./fitness-operations.md) §2c-bis) when fresh
+   Garmin data is wanted again.
 
 ---
 

@@ -1,6 +1,14 @@
 # Fitness Operations
 
-**Status:** active. **Last updated:** 2026-06-21 (Garmin Cloudflare-block handling: connect endpoint reclassifies IP/bot-challenge blocks as `upstream_rate_limited` and trips a global pre-flight cooldown; split-IP mint/import recovery in §2c-bis; see `journal/260619-garmin-cloudflare-recovery.md` and `journal/260621-garmin-upstream-cooldown.md`).
+**Status:** active. **Last updated:** 2026-07-13 (Strava suspension note; previous update
+2026-06-21 — Garmin Cloudflare-block handling: connect endpoint reclassifies IP/bot-challenge blocks as `upstream_rate_limited` and trips a global pre-flight cooldown; split-IP mint/import recovery in §2c-bis; see `journal/260619-garmin-cloudflare-recovery.md` and `journal/260621-garmin-upstream-cooldown.md`).
+
+> **Strava integration suspended (2026-07-13).** Strava paywalled Standard-tier
+> API access behind an active Strava subscription effective 2026-06-30
+> ([announcement](https://communityhub.strava.com/insider-journal-9/an-update-to-our-developer-program-13428)).
+> The Strava sections below are kept for reference but the connect/sync flows
+> will not work without a paid Strava subscription on the account that owns the
+> API app. No active Strava connection exists in prod. See roadmap D8.
 
 Operator-facing runbook for the fitness pipeline. Covers initial setup, re-auth,
 historical backfill, sync monitoring, and troubleshooting the rough edges that
