@@ -75,6 +75,19 @@ def _now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _exit_strava_disabled(*, hint: str | None = None) -> None:
+    """Print the W1 strava-mothball refusal and exit non-zero.
+
+    Strava is mothballed (roadmap D8, Strava API paywall 2026-06-30);
+    every Strava-touching CLI path refuses unless STRAVA_ENABLED=true.
+    """
+    message = "Error: Strava integration is disabled (STRAVA_ENABLED=false)."
+    if hint:
+        message = f"{message} {hint}"
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
 # ── Strava OAuth ─────────────────────────────────────────────────────
 
 
@@ -173,6 +186,10 @@ def cmd_fitness_reauth_strava(args: argparse.Namespace, config: Config) -> None:
     ``created_at`` are read-then-merged from the existing row to
     preserve fields the fetch service maintains independently.
     """
+    if not config.strava_enabled:
+        _exit_strava_disabled(
+            hint="Set STRAVA_ENABLED=true to revive the integration.",
+        )
     if not config.strava_client_id or not config.strava_client_secret:
         print(
             "Error: STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET must be set "
@@ -713,6 +730,12 @@ def cmd_fitness_sync(args: argparse.Namespace, config: Config) -> None:
     The ``fitness_sync_runs`` row is recorded by the fetch service either
     way.
     """
+    # W1 strava-mothball: "both" is rejected (not degraded to garmin) so
+    # the operator gets an explicit signal rather than silently-partial
+    # output.
+    if args.source in ("strava", "both") and not config.strava_enabled:
+        _exit_strava_disabled(hint="Use --source garmin.")
+
     sources: list[str] = (
         ["strava", "garmin"] if args.source == "both" else [args.source]
     )
@@ -816,6 +839,11 @@ def cmd_fitness_backfill(args: argparse.Namespace, config: Config) -> None:
     flight). The operator's recovery path is encoded in the printed
     ``aborted_reason`` string.
     """
+    # W1 strava-mothball: mirror cmd_fitness_sync — reject strava/both
+    # outright with a clear message.
+    if args.source in ("strava", "both") and not config.strava_enabled:
+        _exit_strava_disabled(hint="Use --source garmin.")
+
     sources: list[str] = (
         ["strava", "garmin"] if args.source == "both" else [args.source]
     )

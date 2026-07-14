@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 from starlette.responses import JSONResponse
 
 from journal.api._handler import handler
+from journal.api._shared import STRAVA_DISABLED_ERROR, _strava_enabled
 from journal.auth import get_authenticated_user
 
 if TYPE_CHECKING:
@@ -87,6 +88,12 @@ def register_fitness_jobs_routes(
             return JSONResponse(
                 {"error": f"Unknown fitness source: {source!r}"},
                 status_code=400,
+            )
+        # W1 strava-mothball: with STRAVA_ENABLED=false the Strava job
+        # surface is gone (404), Garmin is untouched.
+        if source == "strava" and not _strava_enabled(services):
+            return JSONResponse(
+                {"error": STRAVA_DISABLED_ERROR}, status_code=404,
             )
 
         job_repository = services["job_repository"]
@@ -164,6 +171,11 @@ def register_fitness_jobs_routes(
             return JSONResponse(
                 {"error": f"Unknown fitness source: {source!r}"},
                 status_code=400,
+            )
+        # W1 strava-mothball: same 404 gate as the sync route above.
+        if source == "strava" and not _strava_enabled(services):
+            return JSONResponse(
+                {"error": STRAVA_DISABLED_ERROR}, status_code=404,
             )
 
         # Parse in-body ("raw" mode): the source-validation 400 above

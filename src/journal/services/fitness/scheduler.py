@@ -49,6 +49,11 @@ class FitnessSyncScheduler:
     users have active auth per source and submits incremental syncs via
     the JobRunner with ``quiet_success=True``. ``enabled=False`` makes
     ``start()`` a no-op (used by tests and the FITNESS_SYNC_ENABLED gate).
+
+    ``sources`` narrows which providers the daily loop touches — the
+    bootstrap passes ``("garmin",)`` when Strava is mothballed
+    (``STRAVA_ENABLED=false``, roadmap D8) so the loop never lists or
+    submits Strava work on a Strava-less server.
     """
 
     def __init__(
@@ -58,12 +63,14 @@ class FitnessSyncScheduler:
         fitness_repo: FitnessRepository,
         hour: int = _DEFAULT_HOUR,
         enabled: bool = True,
+        sources: tuple[str, ...] = _SOURCES,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._runner = job_runner
         self._repo = fitness_repo
         self._hour = hour
         self._enabled = enabled
+        self._sources = sources
         self._clock: Callable[[], datetime] = clock or datetime.now
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -75,7 +82,7 @@ class FitnessSyncScheduler:
         or a transient JobRunner error) is logged and skipped so the rest
         of the run still happens.
         """
-        for source in _SOURCES:
+        for source in self._sources:
             submit = (
                 self._runner.submit_fitness_sync_strava
                 if source == "strava"

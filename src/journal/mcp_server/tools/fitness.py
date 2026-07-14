@@ -43,6 +43,19 @@ log = logging.getLogger(__name__)
 
 _VALID_SOURCES = ("strava", "garmin")
 
+# W1 strava-mothball (roadmap D8, Strava API paywall 2026-06-30): the
+# write/trigger tools refuse Strava unless STRAVA_ENABLED is true. Read
+# tools — including fitness_sync_status — are flag-independent: the
+# status payload keeps both source keys (webapp contract) and historical
+# Strava rows stay queryable.
+_STRAVA_DISABLED_ERROR = "Strava integration is disabled on this server"
+
+
+def _strava_enabled(ctx: Context) -> bool:
+    """True iff the STRAVA_ENABLED mothball flag is on (fail-closed)."""
+    config = ctx.request_context.lifespan_context.get("config")
+    return bool(getattr(config, "strava_enabled", False))
+
 
 # ── Read tools ─────────────────────────────────────────────────────
 
@@ -184,6 +197,8 @@ def fitness_trigger_sync(
             "error": f"Unknown fitness source: {source!r}",
             "job_id": None,
         }
+    if source == "strava" and not _strava_enabled(ctx):
+        return {"error": _STRAVA_DISABLED_ERROR, "job_id": None}
     user_id = _user_id(ctx)
     job_repository = _get_job_repository(ctx)
     # W5: spanning dedup — sync ↔ backfill collisions both return the
@@ -246,6 +261,8 @@ def fitness_trigger_backfill(
             "error": f"Unknown fitness source: {source!r}",
             "job_id": None,
         }
+    if source == "strava" and not _strava_enabled(ctx):
+        return {"error": _STRAVA_DISABLED_ERROR, "job_id": None}
     if not isinstance(start, str) or not start:
         return {
             "error": "'start' is required and must be a YYYY-MM-DD string",

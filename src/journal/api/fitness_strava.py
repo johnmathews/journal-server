@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 from starlette.responses import JSONResponse
 
 from journal.api._handler import JsonBody, handler
-from journal.api._shared import _now_iso
+from journal.api._shared import STRAVA_DISABLED_ERROR, _now_iso, _strava_enabled
 from journal.auth import get_authenticated_user
 from journal.models import FitnessAuthState
 from journal.providers.strava import exchange_code as strava_exchange_code_default
@@ -51,6 +51,21 @@ def register_fitness_strava_routes(
     services_getter: Callable[[], ServicesDict | None],
 ) -> None:
     """Register the Strava authorize_url / exchange / disconnect routes."""
+
+    def _disabled_response(services: ServicesDict) -> JSONResponse | None:
+        """W1 strava-mothball: 404 every Strava OAuth route unless
+        ``STRAVA_ENABLED`` is true.
+
+        The guard lives at request time (not registration time) because
+        config reaches the API layer through the services dict, which is
+        only populated after ``bootstrap._init_services()`` — route
+        registration in ``mcp_server/app.py`` happens at import, before
+        any config exists. Observable behavior matches an unregistered
+        route: 404, with an explicit reason in the body.
+        """
+        if _strava_enabled(services):
+            return None
+        return JSONResponse({"error": STRAVA_DISABLED_ERROR}, status_code=404)
 
     def _strava_pending(services: ServicesDict) -> StravaPendingStore:
         store = services.get("strava_pending")
@@ -106,6 +121,9 @@ def register_fitness_strava_routes(
     def strava_authorize_url(
         request: Request, services: ServicesDict, body: None
     ) -> JSONResponse:
+        disabled = _disabled_response(services)
+        if disabled is not None:
+            return disabled
         user = get_authenticated_user(request)
         config = services.get("config")
         client_id = getattr(config, "strava_client_id", "") if config else ""
@@ -158,6 +176,9 @@ def register_fitness_strava_routes(
     def strava_exchange(
         request: Request, services: ServicesDict, body: dict | object
     ) -> JSONResponse:
+        disabled = _disabled_response(services)
+        if disabled is not None:
+            return disabled
         user = get_authenticated_user(request)
         repo: FitnessRepository = services["fitness_repo"]
         pending = _strava_pending(services)
@@ -297,6 +318,9 @@ def register_fitness_strava_routes(
     def strava_disconnect(
         request: Request, services: ServicesDict, body: None
     ) -> JSONResponse:
+        disabled = _disabled_response(services)
+        if disabled is not None:
+            return disabled
         user = get_authenticated_user(request)
         repo: FitnessRepository = services["fitness_repo"]
         deleted = repo.delete_auth_state(user_id=user.user_id, source="strava")

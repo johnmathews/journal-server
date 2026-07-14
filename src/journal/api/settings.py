@@ -116,6 +116,10 @@ def register_settings_routes(
                     "mood_scoring": _runtime_get(services, "enable_mood_scoring"),
                     "mood_scorer_model": config.mood_scorer_model,
                     "journal_author_name": config.journal_author_name,
+                    # W1 strava-mothball: straight from the frozen config
+                    # (not a runtime setting) — the webapp uses it to hide
+                    # the Strava UI.
+                    "strava_enabled": config.strava_enabled,
                 },
                 "runtime": (
                     runtime.get_all()

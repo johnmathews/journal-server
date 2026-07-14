@@ -150,15 +150,21 @@ def _make_ctx(
     jobs_repository: SQLiteJobRepository,
     job_runner: JobRunner,
     fitness_factory: ConnectionFactory,
+    strava_enabled: bool = True,
 ) -> SimpleNamespace:
     """Build a fake MCP Context whose ``request_context.lifespan_context``
     carries the keys the tools expect. SimpleNamespace is enough — the
-    tools only ever subscript the dict."""
+    tools only ever subscript the dict.
+
+    ``strava_enabled`` defaults to True here so the pre-mothball tests
+    keep exercising the live-Strava paths; production defaults to False
+    (STRAVA_ENABLED unset — roadmap D8 mothball)."""
     services = {
         "fitness_repo": fitness_repo,
         "job_repository": jobs_repository,
         "job_runner": job_runner,
         "db_factory": fitness_factory,
+        "config": SimpleNamespace(strava_enabled=strava_enabled),
     }
     return SimpleNamespace(
         request_context=SimpleNamespace(lifespan_context=services),
@@ -192,6 +198,24 @@ def configured_ctx(
         jobs_repository=jobs_repository,
         job_runner=configured_runner,
         fitness_factory=fitness_factory,
+    )
+
+
+@pytest.fixture
+def strava_disabled_ctx(
+    fitness_repo: FitnessRepository,
+    jobs_repository: SQLiteJobRepository,
+    configured_runner: JobRunner,
+    fitness_factory: ConnectionFactory,
+) -> SimpleNamespace:
+    """Fully wired runner but STRAVA_ENABLED=false — the W1 mothball
+    posture: the flag alone must make Strava unreachable."""
+    return _make_ctx(
+        fitness_repo=fitness_repo,
+        jobs_repository=jobs_repository,
+        job_runner=configured_runner,
+        fitness_factory=fitness_factory,
+        strava_enabled=False,
     )
 
 
@@ -774,3 +798,46 @@ def test_tools_return_json_serialisable_dicts(ctx: SimpleNamespace) -> None:
     ]
     for p in payloads:
         json.dumps(p)  # raises TypeError if not serialisable
+
+
+# --------------------------------------------------------------------
+# STRAVA_ENABLED mothball (W1)
+# --------------------------------------------------------------------
+
+
+def test_trigger_sync_strava_disabled_returns_error(
+    strava_disabled_ctx: SimpleNamespace,
+) -> None:
+    out = fitness_tools.fitness_trigger_sync(
+        source="strava", ctx=strava_disabled_ctx,
+    )
+    assert out["job_id"] is None
+    assert out["error"] == "Strava integration is disabled on this server"
+
+
+def test_trigger_backfill_strava_disabled_returns_error(
+    strava_disabled_ctx: SimpleNamespace,
+) -> None:
+    out = fitness_tools.fitness_trigger_backfill(
+        source="strava", start="2026-01-01", ctx=strava_disabled_ctx,
+    )
+    assert out["job_id"] is None
+    assert out["error"] == "Strava integration is disabled on this server"
+
+
+def test_trigger_sync_garmin_unaffected_when_strava_disabled(
+    strava_disabled_ctx: SimpleNamespace,
+) -> None:
+    out = fitness_tools.fitness_trigger_sync(
+        source="garmin", ctx=strava_disabled_ctx,
+    )
+    assert out["job_id"] is not None
+
+
+def test_sync_status_keeps_both_keys_when_strava_disabled(
+    strava_disabled_ctx: SimpleNamespace,
+) -> None:
+    """Webapp/MCP contract: the status shape is flag-independent — both
+    source keys stay present so historical Strava state remains visible."""
+    out = fitness_tools.fitness_sync_status(ctx=strava_disabled_ctx)
+    assert set(out) == {"strava", "garmin"}

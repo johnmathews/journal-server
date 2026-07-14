@@ -2073,6 +2073,9 @@ class TestSettings:
         # Features block
         assert isinstance(data["features"]["mood_scoring"], bool)
         assert isinstance(data["features"]["journal_author_name"], str)
+        # W1 strava-mothball: the flag is surfaced to the webapp and
+        # defaults to False (STRAVA_ENABLED unset → mothballed).
+        assert data["features"]["strava_enabled"] is False
 
     def test_settings_does_not_leak_secrets(
         self, client: TestClient,

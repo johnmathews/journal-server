@@ -23,6 +23,7 @@ import sqlite3
 import time
 from collections.abc import Generator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -171,12 +172,17 @@ def _make_services(
     fitness_repo: FitnessRepository,
     jobs_repository: SQLiteJobRepository,
     job_runner: JobRunner,
+    *,
+    strava_enabled: bool = True,
 ) -> dict:
+    # W1 strava-mothball: production defaults to STRAVA_ENABLED=false;
+    # tests that exercise live-Strava job routes opt in explicitly.
     return {
         "fitness_repo": fitness_repo,
         "job_repository": jobs_repository,
         "job_runner": job_runner,
         "db_factory": fitness_factory,
+        "config": SimpleNamespace(strava_enabled=strava_enabled),
     }
 
 
@@ -519,6 +525,24 @@ def test_sync_status_auth_broken_surfaces_since(
     assert garmin["last_runs"] == []
 
 
+def test_sync_status_keeps_both_keys_when_strava_disabled(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    jobs_repository: SQLiteJobRepository,
+    job_runner: JobRunner,
+) -> None:
+    """Webapp contract: the status payload keeps both source keys even
+    with Strava mothballed — historical Strava state must stay readable."""
+    services = _make_services(
+        fitness_factory, fitness_repo, jobs_repository, job_runner,
+        strava_enabled=False,
+    )
+    with _build_client(services) as tc:
+        resp = tc.get("/api/fitness/sync/status")
+    assert resp.status_code == 200
+    assert set(resp.json()) == {"strava", "garmin"}
+
+
 # --------------------------------------------------------------------
 # POST /api/fitness/sync/{source}
 # --------------------------------------------------------------------
@@ -582,6 +606,82 @@ def test_sync_post_returns_existing_running_job_id(
         assert body["job_id"] == existing.id
         assert body["status"] == "running"
         assert body.get("already_running") is True
+
+
+def test_sync_post_strava_disabled_returns_404(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    jobs_repository: SQLiteJobRepository,
+    configured_runner: JobRunner,
+) -> None:
+    """STRAVA_ENABLED=false mothball: even a fully wired runner must not
+    accept a Strava sync — 404 with an explicit reason."""
+    services = _make_services(
+        fitness_factory, fitness_repo, jobs_repository, configured_runner,
+        strava_enabled=False,
+    )
+    with _build_client(services) as tc:
+        resp = tc.post("/api/fitness/sync/strava")
+    assert resp.status_code == 404
+    assert resp.json() == {
+        "error": "Strava integration is disabled on this server",
+    }
+
+
+def test_sync_post_garmin_unaffected_when_strava_disabled(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    jobs_repository: SQLiteJobRepository,
+    configured_runner: JobRunner,
+) -> None:
+    services = _make_services(
+        fitness_factory, fitness_repo, jobs_repository, configured_runner,
+        strava_enabled=False,
+    )
+    with _build_client(services) as tc:
+        resp = tc.post("/api/fitness/sync/garmin")
+    assert resp.status_code == 202
+    assert "job_id" in resp.json()
+
+
+def test_backfill_post_strava_disabled_returns_404(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    jobs_repository: SQLiteJobRepository,
+    configured_runner: JobRunner,
+) -> None:
+    services = _make_services(
+        fitness_factory, fitness_repo, jobs_repository, configured_runner,
+        strava_enabled=False,
+    )
+    with _build_client(services) as tc:
+        resp = tc.post(
+            "/api/fitness/backfill/strava",
+            json={"start": "2026-01-01"},
+        )
+    assert resp.status_code == 404
+    assert resp.json() == {
+        "error": "Strava integration is disabled on this server",
+    }
+
+
+def test_backfill_post_garmin_unaffected_when_strava_disabled(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    jobs_repository: SQLiteJobRepository,
+    configured_runner: JobRunner,
+) -> None:
+    services = _make_services(
+        fitness_factory, fitness_repo, jobs_repository, configured_runner,
+        strava_enabled=False,
+    )
+    with _build_client(services) as tc:
+        resp = tc.post(
+            "/api/fitness/backfill/garmin",
+            json={"start": "2026-01-01"},
+        )
+    assert resp.status_code == 202
+    assert "job_id" in resp.json()
 
 
 # --------------------------------------------------------------------

@@ -78,6 +78,34 @@ def test_run_daily_sync_continues_past_list_error():
     runner.submit_fitness_sync_garmin.assert_called_once_with(user_id=9, quiet_success=True)
 
 
+def test_run_daily_sync_garmin_only_sources_skips_strava():
+    """STRAVA_ENABLED=false mothball: bootstrap passes sources=("garmin",),
+    and the daily loop must neither list nor submit Strava syncs."""
+    repo = MagicMock()
+    repo.list_users_with_active_auth.side_effect = lambda *, source: [1, 2]
+    runner = MagicMock()
+    sched = FitnessSyncScheduler(
+        job_runner=runner, fitness_repo=repo, sources=("garmin",),
+    )
+    sched.run_daily_sync()
+    runner.submit_fitness_sync_strava.assert_not_called()
+    assert runner.submit_fitness_sync_garmin.call_count == 2
+    listed = {c.kwargs["source"] for c in repo.list_users_with_active_auth.call_args_list}
+    assert listed == {"garmin"}
+
+
+def test_scheduler_defaults_to_both_sources():
+    """Without an explicit sources override the scheduler still covers both."""
+    sched, runner, _ = _scheduler(strava_users=[1], garmin_users=[1])
+    sched.run_daily_sync()
+    runner.submit_fitness_sync_strava.assert_called_once_with(
+        user_id=1, quiet_success=True,
+    )
+    runner.submit_fitness_sync_garmin.assert_called_once_with(
+        user_id=1, quiet_success=True,
+    )
+
+
 def test_start_disabled_is_noop():
     sched = FitnessSyncScheduler(job_runner=MagicMock(), fitness_repo=MagicMock(), enabled=False)
     sched.start()

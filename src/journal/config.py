@@ -480,6 +480,16 @@ class Config:
     )
 
     # ── Fitness pipeline (W3 of fitness-tier-plan.md) ──────────────
+    # Master switch for the Strava integration. Default FALSE: Strava is
+    # mothballed (roadmap D8) — Strava paywalled API access on 2026-06-30
+    # and this deployment keeps Garmin only. The code, tests, and
+    # historical DB rows stay; flipping STRAVA_ENABLED=true (plus the
+    # OAuth creds below) revives the integration.
+    strava_enabled: bool = field(
+        default_factory=lambda: os.environ.get(
+            "STRAVA_ENABLED", "false"
+        ).lower() in ("1", "true", "yes", "on")
+    )
     # Strava OAuth — register an app at https://www.strava.com/settings/api
     # then drop the values here. See docs/fitness-tier-plan.md §1 P0.1.
     strava_client_id: str = field(

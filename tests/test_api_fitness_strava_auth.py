@@ -142,6 +142,7 @@ def _build_services(
     strava_client_id: str = "12345",
     strava_client_secret: str = "secret-XYZ",
     strava_redirect_uri: str = "https://webapp.example.com/settings/fitness/strava/callback",
+    strava_enabled: bool = True,
 ) -> dict:
     class _StubConfig:
         pass
@@ -150,6 +151,9 @@ def _build_services(
     cfg.strava_client_id = strava_client_id
     cfg.strava_client_secret = strava_client_secret
     cfg.strava_redirect_uri = strava_redirect_uri
+    # W1 strava-mothball: tests that exercise the live OAuth flow opt in
+    # explicitly — production defaults to disabled (STRAVA_ENABLED=false).
+    cfg.strava_enabled = strava_enabled
 
     return {
         "fitness_repo": fitness_repo,
@@ -575,3 +579,56 @@ def test_disconnect_only_affects_calling_user(
     other = fitness_repo.get_auth_state(user_id=2, source="strava")
     assert other is not None
     assert other.extra_state.get("upstream_user_id") == "11111111"
+
+
+# ── Tests: STRAVA_ENABLED mothball (W1) ──────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/api/fitness/strava/authorize_url"),
+        ("POST", "/api/fitness/strava/exchange"),
+        ("POST", "/api/fitness/strava/disconnect"),
+    ],
+)
+def test_strava_routes_404_when_disabled(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: StravaPendingStore,
+    method: str,
+    path: str,
+) -> None:
+    """With STRAVA_ENABLED=false all three OAuth routes are unreachable —
+    404 with a clear reason, even when OAuth creds are configured."""
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, exchange=FakeExchangeCode(),
+        strava_enabled=False,
+    )
+    with _build_client(services) as client:
+        if method == "GET":
+            resp = client.get(path)
+        else:
+            resp = client.post(path, json={"state": "s", "code": "c"})
+    assert resp.status_code == 404
+    assert resp.json() == {
+        "error": "Strava integration is disabled on this server",
+    }
+
+
+def test_strava_routes_404_when_config_missing(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: StravaPendingStore,
+) -> None:
+    """Fail closed: no config in the services dict means Strava is dark."""
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, exchange=FakeExchangeCode(),
+    )
+    services.pop("config")
+    with _build_client(services) as client:
+        resp = client.get("/api/fitness/strava/authorize_url")
+    assert resp.status_code == 404
+    assert "disabled" in resp.json()["error"]

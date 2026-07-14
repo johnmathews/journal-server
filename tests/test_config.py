@@ -311,6 +311,7 @@ class TestFitnessConfig:
         # Per-user Garmin credentials live in `fitness_auth_state`.
         for key in (
             "STRAVA_CLIENT_ID", "STRAVA_CLIENT_SECRET", "STRAVA_REDIRECT_URI",
+            "STRAVA_ENABLED",
             "FITNESS_TRANSIENT_FAILURE_THRESHOLD", "FITNESS_BACKFILL_START",
         ):
             monkeypatch.delenv(key, raising=False)
@@ -328,6 +329,25 @@ class TestFitnessConfig:
         assert not hasattr(config, "garmin_password")
         assert config.fitness_transient_failure_threshold == 3
         assert config.fitness_backfill_start == "2026-01-01"
+        # Strava is mothballed (roadmap D8): the integration is dark
+        # unless the operator explicitly opts back in.
+        assert config.strava_enabled is False
+
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
+    def test_strava_enabled_truthy_values(
+        self, monkeypatch: pytest.MonkeyPatch, value: str,
+    ) -> None:
+        self._clean(monkeypatch)
+        monkeypatch.setenv("STRAVA_ENABLED", value)
+        assert Config().strava_enabled is True
+
+    @pytest.mark.parametrize("value", ["", "0", "false", "no", "off", "banana"])
+    def test_strava_enabled_falsy_values(
+        self, monkeypatch: pytest.MonkeyPatch, value: str,
+    ) -> None:
+        self._clean(monkeypatch)
+        monkeypatch.setenv("STRAVA_ENABLED", value)
+        assert Config().strava_enabled is False
 
     def test_env_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._clean(monkeypatch)

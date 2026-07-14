@@ -72,6 +72,20 @@ def _runtime_get(services: dict, key: str) -> Any:
     return getattr(config, key, None) if config else None
 
 
+# W1 strava-mothball (roadmap D8): shared 404 body for every Strava
+# surface that the STRAVA_ENABLED flag turns off.
+STRAVA_DISABLED_ERROR = "Strava integration is disabled on this server"
+
+
+def _strava_enabled(services: dict) -> bool:
+    """True iff the STRAVA_ENABLED mothball flag is on.
+
+    Fail-closed: a missing config (or a config without the field) reads
+    as disabled — Strava must be unreachable unless explicitly revived.
+    """
+    return bool(getattr(services.get("config"), "strava_enabled", False))
+
+
 def _pricing_to_dict(entry: PricingEntry) -> dict[str, object]:
     """Convert a PricingEntry to a JSON-serializable dict."""
     return {

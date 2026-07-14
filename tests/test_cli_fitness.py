@@ -43,6 +43,10 @@ def fitness_env(tmp_path, monkeypatch):
     """
     db_path = tmp_path / "test.db"
     monkeypatch.setenv("DB_PATH", str(db_path))
+    # W1 strava-mothball: STRAVA_ENABLED defaults to false; the legacy
+    # live-Strava CLI tests opt back in. Flag-off behavior is covered by
+    # the dedicated "disabled" tests below.
+    monkeypatch.setenv("STRAVA_ENABLED", "true")
     monkeypatch.setenv("STRAVA_CLIENT_ID", "12345")
     monkeypatch.setenv("STRAVA_CLIENT_SECRET", "test_secret")
     monkeypatch.setenv("STRAVA_REDIRECT_URI", "http://localhost:8400/strava/callback")
@@ -772,3 +776,90 @@ def test_mint_then_import_roundtrip_via_main(fitness_env, monkeypatch, tmp_path)
     assert state is not None
     assert state.auth_status == "ok"
     assert state.extra_state.get("tokens_blob") == '{"oauth1": "MINTED_BLOB"}'
+
+
+# ── STRAVA_ENABLED mothball (W1) ─────────────────────────────────────
+
+
+def test_fitness_reauth_strava_disabled_exits_nonzero(
+    fitness_env, monkeypatch, capsys,
+):
+    """With the mothball flag off, re-auth must refuse before touching
+    the network or the DB."""
+    monkeypatch.setenv("STRAVA_ENABLED", "false")
+    sys.argv = ["journal", "fitness-reauth-strava", "--user-id", "1"]
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "Strava integration is disabled (STRAVA_ENABLED=false)" in err
+    assert _read_state(fitness_env, source="strava") is None
+
+
+@pytest.mark.parametrize("source", ["strava", "both"])
+def test_fitness_sync_rejects_strava_when_disabled(
+    fitness_env, monkeypatch, capsys, source,
+):
+    monkeypatch.setenv("STRAVA_ENABLED", "false")
+    calls: list[str] = []
+
+    def fake_run(*, source, **kwargs):
+        calls.append(source)
+        return {
+            "source": source, "status": "success", "run_id": 1,
+            "rows_fetched": 0, "rows_normalized": 0,
+        }
+
+    with patch("journal.cli.fitness._run_one_source_sync", side_effect=fake_run):
+        sys.argv = [
+            "journal", "fitness-sync", "--source", source, "--user-id", "1",
+        ]
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+    assert exc_info.value.code == 1
+    assert calls == []  # rejected before any source ran
+    err = capsys.readouterr().err
+    assert "Strava integration is disabled (STRAVA_ENABLED=false)" in err
+    assert "--source garmin" in err
+
+
+def test_fitness_sync_garmin_ok_when_strava_disabled(fitness_env, monkeypatch):
+    monkeypatch.setenv("STRAVA_ENABLED", "false")
+    calls: list[str] = []
+
+    def fake_run(*, source, **kwargs):
+        calls.append(source)
+        return {
+            "source": source, "status": "success", "run_id": 1,
+            "rows_fetched": 0, "rows_normalized": 0,
+        }
+
+    with patch("journal.cli.fitness._run_one_source_sync", side_effect=fake_run):
+        sys.argv = [
+            "journal", "fitness-sync", "--source", "garmin", "--user-id", "1",
+        ]
+        main()
+
+    assert calls == ["garmin"]
+
+
+@pytest.mark.parametrize("source", ["strava", "both"])
+def test_fitness_backfill_rejects_strava_when_disabled(
+    fitness_env, monkeypatch, capsys, source,
+):
+    monkeypatch.setenv("STRAVA_ENABLED", "false")
+    with patch(
+        "journal.cli.fitness._run_one_source_backfill",
+    ) as run_backfill:
+        sys.argv = [
+            "journal", "fitness-backfill",
+            "--source", source,
+            "--start", "2026-01-01",
+            "--user-id", "1",
+        ]
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+    assert exc_info.value.code == 1
+    run_backfill.assert_not_called()
+    err = capsys.readouterr().err
+    assert "Strava integration is disabled (STRAVA_ENABLED=false)" in err

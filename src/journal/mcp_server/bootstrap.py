@@ -74,9 +74,11 @@ def _build_fitness_callables(
     (``fetch_strava_callable``, ``fetch_garmin_callable``,
     ``normalize_strava_callable``, ``normalize_garmin_callable``).
 
-    Strava is wired only when ``STRAVA_CLIENT_ID`` and
-    ``STRAVA_CLIENT_SECRET`` are set (one OAuth app per server, shared
-    across users). Garmin is wired unconditionally — credentials are
+    Strava is wired only when ``STRAVA_ENABLED`` is true (mothballed by
+    default — roadmap D8, Strava API paywall 2026-06-30) **and**
+    ``STRAVA_CLIENT_ID`` + ``STRAVA_CLIENT_SECRET`` are set (one OAuth
+    app per server, shared across users). Garmin is wired
+    unconditionally — credentials are
     per-user from W6 onwards, sourced from ``fitness_auth_state``, not
     from env vars. A user without a Garmin auth row produces a clean
     ``auth_broken`` sync rather than a runtime error. Callers pass the
@@ -110,8 +112,14 @@ def _build_fitness_callables(
         "backfill_garmin_callable": None,
     }
 
+    # W1 strava-mothball: STRAVA_ENABLED (default false) is ANDed into
+    # the credential gate — with the flag off, Strava stays unwired even
+    # when OAuth creds are present, and every downstream surface fails
+    # loud ("not configured") or 404s.
     strava_configured = bool(
-        config.strava_client_id and config.strava_client_secret,
+        config.strava_enabled
+        and config.strava_client_id
+        and config.strava_client_secret,
     )
     if strava_configured:
         def _strava_provider_factory(
@@ -671,10 +679,17 @@ def _init_services() -> dict:
         **fitness_callables,
     )
     # Garmin is wired unconditionally (per-user creds, W6). Strava is
-    # wired only when STRAVA_CLIENT_ID + STRAVA_CLIENT_SECRET are set.
+    # wired only when STRAVA_ENABLED is true AND STRAVA_CLIENT_ID +
+    # STRAVA_CLIENT_SECRET are set.
     strava_wired = fitness_callables.get("fetch_strava_callable") is not None
     if strava_wired:
         log.info("  Fitness sync wired (Strava + Garmin providers)")
+    elif not config.strava_enabled:
+        log.info(
+            "  Fitness sync wired (Garmin only — strava: disabled "
+            "(mothballed, STRAVA_ENABLED=false); Strava routes 404 and "
+            "submit_fitness_sync_strava will refuse)",
+        )
     else:
         log.info(
             "  Fitness sync wired (Garmin only — no STRAVA_CLIENT_ID; "
@@ -704,10 +719,15 @@ def _init_services() -> dict:
     # (the prod media VM runs CEST/UTC+2, i.e. 5pm local — not 17:00 UTC).
     from journal.services.fitness.scheduler import FitnessSyncScheduler
 
+    # W1 strava-mothball: with STRAVA_ENABLED=false the daily loop only
+    # processes Garmin — no doomed Strava submits, no noise in the log.
     fitness_sync_scheduler = FitnessSyncScheduler(
         job_runner=job_runner,
         fitness_repo=fitness_repo,
         enabled=config.fitness_sync_enabled,
+        sources=(
+            ("strava", "garmin") if config.strava_enabled else ("garmin",)
+        ),
     )
     fitness_sync_scheduler.start()
     if config.fitness_sync_enabled:
