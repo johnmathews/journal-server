@@ -651,11 +651,18 @@ class PushoverNotificationService:
 
     # ── Health alerts ────────────────────────────────────────────────
 
-    def notify_fitness_auth_broken(self, user_id: int, source: str) -> None:
+    def notify_fitness_auth_broken(
+        self, user_id: int, source: str, *, recovery_attempted: bool = False,
+    ) -> None:
         """Notify a user that fitness auth needs re-authentication (fire-once).
 
         Caller (the W6 fetch service) only invokes this on the
         transition into ``broken`` — re-broken syncs do not re-fire.
+
+        ``recovery_attempted`` is True when an unattended re-login with
+        saved credentials was actually attempted (and failed) before the
+        transition — the message says so, so the user knows the
+        automatic path is exhausted and manual re-auth is required.
         """
         try:
             if not self._is_topic_enabled(user_id, "notif_fitness_auth_broken"):
@@ -666,6 +673,11 @@ class PushoverNotificationService:
             label = source.capitalize()
             title = f"{label} re-auth needed"
             message = f"{label} fitness sync is paused. Re-authenticate in the app."
+            if recovery_attempted:
+                message += (
+                    " Automatic re-login with saved credentials was "
+                    "attempted and failed."
+                )
             self._post_to_pushover(
                 user_key, app_token, title, message, PRIORITY_HIGH,
             )

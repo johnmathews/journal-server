@@ -67,6 +67,7 @@ def _build_fitness_callables(
     fitness_repo: Any,
     config: Any,
     notification_service: Any,
+    garmin_upstream_cooldown: Any = None,
 ) -> dict[str, Any]:
     """Wire Strava + Garmin fetch + normalize for the JobRunner.
 
@@ -84,6 +85,14 @@ def _build_fitness_callables(
     ``auth_broken`` sync rather than a runtime error. Callers pass the
     dict via ``**`` so a Strava-less server still wires up Garmin.
 
+    ``garmin_upstream_cooldown`` is the process-wide
+    :class:`~journal.services.fitness.garmin_pending.GarminUpstreamCooldown`
+    shared with the connect/reconnect API handlers (seeded into the
+    services dict by :func:`_init_services`) — the W6 unattended re-login
+    must respect a Cloudflare block the UI observed, and vice versa.
+    ``None`` (CLI-style one-shot processes, older tests) leaves the fetch
+    service without a gate.
+
     The repository is constructed in :func:`_init_services` and threaded
     through here so the API layer (W9) can read from the same instance
     without re-wrapping the connection.
@@ -94,6 +103,11 @@ def _build_fitness_callables(
     from journal.services.fitness.backfill import (
         backfill_garmin,
         backfill_strava,
+    )
+    from journal.services.fitness.credentials import (
+        CredentialDecryptError,
+        CredentialKeyInvalid,
+        decrypt_credential,
     )
     from journal.services.fitness.fetch import (
         GarminFetchService,
@@ -200,7 +214,31 @@ def _build_fitness_callables(
         auth: FitnessAuthState,
     ) -> GarminConnectGarminProvider:
         user_id = auth.user_id
-        tokens_blob = auth.extra_state.get("tokens_blob") if auth.extra_state else None
+        extra = auth.extra_state or {}
+        tokens_blob = extra.get("tokens_blob")
+
+        # W6: decrypt saved credentials (persisted by the W5 connect /
+        # MFA / reconnect handlers) so the provider can run an
+        # unattended tier-3 password re-login when the blob is dead.
+        # Key unset, credentials absent, or an undecryptable token
+        # (rotated/lost key) all degrade to the empty-credential
+        # provider — blob-only, exactly the pre-W6 behavior.
+        username = ""
+        password = ""
+        saved_username = extra.get("garmin_username") or ""
+        enc_password = extra.get("enc_password") or ""
+        if config.fitness_credential_key and saved_username and enc_password:
+            try:
+                password = decrypt_credential(
+                    enc_password, key=config.fitness_credential_key,
+                )
+                username = saved_username
+            except (CredentialDecryptError, CredentialKeyInvalid) as exc:
+                log.warning(
+                    "Saved Garmin credentials for user %d could not be "
+                    "decrypted (%s); unattended re-login disabled until "
+                    "the user reconnects", user_id, exc,
+                )
 
         def _persist(tokens_blob: str) -> None:
             # garminconnect emits a JSON blob covering both OAuth1
@@ -225,8 +263,8 @@ def _build_fitness_callables(
             )
 
         return GarminConnectGarminProvider(
-            username="",
-            password="",
+            username=username,
+            password=password,
             tokens_blob=tokens_blob,
             persist_tokens=_persist,
         )
@@ -236,6 +274,7 @@ def _build_fitness_callables(
         notifier=notification_service,
         config=config,
         provider_factory=_garmin_provider_factory,
+        upstream_cooldown=garmin_upstream_cooldown,
     )
     out["fetch_garmin_callable"] = garmin_fetch.run_sync
     out["normalize_garmin_callable"] = (
@@ -596,12 +635,19 @@ def _init_services() -> dict:
         reconciled,
     )
     from journal.db.fitness_repository import FitnessRepository
+    from journal.services.fitness.garmin_pending import GarminUpstreamCooldown
 
     fitness_repo = FitnessRepository(db_factory)
+    # One process-wide upstream-block gate, shared between the Garmin
+    # connect/reconnect API handlers (via the services dict below) and
+    # the W6 unattended re-login in the fetch service. A Cloudflare/IP
+    # block observed by either side must refuse logins from both.
+    garmin_upstream_cooldown = GarminUpstreamCooldown()
     fitness_callables = _build_fitness_callables(
         fitness_repo=fitness_repo,
         config=config,
         notification_service=notification_service,
+        garmin_upstream_cooldown=garmin_upstream_cooldown,
     )
 
     # Storylines (docs/storylines-plan.md). Opt-in: only wired when an
@@ -844,6 +890,11 @@ def _init_services() -> dict:
         "notification_service": notification_service,
         # Fitness — repo for read APIs (W9) and the integrity check.
         "fitness_repo": fitness_repo,
+        # Shared upstream-block gate — the API route registration's lazy
+        # getter (`api/fitness_garmin.py::_garmin_upstream_cooldown`)
+        # picks this up instead of minting its own, so the connect UI
+        # and the W6 unattended re-login share one gate.
+        "garmin_upstream_cooldown": garmin_upstream_cooldown,
         # Storylines — None when ANTHROPIC_API_KEY is unset; the API
         # routes and MCP tools detect that and return 503.
         "storyline_repository": storyline_repository,

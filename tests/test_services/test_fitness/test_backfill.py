@@ -206,7 +206,9 @@ class _RecordingGarminProvider:
 
 
 class _NoopNotifier:
-    def notify_fitness_auth_broken(self, user_id: int, source: str) -> None:
+    def notify_fitness_auth_broken(
+        self, user_id: int, source: str, *, recovery_attempted: bool = False,
+    ) -> None:
         return
 
     def notify_fitness_sync_failure(

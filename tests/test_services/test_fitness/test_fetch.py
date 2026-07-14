@@ -122,6 +122,11 @@ class _FakeGarminProvider:
         self.raise_on_get_daily: BaseException | None = None
         self.raise_on_list_activities: BaseException | None = None
         self.raise_on_login: BaseException | None = None
+        # W6 unattended re-login seam (SupportsUnattendedRelogin surface).
+        self.relogin_password = ""  # empty → can_relogin False (default)
+        self.relogin_calls = 0
+        self.raise_on_relogin: BaseException | None = None
+        self.on_relogin_success: Any = None
 
     def login(self, *, mfa_callback: Any = None) -> None:
         self.login_called = True
@@ -142,14 +147,29 @@ class _FakeGarminProvider:
             raise self.raise_on_list_activities
         yield from self.activities
 
+    # W6 — SupportsUnattendedRelogin surface ---------------------------
+    def can_relogin_with_password(self) -> bool:
+        return bool(self.relogin_password)
+
+    def relogin_with_password(self) -> None:
+        self.relogin_calls += 1
+        if self.raise_on_relogin is not None:
+            raise self.raise_on_relogin
+        if self.on_relogin_success is not None:
+            self.on_relogin_success()
+
 
 class _FakeNotifier:
     def __init__(self) -> None:
         self.auth_broken_calls: list[tuple[int, str]] = []
+        self.auth_broken_recovery_flags: list[bool] = []
         self.sync_failure_calls: list[tuple[int, str, int]] = []
 
-    def notify_fitness_auth_broken(self, user_id: int, source: str) -> None:
+    def notify_fitness_auth_broken(
+        self, user_id: int, source: str, *, recovery_attempted: bool = False,
+    ) -> None:
         self.auth_broken_calls.append((user_id, source))
+        self.auth_broken_recovery_flags.append(recovery_attempted)
 
     def notify_fitness_sync_failure(
         self, user_id: int, source: str, attempts: int,
@@ -202,11 +222,12 @@ def _make_strava(
 
 def _make_garmin(
     *, repo: FitnessRepository, config: Any, fake: _FakeGarminProvider,
-    notifier: _FakeNotifier,
+    notifier: _FakeNotifier, upstream_cooldown: Any = None,
 ) -> GarminFetchService:
     return GarminFetchService(
         repo=repo, notifier=notifier, config=config,
         provider_factory=lambda _auth: fake,
+        upstream_cooldown=upstream_cooldown,
         clock=lambda: datetime(2026, 5, 9, 12, 0, 0, tzinfo=UTC),
     )
 
@@ -921,6 +942,228 @@ def test_garmin_midrun_auth_status_flips_to_broken_clean_abort(
     assert runs[0]["status"] == "auth_broken"
     assert runs[0]["error_class"] == "MidRunAuthLost"
     assert notifier.auth_broken_calls == []
+
+
+# 14. W6 — unattended Garmin re-login on dead token blob --------------
+
+
+def _relogin_capable_fake() -> _FakeGarminProvider:
+    """A fake whose dead-blob failure mode is a login-time auth error and
+    which carries a usable saved password for the unattended retry."""
+    fake = _FakeGarminProvider()
+    fake.relogin_password = "hunter2"
+    fake.raise_on_login = GarminAuthError("401 from dead blob")
+    return fake
+
+
+def test_garmin_dead_blob_auto_relogin_completes_sync_and_persists_blob(
+    repo: FitnessRepository, config: Any, db_conn: sqlite3.Connection,
+) -> None:
+    """Dead blob → one unattended re-login → the retried fetch succeeds
+    without user action and the fresh blob reaches the auth row."""
+    from journal.services.fitness.garmin_pending import GarminUpstreamCooldown
+
+    _seed_auth(repo, "garmin")
+    fake = _relogin_capable_fake()
+
+    def _relogin_succeeds() -> None:
+        # Fresh client works from here on; persist the new blob the way
+        # the real provider's persist callback does.
+        fake.raise_on_login = None
+        auth = repo.get_auth_state(user_id=1, source="garmin")
+        assert auth is not None
+        extra = dict(auth.extra_state)
+        extra["tokens_blob"] = "fresh-blob-after-relogin"
+        repo.upsert_auth_state(
+            FitnessAuthState(
+                user_id=1, source="garmin",
+                access_token=None, refresh_token=None, token_expires_at=None,
+                extra_state=extra,
+            ),
+        )
+
+    fake.on_relogin_success = _relogin_succeeds
+    notifier = _FakeNotifier()
+    gate = GarminUpstreamCooldown()
+    svc = _make_garmin(
+        repo=repo, config=config, fake=fake, notifier=notifier,
+        upstream_cooldown=gate,
+    )
+
+    result = svc.run_sync(
+        user_id=1,
+        since=datetime(2026, 4, 15, tzinfo=UTC),
+        until=datetime(2026, 4, 15, 23, 59, tzinfo=UTC),
+    )
+
+    assert result.status == "success"
+    assert fake.relogin_calls == 1
+    auth = repo.get_auth_state(user_id=1, source="garmin")
+    assert auth is not None
+    assert auth.auth_status == "ok"
+    assert auth.extra_state["tokens_blob"] == "fresh-blob-after-relogin"
+    # Recovery was silent — no auth-broken notification fired.
+    assert notifier.auth_broken_calls == []
+    # A successful upstream contact clears the shared gate.
+    assert gate.check() is None
+
+
+def test_garmin_relogin_skipped_when_upstream_cooldown_hot(
+    repo: FitnessRepository, config: Any,
+) -> None:
+    """A hot shared cooldown (e.g. the connect UI just got blocked) must
+    suppress the unattended attempt entirely — straight to auth_broken."""
+    from journal.services.fitness.garmin_pending import GarminUpstreamCooldown
+
+    _seed_auth(repo, "garmin")
+    fake = _relogin_capable_fake()
+    notifier = _FakeNotifier()
+    gate = GarminUpstreamCooldown()
+    gate.record_block()  # the UI (or a previous run) observed a block
+    svc = _make_garmin(
+        repo=repo, config=config, fake=fake, notifier=notifier,
+        upstream_cooldown=gate,
+    )
+
+    result = svc.run_sync(
+        user_id=1,
+        since=datetime(2026, 4, 15, tzinfo=UTC),
+        until=datetime(2026, 4, 15, 23, 59, tzinfo=UTC),
+    )
+
+    assert result.status == "auth_broken"
+    assert fake.relogin_calls == 0
+    # No attempt was made, so the notification is the plain variant.
+    assert notifier.auth_broken_calls == [(1, "garmin")]
+    assert notifier.auth_broken_recovery_flags == [False]
+
+
+def test_garmin_relogin_rate_limited_records_block_on_shared_cooldown(
+    repo: FitnessRepository, config: Any,
+) -> None:
+    from journal.providers.garmin import GarminRateLimitError
+    from journal.services.fitness.garmin_pending import GarminUpstreamCooldown
+
+    _seed_auth(repo, "garmin")
+    fake = _relogin_capable_fake()
+    fake.raise_on_relogin = GarminRateLimitError("429 from Cloudflare")
+    notifier = _FakeNotifier()
+    gate = GarminUpstreamCooldown()
+    svc = _make_garmin(
+        repo=repo, config=config, fake=fake, notifier=notifier,
+        upstream_cooldown=gate,
+    )
+
+    result = svc.run_sync(
+        user_id=1,
+        since=datetime(2026, 4, 15, tzinfo=UTC),
+        until=datetime(2026, 4, 15, 23, 59, tzinfo=UTC),
+    )
+
+    assert result.status == "auth_broken"
+    assert fake.relogin_calls == 1
+    # The block was recorded on the SHARED gate so the connect UI
+    # refuses further logins while it is hot.
+    assert gate.check() is not None
+    # An attempt was made and failed — the notification says so.
+    assert notifier.auth_broken_calls == [(1, "garmin")]
+    assert notifier.auth_broken_recovery_flags == [True]
+
+
+def test_garmin_relogin_mfa_challenge_degrades_to_auth_broken_one_attempt(
+    repo: FitnessRepository, config: Any,
+) -> None:
+    _seed_auth(repo, "garmin")
+    fake = _relogin_capable_fake()
+    fake.raise_on_relogin = GarminAuthError(
+        "Garmin requested MFA — unattended re-login cannot complete",
+    )
+    notifier = _FakeNotifier()
+    svc = _make_garmin(repo=repo, config=config, fake=fake, notifier=notifier)
+
+    result = svc.run_sync(
+        user_id=1,
+        since=datetime(2026, 4, 15, tzinfo=UTC),
+        until=datetime(2026, 4, 15, 23, 59, tzinfo=UTC),
+    )
+
+    assert result.status == "auth_broken"
+    assert fake.relogin_calls == 1  # exactly one attempt, no retry loop
+    assert notifier.auth_broken_calls == [(1, "garmin")]
+    assert notifier.auth_broken_recovery_flags == [True]
+
+
+def test_garmin_no_saved_credentials_keeps_current_behavior(
+    repo: FitnessRepository, config: Any,
+) -> None:
+    """No saved password → no attempt; the pre-W6 auth_broken flow."""
+    _seed_auth(repo, "garmin")
+    fake = _FakeGarminProvider()
+    fake.raise_on_login = GarminAuthError("401 from dead blob")
+    assert not fake.can_relogin_with_password()
+    notifier = _FakeNotifier()
+    svc = _make_garmin(repo=repo, config=config, fake=fake, notifier=notifier)
+
+    result = svc.run_sync(
+        user_id=1,
+        since=datetime(2026, 4, 15, tzinfo=UTC),
+        until=datetime(2026, 4, 15, 23, 59, tzinfo=UTC),
+    )
+
+    assert result.status == "auth_broken"
+    assert fake.relogin_calls == 0
+    assert notifier.auth_broken_calls == [(1, "garmin")]
+    assert notifier.auth_broken_recovery_flags == [False]
+
+
+def test_garmin_second_auth_failure_in_same_run_does_not_relogin_again(
+    repo: FitnessRepository, config: Any,
+) -> None:
+    """Re-login 'succeeds' but the retried fetch still 401s (e.g. the
+    account is genuinely locked) — the run must fail auth_broken after
+    exactly one re-login attempt, never loop."""
+    _seed_auth(repo, "garmin")
+    fake = _relogin_capable_fake()
+    # on_relogin_success left as None: raise_on_login stays armed, so the
+    # retried fetch hits the auth error again.
+    notifier = _FakeNotifier()
+    svc = _make_garmin(repo=repo, config=config, fake=fake, notifier=notifier)
+
+    result = svc.run_sync(
+        user_id=1,
+        since=datetime(2026, 4, 15, tzinfo=UTC),
+        until=datetime(2026, 4, 15, 23, 59, tzinfo=UTC),
+    )
+
+    assert result.status == "auth_broken"
+    assert fake.relogin_calls == 1
+    assert notifier.auth_broken_calls == [(1, "garmin")]
+    assert notifier.auth_broken_recovery_flags == [True]
+
+
+def test_garmin_relogin_attempted_without_cooldown_instance(
+    repo: FitnessRepository, config: Any,
+) -> None:
+    """CLI-style construction passes no shared cooldown — the attempt
+    still runs (a one-shot process has no gate state to consult)."""
+    _seed_auth(repo, "garmin")
+    fake = _relogin_capable_fake()
+
+    def _relogin_succeeds() -> None:
+        fake.raise_on_login = None
+
+    fake.on_relogin_success = _relogin_succeeds
+    notifier = _FakeNotifier()
+    svc = _make_garmin(repo=repo, config=config, fake=fake, notifier=notifier)
+
+    result = svc.run_sync(
+        user_id=1,
+        since=datetime(2026, 4, 15, tzinfo=UTC),
+        until=datetime(2026, 4, 15, 23, 59, tzinfo=UTC),
+    )
+
+    assert result.status == "success"
+    assert fake.relogin_calls == 1
 
 
 def test_midrun_auth_lost_error_class_carries_reason() -> None:

@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from garminconnect import GarminConnectAuthenticationError
+from garminconnect import (
+    GarminConnectAuthenticationError,
+    GarminConnectTooManyRequestsError,
+)
 
 from journal.providers.garmin import (
     GarminActivitySummary,
@@ -16,6 +19,8 @@ from journal.providers.garmin import (
     GarminConnectGarminProvider,
     GarminDailyMetrics,
     GarminProvider,
+    GarminRateLimitError,
+    SupportsUnattendedRelogin,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "garmin"
@@ -75,7 +80,13 @@ class _FakeGarmin:
         self.login_calls.append(tokenstore)
         if self.login_raises is not None:
             raise self.login_raises
-        if self.login_invokes_mfa and self.prompt_mfa is not None:
+        if self.login_invokes_mfa:
+            if self.prompt_mfa is None:
+                # Mirrors garminconnect 0.3.x: an MFA challenge with no
+                # prompt_mfa mechanism raises rather than blocking on stdin.
+                raise GarminConnectAuthenticationError(
+                    "MFA Required but no prompt_mfa mechanism supplied",
+                )
             self.prompt_mfa()
         return self.login_returns
 
@@ -464,3 +475,166 @@ def test_login_translates_auth_error_to_typed_exception() -> None:
 
     with pytest.raises(GarminAuthError):
         provider.login()
+
+
+# 7. W6 — unattended MFA guard ----------------------------------------
+
+
+def test_login_mfa_challenge_without_callback_raises_typed_error() -> None:
+    """No mfa_callback + MFA challenge → GarminAuthError with the
+    unattended-re-login message; never a hang or an interactive prompt."""
+    fake = _FakeGarmin()
+    fake.login_invokes_mfa = True
+    provider, _, _ = _make_provider(fake=fake)
+
+    with pytest.raises(GarminAuthError, match="unattended"):
+        provider.login()
+
+    # The SDK was constructed with no prompt callback — nothing to hang on.
+    assert fake.init_kwargs["prompt_mfa"] is None
+
+
+# 8. W6 — unattended re-login with saved password ----------------------
+
+
+def _relogin_setup(
+    *,
+    username: str = "user@example.com",
+    password: str = "hunter2",
+    tokens_blob: str | None = '{"di_token":"DEAD"}',
+    configure: Any = None,
+) -> tuple[GarminConnectGarminProvider, list[_FakeGarmin], list[str]]:
+    """Provider + per-call client list for relogin tests.
+
+    Unlike ``_make_provider`` (single shared fake), the factory here mints
+    a fresh ``_FakeGarmin`` per call so the test can distinguish the
+    original client from the one built by ``relogin_with_password``.
+    ``configure`` is applied to every freshly minted client.
+    """
+    clients: list[_FakeGarmin] = []
+    persisted: list[str] = []
+
+    def factory(**kwargs: Any) -> _FakeGarmin:
+        c = _FakeGarmin(**kwargs)
+        if configure is not None:
+            configure(c)
+        clients.append(c)
+        return c
+
+    provider = GarminConnectGarminProvider(
+        username=username,
+        password=password,
+        tokens_blob=tokens_blob,
+        persist_tokens=persisted.append,
+        client_factory=factory,  # type: ignore[arg-type]
+    )
+    return provider, clients, persisted
+
+
+def test_provider_supports_unattended_relogin_protocol() -> None:
+    provider, _, _ = _relogin_setup()
+    assert isinstance(provider, SupportsUnattendedRelogin)
+    assert provider.can_relogin_with_password()
+
+
+def test_can_relogin_is_false_without_credentials() -> None:
+    provider, _, _ = _relogin_setup(username="", password="")
+    assert not provider.can_relogin_with_password()
+
+
+def test_relogin_bypasses_dead_blob_and_persists_fresh_tokens() -> None:
+    """The re-login client must do a password login (no blob hydration,
+    no tokenstore) and mirror the new blob to the persist callback."""
+    new_blob = '{"di_token":"FRESH","di_refresh_token":"R","di_client_id":"C"}'
+
+    def configure(c: _FakeGarmin) -> None:
+        c.client.dump_value = new_blob
+
+    provider, clients, persisted = _relogin_setup(configure=configure)
+
+    provider.relogin_with_password()
+
+    # A fresh client was built for the re-login, with no MFA prompt wired.
+    relogin_client = clients[-1]
+    assert relogin_client.init_kwargs["email"] == "user@example.com"
+    assert relogin_client.init_kwargs["password"] == "hunter2"
+    assert relogin_client.init_kwargs["prompt_mfa"] is None
+    # Password login, not blob or filesystem tokenstore.
+    assert relogin_client.client.loaded_blob is None
+    assert relogin_client.login_calls == [None]
+    # New blob persisted.
+    assert persisted == [new_blob]
+
+
+def test_relogin_updates_blob_so_subsequent_login_uses_it() -> None:
+    """After a successful re-login the provider's own token blob is the
+    fresh one — a retried fetch phase that calls login() again must
+    hydrate the new blob, not reload the dead one."""
+    dead = '{"di_token":"DEAD"}'
+    fresh = '{"di_token":"FRESH"}'
+
+    def configure(c: _FakeGarmin) -> None:
+        c.client.dump_value = fresh
+
+    provider, clients, _ = _relogin_setup(tokens_blob=dead, configure=configure)
+
+    provider.relogin_with_password()
+    provider.login()
+
+    assert clients[-1].client.loaded_blob == fresh
+    assert clients[-1].login_calls == []  # blob hydration, no network login
+
+
+def test_relogin_rate_limited_raises_rate_limit_error() -> None:
+    def configure(c: _FakeGarmin) -> None:
+        c.login_raises = GarminConnectTooManyRequestsError("429 Too Many Requests")
+
+    provider, _, persisted = _relogin_setup(configure=configure)
+
+    with pytest.raises(GarminRateLimitError):
+        provider.relogin_with_password()
+    assert persisted == []
+
+
+def test_relogin_cloudflare_block_raises_rate_limit_error() -> None:
+    """The terminal 'all strategies exhausted' Cloudflare failure surfaces
+    as a generic connection error — the text signals classify it."""
+
+    def configure(c: _FakeGarmin) -> None:
+        c.login_raises = RuntimeError(
+            "Login failed: strategies exhausted (cloudflare challenge)",
+        )
+
+    provider, _, _ = _relogin_setup(configure=configure)
+
+    with pytest.raises(GarminRateLimitError):
+        provider.relogin_with_password()
+
+
+def test_relogin_mfa_challenge_raises_auth_error_without_prompting() -> None:
+    def configure(c: _FakeGarmin) -> None:
+        c.login_invokes_mfa = True
+
+    provider, _, persisted = _relogin_setup(configure=configure)
+
+    with pytest.raises(GarminAuthError, match="unattended"):
+        provider.relogin_with_password()
+    assert persisted == []
+
+
+def test_relogin_bad_password_raises_auth_error() -> None:
+    def configure(c: _FakeGarmin) -> None:
+        c.login_raises = GarminConnectAuthenticationError("invalid credentials")
+
+    provider, _, _ = _relogin_setup(configure=configure)
+
+    with pytest.raises(GarminAuthError):
+        provider.relogin_with_password()
+
+
+def test_relogin_without_credentials_raises_auth_error_before_upstream() -> None:
+    provider, clients, _ = _relogin_setup(username="", password="")
+
+    with pytest.raises(GarminAuthError):
+        provider.relogin_with_password()
+    assert clients == []  # no client was even constructed

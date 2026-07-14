@@ -52,7 +52,12 @@ from journal.services.fitness.backfill import (
     backfill_garmin,
     backfill_strava,
 )
-from journal.services.fitness.credentials import encrypt_credential
+from journal.services.fitness.credentials import (
+    CredentialDecryptError,
+    CredentialKeyInvalid,
+    decrypt_credential,
+    encrypt_credential,
+)
 from journal.services.fitness.fetch import (
     GarminFetchService,
     StravaFetchService,
@@ -576,7 +581,9 @@ class _NoopFitnessNotifier:
     paths to fan out alerts.
     """
 
-    def notify_fitness_auth_broken(self, user_id: int, source: str) -> None:
+    def notify_fitness_auth_broken(
+        self, user_id: int, source: str, *, recovery_attempted: bool = False,
+    ) -> None:
         return
 
     def notify_fitness_sync_failure(
@@ -637,19 +644,41 @@ def _garmin_provider_factory(
 ) -> Any:
     """Build the ``provider_factory`` callback for Garmin sync.
 
-    Post-W6: credentials are per-user from the DB (``tokens_blob`` on
+    Credentials are per-user from the DB (``tokens_blob`` on
     ``fitness_auth_state.extra_state_json``). No global Garmin
     username/password env vars exist; if a user has no token blob, the
     provider falls through to the network login with empty credentials
     and fails cleanly (the fetch service writes ``auth_status='broken'``).
+
+    W6 of the strava-mothball / garmin-credentials plan: mirrors the
+    bootstrap factory — when ``FITNESS_CREDENTIAL_KEY`` is set and the
+    auth row carries saved (encrypted) credentials, they are decrypted
+    and injected so the fetch service's unattended re-login also works
+    from ``journal fitness-sync`` / ``fitness-backfill``. Decrypt
+    failures degrade to the empty-credential provider with a warning.
     """
-    del config  # No global Garmin credentials after W6.
 
     def _factory(auth: FitnessAuthState) -> GarminConnectGarminProvider:
         user_id = auth.user_id
-        tokens_blob = (
-            auth.extra_state.get("tokens_blob") if auth.extra_state else None
-        )
+        extra = auth.extra_state or {}
+        tokens_blob = extra.get("tokens_blob")
+
+        username = ""
+        password = ""
+        saved_username = extra.get("garmin_username") or ""
+        enc_password = extra.get("enc_password") or ""
+        if config.fitness_credential_key and saved_username and enc_password:
+            try:
+                password = decrypt_credential(
+                    enc_password, key=config.fitness_credential_key,
+                )
+                username = saved_username
+            except (CredentialDecryptError, CredentialKeyInvalid) as exc:
+                log.warning(
+                    "Saved Garmin credentials for user %d could not be "
+                    "decrypted (%s); unattended re-login disabled until "
+                    "the user reconnects", user_id, exc,
+                )
 
         def _persist(blob: str) -> None:
             existing = repo.get_auth_state(user_id=user_id, source="garmin")
@@ -678,8 +707,8 @@ def _garmin_provider_factory(
             )
 
         return GarminConnectGarminProvider(
-            username="",
-            password="",
+            username=username,
+            password=password,
             tokens_blob=tokens_blob,
             persist_tokens=_persist,
         )

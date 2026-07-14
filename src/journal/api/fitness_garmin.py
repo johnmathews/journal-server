@@ -50,6 +50,7 @@ from journal.api._handler import JsonBody, handler
 from journal.api._shared import _now_iso
 from journal.auth import get_authenticated_user
 from journal.models import FitnessAuthState
+from journal.providers.garmin import looks_rate_limited as _looks_rate_limited
 from journal.services.fitness.credentials import (
     CredentialDecryptError,
     CredentialKeyInvalid,
@@ -74,31 +75,12 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-# Substrings that mark a Garmin login failure as a rate-limit / Cloudflare
-# bot-challenge rather than genuinely wrong credentials. Lower-cased match
-# against both the exception text and the diagnostics garminconnect logs
-# mid-login (see ``_capture_garmin_logs``). Kept deliberately broad: a false
-# positive only changes a 401 into a "try again later" 429, never the reverse.
-_RATE_LIMIT_SIGNALS = (
-    "429",
-    "rate limit",
-    "rate-limit",
-    "rate limiting",
-    "too many",
-    "cloudflare",
-    "bot challenge",
-    "captcha",
-    "unexpected title",
-    "strategies exhausted",
-    "ip rate limited",
-    "blocking this request",
-)
-
-
-def _looks_rate_limited(*texts: str) -> bool:
-    """True when any text carries a rate-limit / bot-challenge signal."""
-    blob = " ".join(t for t in texts if t).lower()
-    return any(signal in blob for signal in _RATE_LIMIT_SIGNALS)
+# Rate-limit / bot-challenge classification lives in
+# ``journal.providers.garmin`` (``RATE_LIMIT_SIGNALS`` /
+# ``looks_rate_limited``) since W6 — the unattended re-login path and
+# these connect handlers must classify identically. Matched against both
+# the exception text and the diagnostics garminconnect logs mid-login
+# (see ``_capture_garmin_logs``).
 
 
 class _GarminLogCapture(logging.Handler):

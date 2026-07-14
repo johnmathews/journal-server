@@ -27,7 +27,16 @@ class FitnessAuthError(FitnessError):
     Mirrors HTTP 401/403 from either source. The fetch service uses
     this to drive ``transition_auth`` to ``broken`` and fire
     ``notif_fitness_auth_broken`` (fire-once on transition).
+
+    ``recovery_attempted`` (W6 of the strava-mothball / garmin-credentials
+    plan) is True when the Garmin fetch service actually ran an unattended
+    re-login with saved credentials before giving up — the notification
+    mentions the failed automatic recovery only in that case.
     """
+
+    def __init__(self, message: str, *, recovery_attempted: bool = False) -> None:
+        super().__init__(message)
+        self.recovery_attempted = recovery_attempted
 
 
 class FitnessTransientError(FitnessError):

@@ -35,6 +35,8 @@ from journal.providers.garmin import (
     GarminAuthError,
     GarminDailyMetrics,
     GarminProvider,
+    GarminRateLimitError,
+    SupportsUnattendedRelogin,
 )
 from journal.providers.strava import (
     StravaActivitySummary,
@@ -49,6 +51,7 @@ if TYPE_CHECKING:
     from journal.config import Config
     from journal.db.fitness_repository import FitnessRepository
     from journal.models import FitnessAuthState
+    from journal.services.fitness.garmin_pending import GarminUpstreamCooldown
 
 log = logging.getLogger(__name__)
 
@@ -101,7 +104,9 @@ class FitnessNotifier(Protocol):
     reach into ``services/fitness/``.
     """
 
-    def notify_fitness_auth_broken(self, user_id: int, source: str) -> None: ...
+    def notify_fitness_auth_broken(
+        self, user_id: int, source: str, *, recovery_attempted: bool = False,
+    ) -> None: ...
 
     def notify_fitness_sync_failure(
         self, user_id: int, source: str, attempts: int,
@@ -208,7 +213,10 @@ class _FetchServiceBase:
                 error_message=str(exc),
             )
             if transitioned:
-                self._notifier.notify_fitness_auth_broken(user_id, self.SOURCE)
+                self._notifier.notify_fitness_auth_broken(
+                    user_id, self.SOURCE,
+                    recovery_attempted=exc.recovery_attempted,
+                )
             return FitnessSyncResult(
                 status="auth_broken", run_id=run_id,
                 rows_fetched=0, rows_normalized=0,
@@ -399,7 +407,20 @@ class StravaFetchService(_FetchServiceBase):
 
 
 class GarminFetchService(_FetchServiceBase):
-    """Fetch service for Garmin."""
+    """Fetch service for Garmin.
+
+    W6 (strava-mothball / garmin-credentials plan): when a fetch phase
+    fails with an auth error — the dead-blob signature, since a stale
+    blob deserialises fine at ``login()`` but 401s at the first data
+    call — and the provider carries decryptable saved credentials
+    (:class:`~journal.providers.garmin.SupportsUnattendedRelogin`), the
+    service runs **at most one** unattended password re-login per sync
+    run, then retries the fetch once. The shared ``upstream_cooldown``
+    (same instance the connect/reconnect API handlers use) is consulted
+    before, and armed by, any blocked attempt, so unattended recovery
+    can never deepen a Cloudflare block the UI already observed —
+    or vice versa.
+    """
 
     SOURCE = "garmin"
 
@@ -410,10 +431,12 @@ class GarminFetchService(_FetchServiceBase):
         notifier: FitnessNotifier,
         config: Config,
         provider_factory: Callable[[FitnessAuthState], GarminProvider],
+        upstream_cooldown: GarminUpstreamCooldown | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         super().__init__(repo=repo, notifier=notifier, config=config, clock=clock)
         self._provider_factory = provider_factory
+        self._upstream_cooldown = upstream_cooldown
 
     def _has_credentials(self, auth: FitnessAuthState) -> bool:
         """Garmin's live credential is the ``tokens_blob`` from W11 re-auth.
@@ -438,40 +461,141 @@ class GarminFetchService(_FetchServiceBase):
         initial_auth_status: str,
     ) -> _FetchCounts:
         try:
-            # W5 hardening: check auth-state at every meaningful step —
-            # before the login network call, between days of the daily
-            # loop (Garmin walks one day per provider call, so mid-run
-            # disconnect mid-window is plausible), and before
-            # list_activities at the end. Each check is one cheap
-            # SELECT, dominated by the SDK call it precedes.
-            self._verify_auth_live(
-                user_id, initial_status=initial_auth_status,
+            return self._fetch_window(
+                provider=provider, since=since, until=until,
+                sync_run_id=sync_run_id, user_id=user_id,
+                initial_auth_status=initial_auth_status,
             )
-            provider.login()
-            wellness = 0
-            for date_str in _dates_in_window(since, until):
-                self._verify_auth_live(
-                    user_id, initial_status=initial_auth_status,
-                )
-                metrics = provider.get_daily(date_str)
-                wellness += _persist_garmin_daily_rows(
-                    repo=self._repo, user_id=user_id,
-                    sync_run_id=sync_run_id, metrics=metrics,
-                )
-            self._verify_auth_live(
-                user_id, initial_status=initial_auth_status,
-            )
-            activities: Iterable[GarminActivitySummary] = provider.list_activities(
-                after=since, before=until,
-            )
-            workouts = _persist_activity_rows(
-                repo=self._repo, source="garmin",
-                user_id=user_id, sync_run_id=sync_run_id,
-                summaries=(_garmin_activity_raw_row(a) for a in activities),
-            )
-            return _FetchCounts(workouts=workouts, wellness=wellness)
         except GarminAuthError as exc:
-            raise FitnessAuthError(str(exc)) from exc
+            # W6: dead-blob recovery — at most one unattended re-login
+            # per sync run, then one retry of the fetch. Any failure
+            # (no creds, cooldown hot, MFA, rate-limit, bad password,
+            # or a second auth error after a successful re-login)
+            # degrades to the existing auth_broken flow.
+            attempted, recovered = self._attempt_unattended_relogin(
+                provider, user_id=user_id,
+            )
+            if not recovered:
+                raise FitnessAuthError(
+                    str(exc), recovery_attempted=attempted,
+                ) from exc
+            log.info(
+                "Retrying Garmin fetch for user %d after unattended re-login",
+                user_id,
+            )
+            try:
+                return self._fetch_window(
+                    provider=provider, since=since, until=until,
+                    sync_run_id=sync_run_id, user_id=user_id,
+                    initial_auth_status=initial_auth_status,
+                )
+            except GarminAuthError as retry_exc:
+                raise FitnessAuthError(
+                    str(retry_exc), recovery_attempted=True,
+                ) from retry_exc
+
+    def _fetch_window(
+        self,
+        *,
+        provider: GarminProvider,
+        since: datetime,
+        until: datetime,
+        sync_run_id: int,
+        user_id: int,
+        initial_auth_status: str,
+    ) -> _FetchCounts:
+        # W5 hardening: check auth-state at every meaningful step —
+        # before the login network call, between days of the daily
+        # loop (Garmin walks one day per provider call, so mid-run
+        # disconnect mid-window is plausible), and before
+        # list_activities at the end. Each check is one cheap
+        # SELECT, dominated by the SDK call it precedes.
+        self._verify_auth_live(
+            user_id, initial_status=initial_auth_status,
+        )
+        provider.login()
+        wellness = 0
+        for date_str in _dates_in_window(since, until):
+            self._verify_auth_live(
+                user_id, initial_status=initial_auth_status,
+            )
+            metrics = provider.get_daily(date_str)
+            wellness += _persist_garmin_daily_rows(
+                repo=self._repo, user_id=user_id,
+                sync_run_id=sync_run_id, metrics=metrics,
+            )
+        self._verify_auth_live(
+            user_id, initial_status=initial_auth_status,
+        )
+        activities: Iterable[GarminActivitySummary] = provider.list_activities(
+            after=since, before=until,
+        )
+        workouts = _persist_activity_rows(
+            repo=self._repo, source="garmin",
+            user_id=user_id, sync_run_id=sync_run_id,
+            summaries=(_garmin_activity_raw_row(a) for a in activities),
+        )
+        return _FetchCounts(workouts=workouts, wellness=wellness)
+
+    def _attempt_unattended_relogin(
+        self, provider: GarminProvider, *, user_id: int,
+    ) -> tuple[bool, bool]:
+        """Run the single unattended re-login, if possible.
+
+        Returns ``(attempted, recovered)``:
+
+        - ``(False, False)`` — no attempt was made: the provider carries
+          no usable saved credentials, or the shared upstream cooldown
+          is hot (attempting would only deepen an observed block).
+        - ``(True, False)`` — an attempt was made and failed. A
+          rate-limited/blocked login also arms the shared cooldown so
+          the connect UI refuses further logins while it is hot.
+        - ``(True, True)`` — re-login succeeded; the provider persisted
+          a fresh token blob and the caller may retry the fetch once.
+        """
+        if not (
+            isinstance(provider, SupportsUnattendedRelogin)
+            and provider.can_relogin_with_password()
+        ):
+            return (False, False)
+
+        cooldown = self._upstream_cooldown
+        if cooldown is not None:
+            remaining = cooldown.check()
+            if remaining is not None:
+                log.info(
+                    "Skipping unattended Garmin re-login for user %d — "
+                    "upstream cooldown hot (%ds left)",
+                    user_id, int(remaining),
+                )
+                return (False, False)
+
+        log.info(
+            "Garmin auth failed for user %d — attempting unattended "
+            "re-login with saved credentials", user_id,
+        )
+        try:
+            provider.relogin_with_password()
+        except GarminRateLimitError as exc:
+            log.warning(
+                "Unattended Garmin re-login for user %d blocked upstream "
+                "(rate limit / bot challenge): %s", user_id, exc,
+            )
+            if cooldown is not None:
+                cooldown.record_block()
+            return (True, False)
+        except Exception as exc:  # noqa: BLE001  any re-login failure → auth_broken
+            log.warning(
+                "Unattended Garmin re-login for user %d failed: %s",
+                user_id, exc,
+            )
+            return (True, False)
+
+        if cooldown is not None:
+            # Upstream let us through — the egress IP is not blocked.
+            cooldown.reset()
+        log.info("Unattended Garmin re-login succeeded for user %d", user_id)
+        return (True, True)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

@@ -802,6 +802,28 @@ class TestNotifyFitnessAuthBroken:
             posted_data = req.data.decode()
             assert "Strava+re-auth+needed" in posted_data
             assert "priority=1" in posted_data  # PRIORITY_HIGH
+            # No unattended recovery was attempted — the message must not
+            # claim one happened.
+            assert "saved+credentials" not in posted_data
+
+    def test_message_mentions_failed_automatic_recovery_when_attempted(
+        self,
+        svc: PushoverNotificationService,
+        mock_user_repo: MagicMock,
+    ) -> None:
+        """W6: when the Garmin fetch service ran an unattended re-login
+        with saved credentials before giving up, the notification says
+        the automatic path is exhausted."""
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = _make_urlopen_response({"status": 1})
+            svc.notify_fitness_auth_broken(
+                user_id=1, source="garmin", recovery_attempted=True,
+            )
+
+            posted_data = mock_urlopen.call_args[0][0].data.decode()
+            assert "Garmin+re-auth+needed" in posted_data
+            assert "saved+credentials" in posted_data
+            assert "attempted+and+failed" in posted_data
 
     def test_skips_when_topic_disabled(
         self,

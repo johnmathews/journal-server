@@ -610,7 +610,9 @@ class _RecordingNotifier:
         self.auth_broken_calls: list[tuple[int, str]] = []
         self.sync_failure_calls: list[tuple[int, str, int]] = []
 
-    def notify_fitness_auth_broken(self, user_id: int, source: str) -> None:
+    def notify_fitness_auth_broken(
+        self, user_id: int, source: str, *, recovery_attempted: bool = False,
+    ) -> None:
         self.auth_broken_calls.append((user_id, source))
 
     def notify_fitness_sync_failure(

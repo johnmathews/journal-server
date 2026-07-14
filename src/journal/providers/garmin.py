@@ -45,7 +45,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from garminconnect import Garmin, GarminConnectAuthenticationError
+from garminconnect import (
+    Garmin,
+    GarminConnectAuthenticationError,
+    GarminConnectTooManyRequestsError,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -56,6 +60,48 @@ logger = logging.getLogger(__name__)
 
 class GarminAuthError(Exception):
     """Raised when Garmin returns 401/403 — the fetch service classifies as ``auth_broken``."""
+
+
+class GarminRateLimitError(Exception):
+    """An unattended re-login was refused upstream (429 / Cloudflare block).
+
+    Deliberately *not* a :class:`GarminAuthError` subclass — the remedy
+    is "stop and wait" (arm the shared
+    :class:`~journal.services.fitness.garmin_pending.GarminUpstreamCooldown`),
+    not "the credentials are bad". Only raised by
+    :meth:`GarminConnectGarminProvider.relogin_with_password`.
+    """
+
+
+_MFA_UNATTENDED_MESSAGE = (
+    "Garmin requested MFA — unattended re-login cannot complete"
+)
+
+# Substrings that mark a Garmin login failure as a rate-limit / Cloudflare
+# bot-challenge rather than genuinely wrong credentials. Lower-cased match.
+# Kept deliberately broad: a false positive only turns "bad password" into
+# "try again later", never the reverse. Shared with ``api/fitness_garmin.py``
+# so the connect UI and the unattended re-login classify identically.
+RATE_LIMIT_SIGNALS = (
+    "429",
+    "rate limit",
+    "rate-limit",
+    "rate limiting",
+    "too many",
+    "cloudflare",
+    "bot challenge",
+    "captcha",
+    "unexpected title",
+    "strategies exhausted",
+    "ip rate limited",
+    "blocking this request",
+)
+
+
+def looks_rate_limited(*texts: str) -> bool:
+    """True when any text carries a rate-limit / bot-challenge signal."""
+    blob = " ".join(t for t in texts if t).lower()
+    return any(signal in blob for signal in RATE_LIMIT_SIGNALS)
 
 
 @dataclass(frozen=True)
@@ -127,6 +173,20 @@ class GarminProvider(Protocol):
     ) -> Iterator[GarminActivitySummary]: ...
 
 
+@runtime_checkable
+class SupportsUnattendedRelogin(Protocol):
+    """Optional provider capability: unattended password re-login (W6).
+
+    The fetch service duck-checks this via ``isinstance`` before
+    attempting recovery from a dead token blob, so providers (and test
+    fakes) that don't carry saved credentials simply skip the retry.
+    """
+
+    def can_relogin_with_password(self) -> bool: ...
+
+    def relogin_with_password(self) -> None: ...
+
+
 class GarminConnectGarminProvider:
     """``garminconnect``-backed adapter implementing :class:`GarminProvider`.
 
@@ -181,6 +241,13 @@ class GarminConnectGarminProvider:
         try:
             client.login(tokenstore)
         except GarminConnectAuthenticationError as exc:
+            # W6 guard: with no MFA callback wired (the unattended sync
+            # path), an MFA challenge must surface as a typed auth error
+            # with an actionable message — never an interactive prompt.
+            # garminconnect 0.3.x already raises (rather than blocking on
+            # stdin) when ``prompt_mfa`` is None; we translate its message.
+            if mfa_callback is None and "mfa" in str(exc).lower():
+                raise GarminAuthError(_MFA_UNATTENDED_MESSAGE) from exc
             raise GarminAuthError(str(exc)) from exc
 
         if self._persist is not None:
@@ -189,6 +256,76 @@ class GarminConnectGarminProvider:
             except Exception:  # noqa: BLE001  defensive — never fail login on persist
                 logger.exception("Garmin client.dumps() failed; tokens not mirrored to DB")
                 return
+            self._persist(blob)
+
+    # -- W6: unattended password re-login ---------------------------
+
+    def can_relogin_with_password(self) -> bool:
+        """Whether saved credentials are available for an unattended re-login.
+
+        True only when the factory (bootstrap / CLI) injected a real
+        username *and* password — i.e. ``FITNESS_CREDENTIAL_KEY`` is set
+        and the auth row carried decryptable saved credentials.
+        """
+        return bool(self._username and self._password)
+
+    def relogin_with_password(self) -> None:
+        """One unattended tier-3 login that bypasses the (dead) token blob.
+
+        Builds a **fresh** SDK client — no ``tokens_blob`` hydration, no
+        filesystem tokenstore — and logs in with the saved username /
+        password. On success the provider adopts the new client, replaces
+        its own ``tokens_blob`` with the fresh dump (so a retried fetch
+        phase that calls :meth:`login` again hydrates the *new* blob), and
+        mirrors it to the persist callback.
+
+        Raises:
+            GarminRateLimitError: upstream 429 / Cloudflare bot-challenge —
+                the caller must arm the shared upstream cooldown, not retry.
+            GarminAuthError: bad credentials, an MFA challenge (no callback
+                is wired on this path, by design — non-goal 3), or no saved
+                credentials at all.
+        """
+        if not self.can_relogin_with_password():
+            raise GarminAuthError(
+                "No saved Garmin credentials available for unattended re-login",
+            )
+        client = self._client_factory(
+            email=self._username,
+            password=self._password,
+            prompt_mfa=None,
+        )
+        try:
+            client.login(None)
+        except GarminConnectTooManyRequestsError as exc:
+            raise GarminRateLimitError(str(exc)) from exc
+        except GarminConnectAuthenticationError as exc:
+            if looks_rate_limited(str(exc)):
+                # The strategy chain can misreport a Cloudflare block as an
+                # auth failure (see api/fitness_garmin.py) — classify by text.
+                raise GarminRateLimitError(str(exc)) from exc
+            if "mfa" in str(exc).lower():
+                raise GarminAuthError(_MFA_UNATTENDED_MESSAGE) from exc
+            raise GarminAuthError(str(exc)) from exc
+        except Exception as exc:
+            # Terminal "all strategies exhausted" failures surface as
+            # connection errors; rate-limit-looking ones gate the cooldown,
+            # anything else propagates for transient classification.
+            if looks_rate_limited(str(exc)):
+                raise GarminRateLimitError(str(exc)) from exc
+            raise
+
+        self._client = client
+        try:
+            blob = client.client.dumps()
+        except Exception:  # noqa: BLE001  defensive — the login itself succeeded
+            logger.exception(
+                "Garmin client.dumps() failed after unattended re-login; "
+                "fresh tokens not mirrored to DB",
+            )
+            return
+        self._tokens_blob = blob
+        if self._persist is not None:
             self._persist(blob)
 
     # -- Daily aggregation ------------------------------------------
