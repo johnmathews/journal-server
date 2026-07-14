@@ -130,13 +130,19 @@ def fitness_sync_status(
     Mirrors ``GET /api/fitness/sync/status`` exactly: each of
     ``strava`` / ``garmin`` is either ``null`` (no auth state, never
     synced) or a dict with ``auth_status``, ``auth_broken_since``,
-    ``last_success_at``, and the last 10 sync runs.
+    ``last_success_at``, and the last 10 sync runs. The garmin payload
+    also carries ``credentials_saved`` (W5 saved-credentials support).
     """
     log.info("Tool call: fitness_sync_status()")
     repo = _get_fitness_repo(ctx)
     user_id = _user_id(ctx)
+    config = ctx.request_context.lifespan_context.get("config")
+    credential_key = getattr(config, "fitness_credential_key", "") or ""
     return {
-        source: _per_source_status(repo, user_id=user_id, source=source)
+        source: _per_source_status(
+            repo, user_id=user_id, source=source,
+            credential_key=credential_key,
+        )
         for source in _VALID_SOURCES
     }
 

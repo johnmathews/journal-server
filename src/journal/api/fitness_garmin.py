@@ -1,12 +1,25 @@
 """Garmin per-user auth routes (W2 of the fitness multi-user plan).
 
-Owns the three Garmin connect-flow endpoints under ``/api/fitness/garmin/``:
+Owns the four Garmin connect-flow endpoints under ``/api/fitness/garmin/``:
 
 - ``POST /api/fitness/garmin/connect`` — start a Garmin login (sync;
   may return ``mfa_required`` and a pending session token).
 - ``POST /api/fitness/garmin/connect/mfa`` — complete an MFA-required
   Garmin login.
-- ``POST /api/fitness/garmin/disconnect`` — drop the user's Garmin tokens.
+- ``POST /api/fitness/garmin/reconnect`` — re-login with saved
+  (encrypted) credentials, no body (W5 of the strava-mothball /
+  garmin-credentials plan). Same login path as connect, including the
+  cooldown gates and the ``mfa_required`` pending-session shape.
+- ``POST /api/fitness/garmin/disconnect`` — drop the user's Garmin tokens
+  (including any saved credentials — the whole auth row goes).
+
+W5 saved credentials: when ``config.fitness_credential_key`` is set, the
+connect handler encrypts the password at first touch (Fernet, see
+``services/fitness/credentials.py``) and on success persists
+``extra_state_json.garmin_username`` + ``.enc_password`` alongside
+``tokens_blob``. Only ciphertext ever reaches SQLite or the pending
+store. When the key is unset, behavior is byte-for-byte the pre-W5 flow
+— no credential keys are written.
 
 These routes are direct upstream writes against Garmin's login API —
 auth flow, not job creation — so they place by URL-resource root and
@@ -37,6 +50,12 @@ from journal.api._handler import JsonBody, handler
 from journal.api._shared import _now_iso
 from journal.auth import get_authenticated_user
 from journal.models import FitnessAuthState
+from journal.services.fitness.credentials import (
+    CredentialDecryptError,
+    CredentialKeyInvalid,
+    decrypt_credential,
+    encrypt_credential,
+)
 from journal.services.fitness.garmin_pending import (
     GarminCooldownTracker,
     GarminPendingStore,
@@ -179,6 +198,8 @@ def _persist_garmin_auth(
     user_id: int,
     tokens_blob: str,
     upstream_user_id: str,
+    garmin_username: str | None = None,
+    enc_password: str | None = None,
 ) -> None:
     """Upsert the user's Garmin auth row after a successful connect or MFA.
 
@@ -187,11 +208,21 @@ def _persist_garmin_auth(
     clears ``auth_broken_since``, stamps ``last_successful_login_at``, and
     preserves any unrelated ``extra_state`` keys (e.g. fields the fetch
     service writes during a sync).
+
+    W5: when ``enc_password`` (Fernet ciphertext, never plaintext) is
+    provided, it is stored together with ``garmin_username`` so unattended
+    re-login / one-click reconnect can reuse them. When absent (credential
+    key unset) no credential keys are written — and any previously saved
+    ones are left untouched, matching the preserve-unrelated-keys contract.
     """
     existing = repo.get_auth_state(user_id=user_id, source="garmin")
     extra = dict(existing.extra_state) if existing else {}
     extra["tokens_blob"] = tokens_blob
     extra["upstream_user_id"] = upstream_user_id
+    if enc_password:
+        extra["enc_password"] = enc_password
+        if garmin_username:
+            extra["garmin_username"] = garmin_username
     repo.upsert_auth_state(
         FitnessAuthState(
             user_id=user_id,
@@ -209,11 +240,252 @@ def _persist_garmin_auth(
     )
 
 
+def _credential_key(services: ServicesDict) -> str:
+    """The configured Fernet key, or ``""`` when the feature is off.
+
+    Tolerates a missing/partial config service (test harnesses build
+    partial dicts) — absent config means the feature is dark.
+    """
+    config = services.get("config")
+    return getattr(config, "fitness_credential_key", "") or ""
+
+
+def _cooldown_preflight(
+    *,
+    label: str,
+    user_id: int,
+    username: str,
+    cooldown: GarminCooldownTracker,
+    upstream_cooldown: GarminUpstreamCooldown,
+) -> JSONResponse | None:
+    """The two pre-flight refusal gates shared by connect and reconnect.
+
+    Returns the refusal :class:`JSONResponse`, or ``None`` when the login
+    attempt may proceed. Must run *before* any upstream contact — the
+    whole point of both gates is to refuse without touching Garmin.
+    """
+    # Global upstream gate before anything else. A Cloudflare/IP block is
+    # account-agnostic — it lives on the server's egress IP — so once any
+    # recent attempt was blocked we refuse *every* login (any email)
+    # until it ages out. Attempting again would only re-arm the block.
+    upstream_remaining = upstream_cooldown.check()
+    if upstream_remaining is not None:
+        log.info(
+            "%s — refused pre-flight, upstream cooldown hot (%ds left) "
+            "for user_id=%d", label, int(upstream_remaining), user_id,
+        )
+        return _garmin_rate_limited_response(
+            "A recent login attempt was blocked by Garmin's rate-limiter; "
+            "the server is waiting before trying again.",
+            retry_after_seconds=int(upstream_remaining),
+        )
+
+    # Per-email cool-down before any upstream call. Garmin's rate-limiter
+    # keys on clientId+email; if we let the user keep retrying after a few
+    # wrong passwords we deepen the upstream lockout. The local tracker
+    # protects them by refusing inside the same window.
+    retry_after = cooldown.check(username)
+    if retry_after is not None:
+        return JSONResponse(
+            {
+                "error": (
+                    "Too many failed Garmin login attempts for that "
+                    "account. Try again in a few minutes."
+                ),
+                "reason": "local_cooldown",
+                "retry_after_seconds": int(retry_after),
+            },
+            status_code=429,
+        )
+    return None
+
+
+def _login_and_persist(
+    *,
+    label: str,
+    user_id: int,
+    repo: FitnessRepository,
+    pending: GarminPendingStore,
+    cooldown: GarminCooldownTracker,
+    upstream_cooldown: GarminUpstreamCooldown,
+    client: Any,
+    username: str,
+    enc_password: str | None,
+) -> JSONResponse:
+    """Run a constructed Garmin client's login and persist the outcome.
+
+    The single login path shared by ``connect`` and ``reconnect`` (W5):
+    log-captured login, rate-limit/bot-challenge disambiguation, MFA
+    pending-session issue, post-login profile fetch, D8 account-mismatch
+    guard, token-blob capture, and the final auth-row upsert (including
+    ``enc_password``/``garmin_username`` when credential capture is on).
+
+    ``client`` is constructed by the caller — that keeps the plaintext
+    password's lifetime confined to the caller's construction line, so
+    each handler can ``del`` its reference immediately after.
+    """
+    # Capture garminconnect's mid-login diagnostics so we can tell a
+    # genuine bad password apart from a Cloudflare/rate-limit block that
+    # the strategy chain misreports as an auth error (the prod failure
+    # mode that looked like "invalid credentials" but was really a 429).
+    try:
+        with _capture_garmin_logs() as gc_logs:
+            result = client.login()
+    except GarminConnectAuthenticationError as exc:
+        cooldown.record_failure(username)
+        if _looks_rate_limited(str(exc), gc_logs.text):
+            upstream_cooldown.record_block()
+            log.warning(
+                "%s — login blocked by rate-limit/bot-challenge (surfaced "
+                "as an auth error) for user_id=%d", label, user_id,
+            )
+            return _garmin_rate_limited_response(str(exc))
+        log.info("%s — invalid credentials for user_id=%d", label, user_id)
+        return JSONResponse(
+            {
+                "error": "Garmin rejected those credentials.",
+                "reason": "invalid_credentials",
+                "detail": str(exc),
+            },
+            status_code=401,
+        )
+    except GarminConnectTooManyRequestsError as exc:
+        cooldown.record_failure(username)
+        upstream_cooldown.record_block()
+        log.warning("%s — Garmin returned 429 for user_id=%d", label, user_id)
+        return _garmin_rate_limited_response(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        # The terminal "all strategies exhausted" failure (Cloudflare 403
+        # challenges, CAPTCHA, TLS-fingerprint blocks) lands here as a
+        # GarminConnectConnectionError. Classify it as a rate-limit too.
+        if _looks_rate_limited(str(exc), gc_logs.text):
+            cooldown.record_failure(username)
+            upstream_cooldown.record_block()
+            log.warning(
+                "%s — login blocked by rate-limit/bot-challenge "
+                "for user_id=%d", label, user_id,
+            )
+            return _garmin_rate_limited_response(str(exc))
+        log.exception("%s — unexpected error for user_id=%d", label, user_id)
+        return JSONResponse(
+            {
+                "error": f"Garmin login failed: {exc}",
+                "reason": "upstream_error",
+            },
+            status_code=502,
+        )
+
+    # Upstream contact succeeded (MFA challenge or straight login both
+    # mean Garmin let us through, not a block), so clear the global gate.
+    upstream_cooldown.reset()
+
+    # ``Garmin.login()`` returns ``("needs_mfa", legacy)`` when MFA is
+    # required (``return_on_mfa=True``) and ``(None, legacy)`` on
+    # successful no-MFA login.
+    mfa_status: Any = None
+    legacy_token: Any = None
+    if isinstance(result, tuple) and len(result) >= 1:
+        mfa_status = result[0]
+        if len(result) >= 2:
+            legacy_token = result[1]
+
+    if mfa_status == "needs_mfa":
+        token, expires_at_iso = pending.issue(
+            user_id=user_id, client=client, state_token=legacy_token,
+            username=username, enc_password=enc_password,
+        )
+        log.info(
+            "%s — MFA required for user_id=%d (pending session minted)",
+            label, user_id,
+        )
+        return JSONResponse(
+            {
+                "mfa_required": True,
+                "pending_session": token,
+                "expires_at": expires_at_iso,
+            },
+            status_code=200,
+        )
+
+    # No-MFA success: capture upstream id + token blob, persist.
+    try:
+        upstream = _extract_upstream_user_id(client, username)
+    except Exception as exc:  # noqa: BLE001
+        log.exception(
+            "%s — profile fetch failed for user_id=%d after no-MFA login",
+            label, user_id,
+        )
+        return JSONResponse(
+            {
+                "error": (
+                    "Garmin login succeeded but the post-login profile "
+                    "fetch failed. Please retry."
+                ),
+                "reason": "post_login_profile_fetch_failed",
+                "detail": str(exc),
+            },
+            status_code=502,
+        )
+    if not upstream:
+        return JSONResponse(
+            {
+                "error": (
+                    "Garmin login succeeded but no upstream identity "
+                    "could be determined."
+                ),
+                "reason": "post_login_profile_fetch_failed",
+            },
+            status_code=502,
+        )
+
+    existing = repo.get_auth_state(user_id=user_id, source="garmin")
+    if existing is not None:
+        stored = (existing.extra_state or {}).get("upstream_user_id")
+        if stored and stored != upstream:
+            return JSONResponse(
+                {
+                    "error": (
+                        "This Garmin account differs from the one "
+                        "previously connected. Disconnect Garmin first, "
+                        "then reconnect."
+                    ),
+                    "reason": "upstream_account_mismatch",
+                    "stored_upstream_user_id": stored,
+                    "incoming_upstream_user_id": upstream,
+                },
+                status_code=409,
+            )
+
+    try:
+        blob = client.client.dumps()
+    except Exception as exc:  # noqa: BLE001
+        log.exception(
+            "%s — token blob dump failed for user_id=%d", label, user_id,
+        )
+        return JSONResponse(
+            {
+                "error": f"Garmin login succeeded but token capture failed: {exc}",
+                "reason": "token_capture_failed",
+            },
+            status_code=502,
+        )
+
+    _persist_garmin_auth(
+        repo, user_id=user_id, tokens_blob=blob, upstream_user_id=upstream,
+        garmin_username=username, enc_password=enc_password,
+    )
+    cooldown.reset(username)
+    log.info("%s — connected user_id=%d (upstream=%s)", label, user_id, upstream)
+    return JSONResponse(
+        {"connected": True, "upstream_user_id": upstream}, status_code=200,
+    )
+
+
 def register_fitness_garmin_routes(
     mcp: FastMCP,
     services_getter: Callable[[], ServicesDict | None],
 ) -> None:
-    """Register the Garmin connect / MFA / disconnect routes."""
+    """Register the Garmin connect / MFA / reconnect / disconnect routes."""
 
     def _garmin_pending(services: ServicesDict) -> GarminPendingStore:
         store = services.get("garmin_pending")
@@ -260,40 +532,24 @@ def register_fitness_garmin_routes(
                 status_code=400,
             )
 
-        # Global upstream gate before anything else. A Cloudflare/IP block is
-        # account-agnostic — it lives on the server's egress IP — so once any
-        # recent attempt was blocked we refuse *every* connect (any email)
-        # until it ages out. Attempting again would only re-arm the block.
-        upstream_remaining = upstream_cooldown.check()
-        if upstream_remaining is not None:
-            log.info(
-                "POST /api/fitness/garmin/connect — refused pre-flight, "
-                "upstream cooldown hot (%ds left) for user_id=%d",
-                int(upstream_remaining), user.user_id,
-            )
-            return _garmin_rate_limited_response(
-                "A recent login attempt was blocked by Garmin's rate-limiter; "
-                "the server is waiting before trying again.",
-                retry_after_seconds=int(upstream_remaining),
-            )
+        refusal = _cooldown_preflight(
+            label="POST /api/fitness/garmin/connect",
+            user_id=user.user_id,
+            username=username,
+            cooldown=cooldown,
+            upstream_cooldown=upstream_cooldown,
+        )
+        if refusal is not None:
+            return refusal
 
-        # Per-email cool-down before any upstream call. Garmin's rate-limiter
-        # keys on clientId+email; if we let the user keep retrying after a few
-        # wrong passwords we deepen the upstream lockout. The local tracker
-        # protects them by refusing inside the same window.
-        retry_after = cooldown.check(username)
-        if retry_after is not None:
-            return JSONResponse(
-                {
-                    "error": (
-                        "Too many failed Garmin login attempts for that "
-                        "account. Try again in a few minutes."
-                    ),
-                    "reason": "local_cooldown",
-                    "retry_after_seconds": int(retry_after),
-                },
-                status_code=429,
-            )
+        # W5: encrypt at first touch, while the plaintext is still in
+        # scope. Key unset → enc_password stays None and no credential
+        # material is ever captured (pre-W5 behavior, byte-for-byte).
+        credential_key = _credential_key(services)
+        enc_password = (
+            encrypt_credential(password, key=credential_key)
+            if credential_key else None
+        )
 
         # Instantiation is cheap; we want the password living in handler
         # scope only as long as absolutely needed. (The whole body already
@@ -305,172 +561,113 @@ def register_fitness_garmin_routes(
         # own copy briefly; we'll let GC reclaim that once the call returns.
         del password
 
-        # Capture garminconnect's mid-login diagnostics so we can tell a
-        # genuine bad password apart from a Cloudflare/rate-limit block that
-        # the strategy chain misreports as an auth error (the prod failure
-        # mode that looked like "invalid credentials" but was really a 429).
-        try:
-            with _capture_garmin_logs() as gc_logs:
-                result = client.login()
-        except GarminConnectAuthenticationError as exc:
-            cooldown.record_failure(username)
-            if _looks_rate_limited(str(exc), gc_logs.text):
-                upstream_cooldown.record_block()
-                log.warning(
-                    "POST /api/fitness/garmin/connect — login blocked by "
-                    "rate-limit/bot-challenge (surfaced as an auth error) "
-                    "for user_id=%d", user.user_id,
-                )
-                return _garmin_rate_limited_response(str(exc))
+        return _login_and_persist(
+            label="POST /api/fitness/garmin/connect",
+            user_id=user.user_id,
+            repo=repo,
+            pending=pending,
+            cooldown=cooldown,
+            upstream_cooldown=upstream_cooldown,
+            client=client,
+            username=username,
+            enc_password=enc_password,
+        )
+
+    @mcp.custom_route(
+        "/api/fitness/garmin/reconnect",
+        methods=["POST"],
+        name="api_fitness_garmin_reconnect",
+    )
+    @handler(services_getter)
+    def garmin_reconnect(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
+        """Re-login with the saved (encrypted) credentials — no body (W5).
+
+        404 when no credentials are saved; 409 when they exist but cannot
+        be decrypted (key rotated or unset). Otherwise runs the exact
+        connect login path — cooldown gates included — and may return the
+        same ``mfa_required`` + pending-session shape as connect.
+        """
+        user = get_authenticated_user(request)
+        repo: FitnessRepository = services["fitness_repo"]
+        pending = _garmin_pending(services)
+        cooldown = _garmin_cooldown(services)
+        upstream_cooldown = _garmin_upstream_cooldown(services)
+        client_factory = services.get("garmin_client_factory") or Garmin
+
+        auth = repo.get_auth_state(user_id=user.user_id, source="garmin")
+        extra = (auth.extra_state or {}) if auth is not None else {}
+        username = extra.get("garmin_username") or ""
+        enc_password = extra.get("enc_password") or ""
+        if not username or not enc_password:
             log.info(
-                "POST /api/fitness/garmin/connect — invalid credentials "
+                "POST /api/fitness/garmin/reconnect — no saved credentials "
                 "for user_id=%d", user.user_id,
             )
             return JSONResponse(
                 {
-                    "error": "Garmin rejected those credentials.",
-                    "reason": "invalid_credentials",
-                    "detail": str(exc),
+                    "error": (
+                        "No saved Garmin credentials for this account. "
+                        "Connect with username and password first."
+                    ),
+                    "reason": "no_saved_credentials",
                 },
-                status_code=401,
+                status_code=404,
             )
-        except GarminConnectTooManyRequestsError as exc:
-            cooldown.record_failure(username)
-            upstream_cooldown.record_block()
+
+        credential_key = _credential_key(services)
+        try:
+            if not credential_key:
+                raise CredentialDecryptError(
+                    "FITNESS_CREDENTIAL_KEY is not configured",
+                )
+            password = decrypt_credential(enc_password, key=credential_key)
+        except (CredentialDecryptError, CredentialKeyInvalid) as exc:
             log.warning(
-                "POST /api/fitness/garmin/connect — Garmin returned 429 "
-                "for user_id=%d", user.user_id,
-            )
-            return _garmin_rate_limited_response(str(exc))
-        except Exception as exc:  # noqa: BLE001
-            # The terminal "all strategies exhausted" failure (Cloudflare 403
-            # challenges, CAPTCHA, TLS-fingerprint blocks) lands here as a
-            # GarminConnectConnectionError. Classify it as a rate-limit too.
-            if _looks_rate_limited(str(exc), gc_logs.text):
-                cooldown.record_failure(username)
-                upstream_cooldown.record_block()
-                log.warning(
-                    "POST /api/fitness/garmin/connect — login blocked by "
-                    "rate-limit/bot-challenge for user_id=%d", user.user_id,
-                )
-                return _garmin_rate_limited_response(str(exc))
-            log.exception(
-                "POST /api/fitness/garmin/connect — unexpected error "
-                "for user_id=%d", user.user_id,
-            )
-            return JSONResponse(
-                {
-                    "error": f"Garmin login failed: {exc}",
-                    "reason": "upstream_error",
-                },
-                status_code=502,
-            )
-
-        # Upstream contact succeeded (MFA challenge or straight login both
-        # mean Garmin let us through, not a block), so clear the global gate.
-        upstream_cooldown.reset()
-
-        # ``Garmin.login()`` returns ``("needs_mfa", legacy)`` when MFA is
-        # required (``return_on_mfa=True``) and ``(None, legacy)`` on
-        # successful no-MFA login.
-        mfa_status: Any = None
-        legacy_token: Any = None
-        if isinstance(result, tuple) and len(result) >= 1:
-            mfa_status = result[0]
-            if len(result) >= 2:
-                legacy_token = result[1]
-
-        if mfa_status == "needs_mfa":
-            token, expires_at_iso = pending.issue(
-                user_id=user.user_id, client=client, state_token=legacy_token,
-            )
-            log.info(
-                "POST /api/fitness/garmin/connect — MFA required for "
-                "user_id=%d (pending session minted)", user.user_id,
-            )
-            return JSONResponse(
-                {
-                    "mfa_required": True,
-                    "pending_session": token,
-                    "expires_at": expires_at_iso,
-                },
-                status_code=200,
-            )
-
-        # No-MFA success: capture upstream id + token blob, persist.
-        try:
-            upstream = _extract_upstream_user_id(client, username)
-        except Exception as exc:  # noqa: BLE001
-            log.exception(
-                "POST /api/fitness/garmin/connect — profile fetch failed "
-                "for user_id=%d after no-MFA login", user.user_id,
+                "POST /api/fitness/garmin/reconnect — saved credentials "
+                "undecryptable for user_id=%d (%s)", user.user_id, exc,
             )
             return JSONResponse(
                 {
                     "error": (
-                        "Garmin login succeeded but the post-login profile "
-                        "fetch failed. Please retry."
+                        "Saved Garmin credentials cannot be decrypted — "
+                        "the credential key has changed or is unset. "
+                        "Reconnect with username and password."
                     ),
-                    "reason": "post_login_profile_fetch_failed",
-                    "detail": str(exc),
+                    "reason": "credentials_unavailable",
                 },
-                status_code=502,
-            )
-        if not upstream:
-            return JSONResponse(
-                {
-                    "error": (
-                        "Garmin login succeeded but no upstream identity "
-                        "could be determined."
-                    ),
-                    "reason": "post_login_profile_fetch_failed",
-                },
-                status_code=502,
+                status_code=409,
             )
 
-        existing = repo.get_auth_state(user_id=user.user_id, source="garmin")
-        if existing is not None:
-            stored = (existing.extra_state or {}).get("upstream_user_id")
-            if stored and stored != upstream:
-                return JSONResponse(
-                    {
-                        "error": (
-                            "This Garmin account differs from the one "
-                            "previously connected. Disconnect Garmin first, "
-                            "then reconnect."
-                        ),
-                        "reason": "upstream_account_mismatch",
-                        "stored_upstream_user_id": stored,
-                        "incoming_upstream_user_id": upstream,
-                    },
-                    status_code=409,
-                )
-
-        try:
-            blob = client.client.dumps()
-        except Exception as exc:  # noqa: BLE001
-            log.exception(
-                "POST /api/fitness/garmin/connect — token blob dump failed "
-                "for user_id=%d", user.user_id,
-            )
-            return JSONResponse(
-                {
-                    "error": f"Garmin login succeeded but token capture failed: {exc}",
-                    "reason": "token_capture_failed",
-                },
-                status_code=502,
-            )
-
-        _persist_garmin_auth(
-            repo, user_id=user.user_id, tokens_blob=blob, upstream_user_id=upstream,
+        refusal = _cooldown_preflight(
+            label="POST /api/fitness/garmin/reconnect",
+            user_id=user.user_id,
+            username=username,
+            cooldown=cooldown,
+            upstream_cooldown=upstream_cooldown,
         )
-        cooldown.reset(username)
-        log.info(
-            "POST /api/fitness/garmin/connect — connected user_id=%d "
-            "(upstream=%s)", user.user_id, upstream,
+        if refusal is not None:
+            return refusal
+
+        client = client_factory(
+            email=username, password=password, return_on_mfa=True,
         )
-        return JSONResponse(
-            {"connected": True, "upstream_user_id": upstream}, status_code=200,
+        # Same plaintext hygiene as connect: drop the local reference the
+        # moment the client owns it. The stored ciphertext is re-persisted
+        # as-is on success — no re-encryption needed under the same key.
+        del password
+
+        return _login_and_persist(
+            label="POST /api/fitness/garmin/reconnect",
+            user_id=user.user_id,
+            repo=repo,
+            pending=pending,
+            cooldown=cooldown,
+            upstream_cooldown=upstream_cooldown,
+            client=client,
+            username=username,
+            enc_password=enc_password,
         )
 
     @mcp.custom_route(
@@ -629,6 +826,12 @@ def register_fitness_garmin_routes(
 
         _persist_garmin_auth(
             repo, user_id=user.user_id, tokens_blob=blob, upstream_user_id=upstream,
+            # W5: the pending session carried the (ciphertext) credentials
+            # from the connect/reconnect attempt; persist them only now
+            # that the MFA actually completed. Both are absent in
+            # key-unset mode, making this a no-op there.
+            garmin_username=entry.username or None,
+            enc_password=entry.enc_password,
         )
         # Now consume the pending entry — login is committed.
         pending.consume(token)

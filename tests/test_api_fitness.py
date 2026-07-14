@@ -525,6 +525,146 @@ def test_sync_status_auth_broken_surfaces_since(
     assert garmin["last_runs"] == []
 
 
+def _seed_garmin_saved_creds(
+    fitness_repo: FitnessRepository, *, key: str, password: str = "pw",
+) -> None:
+    from journal.services.fitness.credentials import encrypt_credential
+
+    fitness_repo.upsert_auth_state(
+        FitnessAuthState(
+            user_id=_TEST_USER_ID,
+            source="garmin",
+            extra_state={
+                "tokens_blob": "BLOB",
+                "upstream_user_id": "alice.j",
+                "garmin_username": "alice@example.com",
+                "enc_password": encrypt_credential(password, key=key),
+            },
+            auth_status="ok",
+        ),
+    )
+
+
+def _services_with_credential_key(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    jobs_repository: SQLiteJobRepository,
+    job_runner: JobRunner,
+    *,
+    credential_key: str,
+) -> dict:
+    services = _make_services(
+        fitness_factory, fitness_repo, jobs_repository, job_runner,
+    )
+    services["config"] = SimpleNamespace(
+        strava_enabled=True, fitness_credential_key=credential_key,
+    )
+    return services
+
+
+def test_sync_status_credentials_saved_true_when_decryptable(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    jobs_repository: SQLiteJobRepository,
+    job_runner: JobRunner,
+) -> None:
+    """W5: garmin payload reports credentials_saved=True iff the stored
+    ciphertext decrypts under the configured key."""
+    from cryptography.fernet import Fernet
+
+    key = Fernet.generate_key().decode()
+    _seed_garmin_saved_creds(fitness_repo, key=key)
+    services = _services_with_credential_key(
+        fitness_factory, fitness_repo, jobs_repository, job_runner,
+        credential_key=key,
+    )
+    with _build_client(services) as tc:
+        resp = tc.get("/api/fitness/sync/status")
+    assert resp.status_code == 200
+    assert resp.json()["garmin"]["credentials_saved"] is True
+
+
+def test_sync_status_credentials_saved_false_on_rotated_key(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    jobs_repository: SQLiteJobRepository,
+    job_runner: JobRunner,
+) -> None:
+    from cryptography.fernet import Fernet
+
+    old_key = Fernet.generate_key().decode()
+    new_key = Fernet.generate_key().decode()
+    _seed_garmin_saved_creds(fitness_repo, key=old_key)
+    services = _services_with_credential_key(
+        fitness_factory, fitness_repo, jobs_repository, job_runner,
+        credential_key=new_key,
+    )
+    with _build_client(services) as tc:
+        resp = tc.get("/api/fitness/sync/status")
+    assert resp.status_code == 200
+    assert resp.json()["garmin"]["credentials_saved"] is False
+
+
+def test_sync_status_credentials_saved_false_when_none_saved(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    jobs_repository: SQLiteJobRepository,
+    job_runner: JobRunner,
+) -> None:
+    """Key configured but the garmin row has no enc_password (pre-W5 row)."""
+    from cryptography.fernet import Fernet
+
+    fitness_repo.upsert_auth_state(
+        FitnessAuthState(
+            user_id=_TEST_USER_ID,
+            source="garmin",
+            extra_state={"tokens_blob": "BLOB"},
+            auth_status="ok",
+        ),
+    )
+    services = _services_with_credential_key(
+        fitness_factory, fitness_repo, jobs_repository, job_runner,
+        credential_key=Fernet.generate_key().decode(),
+    )
+    with _build_client(services) as tc:
+        resp = tc.get("/api/fitness/sync/status")
+    assert resp.status_code == 200
+    assert resp.json()["garmin"]["credentials_saved"] is False
+
+
+def test_sync_status_credentials_saved_false_when_key_unset(
+    client: TestClient, fitness_repo: FitnessRepository,
+) -> None:
+    """Ciphertext saved but no key configured (default services fixture has
+    no fitness_credential_key) — credentials are unusable, so False."""
+    from cryptography.fernet import Fernet
+
+    _seed_garmin_saved_creds(
+        fitness_repo, key=Fernet.generate_key().decode(),
+    )
+    resp = client.get("/api/fitness/sync/status")
+    assert resp.status_code == 200
+    assert resp.json()["garmin"]["credentials_saved"] is False
+
+
+def test_sync_status_strava_payload_has_no_credentials_saved(
+    client: TestClient, fitness_repo: FitnessRepository,
+) -> None:
+    """W5 scope guard: only the garmin payload gains credentials_saved."""
+    fitness_repo.upsert_auth_state(
+        FitnessAuthState(
+            user_id=_TEST_USER_ID,
+            source="strava",
+            access_token="tok",
+            refresh_token="ref",
+            auth_status="ok",
+        ),
+    )
+    resp = client.get("/api/fitness/sync/status")
+    assert resp.status_code == 200
+    assert "credentials_saved" not in resp.json()["strava"]
+
+
 def test_sync_status_keeps_both_keys_when_strava_disabled(
     fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,

@@ -33,6 +33,11 @@ from starlette.responses import JSONResponse
 from journal.api._handler import handler
 from journal.auth import get_authenticated_user
 from journal.db.fitness_integrity import check_fitness_integrity
+from journal.services.fitness.credentials import (
+    CredentialDecryptError,
+    CredentialKeyInvalid,
+    decrypt_credential,
+)
 
 if TYPE_CHECKING:
     import sqlite3
@@ -123,11 +128,35 @@ def _sync_run_to_dict(run: FitnessSyncRun) -> dict[str, Any]:
     }
 
 
+def _garmin_credentials_saved(
+    auth: FitnessAuthState | None, credential_key: str,
+) -> bool:
+    """True iff the garmin auth row carries saved credentials that the
+    *currently configured* key can actually decrypt (W5).
+
+    False on: no row, no ``enc_password``, key unset, or a rotated/lost
+    key (``CredentialDecryptError``). The webapp uses this to decide
+    whether to offer the one-click reconnect, so "saved but unusable"
+    must read as False — never crash the status endpoint.
+    """
+    if auth is None or not credential_key:
+        return False
+    enc_password = (auth.extra_state or {}).get("enc_password")
+    if not isinstance(enc_password, str) or not enc_password:
+        return False
+    try:
+        decrypt_credential(enc_password, key=credential_key)
+    except (CredentialDecryptError, CredentialKeyInvalid):
+        return False
+    return True
+
+
 def _per_source_status(
     repo: FitnessRepository,
     *,
     user_id: int,
     source: str,
+    credential_key: str = "",
 ) -> dict[str, Any] | None:
     """Return the status payload for *source*, or ``None`` if this user
     has never had any fitness activity on this source — i.e. no
@@ -136,6 +165,11 @@ def _per_source_status(
     Returning ``None`` (rather than a default-populated dict) lets the
     webapp tell "first-use, never connected" apart from "configured but
     no successful sync yet" — only the first deserves the connect CTA.
+
+    The garmin payload additionally carries ``credentials_saved`` (W5),
+    computed against ``credential_key`` (the configured
+    ``FITNESS_CREDENTIAL_KEY``; ``""`` = feature off → always False).
+    The strava payload is unchanged.
     """
     auth: FitnessAuthState | None = repo.get_auth_state(
         user_id=user_id, source=source,
@@ -148,12 +182,17 @@ def _per_source_status(
     last_success_at = repo.last_successful_sync_at(
         user_id=user_id, source=source,
     )
-    return {
+    payload: dict[str, Any] = {
         "auth_status": auth.auth_status if auth is not None else "unknown",
         "auth_broken_since": auth.auth_broken_since if auth is not None else None,
         "last_success_at": last_success_at,
         "last_runs": [_sync_run_to_dict(r) for r in last_runs],
     }
+    if source == "garmin":
+        payload["credentials_saved"] = _garmin_credentials_saved(
+            auth, credential_key,
+        )
+    return payload
 
 
 def _missing_param(name: str) -> JSONResponse:
@@ -245,9 +284,17 @@ def register_fitness_routes(
     ) -> JSONResponse:
         user = get_authenticated_user(request)
         repo: FitnessRepository = services["fitness_repo"]
+        # W5: getattr-with-default tolerates partial test configs; a
+        # missing key means credential persistence is off.
+        credential_key = getattr(
+            services.get("config"), "fitness_credential_key", "",
+        ) or ""
 
         body = {
-            source: _per_source_status(repo, user_id=user.user_id, source=source)
+            source: _per_source_status(
+                repo, user_id=user.user_id, source=source,
+                credential_key=credential_key,
+            )
             for source in _VALID_SOURCES
         }
         log.info(

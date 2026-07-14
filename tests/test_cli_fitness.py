@@ -385,6 +385,65 @@ def test_fitness_reauth_garmin_mfa_happy_path(fitness_env, monkeypatch):
     assert state.auth_status == "ok"
 
 
+def test_fitness_reauth_garmin_key_set_persists_encrypted_creds(
+    fitness_env, monkeypatch,
+):
+    """W5: with FITNESS_CREDENTIAL_KEY set, the CLI re-auth stores the
+    username and the Fernet-encrypted password alongside the token blob."""
+    from cryptography.fernet import Fernet
+
+    from journal.services.fitness.credentials import decrypt_credential
+
+    key = Fernet.generate_key().decode()
+    monkeypatch.setenv("FITNESS_CREDENTIAL_KEY", key)
+    monkeypatch.setattr(
+        "journal.cli.fitness.getpass", lambda *a, **kw: "test_password",
+    )
+
+    clients: list[_FakeGarminClient] = []
+    with _patch_garmin_client(clients, invoke_mfa=False):
+        sys.argv = [
+            "journal", "fitness-reauth-garmin",
+            "--user-id", "1",
+            "--username", "test_user@example.com",
+        ]
+        main()
+
+    state = _read_state(fitness_env, source="garmin")
+    assert state is not None
+    assert state.extra_state.get("tokens_blob") == '{"oauth1": "FAKE_BLOB"}'
+    assert state.extra_state.get("garmin_username") == "test_user@example.com"
+    enc = state.extra_state.get("enc_password")
+    assert isinstance(enc, str) and enc
+    assert enc != "test_password"
+    assert decrypt_credential(enc, key=key) == "test_password"
+
+
+def test_fitness_reauth_garmin_key_unset_writes_no_credential_keys(
+    fitness_env, monkeypatch,
+):
+    """W5 regression guard: without the key, no credential material is
+    written — extra_state carries only the token blob."""
+    monkeypatch.delenv("FITNESS_CREDENTIAL_KEY", raising=False)
+    monkeypatch.setattr(
+        "journal.cli.fitness.getpass", lambda *a, **kw: "test_password",
+    )
+
+    clients: list[_FakeGarminClient] = []
+    with _patch_garmin_client(clients, invoke_mfa=False):
+        sys.argv = [
+            "journal", "fitness-reauth-garmin",
+            "--user-id", "1",
+            "--username", "test_user@example.com",
+        ]
+        main()
+
+    state = _read_state(fitness_env, source="garmin")
+    assert state is not None
+    assert "enc_password" not in state.extra_state
+    assert "garmin_username" not in state.extra_state
+
+
 def test_fitness_reauth_garmin_requires_username(fitness_env, monkeypatch):
     """W6 acceptance: --username is required; argparse refuses without it."""
     sys.argv = ["journal", "fitness-reauth-garmin", "--user-id", "1"]

@@ -77,6 +77,35 @@ def test_pending_entry_expires_after_ttl() -> None:
     assert store.consume(token) is None
 
 
+def test_pending_session_defaults_carry_no_credentials() -> None:
+    """W5: sessions issued without credential kwargs (key-unset mode, and
+    every pre-W5 call site) default to empty username / no ciphertext."""
+    store = GarminPendingStore()
+    token, _ = store.issue(user_id=1, client="C", state_token="S")
+    entry = store.consume(token)
+    assert entry is not None
+    assert entry.username == ""
+    assert entry.enc_password is None
+
+
+def test_pending_issue_carries_username_and_ciphertext() -> None:
+    """W5: the connect handler passes the username and the *encrypted*
+    password through the pending session so MFA completion can persist
+    them. The store is a dumb carrier — it never sees plaintext."""
+    store = GarminPendingStore()
+    token, _ = store.issue(
+        user_id=3,
+        client="C",
+        state_token="S",
+        username="alice@example.com",
+        enc_password="gAAAAA-ciphertext",
+    )
+    entry = store.consume(token)
+    assert entry is not None
+    assert entry.username == "alice@example.com"
+    assert entry.enc_password == "gAAAAA-ciphertext"
+
+
 def test_pending_two_distinct_tokens_dont_collide() -> None:
     store = GarminPendingStore()
     t1, _ = store.issue(user_id=1, client="A", state_token="sa")

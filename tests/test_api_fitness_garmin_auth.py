@@ -19,9 +19,11 @@ entry — production wiring resolves it to ``garminconnect.Garmin``.
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from cryptography.fernet import Fernet
 from garminconnect import (
     GarminConnectAuthenticationError,
     GarminConnectConnectionError,
@@ -34,6 +36,10 @@ from journal.db.factory import ConnectionFactory
 from journal.db.fitness_repository import FitnessRepository
 from journal.db.migrations import run_migrations
 from journal.models import FitnessAuthState
+from journal.services.fitness.credentials import (
+    decrypt_credential,
+    encrypt_credential,
+)
 from journal.services.fitness.garmin_pending import (
     DEFAULT_COOLDOWN_THRESHOLD,
     GarminCooldownTracker,
@@ -208,6 +214,7 @@ def _build_services(
     cooldown_tracker: GarminCooldownTracker,
     garmin_factory: Any,
     upstream_cooldown: GarminUpstreamCooldown | None = None,
+    credential_key: str | None = None,
 ) -> dict:
     services = {
         "fitness_repo": fitness_repo,
@@ -220,6 +227,14 @@ def _build_services(
     # otherwise the endpoint lazily creates one (default 5-minute block).
     if upstream_cooldown is not None:
         services["garmin_upstream_cooldown"] = upstream_cooldown
+    # W5 saved credentials: tests that exercise credential capture inject a
+    # config carrying the Fernet key. The default (no "config" entry at all)
+    # doubles as the regression guard for key-unset behavior — the handlers
+    # must tolerate a missing config service.
+    if credential_key is not None:
+        services["config"] = SimpleNamespace(
+            fitness_credential_key=credential_key,
+        )
     return services
 
 
@@ -984,5 +999,466 @@ def test_factory_kwargs_reach_fake_client(
     assert factory.last_client._email == "alice@example.com"
     assert factory.last_client._password == "secret"
     assert factory.last_client._return_on_mfa is True
+
+
+# ── Tests: W5 saved credentials (capture / MFA / disconnect) ─────────
+
+
+@pytest.fixture(scope="module")
+def credential_key() -> str:
+    return Fernet.generate_key().decode()
+
+
+def _seed_saved_credentials(
+    repo: FitnessRepository,
+    *,
+    key: str,
+    user_id: int = 1,
+    username: str = "alice@example.com",
+    password: str = "correct-horse",
+    upstream_user_id: str = "alice.j",
+) -> str:
+    """Seed a garmin auth row that already carries saved credentials.
+
+    Returns the ciphertext written, so tests can assert re-persistence.
+    """
+    enc = encrypt_credential(password, key=key)
+    repo.upsert_auth_state(
+        FitnessAuthState(
+            user_id=user_id,
+            source="garmin",
+            extra_state={
+                "tokens_blob": "OLD-BLOB",
+                "upstream_user_id": upstream_user_id,
+                "garmin_username": username,
+                "enc_password": enc,
+            },
+            last_successful_login_at="2026-04-01T00:00:00Z",
+            auth_status="ok",
+        ),
+    )
+    return enc
+
+
+def test_connect_key_set_persists_encrypted_credentials(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+    credential_key: str,
+) -> None:
+    """With FITNESS_CREDENTIAL_KEY set, a successful connect stores the
+    username and the Fernet-encrypted password (never the plaintext)."""
+    factory = FakeGarminFactory(profile={"displayName": "alice.j"})
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory, credential_key=credential_key,
+    )
+    with _build_client(services) as client:
+        resp = client.post(
+            "/api/fitness/garmin/connect",
+            json={"username": "alice@example.com", "password": "secret"},
+        )
+    assert resp.status_code == 200
+
+    state = fitness_repo.get_auth_state(user_id=1, source="garmin")
+    assert state is not None
+    assert state.extra_state.get("garmin_username") == "alice@example.com"
+    enc = state.extra_state.get("enc_password")
+    assert isinstance(enc, str) and enc
+    assert enc != "secret"
+    assert decrypt_credential(enc, key=credential_key) == "secret"
+
+
+def test_connect_key_unset_writes_no_credential_keys(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+) -> None:
+    """Key unset (no config service at all): behavior unchanged — no
+    credential material is written to extra_state."""
+    factory = FakeGarminFactory(profile={"displayName": "alice.j"})
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory,
+    )
+    with _build_client(services) as client:
+        resp = client.post(
+            "/api/fitness/garmin/connect",
+            json={"username": "alice@example.com", "password": "secret"},
+        )
+    assert resp.status_code == 200
+
+    state = fitness_repo.get_auth_state(user_id=1, source="garmin")
+    assert state is not None
+    assert "enc_password" not in state.extra_state
+    assert "garmin_username" not in state.extra_state
+
+
+def test_connect_empty_key_writes_no_credential_keys(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+) -> None:
+    """Key present in config but empty string — feature off, same as unset."""
+    factory = FakeGarminFactory(profile={"displayName": "alice.j"})
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory, credential_key="",
+    )
+    with _build_client(services) as client:
+        resp = client.post(
+            "/api/fitness/garmin/connect",
+            json={"username": "alice@example.com", "password": "secret"},
+        )
+    assert resp.status_code == 200
+    state = fitness_repo.get_auth_state(user_id=1, source="garmin")
+    assert state is not None
+    assert "enc_password" not in state.extra_state
+    assert "garmin_username" not in state.extra_state
+
+
+def test_connect_mfa_pending_session_holds_ciphertext_not_plaintext(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+    credential_key: str,
+) -> None:
+    """During an MFA challenge the pending session carries only the
+    ciphertext — plaintext must never sit in the pending store — and
+    nothing is persisted to the DB yet."""
+    factory = FakeGarminFactory(mfa_required=True)
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory, credential_key=credential_key,
+    )
+    with _build_client(services) as client:
+        resp = client.post(
+            "/api/fitness/garmin/connect",
+            json={"username": "alice@example.com", "password": "hunter2"},
+        )
+    assert resp.status_code == 200
+    token = resp.json()["pending_session"]
+
+    entry = pending_store.peek(token)
+    assert entry is not None
+    assert entry.username == "alice@example.com"
+    assert entry.enc_password is not None
+    assert entry.enc_password != "hunter2"
+    assert "hunter2" not in entry.enc_password
+    assert decrypt_credential(entry.enc_password, key=credential_key) == "hunter2"
+    # Nothing persisted until the MFA completes.
+    assert fitness_repo.get_auth_state(user_id=1, source="garmin") is None
+
+
+def test_mfa_completion_persists_credentials(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+    credential_key: str,
+) -> None:
+    factory = FakeGarminFactory(mfa_required=True)
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory, credential_key=credential_key,
+    )
+    with _build_client(services) as client:
+        connect = client.post(
+            "/api/fitness/garmin/connect",
+            json={"username": "alice@example.com", "password": "hunter2"},
+        )
+        token = connect.json()["pending_session"]
+        mfa = client.post(
+            "/api/fitness/garmin/connect/mfa",
+            json={"pending_session": token, "code": "123456"},
+        )
+    assert mfa.status_code == 200
+
+    state = fitness_repo.get_auth_state(user_id=1, source="garmin")
+    assert state is not None
+    assert state.extra_state.get("tokens_blob") == "FAKE-TOKEN-BLOB"
+    assert state.extra_state.get("garmin_username") == "alice@example.com"
+    enc = state.extra_state.get("enc_password")
+    assert isinstance(enc, str) and enc != "hunter2"
+    assert decrypt_credential(enc, key=credential_key) == "hunter2"
+
+
+def test_mfa_completion_key_unset_persists_no_credentials(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+) -> None:
+    factory = FakeGarminFactory(mfa_required=True)
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory,
+    )
+    with _build_client(services) as client:
+        connect = client.post(
+            "/api/fitness/garmin/connect",
+            json={"username": "alice@example.com", "password": "hunter2"},
+        )
+        token = connect.json()["pending_session"]
+        entry = pending_store.peek(token)
+        assert entry is not None
+        assert entry.enc_password is None
+        mfa = client.post(
+            "/api/fitness/garmin/connect/mfa",
+            json={"pending_session": token, "code": "123456"},
+        )
+    assert mfa.status_code == 200
+    state = fitness_repo.get_auth_state(user_id=1, source="garmin")
+    assert state is not None
+    assert "enc_password" not in state.extra_state
+    assert "garmin_username" not in state.extra_state
+
+
+def test_disconnect_clears_saved_credentials(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+    credential_key: str,
+) -> None:
+    """W5 acceptance: disconnect removes the whole auth row, saved
+    credentials included."""
+    _seed_saved_credentials(fitness_repo, key=credential_key)
+    factory = FakeGarminFactory()
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory, credential_key=credential_key,
+    )
+    with _build_client(services) as client:
+        resp = client.post("/api/fitness/garmin/disconnect")
+    assert resp.status_code == 200
+    assert resp.json() == {"disconnected": True}
+    assert fitness_repo.get_auth_state(user_id=1, source="garmin") is None
+
+
+# ── Tests: W5 POST /api/fitness/garmin/reconnect ─────────────────────
+
+
+def test_reconnect_happy_path_refreshes_blob_and_repersists_creds(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+    credential_key: str,
+) -> None:
+    enc = _seed_saved_credentials(fitness_repo, key=credential_key)
+    factory = FakeGarminFactory(profile={"displayName": "alice.j"})
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory, credential_key=credential_key,
+    )
+    with _build_client(services) as client:
+        resp = client.post("/api/fitness/garmin/reconnect")
+    assert resp.status_code == 200
+    assert resp.json() == {"connected": True, "upstream_user_id": "alice.j"}
+
+    # The saved credentials were decrypted and used for the login.
+    assert factory.last_client is not None
+    assert factory.last_client._email == "alice@example.com"
+    assert factory.last_client._password == "correct-horse"
+    assert factory.last_client._return_on_mfa is True
+
+    state = fitness_repo.get_auth_state(user_id=1, source="garmin")
+    assert state is not None
+    assert state.auth_status == "ok"
+    assert state.extra_state["tokens_blob"] == "FAKE-TOKEN-BLOB"
+    # Credentials re-persisted alongside the fresh blob.
+    assert state.extra_state["enc_password"] == enc
+    assert state.extra_state["garmin_username"] == "alice@example.com"
+
+
+def test_reconnect_without_auth_row_returns_404(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+    credential_key: str,
+) -> None:
+    factory = FakeGarminFactory()
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory, credential_key=credential_key,
+    )
+    with _build_client(services) as client:
+        resp = client.post("/api/fitness/garmin/reconnect")
+    assert resp.status_code == 404
+    assert resp.json().get("reason") == "no_saved_credentials"
+    assert factory.last_client is None
+
+
+def test_reconnect_without_saved_credentials_returns_404(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+    credential_key: str,
+) -> None:
+    """An auth row exists (tokens only, pre-W5 shape) but no saved creds."""
+    _seed_existing_garmin_auth(fitness_repo, user_id=1, upstream_user_id="alice.j")
+    factory = FakeGarminFactory()
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory, credential_key=credential_key,
+    )
+    with _build_client(services) as client:
+        resp = client.post("/api/fitness/garmin/reconnect")
+    assert resp.status_code == 404
+    assert resp.json().get("reason") == "no_saved_credentials"
+    assert factory.last_client is None
+
+
+def test_reconnect_with_rotated_key_returns_409(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+) -> None:
+    old_key = Fernet.generate_key().decode()
+    new_key = Fernet.generate_key().decode()
+    _seed_saved_credentials(fitness_repo, key=old_key)
+    factory = FakeGarminFactory()
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory, credential_key=new_key,
+    )
+    with _build_client(services) as client:
+        resp = client.post("/api/fitness/garmin/reconnect")
+    assert resp.status_code == 409
+    assert resp.json().get("reason") == "credentials_unavailable"
+    assert factory.last_client is None
+
+
+def test_reconnect_with_key_unset_returns_409(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+    credential_key: str,
+) -> None:
+    """Ciphertext saved but the key has since been unset — creds exist but
+    cannot be used: 409, not 404."""
+    _seed_saved_credentials(fitness_repo, key=credential_key)
+    factory = FakeGarminFactory()
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory, credential_key="",
+    )
+    with _build_client(services) as client:
+        resp = client.post("/api/fitness/garmin/reconnect")
+    assert resp.status_code == 409
+    assert resp.json().get("reason") == "credentials_unavailable"
+    assert factory.last_client is None
+
+
+def test_reconnect_mfa_challenge_returns_pending_session_with_ciphertext(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+    credential_key: str,
+) -> None:
+    """Reconnect may hit an MFA challenge: same mfa_required shape as
+    connect, and the pending session again carries the ciphertext so the
+    MFA completion re-persists the credentials."""
+    enc = _seed_saved_credentials(fitness_repo, key=credential_key)
+    factory = FakeGarminFactory(mfa_required=True)
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory, credential_key=credential_key,
+    )
+    with _build_client(services) as client:
+        resp = client.post("/api/fitness/garmin/reconnect")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["mfa_required"] is True
+        token = body["pending_session"]
+
+        entry = pending_store.peek(token)
+        assert entry is not None
+        assert entry.username == "alice@example.com"
+        assert entry.enc_password == enc
+
+        mfa = client.post(
+            "/api/fitness/garmin/connect/mfa",
+            json={"pending_session": token, "code": "123456"},
+        )
+    assert mfa.status_code == 200
+    state = fitness_repo.get_auth_state(user_id=1, source="garmin")
+    assert state is not None
+    assert state.extra_state["tokens_blob"] == "FAKE-TOKEN-BLOB"
+    assert state.extra_state["enc_password"] == enc
+    assert state.extra_state["garmin_username"] == "alice@example.com"
+
+
+def test_reconnect_respects_upstream_cooldown_preflight(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+    credential_key: str,
+) -> None:
+    """A hot global upstream cooldown refuses the reconnect pre-flight —
+    no upstream login attempt is made."""
+    _seed_saved_credentials(fitness_repo, key=credential_key)
+    upstream = GarminUpstreamCooldown()
+    upstream.record_block()
+    factory = FakeGarminFactory(profile={"displayName": "alice.j"})
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory, upstream_cooldown=upstream,
+        credential_key=credential_key,
+    )
+    with _build_client(services) as client:
+        resp = client.post("/api/fitness/garmin/reconnect")
+    assert resp.status_code == 429
+    assert resp.json().get("reason") == "upstream_rate_limited"
+    assert factory.last_client is None
+
+
+def test_reconnect_respects_per_email_cooldown(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+    credential_key: str,
+) -> None:
+    """The per-email cooldown tracker gates reconnect just like connect."""
+    _seed_saved_credentials(fitness_repo, key=credential_key)
+    for _ in range(DEFAULT_COOLDOWN_THRESHOLD):
+        cooldown_tracker.record_failure("alice@example.com")
+    factory = FakeGarminFactory(profile={"displayName": "alice.j"})
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory, credential_key=credential_key,
+    )
+    with _build_client(services) as client:
+        resp = client.post("/api/fitness/garmin/reconnect")
+    assert resp.status_code == 429
+    assert resp.json().get("reason") == "local_cooldown"
+    assert factory.last_client is None
 
 

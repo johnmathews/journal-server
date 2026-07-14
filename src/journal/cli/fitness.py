@@ -52,6 +52,7 @@ from journal.services.fitness.backfill import (
     backfill_garmin,
     backfill_strava,
 )
+from journal.services.fitness.credentials import encrypt_credential
 from journal.services.fitness.fetch import (
     GarminFetchService,
     StravaFetchService,
@@ -329,9 +330,21 @@ def cmd_fitness_reauth_garmin(args: argparse.Namespace, config: Config) -> None:
         )
         sys.exit(1)
 
+    # W5 saved credentials: encrypt right after the successful login, while
+    # the plaintext is still in scope. Key unset → feature off, nothing
+    # credential-shaped is written (pre-W5 behavior).
+    enc_password: str | None = None
+    if config.fitness_credential_key:
+        enc_password = encrypt_credential(
+            password, key=config.fitness_credential_key,
+        )
+
     existing = repo.get_auth_state(user_id=user_id, source="garmin")
     extra = dict(existing.extra_state) if existing else {}
     extra["tokens_blob"] = persisted[-1]
+    if enc_password:
+        extra["garmin_username"] = username
+        extra["enc_password"] = enc_password
     repo.upsert_auth_state(
         FitnessAuthState(
             user_id=user_id,
@@ -347,7 +360,13 @@ def cmd_fitness_reauth_garmin(args: argparse.Namespace, config: Config) -> None:
             created_at=existing.created_at if existing else "",
         ),
     )
-    print("Garmin re-auth complete — token blob persisted.")
+    if enc_password:
+        print(
+            "Garmin re-auth complete — token blob and encrypted "
+            "credentials persisted.",
+        )
+    else:
+        print("Garmin re-auth complete — token blob persisted.")
 
 
 # ── Garmin token mint / import (split-IP recovery) ───────────────────

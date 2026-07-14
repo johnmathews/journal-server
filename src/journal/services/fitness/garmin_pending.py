@@ -56,12 +56,23 @@ DEFAULT_UPSTREAM_BLOCK_S = 5 * 60
 
 @dataclass(frozen=True)
 class PendingSession:
-    """One in-flight Garmin MFA challenge."""
+    """One in-flight Garmin MFA challenge.
+
+    ``username`` and ``enc_password`` (W5 saved credentials) carry the
+    account email and the *Fernet-encrypted* password from the connect
+    attempt through to MFA completion, so a successful completion can
+    persist them alongside the token blob. ``enc_password`` is ciphertext
+    only — plaintext must never sit in the pending store. Both default to
+    "absent" for key-unset deployments, where the connect flow never
+    captures credentials.
+    """
 
     user_id: int
     client: Any
     state_token: Any
     expires_at: float
+    username: str = ""
+    enc_password: str | None = None
 
 
 class GarminPendingStore:
@@ -83,13 +94,21 @@ class GarminPendingStore:
         self._ttl = ttl_seconds
 
     def issue(
-        self, *, user_id: int, client: Any, state_token: Any,
+        self,
+        *,
+        user_id: int,
+        client: Any,
+        state_token: Any,
+        username: str = "",
+        enc_password: str | None = None,
     ) -> tuple[str, str]:
         """Mint a new pending session.
 
         Returns ``(token, expires_at_iso)``. The token is a 256-bit CSPRNG
         value (43 chars of URL-safe base64) and the ISO timestamp is
         wall-clock — what the response payload returns to the client.
+        ``username`` / ``enc_password`` (ciphertext only) ride along for
+        W5 credential persistence on MFA completion.
         """
         token = secrets.token_urlsafe(32)
         expires_at_mono = self._time() + self._ttl
@@ -103,6 +122,8 @@ class GarminPendingStore:
                 client=client,
                 state_token=state_token,
                 expires_at=expires_at_mono,
+                username=username,
+                enc_password=enc_password,
             )
         return token, expires_at_iso
 
