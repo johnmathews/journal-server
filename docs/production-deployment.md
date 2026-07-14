@@ -209,7 +209,8 @@ Cloudflare tunnel ingress and four env vars in `/srv/media/.env` (see below).
 
 ### Renaming the public hostname
 
-The app hardcodes no domain — a rename is Cloudflare + `.env` + Strava, in this order:
+The app hardcodes no domain — a rename is Cloudflare + `.env` (+ Strava, only if the
+mothballed integration has been revived with `STRAVA_ENABLED=true`), in this order:
 
 1. **Cloudflare** (Zero Trust → Networks → Tunnels → the tunnel → Public Hostnames):
    point the new hostname at `http://media:8402`. This auto-creates the proxied DNS
@@ -219,19 +220,23 @@ The app hardcodes no domain — a rename is Cloudflare + `.env` + Strava, in thi
    - `APP_BASE_URL=https://journal.itsa-pizza.com` (email verification / reset links)
    - `API_CORS_ORIGINS=https://journal.itsa-pizza.com` (REST CORS allow-list)
    - `MCP_ALLOWED_HOSTS=…,journal.itsa-pizza.com` (Host-header / DNS-rebinding allow-list)
-   - `STRAVA_REDIRECT_URI=https://journal.itsa-pizza.com/strava/callback` (OAuth return)
+   - `STRAVA_REDIRECT_URI=https://journal.itsa-pizza.com/strava/callback` (OAuth return —
+     only consumed while `STRAVA_ENABLED=true`; update it anyway so a future revival
+     doesn't inherit a stale domain)
 
    ```bash
    ssh media && cd /srv/media
    # edit .env (the four vars above)
    docker compose up -d journal-server journal-webapp
    ```
-3. **Strava** (developer dashboard → the app → *Authorization Callback Domain*): set it to
-   `journal.itsa-pizza.com` (Strava stores only the bare domain). Without this the SPA
-   connect flow returns a `redirect_uri` mismatch.
-4. **Verify:** load the new host; a fresh register/reset email links to the new domain; run
-   the Strava connect flow end-to-end (Settings · Fitness → Connect Strava → returns to
-   `/strava/callback` → connected).
+3. **Strava** — skip while mothballed (`STRAVA_ENABLED=false`, the default; see
+   `docs/fitness-operations.md` § Reviving Strava). If revived: developer dashboard → the
+   app → *Authorization Callback Domain* → set it to `journal.itsa-pizza.com` (Strava
+   stores only the bare domain). Without this the SPA connect flow returns a
+   `redirect_uri` mismatch.
+4. **Verify:** load the new host; a fresh register/reset email links to the new domain.
+   With Strava revived, also run the connect flow end-to-end (Settings · Fitness →
+   Connect Strava → returns to `/strava/callback` → connected).
 
 ## Operational commands
 
