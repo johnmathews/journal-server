@@ -521,9 +521,13 @@ operational runbooks, see [`fitness-pipeline.md`](fitness-pipeline.md) and
   Garmin → Strava) plus daily wellness rollups (sleep, HRV, resting HR, body
   battery, stress, training load, training readiness).
 - **Auth:** unofficial library (`python-garminconnect`) that wraps `garth`. Login
-  with username/password (and MFA when prompted) via the W11 CLI
-  (`fitness-reauth-garmin`); subsequent calls reuse a persistent token blob
-  stored in `fitness_auth_state.extra_state_json["tokens_blob"]`.
+  with username/password (and MFA when prompted) via the webapp connect flow or
+  the W11 CLI (`fitness-reauth-garmin`); subsequent calls reuse a persistent
+  token blob stored in `fitness_auth_state.extra_state_json["tokens_blob"]`.
+  When `FITNESS_CREDENTIAL_KEY` is set (optional, 2026-07-14), an encrypted
+  copy of the credentials is also saved so a dead blob triggers one unattended
+  re-login per sync — see
+  [`fitness-operations.md` §6](fitness-operations.md#6-saved-credentials--unattended-re-login).
 - **App registration:** none. The official Garmin Health API is gated to
   approved partners and is out of scope.
 - **Rate limits:** unpublished. Login may rate-limit at 429 after rapid retries

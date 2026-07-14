@@ -211,12 +211,42 @@ webapp Settings panel (`POST /api/fitness/garmin/connect`) or via
 fallback). A user without a `fitness_auth_state` row produces a clean
 `auth_broken` sync rather than a 503.
 
+**Saved Garmin credentials** (optional, off by default). Setting
+`FITNESS_CREDENTIAL_KEY` to a Fernet key enables encrypted credential
+persistence: the connect/MFA/CLI-reauth flows store the user's Garmin username
+plus a Fernet-encrypted copy of their password in
+`fitness_auth_state.extra_state_json`, which powers unattended re-login when
+the garth token blob dies mid-sync and the one-click
+`POST /api/fitness/garmin/reconnect` endpoint. Generate a key with:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Semantics:
+
+- **Unset (default):** feature off — no credential material is ever written;
+  connect behaves exactly as before the feature existed.
+- **Malformed:** startup fails fast with an actionable error that includes the
+  generation command above.
+- **Rotation:** generate a new key and restart. Existing ciphertext becomes
+  undecryptable — `credentials_saved` reads `false`, reconnect returns `409
+  credentials_unavailable`, and each user re-connects once to re-save under
+  the new key. Nothing crashes; unattended re-login just degrades to blob-only
+  behaviour until then.
+- **Loss:** same as rotation — the feature goes dark (stored ciphertext is
+  inert) until users reconnect. Unsetting the variable is the kill switch.
+
+See [`fitness-operations.md` §6](fitness-operations.md#6-saved-credentials--unattended-re-login)
+for the operational flow and runbook.
+
 | Variable                                | Default                                | Description                                                                                                                                                  |
 | --------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `STRAVA_ENABLED`                        | `false`                                | Master switch for the Strava integration (mothballed, roadmap D8). When `false`: Strava OAuth + sync/backfill routes 404, MCP trigger tools and the CLI reject `strava`, and the daily scheduler is Garmin-only. Historical Strava rows stay served. Accepts `1`/`true`/`yes`/`on`. |
 | `STRAVA_CLIENT_ID`                      |                                        | Strava API app client id from <https://www.strava.com/settings/api>. Required for Strava re-auth and sync (only consulted when `STRAVA_ENABLED=true`).       |
 | `STRAVA_CLIENT_SECRET`                  |                                        | Strava API app client secret. Required for Strava re-auth and sync.                                                                                          |
 | `STRAVA_REDIRECT_URI`                   | `http://localhost:8400/strava/callback`| OAuth callback URL embedded in the authorize URL. In prod (post-multi-user-plan W13), this points at the webapp callback route (`https://<webapp>/settings/fitness/strava/callback`) so the per-user webapp connect flow works; the Strava developer app's Authorization Callback Domain must match. The default value still drives the CLI listener path used for dev/laptop bootstrap (see [`fitness-operations.md` §2e](fitness-operations.md#2e-strava--cli-operator-fallback-headless-deployment-server-on-8400) for the headless workaround). |
+| `FITNESS_CREDENTIAL_KEY`                |                                        | Fernet key enabling encrypted Garmin credential persistence (saved-credentials + unattended re-login + `POST /api/fitness/garmin/reconnect`). Unset = feature off (nothing stored); malformed = startup failure with the generation command; rotated/lost = feature dark until users reconnect. Generate: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. |
 | `FITNESS_BACKFILL_START`                | `2026-01-01`                           | Default `--start` for `journal fitness-backfill` when no flag is passed. Activities and daily wellness rows from before this date are not retroactively pulled even if they exist upstream. |
 | `FITNESS_TRANSIENT_FAILURE_THRESHOLD`   | `3`                                    | Number of consecutive transient failures before W6 transitions a source to `auth_status="broken"`. Also the streak ceiling backfill aborts at. Must be ≥ 1.  |
 | `FITNESS_HEALTH_BROKEN_DEGRADED_HOURS`  | `48`                                   | Hours a source can be `auth_status="broken"` before `/api/health` downgrades the overall `status` to `degraded`. Must be ≥ 1.                                |

@@ -28,6 +28,29 @@ in their own stack. Compose subcommands run from `/srv/media` operate on the who
 when targeting only the journal services, name them explicitly (see
 [Operational commands](#operational-commands)).
 
+### Optional secret: `FITNESS_CREDENTIAL_KEY`
+
+Enables encrypted Garmin credential persistence (one-click reconnect + unattended
+re-login — [`fitness-operations.md` §6](./fitness-operations.md#6-saved-credentials--unattended-re-login)).
+Like the other optional secrets (`SMTP_PASSWORD`, `PUSHOVER_*`), the value lives in
+`/srv/media/.env` and is injected via a `${VAR}` interpolation line in the
+`journal-server` `environment:` block. To enable it:
+
+1. Generate a key:
+   `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
+2. Add `FITNESS_CREDENTIAL_KEY=<key>` to `/srv/media/.env`.
+3. Add `- FITNESS_CREDENTIAL_KEY=${FITNESS_CREDENTIAL_KEY}` to the `journal-server`
+   `environment:` block in `/srv/media/docker-compose.yml`, then re-sync the
+   [versioned mirror](../deploy/docker-compose.prod.yml).
+4. `docker compose up -d journal-server`.
+
+Unset = feature off (the server runs fine without it). A malformed value fails startup
+fast with the generation command in the error. Rotating or losing the key is safe but
+degrades saved credentials to unusable until each user reconnects once — see
+[`configuration.md`](./configuration.md#optional--fitness-integration) for full key
+lifecycle semantics. Treat the key like the other `.env` secrets: it decrypts the Garmin
+passwords stored in `journal.db`, so key + DB backup together reveal them.
+
 ## Containers
 
 | Container | Image | Port (host:container) | Restart |

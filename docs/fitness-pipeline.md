@@ -163,7 +163,7 @@ the same window is harmless.
 
 The watermark currently uses strict `>` on a 1-second-resolution
 `fetched_at`, which underprojects under dense writes. See
-[`fitness-operations.md` §7](fitness-operations.md#7-known-limitations) for
+[`fitness-operations.md` §8](fitness-operations.md#8-known-limitations) for
 the operator-facing recovery and the planned fix options.
 
 ### Job workers (W8)

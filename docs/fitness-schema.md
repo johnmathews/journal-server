@@ -1,6 +1,6 @@
 # Fitness Schema Design
 
-**Status:** active — schema design. **Last updated:** 2026-05-09. **Created:** 2026-05-09.
+**Status:** active — schema design. **Last updated:** 2026-07-14 (`extra_state_json` saved-credential keys, W5). **Created:** 2026-05-09.
 **Supersedes:** none.
 **Related docs:** [`fitness-integration-plan.md`](./fitness-integration-plan.md) (master),
 [`architecture.md`](./architecture.md), [`external-services.md`](./external-services.md),
@@ -317,6 +317,20 @@ Token storage shape mirrors `user_sessions` at `migrations/0011_multi_tenant.sql
 PK, ISO 8601 timestamps, `ON DELETE CASCADE` from users). Encryption-at-rest for
 `access_token` / `refresh_token` is handled at the SQLite layer if needed (master plan Q2),
 not in this schema.
+
+**`extra_state_json` keys on `garmin` rows** (no schema migration — the column is a JSON
+grab-bag by design):
+
+| Key | Since | Content |
+|---|---|---|
+| `tokens_blob` | W11 re-auth | The garth token blob (`client.dumps()`), the live sync credential. |
+| `upstream_user_id` | multi-user W2 | Garmin `displayName`, powering the D8 account-mismatch guard. |
+| `garmin_username` | 2026-07-14 (W5 saved credentials) | The Garmin account email, stored plaintext (it is an identifier, not a secret). |
+| `enc_password` | 2026-07-14 (W5 saved credentials) | The Garmin password as **Fernet ciphertext**, encrypted under the `FITNESS_CREDENTIAL_KEY` env var. Written only when that key is set at connect/MFA/CLI-reauth time; plaintext never reaches SQLite. A rotated or lost key leaves the ciphertext inert (undecryptable → treated as "no saved credentials") until the user reconnects. |
+
+Strava rows write only `upstream_user_id` (the `athlete.id`) here and carry no credential
+material beyond the OAuth token columns. Deleting the row (disconnect) removes saved
+credentials with it.
 
 **`updated_at` is app-managed, not auto-updated.** The `DEFAULT (strftime(...))` clause
 runs only on `INSERT`. SQLite has no built-in `ON UPDATE` and the schema deliberately

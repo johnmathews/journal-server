@@ -2312,7 +2312,7 @@ candidate by future extraction runs.
 
 ## Fitness endpoints
 
-Twelve endpoints expose the fitness pipeline:
+Thirteen endpoints expose the fitness pipeline:
 
 - Read routes (`GET /api/fitness/{activities,daily,sync/status,integrity}`) and
   the W2/W3 per-user Garmin connect / Strava OAuth endpoints live in
@@ -2427,7 +2427,8 @@ the soft-pointer integrity check can verify provenance.
 ### GET /api/fitness/sync/status
 
 Per-source snapshot — auth status, last success, and the most recent ten sync
-runs. Mirrors `journal fitness-status`.
+runs. Mirrors `journal fitness-status` (which does not print the
+`credentials_saved` field below).
 
 **Response (200):**
 
@@ -2450,7 +2451,13 @@ runs. Mirrors `journal fitness-status`.
    }
   ]
  },
- "garmin": null
+ "garmin": {
+  "auth_status": "ok",
+  "auth_broken_since": null,
+  "last_success_at": "2026-05-09T18:44:02Z",
+  "credentials_saved": true,
+  "last_runs": []
+ }
 }
 ```
 
@@ -2459,6 +2466,14 @@ neither a `fitness_auth_state` row nor any `fitness_sync_runs` rows for it.
 `null` lets the webapp distinguish "first-use, never connected" from
 "configured but no successful sync yet" — only the first deserves a connect
 CTA.
+
+The `garmin` payload additionally carries `credentials_saved` (the `strava`
+payload does not): `true` iff the auth row holds an encrypted saved password
+**and** the currently configured `FITNESS_CREDENTIAL_KEY` can decrypt it.
+Key unset, no saved ciphertext, or a rotated/lost key all read as `false` —
+"saved but unusable" is deliberately indistinguishable from "not saved", since
+the webapp uses this flag to decide whether to offer the one-click
+[`POST /api/fitness/garmin/reconnect`](#post-apifitnessgarminreconnect).
 
 ---
 
@@ -2608,7 +2623,14 @@ in the body authenticate the *upstream* Garmin account, not the journal user.
 
 The plaintext password is consumed once: it's passed to `garminconnect.Garmin`
 inside the request handler, the login result is captured, and the password is
-dropped before the response is sent. It is never logged or persisted.
+dropped before the response is sent. It is never logged, and plaintext is
+never persisted. When `FITNESS_CREDENTIAL_KEY` is set, the handler encrypts
+the password at first touch (Fernet) and, on login success, stores
+`garmin_username` + `enc_password` (ciphertext only) in
+`fitness_auth_state.extra_state_json` to power unattended re-login and
+[`POST /api/fitness/garmin/reconnect`](#post-apifitnessgarminreconnect); a
+pending MFA session likewise carries only ciphertext. When the key is unset
+(the default), no credential material is written at all.
 
 **Response (200, no MFA needed):**
 
@@ -2727,11 +2749,71 @@ the filesystem cache.
   prompts the user to retry rather than blaming bad credentials.
 - `409` upstream-id mismatch — same shape as `connect`.
 
+On success, if the pending session was carrying saved-credential ciphertext
+(key set at connect time), the `garmin_username` + `enc_password` pair is
+persisted alongside the token blob — only now that the MFA actually
+completed. In key-unset mode the pending session carries no credential
+material and this is a no-op.
+
+---
+
+### POST /api/fitness/garmin/reconnect
+
+Re-login with the saved (encrypted) Garmin credentials — **no request body**
+(W5 of the strava-mothball / garmin-credentials plan). This is the one-click
+recovery path the webapp offers when auth is broken and
+`credentials_saved` is `true` on
+[`GET /api/fitness/sync/status`](#get-apifitnesssyncstatus): the server
+decrypts the stored ciphertext and runs the *exact* connect login path —
+including both pre-flight cooldown gates, the rate-limit/bot-challenge
+disambiguation, the D8 account-mismatch check, and the `mfa_required`
+pending-session shape — so the user never re-types their password. Requires
+`FITNESS_CREDENTIAL_KEY` to be set and credentials to have been saved by a
+prior connect/MFA/CLI-reauth (see
+[`fitness-operations.md` §6](fitness-operations.md#6-saved-credentials--unattended-re-login)).
+
+**Response (200, no MFA needed):**
+
+```json
+{ "connected": true, "upstream_user_id": "alice.j.garmin" }
+```
+
+**Response (200, MFA needed):**
+
+```json
+{
+  "mfa_required": true,
+  "pending_session": "h7-…base64url…-Q",
+  "expires_at": "2026-05-10T12:34:56Z"
+}
+```
+
+Same pending-session mechanics as `connect` — present it to
+`POST /api/fitness/garmin/connect/mfa` with the 6-digit code. An MFA account
+therefore still benefits: reconnect reduces recovery to typing only the code.
+
+**Errors:**
+
+- `404` `{"error": "No saved Garmin credentials for this account. Connect
+  with username and password first.", "reason": "no_saved_credentials"}` —
+  the auth row has no `garmin_username`/`enc_password` pair (never saved, or
+  the row was deleted by disconnect).
+- `409` `{"error": "Saved Garmin credentials cannot be decrypted — the
+  credential key has changed or is unset. Reconnect with username and
+  password.", "reason": "credentials_unavailable"}` — ciphertext exists but
+  `FITNESS_CREDENTIAL_KEY` is unset, or was rotated since the credentials
+  were saved.
+- `429` `local_cooldown` / `upstream_rate_limited`, `401`
+  `invalid_credentials` (e.g. the user changed their Garmin password since
+  saving), `502` `upstream_error`, `409` `upstream_account_mismatch` — same
+  shapes and semantics as [`connect`](#post-apifitnessgarminconnect).
+
 ---
 
 ### POST /api/fitness/garmin/disconnect
 
-Delete the calling user's `fitness_auth_state` row for `source='garmin'`.
+Delete the calling user's `fitness_auth_state` row for `source='garmin'` —
+including any saved (encrypted) credentials; the whole auth row goes.
 Idempotent — disconnecting a not-connected source returns `{disconnected:
 false}`. Existing `fitness_activities` and `fitness_daily` rows are *not*
 deleted; the user keeps their historical data and can reconnect with the same
@@ -3207,7 +3289,9 @@ List daily wellness rollups in a date window. Mirrors `GET /api/fitness/daily`.
 Per-source auth + last-runs snapshot. No parameters. Mirrors
 `GET /api/fitness/sync/status` exactly — each of `strava` / `garmin` is
 either `null` (never connected) or a dict with `auth_status`,
-`auth_broken_since`, `last_success_at`, and the last 10 sync runs.
+`auth_broken_since`, `last_success_at`, and the last 10 sync runs. The
+garmin payload also carries `credentials_saved` (W5 saved-credentials
+support), computed identically to the REST route.
 
 ### fitness_integrity_check
 

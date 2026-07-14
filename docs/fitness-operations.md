@@ -1,6 +1,6 @@
 # Fitness Operations
 
-**Status:** active. **Last updated:** 2026-07-14 (Strava mothballed behind `STRAVA_ENABLED=false`; previous updates
+**Status:** active. **Last updated:** 2026-07-14 (saved Garmin credentials + unattended re-login behind `FITNESS_CREDENTIAL_KEY` — see §6; same day: Strava mothballed behind `STRAVA_ENABLED=false`; previous updates
 2026-07-13 — Strava suspension note; 2026-06-21 — Garmin Cloudflare-block handling: connect endpoint reclassifies IP/bot-challenge blocks as `upstream_rate_limited` and trips a global pre-flight cooldown; split-IP mint/import recovery in §2c-bis; see `journal/260619-garmin-cloudflare-recovery.md` and `journal/260621-garmin-upstream-cooldown.md`).
 
 > **Strava integration mothballed via `STRAVA_ENABLED=false` (2026-07-14).**
@@ -49,8 +49,9 @@ W1–W15 execution sequencing is archived at
 3. [Historical backfill](#3-historical-backfill)
 4. [Routine sync](#4-routine-sync)
 5. [Status, health, and integrity](#5-status-health-and-integrity)
-6. [Troubleshooting](#6-troubleshooting)
-7. [Known limitations](#7-known-limitations)
+6. [Saved credentials & unattended re-login](#6-saved-credentials--unattended-re-login)
+7. [Troubleshooting](#7-troubleshooting)
+8. [Known limitations](#8-known-limitations)
 
 ---
 
@@ -71,6 +72,7 @@ fallback.
 | `STRAVA_CLIENT_ID` | Strava | Strava re-auth + sync |
 | `STRAVA_CLIENT_SECRET` | Strava | Strava re-auth + sync |
 | `STRAVA_REDIRECT_URI` | Strava (default `http://localhost:8400/strava/callback`) | Strava re-auth listener bind + authorize URL |
+| `FITNESS_CREDENTIAL_KEY` | Garmin (optional, unset = off) | Encrypted credential persistence: saved-credentials reconnect + unattended re-login (§6) |
 | `FITNESS_BACKFILL_START` | both (default `2026-01-01`) | `fitness-backfill` default `--start` |
 | `FITNESS_TRANSIENT_FAILURE_THRESHOLD` | both (default `3`) | W6 fetch service auth-broken trip + backfill streak abort |
 | `FITNESS_HEALTH_BROKEN_DEGRADED_HOURS` | both (default `48`) | `/api/health` downgrade when a source has been broken longer than this |
@@ -111,14 +113,22 @@ shipped in W2 of the multi-user plan:
   Authenticates against Garmin synchronously; returns `{connected: true,
   upstream_user_id}` on no-MFA success, or `{mfa_required: true,
   pending_session, expires_at}` when Garmin asks for a 6-digit code.
-  The plaintext password is consumed once inside the request handler
-  and never persisted.
+  The plaintext password is consumed once inside the request handler.
+  When `FITNESS_CREDENTIAL_KEY` is unset it is never persisted; when the
+  key is set, a Fernet-encrypted copy is saved so the server can re-login
+  unattended and offer one-click reconnect (§6) — only ciphertext ever
+  reaches SQLite.
 - `POST /api/fitness/garmin/connect/mfa` — body
   `{pending_session, code}`. Completes the MFA-required flow. The
   `pending_session` is bound to the authenticated user's `user_id`; a
   token leaked to a different logged-in user is rejected with 403.
+- `POST /api/fitness/garmin/reconnect` — no body. Re-login using the
+  saved (encrypted) credentials — the one-click recovery path when auth
+  breaks (§6). Same login path, cooldown gates, and `mfa_required`
+  response shape as connect.
 - `POST /api/fitness/garmin/disconnect` — deletes the calling user's
-  `fitness_auth_state` row for `source='garmin'`.
+  `fitness_auth_state` row for `source='garmin'` (including any saved
+  credentials — the whole auth row goes).
 
 A small in-memory pending-session store
 (`services/fitness/garmin_pending.py`) holds the live `Garmin` client
@@ -222,8 +232,10 @@ docker exec -it journal-server uv run journal fitness-reauth-garmin \
 ```
 
 `--username` is required (no env-var fallback after W6). The password is
-read from the controlling terminal via `getpass()` — never from env vars
-and never persisted. The command logs into `connect.garmin.com` via
+read from the controlling terminal via `getpass()` — never from env vars,
+and plaintext is never persisted (when `FITNESS_CREDENTIAL_KEY` is set, a
+Fernet-encrypted copy is saved for the §6 recovery paths, same as the
+webapp connect flow). The command logs into `connect.garmin.com` via
 `python-garminconnect`, prompts for an MFA code on stdin if Garmin asks
 for one, and persists the resulting token blob into
 `fitness_auth_state.extra_state_json["tokens_blob"]`. (Unlike Strava,
@@ -235,7 +247,7 @@ The `garminconnect` library tries multiple transports in sequence and
 may print intermediate `429: Mobile login returned 429 — IP rate limited
 by Garmin` lines before a third transport succeeds. **The `Garmin
 re-auth complete — token blob persisted.` line is authoritative.** The
-429 lines are not failures (see [§6](#6-troubleshooting)).
+429 lines are not failures (see [§7](#7-troubleshooting)).
 
 ### 2c-bis. Garmin — split-IP recovery when Cloudflare blocks the server
 
@@ -502,7 +514,7 @@ print('garmin:', normalize_garmin(repo, user_id=1, since='').rows_normalized)
 This re-projects every raw row that isn't already normalized. Idempotent — a
 second invocation reports `rows_normalized=0` because everything is in sync.
 
-See [§7 Known limitations](#7-known-limitations) for the watermark fix
+See [§8 Known limitations](#8-known-limitations) for the watermark fix
 status and what the original quirk looked like.
 
 **Abort modes.** `fitness-backfill` exits non-zero with an actionable
@@ -604,8 +616,9 @@ Three windows into the pipeline's runtime state.
 
 Per-source snapshot: `auth_status`, `auth_broken_since`, `last_success_at`,
 plus the most recent ten `fitness_sync_runs` rows. CLI output mirrors the
-shape of `GET /api/fitness/sync/status` exactly. Sources that have never been
-configured (no auth row, no sync runs) are omitted.
+shape of `GET /api/fitness/sync/status` (minus the REST-only
+`credentials_saved` field on the garmin payload — see §6). Sources that have
+never been configured (no auth row, no sync runs) are omitted.
 
 ### `GET /api/health` (per-user, when authenticated)
 
@@ -656,7 +669,87 @@ prod DB before shipping any of the multi-user work units.
 
 ---
 
-## 6. Troubleshooting
+## 6. Saved credentials & unattended re-login
+
+Optional feature (2026-07-14, W4–W7 of the strava-mothball /
+garmin-credentials plan), enabled by setting `FITNESS_CREDENTIAL_KEY` to a
+Fernet key ([`configuration.md`](configuration.md#optional--fitness-integration)).
+Unset — the default — means nothing below applies and passwords are never
+stored.
+
+### The flow
+
+1. **Connect stores ciphertext.** A successful
+   `POST /api/fitness/garmin/connect` (directly, or after the MFA step) or
+   `journal fitness-reauth-garmin` encrypts the Garmin password at first
+   touch (Fernet) and persists `garmin_username` + `enc_password`
+   (ciphertext) in `fitness_auth_state.extra_state_json`, alongside the
+   token blob. Pending MFA sessions carry ciphertext only — plaintext never
+   outlives the login call.
+2. **The token blob eventually dies.** garth blobs last roughly a year;
+   a dead blob fails at API-call time mid-sync (`GarminAuthError`), not at
+   login time.
+3. **One gated auto re-login per sync run.** The fetch service decrypts the
+   saved credentials and performs a fresh password login — at most once per
+   run, and only after consulting the `GarminUpstreamCooldown` gate (now a
+   single instance shared with the connect UI, so unattended recovery can
+   never deepen a Cloudflare block the UI already observed, or vice versa).
+   On success the fresh blob is persisted and the failed fetch window is
+   retried once.
+4. **Anything else degrades to `auth_broken`.** No saved credentials,
+   cooldown hot, rate-limited login (which also arms the shared cooldown),
+   MFA challenge, wrong password, or a second auth failure after a
+   successful re-login — all land in the existing `auth_broken` flow. The
+   Pushover notification now says when automatic re-login was attempted and
+   failed, so the user knows the automatic path is exhausted.
+
+### The MFA limitation
+
+Fully-unattended recovery is impossible when Garmin challenges with MFA —
+there is no stored TOTP secret (deliberately; plan non-goal 3), and the
+unattended path raises a typed auth error rather than hanging on a prompt.
+What the feature still buys an MFA account: the webapp's one-click
+**"Reconnect with saved credentials"** button (`POST
+/api/fitness/garmin/reconnect`, no body) reuses the stored credentials and,
+on an MFA challenge, returns the same `mfa_required` + pending-session shape
+as connect — the user types only the 6-digit code, never their password. A
+"use different credentials" link covers changed passwords.
+
+### Status surface
+
+The garmin payload of `GET /api/fitness/sync/status` (and the MCP
+`fitness_sync_status` mirror) carries `credentials_saved: bool` — true only
+when ciphertext exists **and** the currently configured key can decrypt it.
+The webapp uses it to decide whether to offer one-click reconnect.
+
+### Kill switch
+
+Unset `FITNESS_CREDENTIAL_KEY` and restart. Stored ciphertext becomes inert
+(`credentials_saved` reads false, reconnect returns `409
+credentials_unavailable`, unattended re-login reverts to blob-only
+behaviour). No data cleanup is required; disconnecting a source deletes its
+auth row including any saved credentials.
+
+### Key rotation runbook
+
+1. Generate a new key:
+   `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
+2. Replace `FITNESS_CREDENTIAL_KEY` in the server environment
+   (`/srv/media/.env` in prod) and restart `journal-server`.
+3. Existing ciphertext is now undecryptable — this is expected and safe.
+   Every sync keeps working off the token blob; only the recovery paths are
+   dark until step 4.
+4. Each user re-connects once (Settings → Fitness → the Garmin card asks for
+   credentials, since `credentials_saved` is false). The connect re-saves
+   ciphertext under the new key.
+
+A **lost** key is operationally identical to a rotation: set a fresh key and
+have users reconnect once. There is no way (by design) to recover plaintext
+from the stored ciphertext without the original key.
+
+---
+
+## 7. Troubleshooting
 
 ### Strava re-auth fails with `OSError: [Errno 98] Address already in use`
 
@@ -678,7 +771,7 @@ Expected during a dense backfill (e.g. `windows=5/5 fetched=80
 normalized=50`). Run the force-renormalize one-liner from
 [§3](#3-historical-backfill); a second invocation will report
 `rows_normalized=0` once everything is projected. See
-[§7 Known limitations](#7-known-limitations).
+[§8 Known limitations](#8-known-limitations).
 
 ### Backfill aborts with `BackfillBlocked` (a routine sync is in flight)
 
@@ -689,7 +782,10 @@ then re-invoke. The resume predicate makes catching up cheap.
 ### `auth_status="broken"` after a routine sync
 
 The fetch service has already fired the once-per-transition Pushover (if
-configured). Run `fitness-reauth-{strava,garmin}` to refresh credentials.
+configured) — for Garmin, after first attempting the unattended re-login of
+§6 when saved credentials were available (the notification says so). Use the
+webapp's one-click reconnect (§6) or run `fitness-reauth-{strava,garmin}` to
+refresh credentials.
 Re-auth flips `auth_status` back to `ok` and clears `auth_broken_since`. The
 next sync (CLI, REST, or MCP) picks up from the existing watermark.
 
@@ -733,7 +829,7 @@ re-auth commands with the fresh credentials in `.env`.
 
 ---
 
-## 7. Known limitations
+## 8. Known limitations
 
 These are documented gaps with planned follow-ups. They are not bugs — the
 pipeline works correctly given the documented operator workarounds.
