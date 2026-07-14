@@ -510,6 +510,16 @@ class Config:
     # `fitness_auth_state.extra_state_json["tokens_blob"]` per user. No
     # global GARMIN_USERNAME / GARMIN_PASSWORD env vars; see
     # docs/fitness-multiuser-plan.md §5 W6.
+    # Fernet key enabling encrypted saved Garmin credentials (unattended
+    # re-auth when the token blob dies). Optional-secret idiom like
+    # SMTP_PASSWORD: unset/empty = feature off. When set it must be a
+    # valid Fernet key (32 bytes, urlsafe base64) — validated in
+    # __post_init__ so a malformed key fails startup, not a sync.
+    # Generate one with:
+    #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    fitness_credential_key: str = field(
+        default_factory=lambda: os.environ.get("FITNESS_CREDENTIAL_KEY", "")
+    )
     # How many consecutive transient failures before Pushover fires
     # (per D5 in fitness-integration-plan.md). 3 is a reasonable default
     # for a daily-cadence pipeline — one bad day is noise; three in a row
@@ -603,6 +613,22 @@ class Config:
             raise ValueError(
                 "FITNESS_HEALTH_BROKEN_DEGRADED_HOURS must be >= 1"
             )
+        if self.fitness_credential_key:
+            # Deferred import: journal.services.fitness modules import
+            # this config module at import time, so a top-level import
+            # here would be circular. By __post_init__ time the cycle
+            # is resolved.
+            from journal.services.fitness.credentials import (
+                CredentialKeyInvalid,
+                validate_credential_key,
+            )
+
+            try:
+                validate_credential_key(self.fitness_credential_key)
+            except CredentialKeyInvalid as exc:
+                raise ValueError(
+                    f"FITNESS_CREDENTIAL_KEY is set but invalid: {exc}"
+                ) from exc
         if self.job_worker_count < 1:
             raise ValueError("JOB_WORKER_COUNT must be >= 1")
 

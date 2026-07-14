@@ -383,6 +383,48 @@ class TestFitnessConfig:
             Config()
 
 
+class TestFitnessCredentialKey:
+    """FITNESS_CREDENTIAL_KEY (W4): optional Fernet key for encrypted
+    saved Garmin credentials. Unset = feature off; malformed = fail
+    fast at startup with the generation command in the message."""
+
+    def test_unset_key_defaults_to_empty(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Optional-secret idiom (like SMTP_PASSWORD): absence is valid."""
+        monkeypatch.delenv("FITNESS_CREDENTIAL_KEY", raising=False)
+        config = Config()
+        assert config.fitness_credential_key == ""
+
+    def test_empty_key_is_valid(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FITNESS_CREDENTIAL_KEY", "")
+        config = Config()
+        assert config.fitness_credential_key == ""
+
+    def test_valid_key_stored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cryptography.fernet import Fernet
+
+        key = Fernet.generate_key().decode()
+        monkeypatch.setenv("FITNESS_CREDENTIAL_KEY", key)
+        config = Config()
+        assert config.fitness_credential_key == key
+
+    def test_malformed_key_fails_startup(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("FITNESS_CREDENTIAL_KEY", "not-a-fernet-key")
+        with pytest.raises(ValueError, match="FITNESS_CREDENTIAL_KEY"):
+            Config()
+
+    def test_malformed_key_error_includes_generation_command(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The failure message must tell the operator how to mint a key."""
+        monkeypatch.setenv("FITNESS_CREDENTIAL_KEY", "not-a-fernet-key")
+        with pytest.raises(ValueError, match=r"Fernet\.generate_key"):
+            Config()
+
+
 class TestJobWorkerCount:
     """`JOB_WORKER_COUNT` controls Pool A (ingestion/fast) worker count
     for the background job runner. The storyline pool is always
