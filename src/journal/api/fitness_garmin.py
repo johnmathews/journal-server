@@ -817,17 +817,16 @@ def register_fitness_garmin_routes(
         )
         # Now consume the pending entry — login is committed.
         pending.consume(token)
-        # Reset the per-email cool-down — the user just succeeded.
-        # We don't have the original email here, but the cooldown is keyed
-        # by what the user typed; if a stale failure-counter hangs around
-        # it ages out within the window. Acceptable trade for not having
-        # to plumb the email through the pending entry.
+        # Reset the per-email cool-down — the user just succeeded. The
+        # pending session carries the username since W5 (empty for
+        # pre-W5 sessions or key-unset mode, where there's nothing to
+        # reset by key anyway).
+        if entry.username:
+            cooldown.reset(entry.username)
         log.info(
             "POST /api/fitness/garmin/connect/mfa — connected user_id=%d "
             "(upstream=%s)", user.user_id, upstream,
         )
-        # silence unused-variable complaints from optional cooldown reset
-        del cooldown
         return JSONResponse(
             {"connected": True, "upstream_user_id": upstream}, status_code=200,
         )

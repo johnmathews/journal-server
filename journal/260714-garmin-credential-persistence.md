@@ -116,3 +116,16 @@ Runbook: `docs/fitness-operations.md` §6.
 - Docs (W8): `configuration.md`, `fitness-operations.md` §6 (new),
   `api.md`, `fitness-schema.md`, `production-deployment.md`, `.env.example`
   (shipped with W4).
+
+## 7. Wrap-up review fix
+
+The wrap-up code-review pass caught a stale-comment bug this feature
+introduced indirectly: the MFA-completion handler still carried a pre-W5
+comment claiming "we don't have the original email here" and never reset
+the per-email `GarminCooldownTracker` after a successful MFA login — but
+W5's `PendingSession` now carries the username precisely so credentials
+can be persisted there. Consequence: a user who mistyped a few times and
+then succeeded via MFA could hit the 429 lockout on a single later
+mistype. Fixed with a failing-test-first regression
+(`test_mfa_success_resets_per_email_cooldown`); the reset is guarded on
+a non-empty username so pre-W5 pending sessions are unaffected.

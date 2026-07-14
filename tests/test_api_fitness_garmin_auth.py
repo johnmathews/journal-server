@@ -634,6 +634,48 @@ def test_mfa_completes_login_and_persists_tokens(
     assert state.extra_state.get("upstream_user_id") == "alice.j"
 
 
+def test_mfa_success_resets_per_email_cooldown(
+    fitness_factory: ConnectionFactory,
+    fitness_repo: FitnessRepository,
+    pending_store: GarminPendingStore,
+    cooldown_tracker: GarminCooldownTracker,
+) -> None:
+    """A successful MFA completion must clear the per-email failure counter.
+
+    Scenario: the user mistypes their password a few times (accumulating
+    failures just short of the threshold), then succeeds via an
+    MFA-required connect. The stale counter must be reset — otherwise a
+    single later mistype trips the 429 lockout right after a successful
+    login. The pending session carries the username (W5), so the MFA
+    handler has everything it needs to reset.
+    """
+    factory = FakeGarminFactory(mfa_required=True)
+    services = _build_services(
+        fitness_factory=fitness_factory, fitness_repo=fitness_repo,
+        pending_store=pending_store, cooldown_tracker=cooldown_tracker,
+        garmin_factory=factory,
+    )
+    for _ in range(DEFAULT_COOLDOWN_THRESHOLD - 1):
+        cooldown_tracker.record_failure("alice@example.com")
+
+    with _build_client(services) as client:
+        connect = client.post(
+            "/api/fitness/garmin/connect",
+            json={"username": "alice@example.com", "password": "x"},
+        )
+        token = connect.json()["pending_session"]
+        mfa = client.post(
+            "/api/fitness/garmin/connect/mfa",
+            json={"pending_session": token, "code": "123456"},
+        )
+
+    assert mfa.status_code == 200
+    # One more mistype after the successful login must NOT trip the
+    # threshold — the counter was reset by the MFA completion.
+    cooldown_tracker.record_failure("alice@example.com")
+    assert cooldown_tracker.check("alice@example.com") is None
+
+
 def test_mfa_wrong_code_returns_401_and_preserves_pending_session(
     fitness_factory: ConnectionFactory,
     fitness_repo: FitnessRepository,

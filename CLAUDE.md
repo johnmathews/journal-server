@@ -53,7 +53,8 @@ src/journal/
     conversations/      — Multi-turn chat reply: intent classify → per-intent
                           handlers (lookup/aggregate/temporal/trend) + passages
     entity_extraction/  — Entity extraction service (orchestrator + helpers)
-    fitness/            — Strava/Garmin fetch, normalize, backfill + activity-type map
+    fitness/            — Strava/Garmin fetch, normalize, backfill + activity-type map;
+                          credentials.py = Fernet-encrypted saved Garmin credentials
     storylines/         — StorylineEngine (judge-driven continue-or-break chaptering +
                           narrator), extension classifier, segments; wired via the
                           `bootstrap-storylines` CLI
