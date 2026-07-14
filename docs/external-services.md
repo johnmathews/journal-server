@@ -489,6 +489,13 @@ operational runbooks, see [`fitness-pipeline.md`](fitness-pipeline.md) and
 
 ### Strava
 
+> **Mothballed (2026-07-14):** Strava paywalled Standard-tier API access
+> (~$11.99/mo effective 2026-06-30); no subscription is held, so the
+> integration is disabled via `STRAVA_ENABLED=false` (the default). The entry
+> below describes the dormant integration; historical Strava data is kept and
+> served. See roadmap D8 and
+> [`fitness-operations.md` § Reviving Strava](fitness-operations.md#reviving-strava).
+
 - **Role:** Activity ingestion (runs, rides, swims, walks, hikes, strength, other).
 - **Auth:** OAuth 2.0 with refresh tokens. The W11 CLI (`fitness-reauth-strava`)
   runs the one-time authorize flow; `stravalib` auto-refreshes access tokens
@@ -505,7 +512,8 @@ operational runbooks, see [`fitness-pipeline.md`](fitness-pipeline.md) and
   restricts data display to the user's own data and prohibits AI/ML training on
   the data. Compliant for the single-user personal pipeline; flag if scope
   expands.
-- **Pricing:** free.
+- **Pricing:** was free; since 2026-06-30 Standard-tier API access requires an
+  active Strava subscription (~$11.99/mo) — the reason for the mothball.
 
 ### Garmin Connect
 

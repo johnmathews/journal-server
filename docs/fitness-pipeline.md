@@ -1,6 +1,13 @@
 # Fitness Pipeline
 
-**Status:** active. **Last updated:** 2026-05-10.
+**Status:** active. **Last updated:** 2026-07-14 (Strava mothball note; content otherwise 2026-05-10).
+
+> **Strava mothballed (2026-07-14):** the Strava half of this pipeline is
+> gated behind `STRAVA_ENABLED=false` (the default) — routes 404, scheduler
+> and CLI are Garmin-only. The Strava layers below are accurate but dormant;
+> historical Strava rows are kept and still served. See
+> [`fitness-operations.md` § Reviving Strava](fitness-operations.md#reviving-strava)
+> and roadmap D8.
 
 Engineer-facing overview of how fitness data flows from a user's Garmin watch
 or Strava app into a queryable journal database. This doc walks the layers and

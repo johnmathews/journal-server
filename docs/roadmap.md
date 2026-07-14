@@ -1,8 +1,9 @@
 # Journal Tool — Consolidated Roadmap
 
-**Status:** active. **Last updated:** 2026-07-13 (fitness W14 multi-user verification
-suspended — Strava's API went subscriber-paywalled 2026-06-30, integration suspended, see
-Item 1 and D8; previous update 2026-06-10, quality round: fitness final mile merged +
+**Status:** active. **Last updated:** 2026-07-14 (Strava mothball implemented — integration
+now gated behind `STRAVA_ENABLED=false`, see D8; previous updates 2026-07-13 — fitness W14
+multi-user verification suspended, Strava's API went subscriber-paywalled 2026-06-30, see
+Item 1 and D8; 2026-06-10, quality round: fitness final mile merged +
 deployed, storylines anchor-edit UX shipped, security/test/deploy hardening across ~20 PRs —
 see `journal/260610-quality-round.md`).
 **Supersedes:**
@@ -490,7 +491,7 @@ remain).
 
 ---
 
-### D8. Fitness W14 multi-user verification + Strava integration `[both]` — suspended 2026-07-13
+### D8. Fitness W14 multi-user verification + Strava integration `[both]` — suspended 2026-07-13; mothball implemented 2026-07-14
 
 Strava paywalled Standard-tier API access behind an active Strava subscription
 (~$11.99/mo) effective **2026-06-30**
@@ -498,12 +499,20 @@ Strava paywalled Standard-tier API access behind an active Strava subscription
 [API policy](https://www.strava.com/legal/api_policy)). Without a subscription the
 journal's Strava app can no longer complete OAuth or sync, so:
 
-1. **Strava integration is suspended.** Code stays in place (providers, workers,
-   endpoints, webapp panels) but no active Strava connection exists — user 1's
-   `STRAVA_REFRESH_TOKEN` was removed from prod env 2026-06-10 and never
-   reconnected. Revoking that old token in Strava's web UI is still pending
-   (hygiene). Resume path if ever wanted: subscribe to Strava, reconnect via
-   Settings → Fitness.
+1. **Strava integration is mothballed behind `STRAVA_ENABLED` (implemented
+   2026-07-14).** Code stays in place (providers, workers, endpoints, webapp
+   panels, tests) but the flag defaults to `false`: the Strava OAuth and
+   sync/backfill routes return 404, MCP trigger tools and the CLI refuse
+   `strava`, the daily scheduler is Garmin-only, and the webapp hides all
+   Strava UI via `features.strava_enabled` in `GET /api/settings`. Historical
+   Strava rows are kept and still served. No active Strava connection exists —
+   user 1's `STRAVA_REFRESH_TOKEN` was removed from prod env 2026-06-10 and
+   never reconnected. Revoking that old token in Strava's web UI is still
+   pending (hygiene). Revival path if ever wanted: subscribe to Strava, set
+   `STRAVA_ENABLED=true` + `STRAVA_CLIENT_ID`/`STRAVA_CLIENT_SECRET`, restart,
+   reconnect via Settings → Fitness
+   ([`fitness-operations.md` § Reviving Strava](./fitness-operations.md#reviving-strava);
+   journal: `journal/260714-strava-mothball.md`).
 2. **W14 end-to-end verification with user 2 is suspended.** The Strava half is
    impossible without paying; the Garmin-only half was deliberately skipped
    (user decision 2026-07-13). Baseline captured that day: `fitness-audit`

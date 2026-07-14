@@ -188,7 +188,9 @@ Response on success (**202 Accepted**):
 
 A single in-flight (`queued` or `running`) job per `(user_id, source)` is
 allowed; subsequent submits return the existing job id with `"already_running":
-true` instead of queueing a duplicate. **503** is returned for Strava when
+true` instead of queueing a duplicate. **404** is returned for Strava while
+the integration is mothballed (`STRAVA_ENABLED=false`, the default — see
+`docs/fitness-operations.md`); with the flag on, **503** is returned when
 `STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET` are unset — fail-loud at submit
 time rather than queueing a row that's guaranteed to fail. Garmin never 503s
 here post-multi-user-plan W6 (Garmin is always wired, with per-user

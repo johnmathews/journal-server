@@ -1,14 +1,20 @@
 # Fitness Operations
 
-**Status:** active. **Last updated:** 2026-07-13 (Strava suspension note; previous update
-2026-06-21 — Garmin Cloudflare-block handling: connect endpoint reclassifies IP/bot-challenge blocks as `upstream_rate_limited` and trips a global pre-flight cooldown; split-IP mint/import recovery in §2c-bis; see `journal/260619-garmin-cloudflare-recovery.md` and `journal/260621-garmin-upstream-cooldown.md`).
+**Status:** active. **Last updated:** 2026-07-14 (Strava mothballed behind `STRAVA_ENABLED=false`; previous updates
+2026-07-13 — Strava suspension note; 2026-06-21 — Garmin Cloudflare-block handling: connect endpoint reclassifies IP/bot-challenge blocks as `upstream_rate_limited` and trips a global pre-flight cooldown; split-IP mint/import recovery in §2c-bis; see `journal/260619-garmin-cloudflare-recovery.md` and `journal/260621-garmin-upstream-cooldown.md`).
 
-> **Strava integration suspended (2026-07-13).** Strava paywalled Standard-tier
-> API access behind an active Strava subscription effective 2026-06-30
+> **Strava integration mothballed via `STRAVA_ENABLED=false` (2026-07-14).**
+> Strava paywalled Standard-tier API access behind an active Strava
+> subscription effective 2026-06-30
 > ([announcement](https://communityhub.strava.com/insider-journal-9/an-update-to-our-developer-program-13428)).
-> The Strava sections below are kept for reference but the connect/sync flows
-> will not work without a paid Strava subscription on the account that owns the
-> API app. No active Strava connection exists in prod. See roadmap D8.
+> The integration is now gated by the `STRAVA_ENABLED` env flag (default
+> `false`): the three `/api/fitness/strava/*` OAuth routes and the Strava
+> sync/backfill routes return `404`, the MCP trigger tools and the CLI refuse
+> `source=strava`, and the daily scheduler processes Garmin only. Historical
+> Strava rows are kept and still served, and `GET /api/fitness/sync/status`
+> keeps both source keys. The Strava sections below are kept for reference and
+> only apply when the flag is on — see [Reviving Strava](#reviving-strava) and
+> roadmap D8. Journal entry: `journal/260714-strava-mothball.md`.
 
 Operator-facing runbook for the fitness pipeline. Covers initial setup, re-auth,
 historical backfill, sync monitoring, and troubleshooting the rough edges that
@@ -22,6 +28,17 @@ behind every piece below are in
 W1–W15 execution sequencing is archived at
 [`archive/fitness-tier-plan.md`](archive/fitness-tier-plan.md) (closed
 2026-05-10).
+
+### Reviving Strava
+
+1. Buy a Strava subscription for the account that owns the API app
+   (Standard-tier API access requires it since 2026-06-30).
+2. Set `STRAVA_ENABLED=true` plus `STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET`
+   (and `STRAVA_REDIRECT_URI` for prod) in the server environment.
+3. Restart the server — the flag is read at startup, not at runtime.
+4. Reconnect via the webapp: Settings → Fitness → Connect Strava (§2b). The
+   webapp re-shows all Strava UI automatically once `features.strava_enabled`
+   flips true in `GET /api/settings`.
 
 ---
 
@@ -39,8 +56,9 @@ W1–W15 execution sequencing is archived at
 
 ## 1. Configuration prerequisites
 
-Strava needs server-level env vars (one OAuth app per server, shared across
-users) plus a registered API application. Garmin needs no global env vars
+Strava needs `STRAVA_ENABLED=true` (mothballed off by default — see the banner
+above) plus server-level OAuth env vars (one OAuth app per server, shared
+across users) and a registered API application. Garmin needs no global env vars
 from W6 of the fitness multi-user plan onwards — credentials are per-user in
 `fitness_auth_state`, populated either via the webapp Settings panel
 (`POST /api/fitness/garmin/connect`) or via the
@@ -49,6 +67,7 @@ fallback.
 
 | Variable | Source | Required for |
 |---|---|---|
+| `STRAVA_ENABLED` | Strava (default `false` — mothballed) | Any Strava surface at all (routes, CLI, scheduler, MCP triggers) |
 | `STRAVA_CLIENT_ID` | Strava | Strava re-auth + sync |
 | `STRAVA_CLIENT_SECRET` | Strava | Strava re-auth + sync |
 | `STRAVA_REDIRECT_URI` | Strava (default `http://localhost:8400/strava/callback`) | Strava re-auth listener bind + authorize URL |
@@ -141,6 +160,9 @@ a distinct retry signal) and
 context.
 
 ### 2b. Strava — connecting via the webapp (primary)
+
+> Mothballed: with `STRAVA_ENABLED=false` (the default) all three endpoints
+> below return `404` and the webapp hides the Strava card entirely.
 
 From the webapp's Settings panel, click "Connect Strava" on the Fitness
 Connections card. The browser navigates to Strava's OAuth approval
@@ -282,6 +304,11 @@ Notes:
   console script is not on the container's `$PATH`.
 
 ### 2d. Strava — CLI operator fallback (laptop / dev box)
+
+> Mothballed: with `STRAVA_ENABLED=false` (the default),
+> `journal fitness-reauth-strava` prints
+> `Error: Strava integration is disabled (STRAVA_ENABLED=false).` and exits 1.
+> Same for the §2e variants.
 
 When the journal-server is **not** running on the same host (or is not
 bound to the redirect URI's port), the CLI listener path is
@@ -436,7 +463,9 @@ during a long Garmin run.
 
 Defaults: `--start` falls back to `FITNESS_BACKFILL_START` (default
 `2026-01-01`), `--end` falls back to today (UTC). `--source` accepts `strava`,
-`garmin`, or `both`.
+`garmin`, or `both` — but with `STRAVA_ENABLED=false` (the default) both
+`strava` and `both` are rejected with exit 1 (use `--source garmin`), and
+`POST /api/fitness/backfill/strava` returns `404`.
 
 **Resume.** Re-running is safe and cheap. Per-source watermarks
 (`MAX(local_date)` over normalized rows, with Garmin using `min(activities,
@@ -503,6 +532,11 @@ docker exec journal-server uv run journal fitness-sync \
     --source strava --since 2026-05-01 --user-id 1
 ```
 
+> Mothballed: with `STRAVA_ENABLED=false` (the default), `--source strava` and
+> `--source both` (the CLI default) are rejected with exit 1 — pass
+> `--source garmin`. `POST /api/fitness/sync/strava` returns `404` and the MCP
+> `fitness_trigger_sync` tool rejects `source="strava"`.
+
 The CLI runs synchronously inline (no JobRunner). The long-running server
 exposes the same operation via `POST /api/fitness/sync/{source}` and the
 `fitness_trigger_sync` MCP tool — both queue a `fitness_sync_strava` /
@@ -526,7 +560,9 @@ is set explicitly), the fire time follows it. If the server is down at 17:00, th
 is skipped; the next day's incremental sync pulls from each source's
 existing watermark, so at most one day of activity data is delayed.
 
-**Which users and sources.** For each source (`strava`, `garmin`) the
+**Which users and sources.** With `STRAVA_ENABLED=false` (the default) the
+scheduler is constructed Garmin-only and never lists or submits Strava work.
+When the flag is on, for each source (`strava`, `garmin`) the
 scheduler calls `FitnessRepository.list_users_with_active_auth(source)` and
 submits an incremental sync for every returned user ID. That query returns
 users whose `fitness_auth_state` row has `auth_status != 'broken'` and a

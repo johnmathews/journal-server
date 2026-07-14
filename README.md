@@ -7,8 +7,10 @@ natural language queries about them.
 
 - **Ingests** handwritten journal pages (OCR via Claude Opus 4.6) and voice notes (transcription via configurable
   provider — `gpt-4o-transcribe` by default, with Gemini as alternative and `whisper-1` as fallback)
-- **Pulls fitness data** from Strava (activities) and Garmin Connect (activities + daily wellness — sleep, HRV,
-  body battery, training load) so journal entries can be correlated against training and recovery state
+- **Pulls fitness data** from Garmin Connect (activities + daily wellness — sleep, HRV,
+  body battery, training load) so journal entries can be correlated against training and recovery state.
+  Strava support exists but is mothballed behind `STRAVA_ENABLED=false` (Strava paywalled its API 2026-06-30;
+  historical Strava data is kept and served)
 - **Stores** entries in dual databases: SQLite for structured queries, ChromaDB for semantic search
 - **Answers** natural language questions like "Which friends did I meet in February?" or "What makes me happy?"
 - **Interfaces**: MCP server (for AI assistants), CLI, and API endpoints
@@ -85,7 +87,7 @@ All external APIs are behind provider-agnostic interfaces (Python Protocols), ma
 - [Architecture](docs/architecture.md) — System design and data flow
 - [Configuration](docs/configuration.md) — Environment variables reference
 - [Transcription Providers](docs/transcription-providers.md) — Multi-provider stack, retry/fallback, shadow mode
-- [Fitness Pipeline](docs/fitness-pipeline.md) — Strava + Garmin data flow (engineer-facing overview)
+- [Fitness Pipeline](docs/fitness-pipeline.md) — Strava + Garmin data flow (engineer-facing overview; Strava mothballed via `STRAVA_ENABLED=false`)
 - [Fitness Operations](docs/fitness-operations.md) — Re-auth, backfill, troubleshooting (operator runbook)
 - [Fitness Integration Plan](docs/fitness-integration-plan.md) — Decisions and rationale (sacred raw archive, four-layer pipeline, daily cadence, library pins)
 - [Fitness Schema](docs/fitness-schema.md) — Tables, columns, indexes, migration sequencing

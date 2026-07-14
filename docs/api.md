@@ -1986,6 +1986,10 @@ fields (API keys, bearer tokens, Slack tokens) are not included.
 [...]}` envelope. Field shapes follow the dataclasses in `journal.config.Config` and the runtime/pricing repository
 helpers.
 
+The `features` block includes `strava_enabled` (bool, from the `STRAVA_ENABLED` env flag, default `false` — Strava is
+mothballed, roadmap D8). The webapp uses it to hide all Strava UI; unlike `mood_scoring` it is frozen config, not a
+runtime setting.
+
 ---
 
 ### GET /api/settings/runtime
@@ -2495,8 +2499,12 @@ interleaving writes to the same `(user_id, source)` window.
 
 - `400` `{"error": "Unknown fitness source: ..."}` — `source` is not
   `"strava"` or `"garmin"`.
+- `404` `{"error": "Strava integration is disabled on this server"}` —
+  `source="strava"` while `STRAVA_ENABLED=false` (the default; Strava is
+  mothballed, roadmap D8). Garmin is unaffected.
 - `503` `{"error": "Strava fitness sync is not configured on this server ..."}`
-  — Strava-only: `STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET` are unset
+  — Strava-only (and only reachable with `STRAVA_ENABLED=true`):
+  `STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET` are unset
   on the server, so submitting a sync is guaranteed to fail. Operator
   can tell *feature off* from *real bug*. Garmin never 503s here
   post-multi-user-plan W6 — Garmin is always wired (per-user credentials,
@@ -2557,9 +2565,12 @@ enqueued first wins.
   `"strava"` or `"garmin"`.
 - `400` `{"error": "..."}` — body is missing `start`, dates fail
   `YYYY-MM-DD` parsing, or `end < start`.
-- `503` `{"error": "Strava fitness backfill is not configured on this server ..."}`
-  — the source's credential vars are unset (see the equivalent error on
+- `404` `{"error": "Strava integration is disabled on this server"}` —
+  `source="strava"` while `STRAVA_ENABLED=false` (the default; see
   `POST /api/fitness/sync/{source}`).
+- `503` `{"error": "Strava fitness backfill is not configured on this server ..."}`
+  — the source's credential vars are unset with `STRAVA_ENABLED=true` (see
+  the equivalent error on `POST /api/fitness/sync/{source}`).
 
 ---
 
@@ -2740,6 +2751,11 @@ clear the audit trail of which upstream account the prior tokens belonged to.
 
 ### GET /api/fitness/strava/authorize_url
 
+> **Mothballed:** this route and the two below (`exchange`, `disconnect`)
+> return `404` `{"error": "Strava integration is disabled on this server"}`
+> unless `STRAVA_ENABLED=true` (default `false` — roadmap D8). The docs below
+> describe flag-on behaviour.
+
 Issue an authorize URL plus a one-shot CSRF state token for the per-user
 Strava OAuth flow (W3 of the multi-user plan). The state token is bound to the
 calling user's `user_id` for 10 minutes; presenting it back at
@@ -2763,6 +2779,8 @@ and `state` from the redirect query, then POSTs them to `exchange`.
 
 **Errors:**
 
+- `404` `{"error": "Strava integration is disabled on this server"}` —
+  `STRAVA_ENABLED=false` (the default).
 - `503` `{"error": "Server not initialized"}` — services dict not yet wired
   (startup race; retry).
 - `500` `{"error": "STRAVA_CLIENT_ID is not configured"}` — operator must set
@@ -2800,6 +2818,8 @@ and `last_successful_login_at` is stamped.
 
 **Errors:**
 
+- `404` `{"error": "Strava integration is disabled on this server"}` —
+  `STRAVA_ENABLED=false` (the default).
 - `400` `{"error": "code and state are required"}` — body missing either
   field.
 - `403` `{"error": "Pending state does not belong to this user.", "reason":
@@ -2833,6 +2853,11 @@ upstream Strava athlete to resume syncing.
 ```json
 { "disconnected": true }
 ```
+
+**Errors:**
+
+- `404` `{"error": "Strava integration is disabled on this server"}` —
+  `STRAVA_ENABLED=false` (the default).
 
 A subsequent successful connect with a *different* upstream `athlete.id` is
 explicitly refused (D8) — disconnecting only ungates the row.
@@ -3204,7 +3229,10 @@ instead of queueing a duplicate).
 
 **Returns:** `{"job_id", "status", "already_running"?}` on success;
 `{"error": "...", "job_id": null}` if the source isn't configured on this
-server.
+server, or `{"error": "Strava integration is disabled on this server",
+"job_id": null}` for `source="strava"` while `STRAVA_ENABLED=false` (the
+default). Read tools (`fitness_sync_status`, listing tools) are
+flag-independent — historical Strava rows stay queryable.
 
 ### fitness_trigger_backfill
 
@@ -3220,7 +3248,8 @@ idempotency policy with `fitness_trigger_sync`.
 
 **Returns:** `{"job_id", "status", "already_running"?}` on success;
 `{"error": "...", "job_id": null}` if the source isn't configured or
-validation fails.
+validation fails. Rejects `source="strava"` with the same disabled error as
+`fitness_trigger_sync` while `STRAVA_ENABLED=false` (the default).
 
 ### fitness_correlate_sleep_mood
 

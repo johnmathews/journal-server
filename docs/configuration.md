@@ -178,11 +178,31 @@ See [`fitness-pipeline.md`](fitness-pipeline.md) for the data flow,
 runbooks, and [`external-services.md`](external-services.md#fitness-data-sources)
 for the Strava + Garmin provider entries.
 
-**Strava** counts as "wired on this server" when both `STRAVA_CLIENT_ID` and
-`STRAVA_CLIENT_SECRET` are set (one OAuth app per server, shared across all
-users). Without those, `submit_fitness_sync_strava` raises a `RuntimeError`
-and `POST /api/fitness/sync/strava` returns `503` so operators can tell
-*feature off* from *bug*.
+**Strava is mothballed** (roadmap D8 — Strava paywalled Standard-tier API
+access effective 2026-06-30). `STRAVA_ENABLED` defaults to `false`, and with
+the flag off Strava is unreachable regardless of OAuth credentials: the three
+`/api/fitness/strava/*` OAuth routes and `POST /api/fitness/sync/strava` /
+`POST /api/fitness/backfill/strava` return `404` with
+`{"error": "Strava integration is disabled on this server"}`; the MCP
+`fitness_trigger_sync` / `fitness_trigger_backfill` tools reject
+`source="strava"`; the daily scheduler processes Garmin only; and the CLI
+(`fitness-reauth-strava`, `fitness-sync`/`fitness-backfill` with
+`--source strava` or `--source both`) exits non-zero. Historical Strava rows
+(`fitness_raw_strava`, `fitness_activities` with `source='strava'`) are kept
+and still served, and `GET /api/fitness/sync/status` keeps returning both
+source keys. The flag is surfaced to the webapp as `features.strava_enabled`
+in `GET /api/settings`.
+
+**Reviving Strava:** buy a Strava API subscription, set `STRAVA_ENABLED=true`
+plus `STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET`, restart the server, then
+reconnect via Settings → Fitness. See
+[`fitness-operations.md`](fitness-operations.md#reviving-strava).
+
+**When `STRAVA_ENABLED=true`**, Strava counts as "wired on this server" when
+both `STRAVA_CLIENT_ID` and `STRAVA_CLIENT_SECRET` are also set (one OAuth app
+per server, shared across all users). Without those, `submit_fitness_sync_strava`
+raises a `RuntimeError` and `POST /api/fitness/sync/strava` returns `503` so
+operators can tell *feature off* from *bug*.
 
 **Garmin** is always wired (per W6 of the fitness multi-user plan) — there are
 no global Garmin env vars. Each user connects their own Garmin account via the
@@ -193,7 +213,8 @@ fallback). A user without a `fitness_auth_state` row produces a clean
 
 | Variable                                | Default                                | Description                                                                                                                                                  |
 | --------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `STRAVA_CLIENT_ID`                      |                                        | Strava API app client id from <https://www.strava.com/settings/api>. Required for Strava re-auth and sync.                                                   |
+| `STRAVA_ENABLED`                        | `false`                                | Master switch for the Strava integration (mothballed, roadmap D8). When `false`: Strava OAuth + sync/backfill routes 404, MCP trigger tools and the CLI reject `strava`, and the daily scheduler is Garmin-only. Historical Strava rows stay served. Accepts `1`/`true`/`yes`/`on`. |
+| `STRAVA_CLIENT_ID`                      |                                        | Strava API app client id from <https://www.strava.com/settings/api>. Required for Strava re-auth and sync (only consulted when `STRAVA_ENABLED=true`).       |
 | `STRAVA_CLIENT_SECRET`                  |                                        | Strava API app client secret. Required for Strava re-auth and sync.                                                                                          |
 | `STRAVA_REDIRECT_URI`                   | `http://localhost:8400/strava/callback`| OAuth callback URL embedded in the authorize URL. In prod (post-multi-user-plan W13), this points at the webapp callback route (`https://<webapp>/settings/fitness/strava/callback`) so the per-user webapp connect flow works; the Strava developer app's Authorization Callback Domain must match. The default value still drives the CLI listener path used for dev/laptop bootstrap (see [`fitness-operations.md` §2e](fitness-operations.md#2e-strava--cli-operator-fallback-headless-deployment-server-on-8400) for the headless workaround). |
 | `FITNESS_BACKFILL_START`                | `2026-01-01`                           | Default `--start` for `journal fitness-backfill` when no flag is passed. Activities and daily wellness rows from before this date are not retroactively pulled even if they exist upstream. |
