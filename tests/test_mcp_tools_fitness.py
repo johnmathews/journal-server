@@ -252,11 +252,15 @@ def _seed_run(
     source_id: str,
     local_date: str,
     distance_m: float = 5000.0,
+    source: str = "strava",
 ) -> None:
-    raw_id = _seed_raw_strava(repo, source_id)
+    if source == "garmin":
+        raw_id = _seed_raw_garmin(repo, "activities", source_id)
+    else:
+        raw_id = _seed_raw_strava(repo, source_id)
     repo.upsert_activity(
         FitnessActivity(
-            user_id=_TEST_USER_ID, source="strava", source_id=source_id,
+            user_id=_TEST_USER_ID, source=source, source_id=source_id,
             activity_type="run", source_subtype="Run",
             start_time=f"{local_date}T07:00:00Z", local_date=local_date,
             duration_s=1800, moving_time_s=1800, distance_m=distance_m,
@@ -272,6 +276,7 @@ def _seed_daily(
     sleep_score: int | None = 80,
     sleep_efficiency_pct: float | None = 90.0,
     hrv: float | None = 55.0,
+    stress_avg: int | None = None,
 ) -> None:
     raw_id = _seed_raw_garmin(repo, "sleep", local_date)
     repo.upsert_daily(
@@ -280,6 +285,7 @@ def _seed_daily(
             sleep_score=sleep_score,
             sleep_efficiency_pct=sleep_efficiency_pct,
             hrv_overnight_ms=hrv,
+            stress_avg=stress_avg,
             raw_ref_ids=[raw_id],
         ),
     )
@@ -603,11 +609,11 @@ def test_correlate_sleep_mood_joins_fitness_to_journal(
     _seed_daily(fitness_repo, local_date="2026-05-03", sleep_score=60)
     _seed_entry_with_mood(
         db, entry_date="2026-05-02",
-        dimensions={"energy_fatigue": 0.7, "joy_sadness": 0.5},
+        dimensions={"energy_vigor": 0.7, "joy_sadness": 0.5},
     )
     _seed_entry_with_mood(
         db, entry_date="2026-05-03",
-        dimensions={"energy_fatigue": -0.4, "joy_sadness": -0.2},
+        dimensions={"energy_vigor": -0.4, "joy_sadness": -0.2},
     )
 
     out = fitness_tools.fitness_correlate_sleep_mood(
@@ -640,24 +646,20 @@ def test_correlate_sleep_mood_no_journal_entry_yields_null_mood(
 
 def test_correlate_weekly_runs_stress_buckets_by_monday(
     ctx: SimpleNamespace,
-    db: sqlite3.Connection,
     fitness_repo: FitnessRepository,
 ) -> None:
     """The Monday-of-week shift used by Q2 must put two runs in the
     same week if they fall on the same Mon-Sun span. 2026-05-04 is a
-    Monday; 2026-05-08 is the Friday of the same week."""
+    Monday; 2026-05-08 is the Friday of the same week. The stress series
+    is now the objective Garmin ``stress_avg`` daily metric (W4)."""
     _seed_run(
         fitness_repo, source_id="R1", local_date="2026-05-04", distance_m=5000.0,
     )
     _seed_run(
         fitness_repo, source_id="R2", local_date="2026-05-08", distance_m=8000.0,
     )
-    _seed_entry_with_mood(
-        db, entry_date="2026-05-05", dimensions={"frustration": 0.4},
-    )
-    _seed_entry_with_mood(
-        db, entry_date="2026-05-07", dimensions={"frustration": 0.6},
-    )
+    _seed_daily(fitness_repo, local_date="2026-05-05", stress_avg=40)
+    _seed_daily(fitness_repo, local_date="2026-05-07", stress_avg=60)
 
     out = fitness_tools.fitness_correlate_weekly_runs_stress(
         start="2026-05-01", end="2026-05-31", ctx=ctx,
@@ -667,7 +669,83 @@ def test_correlate_weekly_runs_stress_buckets_by_monday(
     row = rows[0]
     assert row["week_start"] == "2026-05-04"
     assert row["distance_km"] == pytest.approx(13.0)
-    assert row["stress_proxy"] == pytest.approx(0.5)
+    assert row["stress_avg"] == pytest.approx(50.0)
+    assert "stress_proxy" not in row
+
+
+def test_correlate_weekly_runs_stress_dedups_same_run_across_sources(
+    ctx: SimpleNamespace,
+    fitness_repo: FitnessRepository,
+) -> None:
+    """W4 bug fix: a single watch run stored as both a garmin and a
+    strava row must count once toward weekly distance (garmin preferred),
+    not twice."""
+    # Same 5km run on the same day, present in both sources.
+    _seed_run(
+        fitness_repo, source_id="G1", local_date="2026-05-04",
+        distance_m=5000.0, source="garmin",
+    )
+    _seed_run(
+        fitness_repo, source_id="S1", local_date="2026-05-04",
+        distance_m=5000.0, source="strava",
+    )
+    out = fitness_tools.fitness_correlate_weekly_runs_stress(
+        start="2026-05-01", end="2026-05-31", ctx=ctx,
+    )
+    rows = out["rows"]
+    assert len(rows) == 1
+    # Counted once (garmin), not 10km.
+    assert rows[0]["distance_km"] == pytest.approx(5.0)
+
+
+def test_correlate_weekly_runs_stress_strava_only_week_fallback(
+    ctx: SimpleNamespace,
+    fitness_repo: FitnessRepository,
+) -> None:
+    """W4: on days with no garmin run, the dedup falls back to strava so
+    a strava-only week still sums."""
+    _seed_run(
+        fitness_repo, source_id="S1", local_date="2026-05-04",
+        distance_m=5000.0, source="strava",
+    )
+    _seed_run(
+        fitness_repo, source_id="S2", local_date="2026-05-06",
+        distance_m=7000.0, source="strava",
+    )
+    out = fitness_tools.fitness_correlate_weekly_runs_stress(
+        start="2026-05-01", end="2026-05-31", ctx=ctx,
+    )
+    rows = out["rows"]
+    assert len(rows) == 1
+    assert rows[0]["distance_km"] == pytest.approx(12.0)
+
+
+def test_correlate_weekly_runs_stress_series_from_fitness_daily(
+    ctx: SimpleNamespace,
+    db: sqlite3.Connection,
+    fitness_repo: FitnessRepository,
+) -> None:
+    """W4: the stress series is ``fitness_daily.stress_avg`` (objective),
+    not the frustration mood proxy. Seeding a frustration mood entry must
+    NOT influence the ``stress_avg`` output key."""
+    _seed_run(
+        fitness_repo, source_id="R1", local_date="2026-05-04", distance_m=5000.0,
+    )
+    _seed_daily(fitness_repo, local_date="2026-05-04", stress_avg=30)
+    _seed_daily(fitness_repo, local_date="2026-05-06", stress_avg=50)
+    # A frustration entry that would have moved the old stress_proxy —
+    # it must be ignored now.
+    _seed_entry_with_mood(
+        db, entry_date="2026-05-05", dimensions={"frustration": 0.9},
+    )
+    out = fitness_tools.fitness_correlate_weekly_runs_stress(
+        start="2026-05-01", end="2026-05-31", ctx=ctx,
+    )
+    rows = out["rows"]
+    assert len(rows) == 1
+    assert rows[0]["stress_avg"] == pytest.approx(40.0)
+    # Sanity: the stats block correlates distance vs stress_avg.
+    assert "distance_km_vs_stress_avg" in out["stats"]
 
 
 def test_correlate_weekly_runs_stress_handles_year_boundary(
@@ -713,7 +791,7 @@ def test_correlate_hrv_mood_rolling_window_handles_missing_days(
     _seed_daily(fitness_repo, local_date="2026-05-07", hrv=60.0)
     _seed_entry_with_mood(
         db, entry_date="2026-05-03",
-        dimensions={"joy_sadness": 0.4, "energy_fatigue": 0.5},
+        dimensions={"joy_sadness": 0.4, "energy_vigor": 0.5},
     )
 
     out = fitness_tools.fitness_correlate_hrv_mood(
@@ -745,6 +823,147 @@ def test_correlate_hrv_mood_window_bounds_check(ctx: SimpleNamespace) -> None:
     assert "error" in out
 
 
+def test_correlate_hrv_mood_negative_lag_bounds_check(
+    ctx: SimpleNamespace,
+) -> None:
+    out = fitness_tools.fitness_correlate_hrv_mood(
+        start="2026-05-01", end="2026-05-07", lag_days=-1, ctx=ctx,
+    )
+    assert out["rows"] == []
+    assert "error" in out
+
+
+# --- W4: fatigue-facet columns and lag ------------------------------
+
+
+def test_correlate_sleep_mood_returns_fatigue_facets(
+    ctx: SimpleNamespace,
+    db: sqlite3.Connection,
+    fitness_repo: FitnessRepository,
+) -> None:
+    """Q1 surfaces physical_fatigue + mental_fatigue alongside energy."""
+    _seed_daily(fitness_repo, local_date="2026-05-02", sleep_score=85)
+    _seed_entry_with_mood(
+        db, entry_date="2026-05-02",
+        dimensions={
+            "energy_vigor": 0.7,
+            "joy_sadness": 0.5,
+            "physical_fatigue": 0.3,
+            "mental_fatigue": -0.2,
+        },
+    )
+    out = fitness_tools.fitness_correlate_sleep_mood(
+        start="2026-05-01", end="2026-05-31", ctx=ctx,
+    )
+    row = out["rows"][0]
+    assert row["physical_fatigue"] == pytest.approx(0.3)
+    assert row["mental_fatigue"] == pytest.approx(-0.2)
+    assert row["energy"] == pytest.approx(0.7)
+
+
+def test_correlate_sleep_mood_lag_shifts_join(
+    ctx: SimpleNamespace,
+    db: sqlite3.Connection,
+    fitness_repo: FitnessRepository,
+) -> None:
+    """Q1 with lag_days=1: fitness on day D joins to mood on day D+1.
+    Sleep on 05-02 must pick up the mood entry written on 05-03."""
+    _seed_daily(fitness_repo, local_date="2026-05-02", sleep_score=85)
+    _seed_entry_with_mood(
+        db, entry_date="2026-05-03",
+        dimensions={"energy_vigor": 0.9, "joy_sadness": 0.4},
+    )
+    # lag=0 → no mood joins to the 05-02 sleep row.
+    out0 = fitness_tools.fitness_correlate_sleep_mood(
+        start="2026-05-01", end="2026-05-31", lag_days=0, ctx=ctx,
+    )
+    row0 = next(r for r in out0["rows"] if r["local_date"] == "2026-05-02")
+    assert row0["energy"] is None
+
+    # lag=1 → the 05-03 mood entry attaches to the 05-02 sleep row.
+    out1 = fitness_tools.fitness_correlate_sleep_mood(
+        start="2026-05-01", end="2026-05-31", lag_days=1, ctx=ctx,
+    )
+    row1 = next(r for r in out1["rows"] if r["local_date"] == "2026-05-02")
+    assert row1["energy"] == pytest.approx(0.9)
+
+
+def test_correlate_sleep_mood_stats_block(
+    ctx: SimpleNamespace,
+    db: sqlite3.Connection,
+    fitness_repo: FitnessRepository,
+) -> None:
+    """Q1 returns a Pearson stats block over complete pairs."""
+    for day, sleep, energy in [
+        ("2026-05-01", 60, -0.5),
+        ("2026-05-02", 70, 0.0),
+        ("2026-05-03", 80, 0.5),
+        ("2026-05-04", 90, 1.0),
+    ]:
+        _seed_daily(fitness_repo, local_date=day, sleep_score=sleep)
+        _seed_entry_with_mood(
+            db, entry_date=day,
+            dimensions={"energy_vigor": energy, "joy_sadness": 0.0},
+        )
+    out = fitness_tools.fitness_correlate_sleep_mood(
+        start="2026-05-01", end="2026-05-31", ctx=ctx,
+    )
+    stats = out["stats"]
+    assert stats["sleep_vs_energy_vigor"]["n"] == 4
+    assert stats["sleep_vs_energy_vigor"]["r"] == pytest.approx(1.0)
+    assert "sleep_vs_joy" in stats
+
+
+def test_correlate_hrv_mood_returns_fatigue_facets(
+    ctx: SimpleNamespace,
+    db: sqlite3.Connection,
+    fitness_repo: FitnessRepository,
+) -> None:
+    """Q3 rolls physical_fatigue + mental_fatigue alongside energy."""
+    _seed_daily(fitness_repo, local_date="2026-05-01", hrv=50.0)
+    _seed_entry_with_mood(
+        db, entry_date="2026-05-01",
+        dimensions={
+            "joy_sadness": 0.4,
+            "energy_vigor": 0.5,
+            "physical_fatigue": 0.2,
+            "mental_fatigue": -0.1,
+        },
+    )
+    out = fitness_tools.fitness_correlate_hrv_mood(
+        start="2026-05-01", end="2026-05-01", window=7, ctx=ctx,
+    )
+    row = out["rows"][0]
+    assert row["physical_fatigue_roll"] == pytest.approx(0.2)
+    assert row["mental_fatigue_roll"] == pytest.approx(-0.1)
+    assert row["energy_roll"] == pytest.approx(0.5)
+    assert "hrv_vs_physical_fatigue" in out["stats"]
+    assert "hrv_vs_mental_fatigue" in out["stats"]
+
+
+def test_correlate_hrv_mood_lag_shifts_join(
+    ctx: SimpleNamespace,
+    db: sqlite3.Connection,
+    fitness_repo: FitnessRepository,
+) -> None:
+    """Q3 with lag_days=1: HRV on day D correlates with mood on D+1.
+    HRV on 05-01 must pick up the mood entry written on 05-02."""
+    _seed_daily(fitness_repo, local_date="2026-05-01", hrv=50.0)
+    _seed_entry_with_mood(
+        db, entry_date="2026-05-02",
+        dimensions={"joy_sadness": 0.4, "energy_vigor": 0.8},
+    )
+    out0 = fitness_tools.fitness_correlate_hrv_mood(
+        start="2026-05-01", end="2026-05-01", window=7, lag_days=0, ctx=ctx,
+    )
+    assert out0["rows"][0]["energy_roll"] is None
+
+    out1 = fitness_tools.fitness_correlate_hrv_mood(
+        start="2026-05-01", end="2026-05-01", window=7, lag_days=1, ctx=ctx,
+    )
+    assert out1["rows"][0]["energy_roll"] == pytest.approx(0.8)
+
+
 # --------------------------------------------------------------------
 # Tool registry — meta-test
 # --------------------------------------------------------------------
@@ -766,6 +985,7 @@ def test_all_eight_tools_registered() -> None:
         "fitness_correlate_sleep_mood",
         "fitness_correlate_weekly_runs_stress",
         "fitness_correlate_hrv_mood",
+        "fitness_divergence",
     }
     registered: set[str] = set()
     # FastMCP exposes registered tools on its tool manager.
@@ -795,9 +1015,99 @@ def test_tools_return_json_serialisable_dicts(ctx: SimpleNamespace) -> None:
         fitness_tools.fitness_correlate_hrv_mood(
             start="2026-05-01", end="2026-05-31", ctx=ctx,
         ),
+        fitness_tools.fitness_divergence(
+            start="2026-05-01", end="2026-05-31", ctx=ctx,
+        ),
     ]
     for p in payloads:
         json.dumps(p)  # raises TypeError if not serialisable
+
+
+# --------------------------------------------------------------------
+# Divergence detector (fitness-schema.md §9)
+# --------------------------------------------------------------------
+
+
+def _seed_daily_signals(
+    repo: FitnessRepository,
+    *,
+    local_date: str,
+    hrv: float | None = None,
+    sleep: int | None = None,
+) -> None:
+    raw_id = _seed_raw_garmin(repo, "sleep", f"div-{local_date}")
+    repo.upsert_daily(
+        FitnessDaily(
+            user_id=_TEST_USER_ID, source="garmin", local_date=local_date,
+            hrv_overnight_ms=hrv, sleep_score=sleep, raw_ref_ids=[raw_id],
+        ),
+    )
+
+
+def test_fitness_divergence_returns_rows_and_summary(
+    ctx: SimpleNamespace,
+    db: sqlite3.Connection,
+    fitness_repo: FitnessRepository,
+) -> None:
+    """A tired-but-recovered day classifies as likely_mental_fatigue and
+    is counted in the summary; the payload is a JSON-serialisable dict."""
+    testday = "2026-06-15"
+    from datetime import date, timedelta  # noqa: PLC0415
+
+    d0 = date.fromisoformat(testday)
+    baseline = [(d0 - timedelta(days=i)).isoformat() for i in range(10, 0, -1)]
+    for i, d in enumerate(baseline):
+        lo = i % 2 == 0
+        _seed_daily_signals(
+            fitness_repo, local_date=d,
+            hrv=50.0 if lo else 60.0, sleep=75 if lo else 85,
+        )
+        _seed_entry_with_mood(
+            db, entry_date=d,
+            dimensions={
+                "physical_fatigue": 0.3 if lo else 0.5,
+                "mental_fatigue": 0.3 if lo else 0.5,
+            },
+        )
+    # Tired (phys z=+2) but recovered (hrv/sleep z=+1).
+    _seed_daily_signals(fitness_repo, local_date=testday, hrv=60.0, sleep=85)
+    _seed_entry_with_mood(
+        db, entry_date=testday,
+        dimensions={"physical_fatigue": 0.6, "mental_fatigue": 0.4},
+    )
+
+    out = fitness_tools.fitness_divergence(
+        start=testday, end=testday, window=28, ctx=ctx,
+    )
+    json.dumps(out)  # serialisable
+    assert len(out["rows"]) == 1
+    row = out["rows"][0]
+    assert row["quadrant"] == "likely_mental_fatigue"
+    assert row["sufficient"] is True
+    assert out["summary"] == {"likely_mental_fatigue": 1}
+
+
+def test_fitness_divergence_empty_db_is_empty(ctx: SimpleNamespace) -> None:
+    out = fitness_tools.fitness_divergence(
+        start="2026-05-01", end="2026-05-31", ctx=ctx,
+    )
+    assert out == {"rows": [], "summary": {}}
+
+
+def test_fitness_divergence_rejects_bad_window(ctx: SimpleNamespace) -> None:
+    out = fitness_tools.fitness_divergence(
+        start="2026-05-01", end="2026-05-31", window=0, ctx=ctx,
+    )
+    assert out["rows"] == []
+    assert "error" in out
+
+
+def test_fitness_divergence_rejects_malformed_date(ctx: SimpleNamespace) -> None:
+    out = fitness_tools.fitness_divergence(
+        start="not-a-date", end="2026-05-31", ctx=ctx,
+    )
+    assert out["rows"] == []
+    assert "start" in out["error"]
 
 
 # --------------------------------------------------------------------

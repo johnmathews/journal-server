@@ -2314,8 +2314,9 @@ candidate by future extraction runs.
 
 Thirteen endpoints expose the fitness pipeline:
 
-- Read routes (`GET /api/fitness/{activities,daily,sync/status,integrity}`) and
-  the W2/W3 per-user Garmin connect / Strava OAuth endpoints live in
+- Read routes (`GET /api/fitness/{activities,daily,sync/status,integrity}`), the
+  mood × fitness analytics routes (`GET /api/fitness/{divergence,mood-recovery}`),
+  and the W2/W3 per-user Garmin connect / Strava OAuth endpoints live in
   `api/fitness.py`.
 - Job creation (`POST /api/fitness/sync/{source}` and the W5
   `POST /api/fitness/backfill/{source}`) lives in `api/ingestion.py` per the
@@ -3255,11 +3256,14 @@ returned dict is `{"error": "Job not found", "job_id": "..."}`.
 
 ## Fitness Tools
 
-MCP twins for the fitness REST endpoints plus three correlation queries that
-are MCP-only. Read tools mirror `GET /api/fitness/*` exactly so callers can
-use either entry point interchangeably. The correlation queries are the
-journal × fitness joins from
-[`fitness-schema.md` §8](fitness-schema.md#8-correlation-queries-proves-schema-supports-them) — that doc is the source of truth for the queries.
+MCP twins for the fitness REST endpoints plus three correlation queries and the
+`fitness_divergence` analytic. Read tools mirror `GET /api/fitness/*` exactly so
+callers can use either entry point interchangeably. The correlation queries are
+the journal × fitness joins from
+[`fitness-schema.md` §8](fitness-schema.md#8-correlation-queries-proves-schema-supports-them); `fitness_divergence` (and its REST twin `GET /api/fitness/divergence`, plus the
+`GET /api/fitness/mood-recovery` overlay feed) is the self-report-vs-recovery
+divergence detector from
+[`fitness-schema.md` §9](fitness-schema.md#9-divergence-detector) — that doc is the source of truth for both.
 
 ### fitness_list_activities
 
@@ -3337,47 +3341,59 @@ validation fails. Rejects `source="strava"` with the same disabled error as
 
 ### fitness_correlate_sleep_mood
 
-Daily-grain sleep score × mood (energy & joy). Q1 from
+Daily-grain sleep score × mood (energy_vigor, joy, and the two fatigue
+facets). Q1 from
 [`fitness-schema.md` §8](fitness-schema.md#8-correlation-queries-proves-schema-supports-them).
 
-| Parameter | Type   | Required | Description                          |
-| --------- | ------ | -------- | ------------------------------------ |
-| `start`   | string | yes      | Inclusive start date (`YYYY-MM-DD`). |
-| `end`     | string | yes      | Inclusive end date (`YYYY-MM-DD`).   |
+| Parameter   | Type   | Required | Default | Description                                                                 |
+| ----------- | ------ | -------- | ------- | --------------------------------------------------------------------------- |
+| `start`     | string | yes      |         | Inclusive start date (`YYYY-MM-DD`).                                        |
+| `end`       | string | yes      |         | Inclusive end date (`YYYY-MM-DD`).                                          |
+| `lag_days`  | int    | no       | `0`     | Compare mood on day `D` with sleep on day `D − lag_days` (must be ≥ 0).     |
 
 **Returns:**
-`{"rows": [{"local_date", "sleep_score", "sleep_efficiency_pct", "energy", "joy"}, ...]}`.
-Days with sleep but no journal entry have `null` mood values.
+`{"rows": [{"local_date", "sleep_score", "sleep_efficiency_pct", "energy", "joy", "physical_fatigue", "mental_fatigue"}, ...], "stats": {...}}`.
+`energy` is the `energy_vigor` facet. Days with sleep but no journal entry
+have `null` mood values. `stats` gives Pearson `{r, n}` over complete pairs
+for `sleep_vs_energy_vigor`, `sleep_vs_joy`, `sleep_vs_physical_fatigue`,
+`sleep_vs_mental_fatigue` (`r` is `null` when `n < 3` or a series has zero
+variance).
 
 ### fitness_correlate_weekly_runs_stress
 
-Weekly running distance × stress proxy (Monday-of-week buckets). Q2 from
-the schema doc. The `stress_proxy` is the average `frustration` mood-dimension
-score for entries in that week — closest dimension we have to "stress".
+Weekly running distance × objective stress (Monday-of-week buckets). Q2 from
+the schema doc. `stress_avg` is the mean of Garmin's objective daily
+`stress_avg` (HRV-derived, 0–100) for that week — replacing the earlier
+`frustration` mood proxy. Running distance is **de-duplicated to one source
+per day (Garmin preferred)** so a watch run recorded on both Garmin and
+Strava is not double-counted.
 
 | Parameter | Type   | Required | Description                          |
 | --------- | ------ | -------- | ------------------------------------ |
 | `start`   | string | yes      | Inclusive start date (`YYYY-MM-DD`). |
 | `end`     | string | yes      | Inclusive end date (`YYYY-MM-DD`).   |
 
-**Returns:** `{"rows": [{"week_start", "distance_km", "stress_proxy"}, ...]}`.
-`stress_proxy` is `null` for weeks where the user ran but didn't journal.
+**Returns:** `{"rows": [{"week_start", "distance_km", "stress_avg"}, ...], "stats": {"distance_km_vs_stress_avg": {"r", "n"}}}`.
+`stress_avg` is `null` for weeks with runs but no daily wellness data.
 
 ### fitness_correlate_hrv_mood
 
-Rolling-window HRV × mood (joy & energy). Q3 from the schema doc.
-Materialises a calendar-day series so the rolling window measures *days*,
-not row-count days — missing days neither corrupt the rolling mean nor
-shorten the window.
+Rolling-window HRV × mood (joy, energy_vigor, and the two fatigue facets).
+Q3 from the schema doc. Materialises a calendar-day series so the rolling
+window measures *days*, not row-count days — missing days neither corrupt
+the rolling mean nor shorten the window.
 
-| Parameter | Type   | Required | Default | Description                                                |
-| --------- | ------ | -------- | ------- | ---------------------------------------------------------- |
-| `start`   | string | yes      |         | Inclusive start date (`YYYY-MM-DD`).                       |
-| `end`     | string | yes      |         | Inclusive end date (`YYYY-MM-DD`).                         |
-| `window`  | int    | no       | `7`     | Rolling-window size in calendar days (schema doc recommends 7 or 14). |
+| Parameter   | Type   | Required | Default | Description                                                             |
+| ----------- | ------ | -------- | ------- | ----------------------------------------------------------------------- |
+| `start`     | string | yes      |         | Inclusive start date (`YYYY-MM-DD`).                                    |
+| `end`       | string | yes      |         | Inclusive end date (`YYYY-MM-DD`).                                      |
+| `window`    | int    | no       | `7`     | Rolling-window size in calendar days (schema doc recommends 7 or 14).  |
+| `lag_days`  | int    | no       | `0`     | Compare mood on day `D` with HRV on day `D − lag_days` (must be ≥ 0).   |
 
-**Returns:** `{"rows": [{"d", "hrv_roll", "joy_roll", "energy_roll"}, ...]}`
-— one row per calendar day in the window.
+**Returns:** `{"rows": [{"d", "hrv_roll", "joy_roll", "energy_roll", "physical_fatigue_roll", "mental_fatigue_roll"}, ...], "stats": {...}}`
+— one row per calendar day. `stats` gives Pearson `{r, n}` over the rolling
+series for `hrv_vs_joy`, `hrv_vs_energy_vigor`, `hrv_vs_physical_fatigue`,
+`hrv_vs_mental_fatigue`.
 
 ## Transport
 

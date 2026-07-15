@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -213,6 +214,19 @@ def _strava_raw_to_activity(
     distance_m = _float_or_none(payload.get("distance"))
     moving_time_s = _int_or_none(payload.get("moving_time"))
 
+    # Strava's `perceived_exertion` is the athlete's manual RPE, already on
+    # the 1–10 scale the fitness_activities CHECK expects (migration 0025), so
+    # it maps straight into the column (bounds-coerced defensively). Mostly
+    # NULL in reality — RPE is opt-in per activity.
+    #
+    # `suffer_score` (Strava's "Relative Effort", HR-derived, unbounded ~0–300+)
+    # is a DIFFERENT scale and must NOT go in the 1–10 column. Park it in
+    # extras_json so the signal is captured without violating the CHECK.
+    extras: dict[str, Any] = {}
+    suffer_score = _int_or_none(payload.get("suffer_score"))
+    if suffer_score is not None:
+        extras["suffer_score"] = suffer_score
+
     return FitnessActivity(
         user_id=user_id,
         source="strava",
@@ -234,8 +248,10 @@ def _strava_raw_to_activity(
             activity_type=coarse_strava(sport_type),
         ),
         calories_kcal=_int_or_none(payload.get("calories")),
-        perceived_exertion=None,
-        extras={},
+        perceived_exertion=_bounded_int_or_none(
+            payload.get("perceived_exertion"), lo=1, hi=10,
+        ),
+        extras=extras,
         raw_ref_id=raw.id or 0,
     )
 
@@ -298,13 +314,23 @@ def normalize_garmin(
     for local_date, by_endpoint in daily_raws_by_date.items():
         try:
             daily = _garmin_daily_from_raws(local_date, by_endpoint, user_id)
+            repo.upsert_daily(daily)
         except _Drift as exc:
             log.warning(
                 "Garmin daily normalize drift on %s: %s", local_date, exc,
             )
             drift_count += 1
             continue
-        repo.upsert_daily(daily)
+        except sqlite3.IntegrityError as exc:
+            # Defense in depth: sentinels are bounds-coerced above, but any
+            # other CHECK violation must not abort the batch (or the
+            # activity pass that follows). Skip this date, count as drift.
+            log.warning(
+                "Garmin daily upsert rejected by CHECK constraint on %s: %s",
+                local_date, exc,
+            )
+            drift_count += 1
+            continue
         wellness_normalized += 1
 
     for raw in repo.list_raw_since(
@@ -314,6 +340,7 @@ def normalize_garmin(
             continue
         try:
             activity = _garmin_raw_to_activity(raw, user_id)
+            repo.upsert_activity(activity)
         except _Drift as exc:
             log.warning(
                 "Garmin activity normalize drift on raw row %s: %s",
@@ -321,7 +348,15 @@ def normalize_garmin(
             )
             drift_count += 1
             continue
-        repo.upsert_activity(activity)
+        except sqlite3.IntegrityError as exc:
+            # Defense in depth: a CHECK violation on one activity must not
+            # abort the rest of the pass.
+            log.warning(
+                "Garmin activity upsert rejected by CHECK constraint on raw row %s: %s",
+                raw.id, exc,
+            )
+            drift_count += 1
+            continue
         workouts_normalized += 1
 
     rows_normalized = workouts_normalized + wellness_normalized
@@ -383,23 +418,41 @@ def _garmin_daily_from_raws(
         user_id=user_id,
         source="garmin",
         local_date=local_date,
-        sleep_score=_int_or_none(sleep_overall.get("value")),
+        # Range-checked fields use ``_bounded_*`` so Garmin's
+        # insufficient-wear sentinels (-1 / -2) collapse to NULL instead of
+        # tripping the fitness_daily CHECK constraints (migration 0025).
+        sleep_score=_bounded_int_or_none(sleep_overall.get("value"), lo=0, hi=100),
         sleep_duration_s=_int_or_none(sleep_dto.get("sleepTimeSeconds")),
-        sleep_efficiency_pct=_float_or_none(
-            sleep_dto.get("sleepEfficiencyPercentage"),
+        sleep_efficiency_pct=_bounded_float_or_none(
+            sleep_dto.get("sleepEfficiencyPercentage"), lo=0, hi=100,
         ),
-        hrv_overnight_ms=_float_or_none(
+        # Schema requires hrv_overnight_ms > 0; a tiny positive lower bound
+        # nulls the <= 0 sentinels while passing every realistic reading.
+        hrv_overnight_ms=_bounded_float_or_none(
             (hrv.get("hrvSummary") or {}).get("lastNightAvg"),
+            lo=1e-9, hi=float("inf"),
         ),
-        resting_hr_bpm=_int_or_none(sleep.get("restingHeartRate")),
-        body_battery_high=_int_or_none(bb_first.get("charged")),
-        body_battery_low=_int_or_none(bb_first.get("drained")),
-        stress_avg=_int_or_none(stress.get("avgStressLevel")),
+        resting_hr_bpm=_bounded_int_or_none(
+            sleep.get("restingHeartRate"), lo=20, hi=200,
+        ),
+        # NOTE (semantics — do not misread these as battery LEVELS): Garmin's
+        # `charged`/`drained` are the day's TOTAL Body Battery points GAINED
+        # and LOST, not the day's high/low battery level. So `body_battery_high`
+        # ("charged") is total charge accrued and `body_battery_low` ("drained")
+        # is total charge spent — both are cumulative daily deltas in 0–100
+        # points, and `high` is NOT guaranteed >= `low`. Consumers computing a
+        # divergence/fatigue signal (W5) must treat these as charge/drain
+        # totals, not min/max levels.
+        body_battery_high=_bounded_int_or_none(bb_first.get("charged"), lo=0, hi=100),
+        body_battery_low=_bounded_int_or_none(bb_first.get("drained"), lo=0, hi=100),
+        stress_avg=_bounded_int_or_none(stress.get("avgStressLevel"), lo=0, hi=100),
         training_load_acute=_float_or_none(tlb.get("metricsTrainingLoadAcute")),
         training_load_chronic=_float_or_none(
             tlb.get("metricsTrainingLoadChronic"),
         ),
-        training_readiness=_int_or_none(readiness_first.get("score")),
+        training_readiness=_bounded_int_or_none(
+            readiness_first.get("score"), lo=0, hi=100,
+        ),
         extras={},
         raw_ref_ids=sorted(
             raw.id for raw in by_endpoint.values() if raw.id is not None
@@ -441,6 +494,21 @@ def _garmin_raw_to_activity(
     distance_m = _float_or_none(payload.get("distance"))
     moving_time_s = _int_or_none(payload.get("movingDuration"))
 
+    # Garmin has no manual RPE field, so perceived_exertion stays NULL — do
+    # NOT synthesise one from training effect (a different, physiological
+    # scale). Capture Garmin's training-effect signals in extras_json when the
+    # payload carries them, verbatim under their source key names, so the
+    # divergence/fatigue consumers can use them without us inventing an RPE.
+    extras: dict[str, Any] = {}
+    for src_key in (
+        "aerobicTrainingEffect",
+        "anaerobicTrainingEffect",
+        "activityTrainingLoad",
+    ):
+        value = _float_or_none(payload.get(src_key))
+        if value is not None:
+            extras[src_key] = value
+
     return FitnessActivity(
         user_id=user_id,
         source="garmin",
@@ -463,7 +531,7 @@ def _garmin_raw_to_activity(
         ),
         calories_kcal=_int_or_none(payload.get("calories")),
         perceived_exertion=None,
-        extras={},
+        extras=extras,
         raw_ref_id=raw.id or 0,
     )
 
@@ -519,6 +587,40 @@ def _float_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _bounded_int_or_none(value: Any, *, lo: int, hi: int) -> int | None:
+    """Coerce to ``int`` but collapse out-of-range values to ``None``.
+
+    Garmin publishes sentinel values (``-1`` / ``-2``) for wellness metrics
+    such as stress, sleep score, resting HR, body battery, and training
+    readiness on days with insufficient wear. ``_int_or_none`` would pass
+    those straight through, but the ``fitness_daily`` CHECK constraints
+    (migration 0025) reject out-of-range values, so the ``upsert_daily``
+    that follows would raise ``sqlite3.IntegrityError`` and abort the whole
+    pass. Anything ``None`` or outside the inclusive ``[lo, hi]`` window —
+    which the sentinels always are — becomes ``None`` (a legitimate
+    "no reading" value the schema accepts).
+    """
+    result = _int_or_none(value)
+    if result is None or result < lo or result > hi:
+        return None
+    return result
+
+
+def _bounded_float_or_none(value: Any, *, lo: float, hi: float) -> float | None:
+    """Float counterpart of :func:`_bounded_int_or_none`.
+
+    Same Garmin insufficient-wear sentinel rationale: values ``None`` or
+    outside the inclusive ``[lo, hi]`` window collapse to ``None`` so they
+    never trip a ``fitness_daily`` CHECK constraint. Used for
+    ``sleep_efficiency_pct`` (0–100) and ``hrv_overnight_ms`` (the schema
+    requires ``> 0``; callers pass a lower bound above zero to enforce it).
+    """
+    result = _float_or_none(value)
+    if result is None or result < lo or result > hi:
+        return None
+    return result
 
 
 def _normalize_iso(value: str) -> str:

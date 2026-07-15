@@ -23,7 +23,8 @@ backfill window are all decided in `fitness-integration-plan.md`. Read that firs
 6. [Foreign keys & cascade posture](#6-foreign-keys--cascade-posture)
 7. [Migration sequencing](#7-migration-sequencing)
 8. [Correlation queries](#8-correlation-queries-proves-schema-supports-them)
-9. [Out of scope](#9-out-of-scope-explicit)
+9. [Divergence detector](#9-divergence-detector)
+10. [Out of scope](#10-out-of-scope-explicit)
 
 ---
 
@@ -442,30 +443,55 @@ session prefers the bundle, the merge is mechanical.
 
 ## 8. Correlation queries (proves schema supports them)
 
-Mood dimension keys come from `config/mood-dimensions.toml`: `joy_sadness`, `energy_fatigue`,
-`frustration` (the closest proxy to "stress" — confirm at integrate time whether to add a
-dedicated `stress` dimension). All examples are for `user_id = :uid` between `:start` and
-`:end`.
+Mood dimension keys come from `config/mood-dimensions.toml`: `joy_sadness`, `energy_vigor`
+(the energetic-arousal / drive axis — formerly the single bipolar `energy_fatigue`, split
+2026-07-15), plus the two fatigue facets `physical_fatigue` and `mental_fatigue` that the same
+split introduced. All examples are for `user_id = :uid` between `:start` and `:end`.
 
-### Q1. Sleep quality × energy & joy (daily grain)
+**2026-07-15 correlation-tool changes (W4).** Three behaviours were added on top of the
+verbatim queries below and are reflected in this section:
+
+- **Objective stress (Q2).** The weekly "stress" series is now `AVG(fitness_daily.stress_avg)`
+  (Garmin's 0-100 stress metric), not the `frustration` mood-dimension proxy. The output key
+  is `stress_avg`.
+- **Cross-source run dedup (Q2).** A watch run that lands in both `garmin` and `strava` was
+  double-counting weekly distance. Q2 now dedups at **day granularity**, picking one source
+  per day preferring `garmin` (falling back to `strava` on days with no garmin run).
+- **Lag & fatigue facets (Q1/Q3).** Q1 and Q3 accept a `:lag` parameter (`lag_days >= 0`,
+  default 0) that shifts the mood↔fitness join so mood on day D is compared to fitness on
+  `D − lag_days` (`entry_date = date(fitness_date, '+lag days')`). Both also surface the
+  `physical_fatigue` and `mental_fatigue` facets alongside `energy` (energy_vigor). Q2 takes
+  no lag. The MCP tools additionally return a `stats` block of Pearson coefficients
+  (`{"r", "n"}`, computed in `services/fitness/correlation_stats.py`) over the complete pairs
+  in each result — see that module for the null/variance rules.
+
+### Q1. Sleep quality × energy, joy & fatigue facets (daily grain)
+
+`:lag` shifts the mood join forward by `lag_days` calendar days so a night's sleep on
+`fd.local_date` is compared to the mood entry `lag_days` days later. With the default
+`:lag = 0` the join is same-day (`date(fd.local_date, '+0 days') = fd.local_date`), so the
+query below is a strict superset of the original.
 
 ```sql
 SELECT
     fd.local_date,
     fd.sleep_score,
     fd.sleep_efficiency_pct,
-    AVG(CASE WHEN ms.dimension = 'energy_fatigue' THEN ms.score END) AS energy,
-    AVG(CASE WHEN ms.dimension = 'joy_sadness'    THEN ms.score END) AS joy
+    AVG(CASE WHEN ms.dimension = 'energy_vigor'     THEN ms.score END) AS energy,
+    AVG(CASE WHEN ms.dimension = 'joy_sadness'      THEN ms.score END) AS joy,
+    AVG(CASE WHEN ms.dimension = 'physical_fatigue' THEN ms.score END) AS physical_fatigue,
+    AVG(CASE WHEN ms.dimension = 'mental_fatigue'   THEN ms.score END) AS mental_fatigue
 FROM fitness_daily fd
 LEFT JOIN entries e
-    ON e.user_id = fd.user_id AND e.entry_date = fd.local_date
+    ON e.user_id = fd.user_id
+   AND e.entry_date = date(fd.local_date, '+' || :lag || ' days')
 LEFT JOIN mood_scores ms ON ms.entry_id = e.id
 WHERE fd.user_id = :uid AND fd.local_date BETWEEN :start AND :end
 GROUP BY fd.local_date, fd.sleep_score, fd.sleep_efficiency_pct
 ORDER BY fd.local_date;
 ```
 
-### Q2. Weekly running distance × stress
+### Q2. Weekly running distance × objective stress
 
 Bucket by Monday-of-week (Mon-Sun calendar weeks). Do **not** use
 `strftime('%Y-%W', d)` — it fragments any week spanning Dec/Jan into a partial
@@ -474,29 +500,49 @@ distance for that week. The arithmetic below shifts each date back to the
 Monday of its week using SQLite's `%w` (0=Sun..6=Sat); both sides of the join
 use the same shift so they always agree.
 
+**Cross-source day-level dedup.** A single watch run frequently normalizes into **two**
+`fitness_activities` rows — one `garmin`, one `strava` (see §9 "Cross-source deduplication").
+Summing `distance_m` across all sources double-counts that run's weekly km. The `deduped` CTE
+picks **one source per day**, preferring `garmin` and falling back to `strava` on days with no
+garmin run, before the weekly `SUM`. Granularity is the day, not the individual activity: two
+genuine runs from the chosen source on one day still both count.
+
+**Objective stress.** The weekly stress series is `AVG(fitness_daily.stress_avg)` (Garmin's
+0-100 daily stress metric, `NULL`-skipped), replacing the former `frustration` mood-dimension
+proxy. Output key: `stress_avg`.
+
 ```sql
-WITH weekly_runs AS (
+WITH deduped AS (
+    SELECT fa.local_date, fa.distance_m
+    FROM fitness_activities fa
+    WHERE fa.user_id = :uid AND fa.activity_type = 'run'
+      AND fa.local_date BETWEEN :start AND :end
+      AND fa.source = CASE
+          WHEN EXISTS (
+              SELECT 1 FROM fitness_activities g
+              WHERE g.user_id = fa.user_id AND g.activity_type = 'run'
+                AND g.local_date = fa.local_date AND g.source = 'garmin'
+          ) THEN 'garmin' ELSE fa.source END
+),
+weekly_runs AS (
     SELECT
         date(local_date,
              '-' || ((strftime('%w', local_date) + 6) % 7) || ' days') AS week_start,
         SUM(distance_m) / 1000.0                                       AS distance_km
-    FROM fitness_activities
-    WHERE user_id = :uid AND activity_type = 'run'
-      AND local_date BETWEEN :start AND :end
+    FROM deduped
     GROUP BY week_start
 ),
 weekly_stress AS (
     SELECT
-        date(e.entry_date,
-             '-' || ((strftime('%w', e.entry_date) + 6) % 7) || ' days') AS week_start,
-        AVG(ms.score)                                                    AS stress_proxy
-    FROM entries e
-    JOIN mood_scores ms ON ms.entry_id = e.id
-    WHERE e.user_id = :uid AND ms.dimension = 'frustration'
-      AND e.entry_date BETWEEN :start AND :end
+        date(local_date,
+             '-' || ((strftime('%w', local_date) + 6) % 7) || ' days') AS week_start,
+        AVG(stress_avg)                                                AS stress_avg
+    FROM fitness_daily
+    WHERE user_id = :uid AND stress_avg IS NOT NULL
+      AND local_date BETWEEN :start AND :end
     GROUP BY week_start
 )
-SELECT r.week_start, r.distance_km, s.stress_proxy
+SELECT r.week_start, r.distance_km, s.stress_avg
 FROM weekly_runs r LEFT JOIN weekly_stress s USING (week_start)
 ORDER BY r.week_start;
 ```
@@ -508,6 +554,12 @@ window when there are sync gaps in `fitness_daily`. To get a true 7-day or 14-da
 window even when a day is missing, materialize a date series first and left-join. Pick
 `:window` = 7 or 14.
 
+Like Q1, `:lag` (default 0) shifts the mood join forward by `lag_days` days: the mood joined
+to fitness day `ds.d` is the entry on `date(ds.d, '+lag days')`, so HRV on day D correlates
+with mood on `D + lag_days`. The `daily_mood` window is widened by the same lag so shifted
+entries are in scope. Alongside `energy` (energy_vigor) the query rolls the two fatigue
+facets `physical_fatigue` and `mental_fatigue`.
+
 ```sql
 WITH RECURSIVE date_series(d) AS (
     SELECT :start
@@ -517,11 +569,15 @@ WITH RECURSIVE date_series(d) AS (
 daily_mood AS (
     SELECT
         e.entry_date AS d,
-        AVG(CASE WHEN ms.dimension = 'joy_sadness'    THEN ms.score END) AS joy,
-        AVG(CASE WHEN ms.dimension = 'energy_fatigue' THEN ms.score END) AS energy
+        AVG(CASE WHEN ms.dimension = 'joy_sadness'      THEN ms.score END) AS joy,
+        AVG(CASE WHEN ms.dimension = 'energy_vigor'     THEN ms.score END) AS energy,
+        AVG(CASE WHEN ms.dimension = 'physical_fatigue' THEN ms.score END) AS physical_fatigue,
+        AVG(CASE WHEN ms.dimension = 'mental_fatigue'   THEN ms.score END) AS mental_fatigue
     FROM entries e
     JOIN mood_scores ms ON ms.entry_id = e.id
-    WHERE e.user_id = :uid AND e.entry_date BETWEEN :start AND :end
+    WHERE e.user_id = :uid
+      AND e.entry_date BETWEEN date(:start, '+' || :lag || ' days')
+                           AND date(:end,   '+' || :lag || ' days')
     GROUP BY e.entry_date
 ),
 joined AS (
@@ -529,16 +585,20 @@ joined AS (
         ds.d,
         fd.hrv_overnight_ms,
         dm.joy,
-        dm.energy
+        dm.energy,
+        dm.physical_fatigue,
+        dm.mental_fatigue
     FROM date_series ds
     LEFT JOIN fitness_daily fd ON fd.user_id = :uid AND fd.local_date = ds.d
-    LEFT JOIN daily_mood    dm ON dm.d = ds.d
+    LEFT JOIN daily_mood    dm ON dm.d = date(ds.d, '+' || :lag || ' days')
 )
 SELECT
     d,
     AVG(hrv_overnight_ms) OVER w AS hrv_roll,
     AVG(joy)              OVER w AS joy_roll,
-    AVG(energy)           OVER w AS energy_roll
+    AVG(energy)           OVER w AS energy_roll,
+    AVG(physical_fatigue) OVER w AS physical_fatigue_roll,
+    AVG(mental_fatigue)   OVER w AS mental_fatigue_roll
 FROM joined
 WINDOW w AS (
     ORDER BY d
@@ -556,7 +616,80 @@ All three queries execute against indexes already declared: `idx_fit_daily_user_
 
 ---
 
-## 9. Out of scope (explicit)
+## 9. Divergence detector
+
+A read-only analytic that answers the product question *"am I tired because I run, or is it
+mental?"* Per day it compares **self-reported tiredness** (the `physical_fatigue` /
+`mental_fatigue` mood facets from §8) against **baselined objective recovery signals** from
+`fitness_daily`, and sorts each day into a quadrant.
+
+Lives in `services/fitness/divergence.py` (pure, DB-conn in). Surfaced as the
+`fitness_divergence` MCP tool and `GET /api/fitness/divergence`; a companion
+`GET /api/fitness/mood-recovery` returns the date-aligned raw values for the webapp overlay.
+
+### Baselining & z-scores
+
+A raw HRV of 55 ms is meaningless without knowing *your* normal. So every signal is turned
+into a **rolling per-person z-score**: the value on day D versus the mean and (population)
+standard deviation of the *same* signal over the trailing `window` calendar days **before** D
+(default `window = 28`). `window` days of history before the requested `start` are pulled in
+internally so even the first day in the range has a baseline. A signal's z is `None` (marked
+unavailable that day) when the baseline has fewer than **10** non-null points or **zero
+variance**, or the day itself lacks a value.
+
+### Signals & orientation
+
+Every z is **oriented so positive = better recovered**:
+
+| Signal | Source column(s) | Orientation |
+| --- | --- | --- |
+| `hrv_z` | `hrv_overnight_ms` | as-is (higher HRV = better) |
+| `resting_hr_z` | `resting_hr_bpm` | **sign-flipped** (lower RHR = better) |
+| `sleep_z` | `sleep_score` | as-is |
+| `readiness_z` | `training_readiness` | as-is |
+| `acwr_z` | `training_load_acute / NULLIF(training_load_chronic, 0)` | **sign-flipped** (a higher acute:chronic ratio = worse) |
+
+`recovery_z` is the **mean of the available oriented signals**; the day is only classifiable
+when **≥ 2** objective signals are present. The raw acute:chronic ratio is also returned as
+`acwr` (not a z).
+
+The subjective side takes the same rolling z of the `physical_fatigue` and `mental_fatigue`
+facets (unflipped, so positive = more tired than the personal norm) and reports
+`subjective_tired_z` = the **max** of the two available facet z's.
+
+### Quadrants
+
+With `feels_tired = subjective_tired_z >= z_threshold` (default `z_threshold = 1.0`):
+
+| | Objectively recovered (`recovery_z >= 0`) | Under-recovered (`recovery_z <= −z_threshold`) |
+| --- | --- | --- |
+| **Feels tired** | `likely_mental_fatigue` *(divergence)* | `congruent_fatigue` |
+| **Feels fresh** | `congruent_ok` | `hidden_physical_under_recovery` *(divergence)* |
+
+The two *divergence* quadrants are the signal — the answer to the product question. A tired
+day is only `likely_mental_fatigue` when objectively **fully** recovered (`recovery_z >= 0`); a
+fresh day is only `hidden_physical_under_recovery` when **clearly** under-recovered
+(`recovery_z <= −z_threshold`). The ambiguous middle band collapses into the congruent
+buckets. Every classified day carries `sufficient = true`; days with < 2 objective signals or
+no computable subjective z are returned with `sufficient = false` and `quadrant = null` (no
+misleading label). Days with no data at all are omitted, so an empty DB yields an empty list.
+
+### Endpoints
+
+- **`GET /api/fitness/divergence?start=&end=&window=`** → `{"rows": [DivergenceDay…],
+  "summary": {quadrant: count}}`. `window` is optional (default 28; a malformed value falls
+  back rather than erroring). `summary` counts only classified days. Missing `start`/`end` →
+  400, mirroring `list_daily`.
+- **`GET /api/fitness/mood-recovery?from=&to=`** → `{"rows": [{local_date,
+  training_load_acute, training_readiness, hrv_overnight_ms, physical_fatigue,
+  mental_fatigue}…]}`. One row per date that has fitness data **or** a fatigue mood score;
+  every field is nullable. Powers the webapp overlay. Missing `from`/`to` → 400.
+
+The `DivergenceDay` shape (dataclass in `models.py`): `local_date`, `subjective_tired_z`,
+`physical_fatigue`, `mental_fatigue`, `recovery_z`, `hrv_z`, `resting_hr_z`, `sleep_z`,
+`readiness_z`, `acwr`, `acwr_z`, `quadrant`, `n_signals`, `sufficient`.
+
+## 10. Out of scope (explicit)
 
 - `fitness_workouts` (S3 — defer until a query needs it).
 - Wide source-native activity-type enum on `activity_type`. The coarse 7-value bucketing is

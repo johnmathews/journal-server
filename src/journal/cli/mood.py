@@ -98,11 +98,12 @@ def cmd_backfill_mood(args: argparse.Namespace, config: Config) -> None:
             print(f"  {err}")
 
     # Rough cost estimate using public Sonnet 4.5 pricing: $3/M
-    # input tokens, $15/M output. Per-entry call is ~1250 input
-    # tokens (prompt ~500 + ~750 for a 500-word entry) + ~150
-    # output tokens. Adjust if you change the model.
+    # input tokens, $15/M output. Per-entry call is ~1750 input
+    # tokens (prompt ~1000 for the 10-facet schema + ~750 for a
+    # 500-word entry) + ~210 output tokens. Adjust if you change
+    # the model or the facet set.
     if result.scored and not result.dry_run:
-        input_cost = result.scored * 1250 * 3.0 / 1_000_000
-        output_cost = result.scored * 150 * 15.0 / 1_000_000
+        input_cost = result.scored * 1750 * 3.0 / 1_000_000
+        output_cost = result.scored * 210 * 15.0 / 1_000_000
         total = input_cost + output_cost
         print(f"\nEstimated cost for this run: ${total:.4f}")

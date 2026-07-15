@@ -849,16 +849,23 @@ def _init_services() -> dict:
         context_entries=config.answer_context_entries,
     )
     conversation_repository = SQLiteConversationRepository(db_factory)
+    mood_dimension_names = [d.name for d in mood_dimensions]
     intent_classifier = build_intent_classifier(
         config.answer_provider,
         anthropic_api_key=config.anthropic_api_key,
         model=config.answer_classifier_model,
+        dimensions=mood_dimension_names,
     )
     conversation_handlers = {
         "lookup": LookupHandler(query_service, answerer, passage_chars=800),
         "aggregate": AggregateHandler(query_service, answerer, passage_chars=800),
         "temporal": TemporalHandler(query_service, answerer, passage_chars=800),
-        "trend": TrendHandler(query_service, answerer, passage_chars=800),
+        "trend": TrendHandler(
+            query_service,
+            answerer,
+            passage_chars=800,
+            dimension_names=mood_dimension_names,
+        ),
     }
     conversation_service = ConversationService(
         repository=conversation_repository,

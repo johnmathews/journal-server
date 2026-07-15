@@ -9,9 +9,12 @@ facets — each facet is a required property with its own
 `minimum`/`maximum` based on `scale_type` (bipolar `[-1, +1]` or
 unipolar `[0, +1]`).
 
-Editing `config/mood-dimensions.toml` and restarting the server
+Editing `config/mood-dimensions.toml` and reloading the facet set
 changes the tool schema at the next call — no code or prompt
-edits required.
+edits required. Reload without a restart by calling the admin
+hot-reload endpoint `POST /api/admin/reload/mood-dimensions`
+(a restart also picks up the change, since the facets are loaded
+at startup too).
 
 The adapter deliberately does **not** cache the system prompt
 block: journal entries are short and the prompt rebuilds from

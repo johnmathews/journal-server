@@ -127,3 +127,101 @@ def test_trend_handler_summarizes_series_into_note() -> None:
     assert "happiness" in answerer.last_kwargs["context_note"]
     assert "0.3" in answerer.last_kwargs["context_note"]
     assert out.answer == "You've trended happier."
+
+
+def test_trend_handler_resolves_near_miss_dimension_to_real_facet() -> None:
+    # LLM emits "energy"; the real facet is "energy_vigor". Exact-equality
+    # matching yielded an empty series + "no data". Now it must resolve.
+    trends = [
+        MoodTrend(period="2026-W01", dimension="energy_vigor", avg_score=-0.2,
+                  entry_count=4),
+        MoodTrend(period="2026-W20", dimension="energy_vigor", avg_score=0.4,
+                  entry_count=5),
+        MoodTrend(period="2026-W01", dimension="joy_sadness", avg_score=0.1,
+                  entry_count=4),
+    ]
+    query = _Query(get_mood_trends=trends,
+                   search_entries=[_sr(7, "Low energy.")])
+    answerer = _Answerer(AnswerResult("Your energy dipped then recovered.",
+                                      True, [7]))
+    handler = TrendHandler(
+        query, answerer, passage_chars=800,
+        dimension_names=["joy_sadness", "energy_vigor", "physical_fatigue"],
+    )
+    intent = IntentResult(intent="trend", search_query="energy over time",
+                          dimension="energy")
+
+    out = handler.handle(_history(), intent, user_id=1)
+
+    note = answerer.last_kwargs["context_note"]
+    assert "energy_vigor" in note
+    assert "No mood-trend data" not in note
+    # resolved to a single facet — the unrelated facet must not leak in
+    assert "joy_sadness" not in note
+    assert out.answer == "Your energy dipped then recovered."
+
+
+def test_trend_handler_ambiguous_near_miss_falls_back_to_all_dimensions() -> None:
+    # "tiredness" is ambiguous between physical_ and mental_fatigue, so it
+    # must degrade to all dimensions rather than returning no data.
+    trends = [
+        MoodTrend(period="2026-W01", dimension="physical_fatigue",
+                  avg_score=0.6, entry_count=4),
+        MoodTrend(period="2026-W01", dimension="mental_fatigue",
+                  avg_score=0.3, entry_count=4),
+    ]
+    query = _Query(get_mood_trends=trends,
+                   search_entries=[_sr(7, "Wiped out.")])
+    answerer = _Answerer(AnswerResult("You've been tired.", True, [7]))
+    handler = TrendHandler(
+        query, answerer, passage_chars=800,
+        dimension_names=["physical_fatigue", "mental_fatigue"],
+    )
+    intent = IntentResult(intent="trend", search_query="why so tired",
+                          dimension="tiredness")
+
+    out = handler.handle(_history(), intent, user_id=1)
+
+    note = answerer.last_kwargs["context_note"]
+    assert "No mood-trend data" not in note
+    assert "physical_fatigue" in note
+    assert "mental_fatigue" in note
+    assert out.answer == "You've been tired."
+
+
+def test_trend_handler_null_dimension_labels_each_series() -> None:
+    # With no dimension, every facet's series must be labeled so the LLM
+    # can tell them apart (previously all interleaved unlabeled).
+    trends = [
+        MoodTrend(period="2026-W01", dimension="energy_vigor", avg_score=0.2,
+                  entry_count=4),
+        MoodTrend(period="2026-W20", dimension="energy_vigor", avg_score=0.5,
+                  entry_count=5),
+        MoodTrend(period="2026-W01", dimension="agency", avg_score=-0.1,
+                  entry_count=4),
+    ]
+    query = _Query(get_mood_trends=trends,
+                   search_entries=[_sr(7, "Mixed week.")])
+    answerer = _Answerer(AnswerResult("Here's the breakdown.", True, [7]))
+    handler = TrendHandler(query, answerer, passage_chars=800)
+    intent = IntentResult(intent="trend", search_query="how have I been",
+                          dimension=None)
+
+    out = handler.handle(_history(), intent, user_id=1)
+
+    note = answerer.last_kwargs["context_note"]
+    # each dimension is identifiable in the serialized note
+    assert "energy_vigor" in note
+    assert "agency" in note
+    assert out.answer == "Here's the breakdown."
+
+
+def test_trend_handler_no_trends_reports_no_data() -> None:
+    query = _Query(get_mood_trends=[], search_entries=[_sr(7, "Nothing.")])
+    answerer = _Answerer(AnswerResult("No data.", True, [7]))
+    handler = TrendHandler(query, answerer, passage_chars=800)
+    intent = IntentResult(intent="trend", search_query="mood", dimension=None)
+
+    handler.handle(_history(), intent, user_id=1)
+
+    assert "No mood-trend data" in answerer.last_kwargs["context_note"]

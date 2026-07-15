@@ -111,6 +111,96 @@ class TestMoodTrends:
         assert len(trends) == 2
 
 
+class TestMoodTrendsBar:
+    """The MCP tool renders an ASCII bar per trend row. It must scale
+    the bar to each dimension's range so a unipolar dimension (range
+    [0, 1]) does not render a half-bar at score 0 the way a bipolar
+    neutral (range [-1, +1]) does. Regression test for the bar-scaling
+    bug (W9)."""
+
+    @staticmethod
+    def _trailing_bar(line: str) -> str:
+        """Extract the trailing run of ``+`` characters from a row."""
+        stripped = line.rstrip()
+        i = len(stripped)
+        while i > 0 and stripped[i - 1] == "+":
+            i -= 1
+        return stripped[i:]
+
+    def _bars(self, output: str) -> dict[tuple[str, str], str]:
+        """Map ``(period, dimension) -> bar string`` from tool output."""
+        bars: dict[tuple[str, str], str] = {}
+        for line in output.splitlines():
+            if "|" not in line or ":" not in line:
+                continue
+            head, _, tail = line.partition("|")
+            period = head.strip()
+            dimension = tail.split(":", 1)[0].strip()
+            bars[(period, dimension)] = self._trailing_bar(line)
+        return bars
+
+    @pytest.fixture
+    def bar_ctx(self, repo, vector_store, mock_embeddings):
+        from journal.services.mood_dimensions import MoodDimension
+
+        # bipolar neutral (0.0), unipolar absent (0.0), unipolar full (1.0)
+        e0 = repo.create_entry("2026-03-22", "text", "neutral bipolar day", 3)
+        e1 = repo.create_entry("2026-03-23", "text", "no frustration at all", 4)
+        e2 = repo.create_entry("2026-03-24", "text", "totally frustrated", 2)
+        repo.add_mood_score(e0.id, "overall", 0.0)
+        repo.add_mood_score(e1.id, "frustration", 0.0)
+        repo.add_mood_score(e2.id, "frustration", 1.0)
+
+        dims = (
+            MoodDimension(
+                name="overall",
+                positive_pole="good",
+                negative_pole="bad",
+                scale_type="bipolar",
+                notes="",
+            ),
+            MoodDimension(
+                name="frustration",
+                positive_pole="frustrated",
+                negative_pole="calm",
+                scale_type="unipolar",
+                notes="",
+            ),
+        )
+        ctx = MagicMock()
+        ctx.request_context.lifespan_context = {
+            "query": QueryService(repo, vector_store, mock_embeddings),
+            "mood_dimensions": dims,
+        }
+        return ctx
+
+    def test_unipolar_zero_shorter_than_bipolar_zero(self, bar_ctx):
+        from journal.mcp_server import journal_get_mood_trends
+
+        out = journal_get_mood_trends(granularity="day", ctx=bar_ctx)
+        bars = self._bars(out)
+
+        bipolar_neutral = bars[("2026-03-22", "overall")]
+        unipolar_zero = bars[("2026-03-23", "frustration")]
+        unipolar_full = bars[("2026-03-24", "frustration")]
+
+        # The core of the bug: unipolar 0 must be visibly shorter than a
+        # bipolar neutral (which sits at the midpoint).
+        assert len(unipolar_zero) < len(bipolar_neutral)
+        assert len(unipolar_zero) <= 1  # empty / near-empty
+        assert len(bipolar_neutral) == 5  # half of the 10-wide bar
+        assert len(unipolar_full) == 10  # full bar
+        assert len(unipolar_full) > len(bipolar_neutral)
+
+    def test_docstring_describes_all_time_default(self):
+        from journal.mcp_server import journal_get_mood_trends
+
+        doc = journal_get_mood_trends.__doc__ or ""
+        # The service applies no default window (None => all-time); the
+        # docstring must not claim a "3 months ago" default.
+        assert "3 months ago" not in doc
+
+
 class TestTopicFrequency:
     def test_found(self, seeded_query):
         freq = seeded_query.get_topic_frequency("Vienna")

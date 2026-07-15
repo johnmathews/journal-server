@@ -26,7 +26,10 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 import anthropic
 
@@ -38,7 +41,8 @@ _AGGREGATE = re.compile(r"\bhow (many|often)\b|\bhow much\b|\bcount\b", re.I)
 _TEMPORAL = re.compile(r"\bwhen did\b|\bwhen was\b|\bfirst (time|mention)\b", re.I)
 _TREND = re.compile(
     r"\b(trend|over time|gotten (more|less|better|worse|happier|sadder)|"
-    r"have i (become|been)|mood)\b",
+    r"have i (become|been)|mood|tired|tiredness|exhausted|exhaustion|"
+    r"fatigue|fatigued|energy)\b",
     re.I,
 )
 
@@ -107,6 +111,26 @@ _SYSTEM_PROMPT = (
 )
 
 
+def _system_prompt(dimensions: Sequence[str]) -> str:
+    """Base prompt, plus the valid facet keys when the caller supplies them.
+
+    Telling the model the exact stored keys makes `dimension` a lookup
+    against a known set instead of a free-form guess ("energy" vs the
+    real `energy_vigor`), which the handler would otherwise have to
+    reconcile after the fact.
+    """
+    if not dimensions:
+        return _SYSTEM_PROMPT
+    return (
+        _SYSTEM_PROMPT
+        + "\n\nFor a trend intent, set \"dimension\" to exactly one of "
+        "these mood dimension keys (or null if the message is about "
+        "overall mood or none clearly apply): "
+        + ", ".join(dimensions)
+        + "."
+    )
+
+
 class AnthropicIntentClassifier:
     """Four-way intent classifier via an Anthropic Claude model (Haiku)."""
 
@@ -115,10 +139,13 @@ class AnthropicIntentClassifier:
         api_key: str,
         model: str = "claude-haiku-4-5",
         max_tokens: int = 256,
+        *,
+        dimensions: Sequence[str] = (),
     ) -> None:
         self._client = anthropic.Anthropic(api_key=api_key)
         self._model = model
         self._max_tokens = max_tokens
+        self._system_prompt = _system_prompt(dimensions)
 
     @property
     def model(self) -> str:
@@ -139,7 +166,7 @@ class AnthropicIntentClassifier:
                 system=[
                     {
                         "type": "text",
-                        "text": _SYSTEM_PROMPT,
+                        "text": self._system_prompt,
                         "cache_control": {"type": "ephemeral"},
                     }
                 ],
@@ -195,6 +222,7 @@ def build_intent_classifier(
     *,
     anthropic_api_key: str = "",
     model: str = "claude-haiku-4-5",
+    dimensions: Sequence[str] = (),
 ) -> IntentClassifier:
     """Build an intent classifier by name. Unknown names raise (fail-fast)."""
     if name in ("none", "noop", "heuristic"):
@@ -204,7 +232,9 @@ def build_intent_classifier(
             raise ValueError(
                 "AnthropicIntentClassifier requires ANTHROPIC_API_KEY to be set"
             )
-        return AnthropicIntentClassifier(api_key=anthropic_api_key, model=model)
+        return AnthropicIntentClassifier(
+            api_key=anthropic_api_key, model=model, dimensions=dimensions
+        )
     raise ValueError(
         f"Unknown intent classifier {name!r} — must be 'anthropic' or 'none'"
     )

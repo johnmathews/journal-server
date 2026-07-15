@@ -10,10 +10,12 @@ duplicates together.
 
 from __future__ import annotations
 
+import copy
 import json
+import sqlite3
 import time
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pytest
 
@@ -27,10 +29,6 @@ from journal.services.fitness.normalize import (
     normalize_garmin,
     normalize_strava,
 )
-
-if TYPE_CHECKING:
-    import sqlite3
-
 
 # ── Test infrastructure ──────────────────────────────────────────────
 
@@ -704,3 +702,260 @@ def test_strava_start_time_normalized_to_z_suffix(
     dt = datetime.fromisoformat(row["start_time"].replace("Z", "+00:00"))
     assert dt.tzinfo == UTC
     assert row["start_time"].endswith("Z")
+
+
+# 15. Garmin insufficient-wear sentinels are sanitized, not fatal -----
+#
+# Garmin publishes sentinel values (-1 / -2) for stress, sleep score,
+# body battery, etc. on days with insufficient wear. Those violate the
+# ``fitness_daily`` CHECK constraints (migration 0025). Before the W1
+# fix, ``upsert_daily`` sat OUTSIDE the per-date drift guard, so the
+# resulting sqlite3.IntegrityError aborted the whole daily pass (and the
+# activity pass after it). The fix bounds-coerces sentinels to NULL and
+# adds a defensive IntegrityError guard around the upsert.
+
+
+def _sentinel_daily_fixture(**overrides: Any) -> dict[str, Any]:
+    """Deep-copy ``_GARMIN_DAILY_FIXTURE`` and apply sentinel overrides.
+
+    Recognized override keys map onto the nested Garmin payload shape:
+    ``stress``, ``sleep_score``, ``resting_hr``, ``body_battery_charged``,
+    ``training_readiness``.
+    """
+    fixture = copy.deepcopy(_GARMIN_DAILY_FIXTURE)
+    if "stress" in overrides:
+        fixture["stress"]["avgStressLevel"] = overrides["stress"]
+    if "sleep_score" in overrides:
+        fixture["sleep"]["dailySleepDTO"]["sleepScores"]["overall"]["value"] = (
+            overrides["sleep_score"]
+        )
+    if "resting_hr" in overrides:
+        fixture["sleep"]["restingHeartRate"] = overrides["resting_hr"]
+    if "body_battery_charged" in overrides:
+        fixture["body_battery"][0]["charged"] = overrides["body_battery_charged"]
+    if "training_readiness" in overrides:
+        fixture["training_readiness"][0]["score"] = overrides["training_readiness"]
+    return fixture
+
+
+def test_garmin_sentinel_batch_normalizes_all_days_not_fatal(
+    repo: FitnessRepository, db_conn: sqlite3.Connection,
+) -> None:
+    """A batch of [clean, stress=-1 sentinel, clean] fully normalizes.
+
+    All three daily rows land; the sentinel day gets ``stress_avg IS
+    NULL`` (sanitized) while its other metrics survive; the clean days
+    are intact; and ``drift_count == 0`` because a sanitized sentinel is
+    not drift.
+    """
+    notifier = _CapturingNotifier()
+    _insert_garmin_daily(repo, "2026-04-14")  # clean
+    _insert_garmin_daily(
+        repo, "2026-04-15", payloads=_sentinel_daily_fixture(stress=-1),
+    )
+    _insert_garmin_daily(repo, "2026-04-16")  # clean
+
+    result = normalize_garmin(repo, user_id=1, notifier=notifier)
+
+    assert result.rows_normalized == 3
+    assert result.drift_count == 0
+    assert notifier.drift_calls == []
+
+    rows = {
+        r["local_date"]: r
+        for r in db_conn.execute(
+            "SELECT * FROM fitness_daily WHERE user_id=1 ORDER BY local_date",
+        ).fetchall()
+    }
+    assert set(rows) == {"2026-04-14", "2026-04-15", "2026-04-16"}
+    # Sentinel day: stress sanitized to NULL, other metrics intact.
+    assert rows["2026-04-15"]["stress_avg"] is None
+    assert rows["2026-04-15"]["sleep_score"] == 84
+    assert rows["2026-04-15"]["resting_hr_bpm"] == 51
+    # Clean days unaffected.
+    assert rows["2026-04-14"]["stress_avg"] == 31
+    assert rows["2026-04-16"]["stress_avg"] == 31
+
+
+@pytest.mark.parametrize(
+    ("override", "column"),
+    [
+        ({"sleep_score": -1}, "sleep_score"),
+        ({"body_battery_charged": -1}, "body_battery_high"),
+        ({"resting_hr": -1}, "resting_hr_bpm"),
+        ({"training_readiness": -1}, "training_readiness"),
+    ],
+)
+def test_garmin_sentinel_field_becomes_null_row_persists(
+    repo: FitnessRepository, db_conn: sqlite3.Connection,
+    override: dict[str, int], column: str,
+) -> None:
+    """Each out-of-range sentinel field is coerced to NULL and the row
+    still persists (no IntegrityError, no drift)."""
+    _insert_garmin_daily(
+        repo, "2026-04-15", payloads=_sentinel_daily_fixture(**override),
+    )
+
+    result = normalize_garmin(repo, user_id=1)
+
+    assert result.rows_normalized == 1
+    assert result.drift_count == 0
+    row = db_conn.execute(
+        "SELECT * FROM fitness_daily WHERE user_id=1 AND local_date='2026-04-15'",
+    ).fetchone()
+    assert row is not None
+    assert row[column] is None
+
+
+def test_garmin_upsert_integrity_error_does_not_abort_activity_pass(
+    repo: FitnessRepository, db_conn: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defense in depth: even if ``upsert_daily`` raises an
+    IntegrityError (e.g. a constraint we didn't bounds-check), the daily
+    loop records it as drift and the subsequent activity pass still runs."""
+    _insert_garmin_daily(repo, "2026-04-15")
+    repo.insert_raw(
+        source="garmin", user_id=1,
+        endpoint="activities", source_id="22000000001",
+        payload_json=json.dumps(_garmin_activity_payload(22000000001)),
+        sync_run_id=None,
+    )
+
+    def _boom(_daily: Any) -> None:
+        raise sqlite3.IntegrityError("CHECK constraint failed")
+
+    monkeypatch.setattr(repo, "upsert_daily", _boom)
+
+    result = normalize_garmin(repo, user_id=1)
+
+    # The daily upsert failed → counted as drift, but the activity pass
+    # still ran and persisted the activity.
+    assert result.drift_count == 1
+    activities = db_conn.execute(
+        "SELECT source_id FROM fitness_activities WHERE user_id=1",
+    ).fetchall()
+    assert [r["source_id"] for r in activities] == ["22000000001"]
+
+
+# ── W10: perceived_exertion + training-effect extras ──────────────────
+
+
+def test_strava_perceived_exertion_maps_to_column(
+    repo: FitnessRepository, db_conn: sqlite3.Connection,
+) -> None:
+    """Strava's manual RPE is already 1–10 → straight into the column."""
+    payload = _strava_payload(31000000001)
+    payload["perceived_exertion"] = 6
+    repo.insert_raw(
+        source="strava", user_id=1,
+        endpoint="activities", source_id="31000000001",
+        payload_json=json.dumps(payload, sort_keys=True),
+        sync_run_id=None,
+    )
+
+    normalize_strava(repo, user_id=1)
+
+    row = db_conn.execute(
+        "SELECT perceived_exertion, extras_json FROM fitness_activities"
+        " WHERE user_id=1",
+    ).fetchone()
+    assert row["perceived_exertion"] == 6
+    assert json.loads(row["extras_json"]) == {}
+
+
+def test_strava_suffer_score_goes_to_extras_not_column(
+    repo: FitnessRepository, db_conn: sqlite3.Connection,
+) -> None:
+    """suffer_score is a different scale — it must NOT land in the 1–10
+    column; it is captured in extras_json and perceived_exertion stays NULL."""
+    payload = _strava_payload(31000000002)
+    payload["suffer_score"] = 210  # well outside 1–10
+    repo.insert_raw(
+        source="strava", user_id=1,
+        endpoint="activities", source_id="31000000002",
+        payload_json=json.dumps(payload, sort_keys=True),
+        sync_run_id=None,
+    )
+
+    normalize_strava(repo, user_id=1)
+
+    row = db_conn.execute(
+        "SELECT perceived_exertion, extras_json FROM fitness_activities"
+        " WHERE user_id=1",
+    ).fetchone()
+    assert row["perceived_exertion"] is None
+    assert json.loads(row["extras_json"]) == {"suffer_score": 210}
+
+
+def test_strava_out_of_range_perceived_exertion_collapses_to_null(
+    repo: FitnessRepository, db_conn: sqlite3.Connection,
+) -> None:
+    """A garbage RPE outside 1–10 is coerced to NULL, never a CHECK failure."""
+    payload = _strava_payload(31000000003)
+    payload["perceived_exertion"] = 42
+    repo.insert_raw(
+        source="strava", user_id=1,
+        endpoint="activities", source_id="31000000003",
+        payload_json=json.dumps(payload, sort_keys=True),
+        sync_run_id=None,
+    )
+
+    result = normalize_strava(repo, user_id=1)
+
+    assert result.drift_count == 0
+    row = db_conn.execute(
+        "SELECT perceived_exertion FROM fitness_activities WHERE user_id=1",
+    ).fetchone()
+    assert row["perceived_exertion"] is None
+
+
+def test_garmin_training_effect_goes_to_extras_perceived_exertion_null(
+    repo: FitnessRepository, db_conn: sqlite3.Connection,
+) -> None:
+    """Garmin has no manual RPE — we never invent one. Training-effect signals
+    are captured verbatim in extras_json; perceived_exertion stays NULL."""
+    payload = _garmin_activity_payload(32000000001)
+    payload["aerobicTrainingEffect"] = 3.4
+    payload["anaerobicTrainingEffect"] = 1.1
+    payload["activityTrainingLoad"] = 156.0
+    repo.insert_raw(
+        source="garmin", user_id=1,
+        endpoint="activities", source_id="32000000001",
+        payload_json=json.dumps(payload),
+        sync_run_id=None,
+    )
+
+    normalize_garmin(repo, user_id=1)
+
+    row = db_conn.execute(
+        "SELECT perceived_exertion, extras_json FROM fitness_activities"
+        " WHERE user_id=1",
+    ).fetchone()
+    assert row["perceived_exertion"] is None
+    assert json.loads(row["extras_json"]) == {
+        "aerobicTrainingEffect": 3.4,
+        "anaerobicTrainingEffect": 1.1,
+        "activityTrainingLoad": 156.0,
+    }
+
+
+def test_garmin_activity_without_training_effect_has_empty_extras(
+    repo: FitnessRepository, db_conn: sqlite3.Connection,
+) -> None:
+    """Absent training-effect keys → extras stays empty (capture-when-available)."""
+    repo.insert_raw(
+        source="garmin", user_id=1,
+        endpoint="activities", source_id="32000000002",
+        payload_json=json.dumps(_garmin_activity_payload(32000000002)),
+        sync_run_id=None,
+    )
+
+    normalize_garmin(repo, user_id=1)
+
+    row = db_conn.execute(
+        "SELECT perceived_exertion, extras_json FROM fitness_activities"
+        " WHERE user_id=1",
+    ).fetchone()
+    assert row["perceived_exertion"] is None
+    assert json.loads(row["extras_json"]) == {}

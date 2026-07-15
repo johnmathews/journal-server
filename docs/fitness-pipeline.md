@@ -178,14 +178,15 @@ JobRunner — short-lived process, no `ThreadPoolExecutor` shutdown hazard.
 ### REST + MCP surface (W9 + W10)
 
 Read endpoints (`api/fitness.py`) expose `/api/fitness/{activities,daily,
-sync/status,integrity}`. Job creation lives at
+sync/status,integrity}` plus the mood × fitness analytics routes
+`/api/fitness/{divergence,mood-recovery}`. Job creation lives at
 `POST /api/fitness/sync/{source}` in `api/ingestion.py` per the codebase's
 write-in-ingestion-router convention.
 
 The MCP twin (`mcp_server/tools/fitness.py`) mirrors the read endpoints
 plus three correlation queries (`fitness_correlate_sleep_mood`,
-`fitness_correlate_weekly_runs_stress`, `fitness_correlate_hrv_mood`)
-copied verbatim from
+`fitness_correlate_weekly_runs_stress`, `fitness_correlate_hrv_mood`) and the
+`fitness_divergence` detector, copied verbatim from
 [`fitness-schema.md` §8](fitness-schema.md#8-correlation-queries-proves-schema-supports-them).
 
 Backfill is CLI-only (`journal fitness-backfill`) — no REST surface. The

@@ -242,6 +242,21 @@ class TestShippedConfigFile:
             assert d.positive_pole
             assert d.negative_pole
 
+    def test_shipped_config_has_fatigue_facets_not_energy_fatigue(self) -> None:
+        """The 2026-07-15 redesign split the single bipolar
+        `energy_fatigue` facet into four arousal/fatigue facets. Guard
+        that the new names ship and the old one is gone."""
+        repo_root = Path(__file__).resolve().parents[2]
+        path = repo_root / "config" / "mood-dimensions.toml"
+        names = {d.name for d in load_mood_dimensions(path)}
+        assert {
+            "energy_vigor",
+            "physical_fatigue",
+            "mental_fatigue",
+            "tension_calm",
+        } <= names
+        assert "energy_fatigue" not in names
+
     def test_shipped_config_has_mixed_scale_types(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         path = repo_root / "config" / "mood-dimensions.toml"

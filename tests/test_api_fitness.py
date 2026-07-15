@@ -22,6 +22,7 @@ import json
 import sqlite3
 import time
 from collections.abc import Generator
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -458,6 +459,142 @@ def test_list_daily_returns_window(
 
 def test_list_daily_missing_params_returns_400(client: TestClient) -> None:
     resp = client.get("/api/fitness/daily?end=2026-05-31")
+    assert resp.status_code == 400
+
+
+# --------------------------------------------------------------------
+# GET /api/fitness/divergence  &  /api/fitness/mood-recovery (§9)
+# --------------------------------------------------------------------
+
+
+def _seed_div_daily(
+    repo: FitnessRepository,
+    *,
+    local_date: str,
+    hrv: float | None = None,
+    sleep: int | None = None,
+) -> None:
+    raw_id = _seed_raw_garmin(repo, endpoint="sleep", source_id=f"div-{local_date}")
+    repo.upsert_daily(
+        FitnessDaily(
+            user_id=_TEST_USER_ID, source="garmin", local_date=local_date,
+            hrv_overnight_ms=hrv, sleep_score=sleep, raw_ref_ids=[raw_id],
+        ),
+    )
+
+
+def _seed_div_mood(
+    db: sqlite3.Connection,
+    *,
+    entry_date: str,
+    physical_fatigue: float | None = None,
+    mental_fatigue: float | None = None,
+) -> None:
+    cur = db.execute(
+        "INSERT INTO entries (user_id, entry_date, source_type, raw_text,"
+        " final_text, word_count) VALUES (?, ?, 'voice', 't', 't', 1)",
+        (_TEST_USER_ID, entry_date),
+    )
+    entry_id = cur.lastrowid
+    for dim, val in (
+        ("physical_fatigue", physical_fatigue),
+        ("mental_fatigue", mental_fatigue),
+    ):
+        if val is not None:
+            db.execute(
+                "INSERT INTO mood_scores (entry_id, dimension, score)"
+                " VALUES (?, ?, ?)",
+                (entry_id, dim, val),
+            )
+    db.commit()
+
+
+def test_divergence_empty_returns_empty(client: TestClient) -> None:
+    resp = client.get("/api/fitness/divergence?start=2026-06-01&end=2026-06-30")
+    assert resp.status_code == 200
+    assert resp.json() == {"rows": [], "summary": {}}
+
+
+def test_divergence_returns_classified_rows(
+    client: TestClient,
+    fitness_db: sqlite3.Connection,
+    fitness_repo: FitnessRepository,
+) -> None:
+    testday = "2026-06-15"
+    d0 = date.fromisoformat(testday)
+    baseline = [(d0 - timedelta(days=i)).isoformat() for i in range(10, 0, -1)]
+    for i, d in enumerate(baseline):
+        lo = i % 2 == 0
+        _seed_div_daily(
+            fitness_repo, local_date=d,
+            hrv=50.0 if lo else 60.0, sleep=75 if lo else 85,
+        )
+        _seed_div_mood(
+            fitness_db, entry_date=d,
+            physical_fatigue=0.3 if lo else 0.5,
+            mental_fatigue=0.3 if lo else 0.5,
+        )
+    # Tired but recovered → likely_mental_fatigue.
+    _seed_div_daily(fitness_repo, local_date=testday, hrv=60.0, sleep=85)
+    _seed_div_mood(
+        fitness_db, entry_date=testday,
+        physical_fatigue=0.6, mental_fatigue=0.4,
+    )
+
+    resp = client.get(
+        f"/api/fitness/divergence?start={testday}&end={testday}&window=28",
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["rows"]) == 1
+    row = body["rows"][0]
+    # Documented DivergenceDay shape.
+    for key in (
+        "local_date", "subjective_tired_z", "physical_fatigue",
+        "mental_fatigue", "recovery_z", "hrv_z", "resting_hr_z", "sleep_z",
+        "readiness_z", "acwr", "acwr_z", "quadrant", "n_signals", "sufficient",
+    ):
+        assert key in row
+    assert row["quadrant"] == "likely_mental_fatigue"
+    assert body["summary"] == {"likely_mental_fatigue": 1}
+
+
+def test_divergence_missing_params_returns_400(client: TestClient) -> None:
+    resp = client.get("/api/fitness/divergence?start=2026-06-01")
+    assert resp.status_code == 400
+
+
+def test_divergence_malformed_date_returns_400(client: TestClient) -> None:
+    # A malformed date must degrade to 400, not surface as a 500 from
+    # compute_divergence's date.fromisoformat.
+    resp = client.get("/api/fitness/divergence?start=garbage&end=2026-06-30")
+    assert resp.status_code == 400
+    assert "start" in resp.json()["error"]
+
+
+def test_mood_recovery_returns_date_aligned_rows(
+    client: TestClient,
+    fitness_db: sqlite3.Connection,
+    fitness_repo: FitnessRepository,
+) -> None:
+    _seed_div_daily(fitness_repo, local_date="2026-06-01", hrv=55.0)
+    _seed_div_mood(
+        fitness_db, entry_date="2026-06-02",
+        physical_fatigue=0.5, mental_fatigue=0.3,
+    )
+    resp = client.get("/api/fitness/mood-recovery?from=2026-06-01&to=2026-06-30")
+    assert resp.status_code == 200
+    rows = resp.json()["rows"]
+    by_date = {r["local_date"]: r for r in rows}
+    assert set(by_date) == {"2026-06-01", "2026-06-02"}
+    assert by_date["2026-06-01"]["hrv_overnight_ms"] == 55.0
+    assert by_date["2026-06-01"]["physical_fatigue"] is None
+    assert by_date["2026-06-02"]["training_load_acute"] is None
+    assert by_date["2026-06-02"]["physical_fatigue"] == 0.5
+
+
+def test_mood_recovery_missing_params_returns_400(client: TestClient) -> None:
+    resp = client.get("/api/fitness/mood-recovery?from=2026-06-01")
     assert resp.status_code == 400
 
 

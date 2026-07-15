@@ -9,6 +9,35 @@ from journal.mcp_server.tools._ctx import _get_query, _user_id
 
 log = logging.getLogger(__name__)
 
+# Fallback range for the ASCII trend bar when a dimension's scale is not
+# in the loaded config (e.g. a retired dimension still present in
+# historical mood_scores). Bipolar [-1, +1] preserves the pre-fix
+# rendering for those rows.
+_DEFAULT_SCALE: tuple[float, float] = (-1.0, 1.0)
+_BAR_WIDTH = 10
+
+
+def _mood_bar(avg_score: float, score_min: float, score_max: float) -> str:
+    """Render a fixed-width ASCII bar for a mood score, scaled to the
+    dimension's own range so unipolar and bipolar dimensions read
+    correctly.
+
+    The score is mapped from ``[score_min, score_max]`` onto
+    ``0.._BAR_WIDTH`` ``+`` characters:
+
+    - bipolar ([-1, +1]): a neutral 0.0 lands at half width (5 of 10),
+      matching the intuition that 0 is the midpoint.
+    - unipolar ([0, +1]): 0.0 renders an empty bar (absence of the
+      pole) and +1.0 a full one — so a unipolar 0 is visibly distinct
+      from a bipolar neutral instead of both showing a half-bar.
+    """
+    span = score_max - score_min
+    if span <= 0:
+        return ""
+    fraction = (avg_score - score_min) / span
+    fraction = max(0.0, min(1.0, fraction))
+    return "+" * round(fraction * _BAR_WIDTH)
+
 
 @mcp.tool()
 def journal_search_entries(
@@ -176,8 +205,11 @@ def journal_get_mood_trends(
     """Analyze mood trends over time from journal entries.
 
     Args:
-        start_date: Start of period (ISO 8601). Defaults to 3 months ago.
-        end_date: End of period (ISO 8601). Defaults to today.
+        start_date: Start of period (ISO 8601). Optional; when omitted,
+            trends cover all entries from the start of the journal (no
+            default window is applied).
+        end_date: End of period (ISO 8601). Optional; when omitted,
+            trends run through the most recent entry.
         granularity: Time grouping - "day", "week", or "month" (default "week").
     """
     log.info(
@@ -191,9 +223,16 @@ def journal_get_mood_trends(
     if not trends:
         return "No mood data available for the specified period."
 
+    # Look up each dimension's scale so the ASCII bar is scaled to its
+    # own range (unipolar [0, 1] vs bipolar [-1, +1]) rather than
+    # assuming every dimension is bipolar.
+    dimensions = ctx.request_context.lifespan_context.get("mood_dimensions", ())
+    scale_by_name = {d.name: (d.score_min, d.score_max) for d in dimensions}
+
     lines = [f"Mood trends by {granularity}:\n"]
     for t in trends:
-        bar = "+" * max(1, int((t.avg_score + 1) * 5))
+        score_min, score_max = scale_by_name.get(t.dimension, _DEFAULT_SCALE)
+        bar = _mood_bar(t.avg_score, score_min, score_max)
         line = f"  {t.period} | {t.dimension}: {t.avg_score:+.2f} ({t.entry_count} entries) {bar}"
         lines.append(line)
     return "\n".join(lines)

@@ -27,7 +27,7 @@ happening, just geometric proximity.
 
 **Two features sit outside this rule** and bake LLM comprehension into stored service data:
 
-1. **Mood scoring** (see [`mood-scoring.md`](./mood-scoring.md)) — a Haiku tool-use call produces a small set of
+1. **Mood scoring** (see [`mood-scoring.md`](./mood-scoring.md)) — a Sonnet (`claude-sonnet-4-5`) tool-use call produces a small set of
    `(dimension, score, rationale)` tuples per entry, stored on `entry_mood_scores`. The service exposes a scalar plus
    short reasoning, not generated prose.
 2. **Storylines** (see [`storylines.md`](./storylines.md)) — a per-chapter Opus narration produces a third-person

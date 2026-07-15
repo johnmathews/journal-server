@@ -20,6 +20,7 @@ in code means changing the schema's contract).
 
 import logging
 from dataclasses import asdict
+from datetime import date
 from typing import Any
 
 from mcp.server.fastmcp import Context
@@ -27,6 +28,7 @@ from mcp.server.fastmcp import Context
 from journal.api.fitness import (
     _activity_to_dict,
     _daily_to_dict,
+    _divergence_summary,
     _per_source_status,
 )
 from journal.db.fitness_integrity import check_fitness_integrity
@@ -38,6 +40,8 @@ from journal.mcp_server.tools._ctx import (
     _get_job_runner,
     _user_id,
 )
+from journal.services.fitness.correlation_stats import pearson
+from journal.services.fitness.divergence import compute_divergence
 
 log = logging.getLogger(__name__)
 
@@ -308,27 +312,46 @@ def fitness_trigger_backfill(
 # ── Correlation queries (master plan §8) ──────────────────────────
 
 
+def _pairs(
+    rows: list[dict[str, Any]], x_key: str, y_key: str,
+) -> list[tuple[float, float]]:
+    """Complete (x, y) pairs from ``rows`` — drops any row missing either
+    value so the Pearson helper sees only real observations."""
+    return [
+        (float(r[x_key]), float(r[y_key]))
+        for r in rows
+        if r.get(x_key) is not None and r.get(y_key) is not None
+    ]
+
+
 def _q1_sleep_mood(
-    conn: Any, *, user_id: int, start: str, end: str,
+    conn: Any, *, user_id: int, start: str, end: str, lag_days: int = 0,
 ) -> list[dict[str, Any]]:
-    """Q1 from fitness-schema.md §8 — verbatim."""
+    """Q1 from fitness-schema.md §8 — verbatim.
+
+    ``lag_days`` shifts the mood join forward: sleep on day D is compared
+    to the mood entry on ``D + lag_days`` (default 0 = same day).
+    """
     rows = conn.execute(
         """
         SELECT
             fd.local_date,
             fd.sleep_score,
             fd.sleep_efficiency_pct,
-            AVG(CASE WHEN ms.dimension = 'energy_fatigue' THEN ms.score END) AS energy,
-            AVG(CASE WHEN ms.dimension = 'joy_sadness'    THEN ms.score END) AS joy
+            AVG(CASE WHEN ms.dimension = 'energy_vigor'     THEN ms.score END) AS energy,
+            AVG(CASE WHEN ms.dimension = 'joy_sadness'      THEN ms.score END) AS joy,
+            AVG(CASE WHEN ms.dimension = 'physical_fatigue' THEN ms.score END) AS physical_fatigue,
+            AVG(CASE WHEN ms.dimension = 'mental_fatigue'   THEN ms.score END) AS mental_fatigue
         FROM fitness_daily fd
         LEFT JOIN entries e
-            ON e.user_id = fd.user_id AND e.entry_date = fd.local_date
+            ON e.user_id = fd.user_id
+           AND e.entry_date = date(fd.local_date, '+' || :lag || ' days')
         LEFT JOIN mood_scores ms ON ms.entry_id = e.id
         WHERE fd.user_id = :uid AND fd.local_date BETWEEN :start AND :end
         GROUP BY fd.local_date, fd.sleep_score, fd.sleep_efficiency_pct
         ORDER BY fd.local_date
         """,
-        {"uid": user_id, "start": start, "end": end},
+        {"uid": user_id, "start": start, "end": end, "lag": lag_days},
     ).fetchall()
     return [
         {
@@ -337,6 +360,8 @@ def _q1_sleep_mood(
             "sleep_efficiency_pct": r["sleep_efficiency_pct"],
             "energy": r["energy"],
             "joy": r["joy"],
+            "physical_fatigue": r["physical_fatigue"],
+            "mental_fatigue": r["mental_fatigue"],
         }
         for r in rows
     ]
@@ -345,31 +370,47 @@ def _q1_sleep_mood(
 def _q2_weekly_runs_stress(
     conn: Any, *, user_id: int, start: str, end: str,
 ) -> list[dict[str, Any]]:
-    """Q2 from fitness-schema.md §8 — verbatim."""
+    """Q2 from fitness-schema.md §8 — verbatim.
+
+    The ``deduped`` CTE picks one source per day (preferring ``garmin``,
+    falling back to ``strava``) so a watch run stored in both sources is
+    not double-counted. Dedup granularity is the **day**, not the
+    individual activity. The weekly stress series is the objective
+    ``fitness_daily.stress_avg`` (Garmin 0-100), not a mood proxy.
+    """
     rows = conn.execute(
         """
-        WITH weekly_runs AS (
+        WITH deduped AS (
+            SELECT fa.local_date, fa.distance_m
+            FROM fitness_activities fa
+            WHERE fa.user_id = :uid AND fa.activity_type = 'run'
+              AND fa.local_date BETWEEN :start AND :end
+              AND fa.source = CASE
+                  WHEN EXISTS (
+                      SELECT 1 FROM fitness_activities g
+                      WHERE g.user_id = fa.user_id AND g.activity_type = 'run'
+                        AND g.local_date = fa.local_date AND g.source = 'garmin'
+                  ) THEN 'garmin' ELSE fa.source END
+        ),
+        weekly_runs AS (
             SELECT
                 date(local_date,
                      '-' || ((strftime('%w', local_date) + 6) % 7) || ' days') AS week_start,
                 SUM(distance_m) / 1000.0                                       AS distance_km
-            FROM fitness_activities
-            WHERE user_id = :uid AND activity_type = 'run'
-              AND local_date BETWEEN :start AND :end
+            FROM deduped
             GROUP BY week_start
         ),
         weekly_stress AS (
             SELECT
-                date(e.entry_date,
-                     '-' || ((strftime('%w', e.entry_date) + 6) % 7) || ' days') AS week_start,
-                AVG(ms.score)                                                    AS stress_proxy
-            FROM entries e
-            JOIN mood_scores ms ON ms.entry_id = e.id
-            WHERE e.user_id = :uid AND ms.dimension = 'frustration'
-              AND e.entry_date BETWEEN :start AND :end
+                date(local_date,
+                     '-' || ((strftime('%w', local_date) + 6) % 7) || ' days') AS week_start,
+                AVG(stress_avg)                                                AS stress_avg
+            FROM fitness_daily
+            WHERE user_id = :uid AND stress_avg IS NOT NULL
+              AND local_date BETWEEN :start AND :end
             GROUP BY week_start
         )
-        SELECT r.week_start, r.distance_km, s.stress_proxy
+        SELECT r.week_start, r.distance_km, s.stress_avg
         FROM weekly_runs r LEFT JOIN weekly_stress s USING (week_start)
         ORDER BY r.week_start
         """,
@@ -379,7 +420,7 @@ def _q2_weekly_runs_stress(
         {
             "week_start": r["week_start"],
             "distance_km": r["distance_km"],
-            "stress_proxy": r["stress_proxy"],
+            "stress_avg": r["stress_avg"],
         }
         for r in rows
     ]
@@ -387,8 +428,15 @@ def _q2_weekly_runs_stress(
 
 def _q3_hrv_mood(
     conn: Any, *, user_id: int, start: str, end: str, window: int,
+    lag_days: int = 0,
 ) -> list[dict[str, Any]]:
-    """Q3 from fitness-schema.md §8 — verbatim. ``window`` is 7 or 14."""
+    """Q3 from fitness-schema.md §8 — verbatim. ``window`` is 7 or 14.
+
+    ``lag_days`` shifts the mood join forward: HRV on day D is compared to
+    the mood entry on ``D + lag_days`` (default 0 = same day). The
+    ``daily_mood`` window is widened by the same lag so shifted entries
+    stay in scope.
+    """
     rows = conn.execute(
         """
         WITH RECURSIVE date_series(d) AS (
@@ -399,11 +447,15 @@ def _q3_hrv_mood(
         daily_mood AS (
             SELECT
                 e.entry_date AS d,
-                AVG(CASE WHEN ms.dimension = 'joy_sadness'    THEN ms.score END) AS joy,
-                AVG(CASE WHEN ms.dimension = 'energy_fatigue' THEN ms.score END) AS energy
+                AVG(CASE WHEN ms.dimension = 'joy_sadness' THEN ms.score END) AS joy,
+                AVG(CASE WHEN ms.dimension = 'energy_vigor' THEN ms.score END) AS energy,
+                AVG(CASE WHEN ms.dimension = 'physical_fatigue' THEN ms.score END) AS phys_fat,
+                AVG(CASE WHEN ms.dimension = 'mental_fatigue' THEN ms.score END) AS ment_fat
             FROM entries e
             JOIN mood_scores ms ON ms.entry_id = e.id
-            WHERE e.user_id = :uid AND e.entry_date BETWEEN :start AND :end
+            WHERE e.user_id = :uid
+              AND e.entry_date BETWEEN date(:start, '+' || :lag || ' days')
+                                   AND date(:end,   '+' || :lag || ' days')
             GROUP BY e.entry_date
         ),
         joined AS (
@@ -411,16 +463,20 @@ def _q3_hrv_mood(
                 ds.d,
                 fd.hrv_overnight_ms,
                 dm.joy,
-                dm.energy
+                dm.energy,
+                dm.phys_fat,
+                dm.ment_fat
             FROM date_series ds
             LEFT JOIN fitness_daily fd ON fd.user_id = :uid AND fd.local_date = ds.d
-            LEFT JOIN daily_mood    dm ON dm.d = ds.d
+            LEFT JOIN daily_mood    dm ON dm.d = date(ds.d, '+' || :lag || ' days')
         )
         SELECT
             d,
             AVG(hrv_overnight_ms) OVER w AS hrv_roll,
             AVG(joy)              OVER w AS joy_roll,
-            AVG(energy)           OVER w AS energy_roll
+            AVG(energy)           OVER w AS energy_roll,
+            AVG(phys_fat)         OVER w AS physical_fatigue_roll,
+            AVG(ment_fat)         OVER w AS mental_fatigue_roll
         FROM joined
         WINDOW w AS (
             ORDER BY d
@@ -428,7 +484,8 @@ def _q3_hrv_mood(
         )
         ORDER BY d
         """,
-        {"uid": user_id, "start": start, "end": end, "window": window},
+        {"uid": user_id, "start": start, "end": end, "window": window,
+         "lag": lag_days},
     ).fetchall()
     return [
         {
@@ -436,6 +493,8 @@ def _q3_hrv_mood(
             "hrv_roll": r["hrv_roll"],
             "joy_roll": r["joy_roll"],
             "energy_roll": r["energy_roll"],
+            "physical_fatigue_roll": r["physical_fatigue_roll"],
+            "mental_fatigue_roll": r["mental_fatigue_roll"],
         }
         for r in rows
     ]
@@ -445,30 +504,55 @@ def _q3_hrv_mood(
 def fitness_correlate_sleep_mood(
     start: str,
     end: str,
+    lag_days: int = 0,
     ctx: Context = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
-    """Daily-grain sleep score × mood (energy & joy).
+    """Daily-grain sleep score × mood (energy, joy & fatigue facets).
 
     Q1 from fitness-schema.md §8. Each row is one day in
     ``[start, end]`` that has a ``fitness_daily`` row, joined to that
     day's journal entries' mood scores. Days with sleep but no
-    journal entry have ``energy``/``joy`` = ``null``.
+    journal entry have ``energy``/``joy``/fatigue = ``null``.
 
     Args:
         start: Inclusive start date (ISO 8601).
         end: Inclusive end date (ISO 8601).
+        lag_days: Compare each day's sleep to the mood entry
+            ``lag_days`` days later (``entry_date = sleep_date +
+            lag_days``). Must be ``>= 0``. Default 0 (same day).
 
     Returns:
         ``{"rows": [{"local_date", "sleep_score",
-        "sleep_efficiency_pct", "energy", "joy"}, ...]}``
+        "sleep_efficiency_pct", "energy", "joy", "physical_fatigue",
+        "mental_fatigue"}, ...], "stats": {"sleep_vs_energy_vigor":
+        {"r", "n"}, "sleep_vs_joy": {...}, "sleep_vs_physical_fatigue":
+        {...}, "sleep_vs_mental_fatigue": {...}}}``. Each stats entry is
+        the Pearson coefficient over the complete pairs of
+        ``sleep_score`` vs that series (``r`` is ``null`` when ``n < 3``
+        or a series is constant).
     """
     log.info(
-        "Tool call: fitness_correlate_sleep_mood(start=%s, end=%s)",
-        start, end,
+        "Tool call: fitness_correlate_sleep_mood(start=%s, end=%s, lag_days=%d)",
+        start, end, lag_days,
     )
+    if lag_days < 0:
+        return {"error": "lag_days must be >= 0", "rows": [], "stats": {}}
     conn = _get_db_conn(ctx)
     user_id = _user_id(ctx)
-    return {"rows": _q1_sleep_mood(conn, user_id=user_id, start=start, end=end)}
+    rows = _q1_sleep_mood(
+        conn, user_id=user_id, start=start, end=end, lag_days=lag_days,
+    )
+    stats = {
+        "sleep_vs_energy_vigor": pearson(_pairs(rows, "sleep_score", "energy")),
+        "sleep_vs_joy": pearson(_pairs(rows, "sleep_score", "joy")),
+        "sleep_vs_physical_fatigue": pearson(
+            _pairs(rows, "sleep_score", "physical_fatigue"),
+        ),
+        "sleep_vs_mental_fatigue": pearson(
+            _pairs(rows, "sleep_score", "mental_fatigue"),
+        ),
+    }
+    return {"rows": rows, "stats": stats}
 
 
 @mcp.tool()
@@ -477,21 +561,24 @@ def fitness_correlate_weekly_runs_stress(
     end: str,
     ctx: Context = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
-    """Weekly running distance × stress proxy.
+    """Weekly running distance × objective stress.
 
-    Q2 from fitness-schema.md §8. Buckets by Monday-of-week. The
-    ``stress_proxy`` is the average ``frustration`` mood-dimension
-    score for entries in that week (closest dimension to "stress" —
-    see schema doc §8 header).
+    Q2 from fitness-schema.md §8. Buckets by Monday-of-week. Runs are
+    deduped at **day granularity** across sources (preferring
+    ``garmin``) so a watch run stored in both Garmin and Strava counts
+    once. ``stress_avg`` is the average Garmin ``fitness_daily.stress_avg``
+    (0-100) for that week — the objective stress metric, not a mood proxy.
 
     Args:
         start: Inclusive start date (ISO 8601).
         end: Inclusive end date (ISO 8601).
 
     Returns:
-        ``{"rows": [{"week_start", "distance_km",
-        "stress_proxy"}, ...]}``. ``stress_proxy`` is ``null`` for
-        weeks where the user ran but didn't journal.
+        ``{"rows": [{"week_start", "distance_km", "stress_avg"}, ...],
+        "stats": {"distance_km_vs_stress_avg": {"r", "n"}}}``.
+        ``stress_avg`` is ``null`` for weeks the user ran but had no
+        Garmin stress data; the stats block is the Pearson coefficient
+        over the complete ``distance_km`` × ``stress_avg`` pairs.
     """
     log.info(
         "Tool call: fitness_correlate_weekly_runs_stress(start=%s, end=%s)",
@@ -499,9 +586,13 @@ def fitness_correlate_weekly_runs_stress(
     )
     conn = _get_db_conn(ctx)
     user_id = _user_id(ctx)
-    return {
-        "rows": _q2_weekly_runs_stress(conn, user_id=user_id, start=start, end=end),
+    rows = _q2_weekly_runs_stress(conn, user_id=user_id, start=start, end=end)
+    stats = {
+        "distance_km_vs_stress_avg": pearson(
+            _pairs(rows, "distance_km", "stress_avg"),
+        ),
     }
+    return {"rows": rows, "stats": stats}
 
 
 @mcp.tool()
@@ -509,9 +600,10 @@ def fitness_correlate_hrv_mood(
     start: str,
     end: str,
     window: int = 7,
+    lag_days: int = 0,
     ctx: Context = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
-    """Rolling-window HRV × mood (joy & energy).
+    """Rolling-window HRV × mood (joy, energy & fatigue facets).
 
     Q3 from fitness-schema.md §8. Materialises a date series so the
     rolling window is *calendar* days, not row-count days — missing
@@ -523,21 +615,109 @@ def fitness_correlate_hrv_mood(
         end: Inclusive end date (ISO 8601).
         window: Rolling-window size in calendar days. Defaults to 7;
             the schema doc recommends 7 or 14.
+        lag_days: Compare each day's HRV to the mood entry ``lag_days``
+            days later (``entry_date = hrv_date + lag_days``). Must be
+            ``>= 0``. Default 0 (same day).
 
     Returns:
-        ``{"rows": [{"d", "hrv_roll", "joy_roll",
-        "energy_roll"}, ...]}`` — one row per calendar day.
+        ``{"rows": [{"d", "hrv_roll", "joy_roll", "energy_roll",
+        "physical_fatigue_roll", "mental_fatigue_roll"}, ...],
+        "stats": {"hrv_vs_joy": {"r", "n"}, "hrv_vs_energy_vigor":
+        {...}, "hrv_vs_physical_fatigue": {...}, "hrv_vs_mental_fatigue":
+        {...}}}`` — one row per calendar day; stats are Pearson
+        coefficients over the complete rolling-value pairs.
     """
     log.info(
-        "Tool call: fitness_correlate_hrv_mood(start=%s, end=%s, window=%d)",
-        start, end, window,
+        "Tool call: fitness_correlate_hrv_mood(start=%s, end=%s, window=%d, "
+        "lag_days=%d)",
+        start, end, window, lag_days,
     )
     if window < 1:
-        return {"error": "window must be >= 1", "rows": []}
+        return {"error": "window must be >= 1", "rows": [], "stats": {}}
+    if lag_days < 0:
+        return {"error": "lag_days must be >= 0", "rows": [], "stats": {}}
     conn = _get_db_conn(ctx)
     user_id = _user_id(ctx)
-    return {
-        "rows": _q3_hrv_mood(
-            conn, user_id=user_id, start=start, end=end, window=window,
+    rows = _q3_hrv_mood(
+        conn, user_id=user_id, start=start, end=end, window=window,
+        lag_days=lag_days,
+    )
+    stats = {
+        "hrv_vs_joy": pearson(_pairs(rows, "hrv_roll", "joy_roll")),
+        "hrv_vs_energy_vigor": pearson(_pairs(rows, "hrv_roll", "energy_roll")),
+        "hrv_vs_physical_fatigue": pearson(
+            _pairs(rows, "hrv_roll", "physical_fatigue_roll"),
         ),
+        "hrv_vs_mental_fatigue": pearson(
+            _pairs(rows, "hrv_roll", "mental_fatigue_roll"),
+        ),
+    }
+    return {"rows": rows, "stats": stats}
+
+
+# ── Divergence detector (fitness-schema.md §9) ────────────────────
+
+
+@mcp.tool()
+def fitness_divergence(
+    start: str,
+    end: str,
+    window: int = 28,
+    z_threshold: float = 1.0,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """Mood↔recovery divergence: "am I tired because I run, or is it mental?"
+
+    §9 of fitness-schema.md. For each day in ``[start, end]`` it compares
+    self-reported tiredness (``physical_fatigue`` / ``mental_fatigue``
+    mood facets) against baselined objective recovery signals from
+    ``fitness_daily`` (HRV, resting HR, sleep score, training readiness,
+    acute:chronic load ratio), each turned into a rolling per-person
+    z-score and oriented so positive = better recovered. Days are sorted
+    into quadrants — ``likely_mental_fatigue`` (tired but recovered),
+    ``hidden_physical_under_recovery`` (fresh but under-recovered), and
+    the two ``congruent_*`` cases.
+
+    Args:
+        start: Inclusive start date (ISO 8601).
+        end: Inclusive end date (ISO 8601).
+        window: Rolling-baseline size in calendar days. ``window`` days of
+            history before ``start`` are pulled internally so early days
+            still get a baseline. Default 28.
+        z_threshold: How many standard deviations above the personal norm
+            counts as "feels tired" / "under-recovered". Default 1.0.
+
+    Returns:
+        ``{"rows": [DivergenceDay-as-dict, ...], "summary": {quadrant:
+        count}}``. ``summary`` counts only classified (``sufficient``)
+        days by quadrant. Days with no data are omitted; an empty DB
+        yields ``{"rows": [], "summary": {}}``.
+    """
+    log.info(
+        "Tool call: fitness_divergence(start=%s, end=%s, window=%d, "
+        "z_threshold=%s)",
+        start, end, window, z_threshold,
+    )
+    if window < 1:
+        return {"error": "window must be >= 1", "rows": [], "summary": {}}
+    # compute_divergence parses dates with date.fromisoformat; validate here
+    # so a malformed date returns a friendly error rather than a raw traceback.
+    for name, value in (("start", start), ("end", end)):
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            return {
+                "error": f"'{name}' must be a YYYY-MM-DD string",
+                "rows": [],
+                "summary": {},
+            }
+    conn = _get_db_conn(ctx)
+    user_id = _user_id(ctx)
+    days = compute_divergence(
+        conn, user_id=user_id, start=start, end=end,
+        window=window, z_threshold=z_threshold,
+    )
+    return {
+        "rows": [asdict(d) for d in days],
+        "summary": _divergence_summary(days),
     }

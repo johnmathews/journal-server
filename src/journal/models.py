@@ -675,3 +675,51 @@ class FitnessDaily:
     raw_ref_ids: list[int] = field(default_factory=list)
     id: int | None = None
     normalized_at: str = ""
+
+
+@dataclass
+class DivergenceDay:
+    """One day of the mood↔recovery divergence detector (fitness §9).
+
+    Compares self-reported tiredness (the ``physical_fatigue`` /
+    ``mental_fatigue`` mood facets) against baselined objective recovery
+    signals from ``fitness_daily`` and classifies the day into a quadrant.
+
+    Every z-score is a **rolling per-person** z: the value on this day
+    versus the mean/std of the same signal over the trailing ``window``
+    calendar days *before* this day. Objective per-signal z's
+    (``hrv_z``/``resting_hr_z``/``sleep_z``/``readiness_z``/``acwr_z``)
+    are **oriented so positive = better recovered** — ``resting_hr_z``
+    and ``acwr_z`` are sign-flipped because lower resting HR and a lower
+    acute:chronic ratio mean better recovery. ``recovery_z`` is the mean
+    of the available oriented signals. ``subjective_tired_z`` is the max
+    of the (unflipped) fatigue-facet z's, so positive = more tired than
+    this person's norm. All z fields are ``None`` when that signal lacked
+    a baseline (fewer than ~10 non-null trailing points, or zero variance)
+    or a value on the day. ``acwr`` is the raw acute:chronic ratio on the
+    day (not a z).
+
+    ``quadrant`` is one of ``"likely_mental_fatigue"`` (tired but
+    objectively recovered), ``"hidden_physical_under_recovery"`` (fresh
+    but objectively under-recovered), ``"congruent_fatigue"`` (tired and
+    under-recovered), ``"congruent_ok"`` (fresh and recovered), or
+    ``None`` when the day is not ``sufficient``. ``sufficient`` is True
+    only when at least two objective signals are present *and* a
+    subjective tiredness z could be computed. ``n_signals`` is the count
+    of available objective signals.
+    """
+
+    local_date: str
+    subjective_tired_z: float | None = None
+    physical_fatigue: float | None = None
+    mental_fatigue: float | None = None
+    recovery_z: float | None = None
+    hrv_z: float | None = None
+    resting_hr_z: float | None = None
+    sleep_z: float | None = None
+    readiness_z: float | None = None
+    acwr: float | None = None
+    acwr_z: float | None = None
+    quadrant: str | None = None
+    n_signals: int = 0
+    sufficient: bool = False

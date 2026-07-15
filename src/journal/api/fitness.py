@@ -1,11 +1,15 @@
 """Fitness pipeline read-side routes.
 
-Owns the four GET endpoints under ``/api/fitness/``:
+Owns the six GET endpoints under ``/api/fitness/``:
 
 - ``GET /api/fitness/activities?start=&end=&type=`` — windowed activities.
 - ``GET /api/fitness/daily?start=&end=`` — windowed daily rollups.
 - ``GET /api/fitness/sync/status`` — per-source auth + last-runs snapshot.
 - ``GET /api/fitness/integrity`` — soft-pointer orphan report.
+- ``GET /api/fitness/divergence?start=&end=&window=`` — mood↔recovery
+  divergence detector (fitness-schema.md §9).
+- ``GET /api/fitness/mood-recovery?from=&to=`` — date-aligned raw
+  training-load / recovery / fatigue rows for the webapp overlay.
 
 The rest of the ``/api/fitness/`` surface lives in sibling modules
 (carved out when this file outgrew the ~800-line size rule):
@@ -26,6 +30,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict
+from datetime import date
 from typing import TYPE_CHECKING, Any
 
 from starlette.responses import JSONResponse
@@ -38,6 +43,10 @@ from journal.services.fitness.credentials import (
     CredentialKeyInvalid,
     decrypt_credential,
 )
+from journal.services.fitness.divergence import (
+    compute_divergence,
+    mood_recovery_rows,
+)
 
 if TYPE_CHECKING:
     import sqlite3
@@ -48,6 +57,7 @@ if TYPE_CHECKING:
 
     from journal.db.fitness_repository import FitnessRepository
     from journal.models import (
+        DivergenceDay,
         FitnessActivity,
         FitnessAuthState,
         FitnessDaily,
@@ -195,9 +205,29 @@ def _per_source_status(
     return payload
 
 
+def _divergence_to_dict(d: DivergenceDay) -> dict[str, Any]:
+    return asdict(d)
+
+
+def _divergence_summary(days: list[DivergenceDay]) -> dict[str, int]:
+    """Count classified days by quadrant (unclassified days excluded)."""
+    summary: dict[str, int] = {}
+    for d in days:
+        if d.quadrant is not None:
+            summary[d.quadrant] = summary.get(d.quadrant, 0) + 1
+    return summary
+
+
 def _missing_param(name: str) -> JSONResponse:
     return JSONResponse(
         {"error": f"Query parameter '{name}' is required"},
+        status_code=400,
+    )
+
+
+def _invalid_date(name: str) -> JSONResponse:
+    return JSONResponse(
+        {"error": f"Query parameter '{name}' must be a YYYY-MM-DD date"},
         status_code=400,
     )
 
@@ -331,3 +361,84 @@ def register_fitness_routes(
             user.user_id, len(report.activities), len(report.daily),
         )
         return JSONResponse(body)
+
+    @mcp.custom_route(
+        "/api/fitness/divergence",
+        methods=["GET"],
+        name="api_fitness_divergence",
+    )
+    @handler(services_getter)
+    def divergence(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
+        user = get_authenticated_user(request)
+        conn: sqlite3.Connection = services["db_factory"].get()
+
+        start = request.query_params.get("start")
+        end = request.query_params.get("end")
+        if not start:
+            return _missing_param("start")
+        if not end:
+            return _missing_param("end")
+        # compute_divergence parses these with date.fromisoformat, which would
+        # raise → 500. Validate up front so a malformed date returns 400.
+        for name, value in (("start", start), ("end", end)):
+            try:
+                date.fromisoformat(value)
+            except ValueError:
+                return _invalid_date(name)
+        # window is optional; a malformed value falls back to the default
+        # rather than 400 — the analytic is robust to any positive window.
+        window_raw = request.query_params.get("window")
+        window = 28
+        if window_raw:
+            try:
+                parsed = int(window_raw)
+                if parsed >= 1:
+                    window = parsed
+            except ValueError:
+                window = 28
+
+        days = compute_divergence(
+            conn, user_id=user.user_id, start=start, end=end, window=window,
+        )
+        log.info(
+            "GET /api/fitness/divergence — user_id=%d %d rows (%s..%s, window=%d)",
+            user.user_id, len(days), start, end, window,
+        )
+        return JSONResponse(
+            {
+                "rows": [_divergence_to_dict(d) for d in days],
+                "summary": _divergence_summary(days),
+            },
+        )
+
+    @mcp.custom_route(
+        "/api/fitness/mood-recovery",
+        methods=["GET"],
+        name="api_fitness_mood_recovery",
+    )
+    @handler(services_getter)
+    def mood_recovery(
+        request: Request, services: ServicesDict, body: None
+    ) -> JSONResponse:
+        # Uses ``from``/``to`` (not start/end) to match the webapp overlay's
+        # date-range vocabulary; both are required.
+        user = get_authenticated_user(request)
+        conn: sqlite3.Connection = services["db_factory"].get()
+
+        start = request.query_params.get("from")
+        end = request.query_params.get("to")
+        if not start:
+            return _missing_param("from")
+        if not end:
+            return _missing_param("to")
+
+        rows = mood_recovery_rows(
+            conn, user_id=user.user_id, start=start, end=end,
+        )
+        log.info(
+            "GET /api/fitness/mood-recovery — user_id=%d %d rows (%s..%s)",
+            user.user_id, len(rows), start, end,
+        )
+        return JSONResponse({"rows": rows})

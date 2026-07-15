@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from journal.providers.answerer import AnswerPassage
+from journal.services.conversations.dimensions import resolve_dimension
 from journal.services.conversations.passages import (
     build_citations,
     select_passages,
@@ -20,6 +21,9 @@ from journal.services.conversations.passages import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from journal.models import MoodTrend
     from journal.providers.answerer import Answerer, ConversationTurn
     from journal.providers.intent_classifier import IntentResult
     from journal.services.query import QueryService
@@ -210,6 +214,39 @@ class TemporalHandler:
         )
 
 
+def _trend_note(trends: list[MoodTrend], resolved: str | None) -> str:
+    """Serialize mood trends into a context note for the answerer.
+
+    When `resolved` names a single facet, only that facet's series is
+    summarized. When it is `None` (all dimensions), each dimension's
+    series is labeled so the answerer can tell them apart — previously
+    every facet's points were interleaved into one unlabeled series.
+    """
+    if resolved is not None:
+        relevant = [t for t in trends if t.dimension == resolved]
+        if not relevant:
+            return (
+                f"No mood-trend data is available for '{resolved}' "
+                "in this period."
+            )
+        series = ", ".join(f"{t.period}={t.avg_score:.2f}" for t in relevant)
+        return f"Mood trend for '{resolved}' (period=avg_score): {series}."
+
+    if not trends:
+        return "No mood-trend data is available for this period."
+    parts: list[str] = []
+    for dim in dict.fromkeys(t.dimension for t in trends):
+        series = ", ".join(
+            f"{t.period}={t.avg_score:.2f}" for t in trends if t.dimension == dim
+        )
+        parts.append(f"{dim}: {series}")
+    return (
+        "Mood trends by dimension (dimension: period=avg_score): "
+        + "; ".join(parts)
+        + "."
+    )
+
+
 class TrendHandler:
     """Change-over-time / mood questions — summarize the series as a note."""
 
@@ -219,10 +256,12 @@ class TrendHandler:
         answerer: Answerer,
         *,
         passage_chars: int = 800,
+        dimension_names: Sequence[str] = (),
     ) -> None:
         self._query = query_service
         self._answerer = answerer
         self._passage_chars = passage_chars
+        self._dimension_names = tuple(dimension_names)
 
     def handle(
         self,
@@ -235,18 +274,15 @@ class TrendHandler:
             end_date=intent.end_date,
             user_id=user_id,
         )
-        relevant = (
-            [t for t in trends if t.dimension == intent.dimension]
-            if intent.dimension
-            else trends
+        # Validate the LLM-emitted dimension against the facets we know
+        # about — the configured set plus any present in the data — so a
+        # near-miss ("energy" → "energy_vigor") resolves instead of
+        # yielding an empty series. Unresolvable/ambiguous → all dims.
+        valid = list(
+            dict.fromkeys([*self._dimension_names, *(t.dimension for t in trends)])
         )
-        series = ", ".join(f"{t.period}={t.avg_score:.2f}" for t in relevant)
-        note = (
-            f"Mood trend for '{intent.dimension or 'overall'}' "
-            f"(period=avg_score): {series}."
-            if series
-            else "No mood-trend data is available for this period."
-        )
+        resolved = resolve_dimension(intent.dimension, valid)
+        note = _trend_note(trends, resolved)
         results = self._query.search_entries(
             query=intent.search_query,
             limit=_PASSAGE_FLOOR,

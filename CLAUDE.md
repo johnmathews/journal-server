@@ -20,7 +20,7 @@ src/journal/
     connection.py       — get_connection() with PRAGMAs (same-thread guard on)
     factory.py          — ConnectionFactory: per-thread SQLite connections
     migrations.py       — Migration runner (PRAGMA user_version)
-    migrations/*.sql    — SQL migration files (currently 0001 → 0035)
+    migrations/*.sql    — SQL migration files (currently 0001 → 0038)
     repository/         — SQLiteEntryRepository carved into protocol/store/core/
                           pages/chunks/search/mood/stats/analytics
     fitness_repository.py    — Fitness activities / daily wellness / auth state
@@ -51,10 +51,13 @@ src/journal/
     chunking.py         — Text chunking with tiktoken
     hybrid.py           — Hybrid BM25 + dense + RRF + listwise rerank pipeline
     conversations/      — Multi-turn chat reply: intent classify → per-intent
-                          handlers (lookup/aggregate/temporal/trend) + passages
+                          handlers (lookup/aggregate/temporal/trend) + passages;
+                          dimensions.py = free-form → canonical mood-facet resolver
     entity_extraction/  — Entity extraction service (orchestrator + helpers)
     fitness/            — Strava/Garmin fetch, normalize, backfill + activity-type map;
-                          credentials.py = Fernet-encrypted saved Garmin credentials
+                          credentials.py = Fernet-encrypted saved Garmin credentials;
+                          correlation_stats.py = pure Pearson; divergence.py =
+                          self-report vs baselined-recovery divergence detector
     storylines/         — StorylineEngine (judge-driven continue-or-break chaptering +
                           narrator), extension classifier, segments; wired via the
                           `bootstrap-storylines` CLI
@@ -146,8 +149,9 @@ way.
 - Python 3.13, uv, pytest, ruff
 - Google Gemini API (OCR primary in prod via `gemini-2.5-pro`, plus a Gemini
   transcription adapter and shadow-mode support)
-- Anthropic SDK (Claude Opus 4.6 OCR adapter; Haiku 4.5 for mood scoring,
-  transcript formatting, date-heading detection, and the listwise reranker)
+- Anthropic SDK (Claude Opus 4.6 OCR adapter; `claude-sonnet-4-5` for mood
+  scoring; Haiku 4.5 for transcript formatting, date-heading detection, and
+  the listwise reranker)
 - OpenAI SDK (`gpt-4o-transcribe` primary transcription with `whisper-1`
   fallback; `text-embedding-3-large` embeddings)
 - ChromaDB (vector storage, cosine distance)

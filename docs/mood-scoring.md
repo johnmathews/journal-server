@@ -70,19 +70,29 @@ The LLM is instructed to be concrete — quoting or paraphrasing the entry rathe
 Entries scored before migration 0014 have `rationale = NULL`. Run `journal backfill-mood --force` to populate rationales
 for all entries.
 
-## The 7-facet starting set
+## The 10-facet set
 
 The facets shipped in `config/mood-dimensions.toml` at the time of writing are:
 
 | Facet                | Scale    | Notes                                                                       |
 | -------------------- | -------- | --------------------------------------------------------------------------- |
 | `joy_sadness`        | bipolar  | Joyful vs sad. The valence axis.                                            |
-| `energy_fatigue`     | bipolar  | Energetic/alert vs tired/drained. The arousal axis.                         |
+| `energy_vigor`       | bipolar  | Vigorous/raring-to-go vs flat. The energetic-arousal (drive) axis.          |
+| `tension_calm`       | bipolar  | Calm/at-ease (+1) vs tense/keyed-up (−1). The tense-arousal axis.           |
+| `physical_fatigue`   | unipolar | Bodily/muscular depletion (1) vs absence of it (0).                         |
+| `mental_fatigue`     | unipolar | Cognitive/central depletion, brain fog (1) vs absence of it (0).            |
 | `agency`             | unipolar | Strong sense of agency (1) vs apathy/resignation (0).                       |
 | `fulfillment`        | unipolar | Meaningful fulfillment (1) vs indifference (0).                             |
 | `connection`         | unipolar | Felt closeness with specific other people (1) vs solitude/disconnect (0).   |
 | `frustration`        | unipolar | Active frustration / blocked goals (1) vs calm / no friction (0).           |
 | `proactive_reactive` | bipolar  | Proactive/initiating vs reactive. More stance than mood.                    |
+
+The original single bipolar `energy_fatigue` facet was split (2026-07-15) into four so the system can distinguish drive
+from depletion and physical from mental tiredness: `energy_vigor` (energetic-arousal / drive), `tension_calm`
+(tense-arousal / nervous activation), and the two unipolar depletion facets `physical_fatigue` and `mental_fatigue`.
+This makes "tired-and-wired" (low vigor, tense, high mental fatigue) distinguishable from "calmly energetic" (high vigor,
+calm, no fatigue). `tension_calm` places **calm** at the +1 pole so the dashboard "higher = better" convention holds
+without a render-time inversion.
 
 `frustration` is the only facet where a higher stored score means a worse mood. The dashboard inverts it at render
 time so the chart stays "higher = better" across every line: the line is labelled "calm" and the score is plotted as
@@ -158,13 +168,13 @@ pricing so you can decide whether to proceed.
 
 Per-entry cost with Sonnet 4.5 (`claude-sonnet-4-5`), ~500-word entry:
 
-- ~1250 input tokens (system prompt ~500 + entry ~750)
-- ~150 output tokens (tool call payload for 7 facets)
-- Input: 1250 × $3.00 / 1M = $0.00375
-- Output: 150 × $15.00 / 1M = $0.00225
-- **Total: ~$0.006 per entry**
+- ~1750 input tokens (system prompt ~1000 for the 10-facet schema + entry ~750)
+- ~210 output tokens (tool call payload for 10 facets)
+- Input: 1750 × $3.00 / 1M = $0.00525
+- Output: 210 × $15.00 / 1M = $0.00315
+- **Total: ~$0.008 per entry**
 
-Scaling: one entry per day ≈ 30 entries per month ≈ **$0.18/month**. Backfilling 100 historical entries is ~$0.60. If you
+Scaling: one entry per day ≈ 30 entries per month ≈ **$0.25/month**. Backfilling 100 historical entries is ~$0.84. If you
 switch to Claude Haiku 4.5 (via `MOOD_SCORER_MODEL=claude-haiku-4-5`), cost drops ~3× to ~$0.06/month, at the price of
 slightly less calibrated subjective scoring on short entries.
 

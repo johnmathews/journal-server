@@ -161,7 +161,7 @@ See [`mood-scoring.md`](mood-scoring.md) for the pipeline and CLI.
 | `JOURNAL_ENABLE_MOOD_SCORING`  | `true`                             | When `true`, ingestion submits a `mood_score_entry` job per entry. Toggleable at runtime via Settings → Features (writes the `enable_mood_scoring` row in `runtime_settings` and rebuilds the service in-place; no restart needed). |
 | `MOOD_SCORER_MODEL`            | `claude-sonnet-4-5`                | Anthropic model used for tool-use mood scoring.                                                                                                                                                      |
 | `MOOD_SCORER_MAX_TOKENS`       | `1024`                             | Token budget for the mood-scoring tool-use response.                                                                                                                                                 |
-| `MOOD_DIMENSIONS_PATH`         | `config/mood-dimensions.toml`      | Path to the TOML file defining the 7 facets (joy_sadness, energy_fatigue, agency, fulfillment, connection, frustration, proactive_reactive). Reload with `POST /api/admin/reload/mood-dimensions`.   |
+| `MOOD_DIMENSIONS_PATH`         | `config/mood-dimensions.toml`      | Path to the TOML file defining the 10 facets (joy_sadness, energy_vigor, tension_calm, physical_fatigue, mental_fatigue, agency, fulfillment, connection, frustration, proactive_reactive). Reload with `POST /api/admin/reload/mood-dimensions`.   |
 
 ## Optional — entity extraction
 

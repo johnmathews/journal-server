@@ -49,16 +49,25 @@
 #
 # Ordering is load-bearing only for chart display — the dashboard renders
 # lines in the order defined here. Current ordering groups facets by
-# kind: affect axes (valence, arousal), psychological needs (agency,
-# fulfillment, connection), active negative affect (frustration),
-# stance (proactive_reactive).
+# kind: affect axes (valence via joy_sadness; the two Thayer arousal
+# axes — energetic-arousal via energy_vigor and tense-arousal via
+# tension_calm), depletion/fatigue (physical_fatigue, mental_fatigue),
+# psychological needs (agency, fulfillment, connection), active negative
+# affect (frustration), stance (proactive_reactive).
 
 [meta]
-version = "2026-05-05"
+version = "2026-07-15"
 description = """
-The seven facets below are organised into four conceptual groups (affect
-axes, psychological needs, active negative affect, stance) — see the
-ordering note above. The webapp's admin "Moods" page renders the same
+The ten facets below are organised into five conceptual groups: affect
+axes (valence + the two Thayer arousal axes), depletion/fatigue
+(physical vs mental), psychological needs (agency, fulfillment,
+connection), active negative affect (frustration), and stance
+(proactive_reactive) — see the ordering note above. The old single
+`energy_fatigue` bipolar facet was split (2026-07-15) into four: an
+energetic-arousal drive axis (energy_vigor), a tense-arousal axis
+(tension_calm), and two unipolar depletion facets (physical_fatigue,
+mental_fatigue), so the system can tell "tired-and-wired" apart from
+"calmly energetic". The webapp's admin "Moods" page renders the same
 groups with plain-English explanations alongside each facet's full notes.
 """
 
@@ -83,19 +92,89 @@ frustration high and joy_sadness near zero.
 """
 
 [[dimension]]
-name = "energy_fatigue"
-positive_pole = "energetic"
-negative_pole = "tired"
+name = "energy_vigor"
+positive_pole = "vigorous"
+negative_pole = "flat"
 scale_type = "bipolar"
 notes = """
-Energetic / alert (+1) vs tired / drained (-1). The arousal axis —
-how high or low the writer's activation level is, independent of
-valence. You can be energetic-and-anxious or tired-and-content.
+Vigorous / raring to go (+1) vs flat / no get-up-and-go (-1). The
+energetic-arousal axis (Thayer): felt drive, momentum, and readiness
+to act, independent of valence. Score 0 for an ordinary baseline day
+with no notable lift or flatness.
 
-Score on the bodily / cognitive sense of activation, not the emotional
-tone. "Buzzing with caffeine, three meetings deep" scores energy high
-regardless of how the meetings went. "Exhausted by 3pm, dragging
-through the afternoon" scores energy low regardless of mood.
+Score felt drive, NOT depletion. "Woke up raring to go, plans
+spilling out of me" scores high. "Everything felt like wading through
+treacle, no spark to start anything" scores low.
+
+Distinct from physical_fatigue and mental_fatigue (depletion, not
+drive) — you can be low-vigor without being fatigued (a flat, becalmed
+day), and you can run on adrenaline through real fatigue (high vigor
+while genuinely tired). Distinct from tension_calm — vigor is
+get-up-and-go, tension is jitteriness vs ease.
+"""
+
+[[dimension]]
+name = "tension_calm"
+positive_pole = "calm"
+negative_pole = "tense"
+scale_type = "bipolar"
+notes = """
+Calm / at ease (+1) vs tense / keyed-up (-1). The tense-arousal axis
+(Thayer): nervous activation, edginess, bracing. Score 0 for an even
+keel with no notable tension or unusual calm. Calm is deliberately
+placed at the +1 pole so the dashboard's "higher = better" convention
+holds without a render-time inversion.
+
+"Shoulders up by my ears, mind racing, couldn't sit still" scores
+strongly negative. "Slow Sunday, deep unhurried calm, nothing pulling
+at me" scores strongly positive.
+
+Distinct from energy_vigor — the two arousal axes are independent, so
+"calm and energetic" (high vigor, high calm) is a real state and so is
+"tired and wired" (low vigor, low calm / tense). Distinct from
+frustration — frustration is anger at a blocked goal, tension is
+diffuse nervous arousal with no specific target.
+"""
+
+[[dimension]]
+name = "physical_fatigue"
+positive_pole = "severe bodily depletion"
+negative_pole = "absence of bodily depletion"
+scale_type = "unipolar"
+notes = """
+How strongly does the entry convey bodily / muscular tiredness — heavy
+limbs, sore muscles, needing to lie down, the wrung-out exhaustion that
+follows hard exertion or a bad night's sleep? Score 0 when the body is
+fine or unmentioned, and 1 when the writer is physically wiped out.
+Unipolar because the low end is the absence of bodily depletion, not an
+active opposite (drive lives on energy_vigor).
+
+Contrast with mental_fatigue. "Legs are jelly after the long run but
+my head's clear and sharp" scores physical_fatigue high and
+mental_fatigue low. "Brain fried from back-to-back meetings but I could
+happily go for a run" scores mental_fatigue high and physical_fatigue
+low.
+"""
+
+[[dimension]]
+name = "mental_fatigue"
+positive_pole = "severe cognitive depletion"
+negative_pole = "absence of mental depletion"
+scale_type = "unipolar"
+notes = """
+How strongly does the entry convey cognitive / central depletion —
+brain fog, decision fatigue, no focus or willpower left, the drained
+feeling that follows sustained thinking or heavy emotional load? Score
+0 when the mind is sharp or unmentioned, and 1 for near-burnout. Unipolar
+because the low end is the absence of mental depletion, not an active
+opposite.
+
+Distinct from physical_fatigue (the body can be fresh while the mind is
+spent, and vice versa). Distinct from energy_vigor — depletion is not
+the same as low drive: a "tired-and-wired" evening scores mental_fatigue
+high while energy_vigor stays positive. Distinct from tension_calm —
+spent is not the same as on-edge; you can be calmly exhausted (high
+mental_fatigue, high calm).
 """
 
 [[dimension]]
