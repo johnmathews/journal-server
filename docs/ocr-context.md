@@ -170,6 +170,26 @@ Both the Anthropic and Gemini providers share `SYSTEM_PROMPT` and the same `extr
 identical across providers (and through dual-pass reconciliation, which operates on each provider's already-stripped
 text). This is a forward-only behaviour: existing stored entries are not retroactively re-cleaned.
 
+## Markdown escapes (page fidelity)
+
+The OCR models are trained on Markdown, so punctuation that has Markdown meaning comes back backslash-escaped: a `***`
+divider centered on the page arrives as `\*\*\*` (a "protected" thematic break), `snake_case` as `snake\_case`, a
+literal `#` at line start as `\#`. Entry text is plain text and is displayed verbatim by the webapp, so every such
+escape is a character the author never wrote — a page-fidelity violation. Handled in the same two layers as
+strikethrough:
+
+1. **System prompt** — the model is told to output plain text, never escape punctuation with backslashes, and reproduce
+   every punctuation character exactly as the author wrote it.
+2. **Deterministic safety net** — `strip_markdown_escapes(raw)` in `providers/ocr.py` removes a backslash before any
+   CommonMark-escapable character (the ASCII punctuation set), including `\\` → `\` so a literal handwritten backslash
+   the model escaped round-trips correctly. Backslashes before letters, digits, or non-ASCII punctuation are not
+   Markdown escapes and are left untouched.
+
+Ordering: it runs **after** `strip_strikethrough` (so a handwritten literal `\~\~` unescapes to `~~` only after the
+strikethrough stripper has run, and survives) and **before** `parse_uncertain_markers` (unescaping changes character
+counts, so it must precede span-offset computation). Like the strikethrough stripper this is forward-only: entries
+stored before the fix are not retroactively re-cleaned.
+
 ## Uncertainty spans (the "Review" feature)
 
 Glossary priming raises the ceiling on proper-noun accuracy but doesn't solve the deeper problem: **the user doesn't know
@@ -256,7 +276,8 @@ scribble, flag the substituted word"), but that's out of scope for the initial r
 
 ### Files to read if you change this
 
-- `src/journal/providers/ocr.py` — `parse_uncertain_markers`, `OCRResult`, sentinel constants, `SYSTEM_PROMPT`
+- `src/journal/providers/ocr.py` — `parse_uncertain_markers`, `strip_markdown_escapes`, `OCRResult`, sentinel
+  constants, `SYSTEM_PROMPT`
 - `src/journal/services/ingestion/` — package containing the single- and multi-page flows; `_strip_and_shift_page_spans`
   lives in the image-handling module after the 2026-05-07 split
 - `src/journal/db/migrations/0005_uncertain_spans.sql` — schema

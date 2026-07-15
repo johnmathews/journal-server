@@ -60,6 +60,9 @@ SYSTEM_PROMPT = (
     "text is a mistake the author deleted. Omit it entirely: do not transcribe "
     "crossed-out text and do not mark it with strikethrough. Keep only what the "
     "author left standing.\n\n"
+    "Output plain text, not Markdown. Never escape punctuation with backslashes: "
+    "if the page shows ***, output *** — not \\*\\*\\*. Reproduce every "
+    "punctuation character exactly as the author wrote it.\n\n"
     "Output only the extracted text with no commentary or preamble. "
     "When you are unsure about a word or short phrase — illegible strokes, ambiguous "
     "letters, a guess you cannot make with confidence — wrap that word or phrase in "
@@ -244,6 +247,32 @@ def strip_strikethrough(text: str) -> str:
     without = re.sub(r"[ \t]+\n", "\n", without)
     without = re.sub(r"\n[ \t]+", "\n", without)
     return without.strip()
+
+
+# The OCR models are trained on Markdown, so punctuation that has Markdown
+# meaning comes back backslash-escaped: a *** divider centered on the page
+# arrives as \*\*\* (a "protected" thematic break), snake_case as
+# snake\_case, and so on. Entry text is plain text — every such escape is
+# a character the author never wrote. The character class is CommonMark's
+# escapable set: exactly the ASCII punctuation range.
+_MARKDOWN_ESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~])")
+
+
+def strip_markdown_escapes(text: str) -> str:
+    """Remove Markdown backslash escapes (``\\*`` → ``*``) from *text*.
+
+    Applies to every CommonMark-escapable character (ASCII punctuation),
+    including ``\\\\`` → ``\\`` — so an author's literal backslash the
+    model escaped round-trips correctly. Backslashes before letters,
+    digits, or non-ASCII punctuation are not Markdown escapes and are
+    left untouched.
+
+    Run this on the raw model output **before** ``parse_uncertain_markers``
+    (it changes character counts) and **after** ``strip_strikethrough``
+    (so a handwritten literal ``\\~\\~`` unescapes to ``~~`` only after
+    the strikethrough stripper has run, and survives).
+    """
+    return _MARKDOWN_ESCAPE_RE.sub(r"\1", text)
 
 
 def reflow_paragraphs(text: str) -> str:
@@ -490,6 +519,9 @@ class AnthropicOCRProvider:
         # Drop crossed-out (struck-through) words before parsing sentinels
         # so the uncertain-span offsets are anchored to the final text.
         raw = strip_strikethrough(raw)
+        # Undo Markdown backslash escapes (\*\*\* → ***) — also before the
+        # sentinel parser, because unescaping changes character counts.
+        raw = strip_markdown_escapes(raw)
         clean_text, spans = parse_uncertain_markers(raw)
         # The OCR prompt asks the model to reflow line wraps as a single
         # space, but Anthropic (like Gemini) occasionally preserves a
@@ -576,6 +608,9 @@ class GeminiOCRProvider:
         # Drop crossed-out (struck-through) words before parsing sentinels
         # so the uncertain-span offsets are anchored to the final text.
         raw = strip_strikethrough(raw)
+        # Undo Markdown backslash escapes (\*\*\* → ***) — also before the
+        # sentinel parser, because unescaping changes character counts.
+        raw = strip_markdown_escapes(raw)
         clean_text, spans = parse_uncertain_markers(raw)
         # Gemini preserves physical line breaks from the handwritten page.
         # Reflow into natural paragraphs — single \n → space, \n\n+ kept.

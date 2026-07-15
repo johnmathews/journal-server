@@ -23,6 +23,7 @@ from journal.providers.ocr import (
     parse_uncertain_markers,
     reconcile_ocr_results,
     reflow_paragraphs,
+    strip_markdown_escapes,
     strip_strikethrough,
 )
 
@@ -161,6 +162,43 @@ class TestAnthropicOCRProvider:
         start, end = result.uncertain_spans[0]
         assert result.text[start:end] == "Ritsya"
 
+    def test_extract_unescapes_markdown_escaped_divider(self) -> None:
+        """A *** divider on the page must reach the entry as literal
+        asterisks. The OCR model sees *** alone on a line as a Markdown
+        thematic break and emits \\*\\*\\* to keep it "literal" — but the
+        entry text is plain text, so the backslashes are noise the author
+        never wrote. Regression test for the reported bug."""
+        provider, client = self._make_provider()
+        raw = "Morning pages done.\n\n\\*\\*\\*\n\nAfternoon thoughts."
+        mock_message = MagicMock()
+        mock_message.content = [MagicMock(text=raw)]
+        client.messages.create.return_value = mock_message
+
+        result = provider.extract(b"data", "image/png")
+
+        assert result.text == "Morning pages done.\n\n***\n\nAfternoon thoughts."
+        assert "\\" not in result.text
+
+    def test_extract_unescapes_markdown_keeps_uncertain_spans_valid(
+        self,
+    ) -> None:
+        """Escape stripping changes character counts, so it must run
+        before the sentinel parser computes span offsets — same contract
+        as strikethrough stripping."""
+        provider, client = self._make_provider()
+        raw = (
+            f"\\*\\*\\*\n\nMet {UNCERTAIN_OPEN}Ritsya{UNCERTAIN_CLOSE} today."
+        )
+        mock_message = MagicMock()
+        mock_message.content = [MagicMock(text=raw)]
+        client.messages.create.return_value = mock_message
+
+        result = provider.extract(b"data", "image/png")
+
+        assert result.text == "***\n\nMet Ritsya today."
+        start, end = result.uncertain_spans[0]
+        assert result.text[start:end] == "Ritsya"
+
     def test_system_prompt_included_without_context(self) -> None:
         provider, client = self._make_provider()
         mock_message = MagicMock()
@@ -196,6 +234,15 @@ class TestAnthropicOCRProvider:
         lowered = SYSTEM_PROMPT.lower()
         assert "crossed out" in lowered or "struck" in lowered
         assert "omit" in lowered or "do not include" in lowered
+
+    def test_system_prompt_forbids_markdown_escaping(self) -> None:
+        """SYSTEM_PROMPT must tell the model to output plain text and
+        never backslash-escape punctuation (e.g. *** → \\*\\*\\*). The
+        deterministic strip_markdown_escapes is the guarantee, but the
+        prompt is the first line of defence."""
+        lowered = SYSTEM_PROMPT.lower()
+        assert "plain text" in lowered
+        assert "backslash" in lowered
 
     def test_role_prompts_mention_entry_begins_and_ends(self) -> None:
         """Role-specific prompt clauses must reference ENTRY_BEGINS / ENTRY_ENDS
@@ -669,6 +716,58 @@ class TestStripStrikethrough:
         )
 
 
+class TestStripMarkdownEscapes:
+    """Tests for strip_markdown_escapes — undoing the backslash escapes
+    the OCR model inserts to keep punctuation "literal" in Markdown.
+
+    The entry text is plain text, so every escape is noise the author
+    never wrote. Page fidelity requires the punctuation exactly as it
+    appears on the page.
+    """
+
+    def test_plain_text_unchanged(self) -> None:
+        assert strip_markdown_escapes("hello world") == "hello world"
+
+    def test_empty_string(self) -> None:
+        assert strip_markdown_escapes("") == ""
+
+    def test_escaped_thematic_break(self) -> None:
+        # The reported bug: a centered *** divider on its own line.
+        assert strip_markdown_escapes("\\*\\*\\*") == "***"
+
+    def test_escaped_divider_between_paragraphs(self) -> None:
+        text = "First thought.\n\n\\*\\*\\*\n\nSecond thought."
+        assert (
+            strip_markdown_escapes(text)
+            == "First thought.\n\n***\n\nSecond thought."
+        )
+
+    def test_escaped_underscore_in_word(self) -> None:
+        assert strip_markdown_escapes("snake\\_case") == "snake_case"
+
+    def test_escaped_hash_heading(self) -> None:
+        assert strip_markdown_escapes("\\# not a heading") == "# not a heading"
+
+    def test_all_commonmark_escapable_punctuation(self) -> None:
+        # CommonMark's full escapable set — every ASCII punctuation char.
+        punctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+        escaped = "".join(f"\\{ch}" for ch in punctuation)
+        assert strip_markdown_escapes(escaped) == punctuation
+
+    def test_escaped_backslash_becomes_single_backslash(self) -> None:
+        assert strip_markdown_escapes("a \\\\ b") == "a \\ b"
+
+    def test_backslash_before_letter_untouched(self) -> None:
+        # Not a Markdown escape — CommonMark only escapes ASCII punctuation.
+        assert strip_markdown_escapes("C:\\temp and \\n") == "C:\\temp and \\n"
+
+    def test_backslash_before_unicode_punctuation_untouched(self) -> None:
+        assert strip_markdown_escapes("a \\— b") == "a \\— b"
+
+    def test_trailing_backslash_untouched(self) -> None:
+        assert strip_markdown_escapes("ends with \\") == "ends with \\"
+
+
 class TestGeminiOCRProvider:
     """Tests for GeminiOCRProvider."""
 
@@ -784,6 +883,19 @@ class TestGeminiOCRProvider:
 
         assert result.text[12:18] == "Ritsya"
         assert result.uncertain_spans == [(12, 18)]
+
+    def test_extract_unescapes_markdown_escaped_divider(self) -> None:
+        """Same page-fidelity contract as the Anthropic provider: a ***
+        divider the model escaped as \\*\\*\\* must be stored as ***."""
+        provider, client = self._make_provider()
+        mock_response = MagicMock()
+        mock_response.text = "Morning pages done.\n\n\\*\\*\\*\n\nAfternoon thoughts."
+        client.models.generate_content.return_value = mock_response
+
+        result = provider.extract(b"data", "image/png")
+
+        assert result.text == "Morning pages done.\n\n***\n\nAfternoon thoughts."
+        assert "\\" not in result.text
 
     def test_context_dir_composes_into_system_text(
         self, tmp_path: Path
