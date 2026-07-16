@@ -73,11 +73,14 @@ def register_storylines_routes(
                 status_code=400,
             )
         status = request.query_params.get("status")
+        search = request.query_params.get("search")
         rows = repo.list_storylines(
             user_id=user.user_id, status=status,
-            limit=limit, offset=offset,
+            limit=limit, offset=offset, search=search,
         )
-        total = repo.count_storylines(user_id=user.user_id, status=status)
+        total = repo.count_storylines(
+            user_id=user.user_id, status=status, search=search,
+        )
         entity_store = services.get("entity_store")
         # Batch fetch unread and chapter counts — avoids N+1 queries
         unread = repo.unread_counts(user.user_id)

@@ -201,6 +201,7 @@ class SQLiteJobRepository:
         *,
         status: str | None = None,
         job_type: str | None = None,
+        search: str | None = None,
         limit: int = 50,
         offset: int = 0,
         user_id: int | None = None,
@@ -209,6 +210,11 @@ class SQLiteJobRepository:
 
         Returns ``(jobs, total)`` where *total* is the unfiltered count
         matching the filters (before limit/offset), for pagination.
+
+        *search* is a case-insensitive free-text needle matched against
+        ``id``, ``type``, and ``error_message`` in SQL (before
+        LIMIT/OFFSET), so *total* reflects the whole-table filtered
+        count. Blank/whitespace-only values are ignored.
         """
         where_clauses: list[str] = []
         params: list[str | int] = []
@@ -221,6 +227,13 @@ class SQLiteJobRepository:
         if user_id is not None:
             where_clauses.append("user_id = ?")
             params.append(user_id)
+        if search is not None and search.strip():
+            needle = f"%{search.strip().lower()}%"
+            where_clauses.append(
+                "(LOWER(id) LIKE ? OR LOWER(type) LIKE ? "
+                "OR LOWER(COALESCE(error_message, '')) LIKE ?)"
+            )
+            params.extend([needle, needle, needle])
 
         where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 

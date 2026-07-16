@@ -60,6 +60,22 @@ class BootstrapChapterSpec:
     mark_read: bool = False
 
 
+def _search_needle(search: str | None) -> str | None:
+    """Build a ``%needle%`` LIKE pattern for whole-dataset text search.
+
+    Returns ``None`` when ``search`` is falsy or blank after ``.strip()``
+    so callers can skip the predicate entirely. The needle is lowercased
+    (matched against ``LOWER(...)`` columns for case-insensitivity) and
+    always bound as a parameter — never interpolated into SQL.
+    """
+    if not search:
+        return None
+    trimmed = search.strip().lower()
+    if not trimmed:
+        return None
+    return f"%{trimmed}%"
+
+
 def _row_to_storyline(row: sqlite3.Row) -> Storyline:
     return Storyline(
         id=row["id"],
@@ -209,12 +225,17 @@ class SQLiteStorylineRepository:
         status: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        search: str | None = None,
     ) -> list[Storyline]:
         sql = "SELECT * FROM storylines WHERE user_id = ?"
         params: list[object] = [user_id]
         if status is not None:
             sql += " AND status = ?"
             params.append(status)
+        needle = _search_needle(search)
+        if needle is not None:
+            sql += " AND (LOWER(name) LIKE ? OR LOWER(description) LIKE ?)"
+            params.extend([needle, needle])
         sql += " ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         rows = self._conn().execute(sql, params).fetchall()
@@ -222,12 +243,17 @@ class SQLiteStorylineRepository:
 
     def count_storylines(
         self, user_id: int, status: str | None = None,
+        search: str | None = None,
     ) -> int:
         sql = "SELECT COUNT(*) AS cnt FROM storylines WHERE user_id = ?"
         params: list[object] = [user_id]
         if status is not None:
             sql += " AND status = ?"
             params.append(status)
+        needle = _search_needle(search)
+        if needle is not None:
+            sql += " AND (LOWER(name) LIKE ? OR LOWER(description) LIKE ?)"
+            params.extend([needle, needle])
         row = self._conn().execute(sql, params).fetchone()
         return int(row["cnt"])
 

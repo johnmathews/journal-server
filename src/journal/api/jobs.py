@@ -52,6 +52,7 @@ def register_jobs_routes(
 
         status = request.query_params.get("status")
         job_type = request.query_params.get("type")
+        search = request.query_params.get("search")
         try:
             limit = int(request.query_params.get("limit", "50"))
             offset = int(request.query_params.get("offset", "0"))
@@ -64,6 +65,7 @@ def register_jobs_routes(
         jobs, total = job_repository.list_jobs(
             status=status,
             job_type=job_type,
+            search=search,
             limit=limit,
             offset=offset,
             user_id=user_id,

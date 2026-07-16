@@ -1447,6 +1447,7 @@ see all jobs across users (`api/jobs.py:48`).
 | -------- | ------ | ------- | --------------------------------------------------------------- |
 | `status` | string | (all)   | Filter by status (`queued`, `running`, `succeeded`, `failed`)   |
 | `type`   | string | (all)   | Filter by job type (`entity_extraction`, `mood_backfill`, etc.) |
+| `search` | string | (all)   | Case-insensitive substring match against `id`, `type`, and `error_message`. Applied in SQL before `limit`/`offset`, so it searches the whole table; `total` reflects the filtered count. Composes with `status`/`type`. |
 | `limit`  | int    | 50      | Max items to return                                             |
 | `offset` | int    | 0       | Pagination offset                                               |
 
