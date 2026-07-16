@@ -552,3 +552,89 @@ class TestFactoryPathSemantics:
         t.join()
         _, total = jobs_repo_factory.list_jobs()
         assert total == 2
+
+
+class TestListJobsSearch:
+    """Whole-dataset free-text search over the jobs table (W2).
+
+    Search is evaluated in SQL before LIMIT/OFFSET, matches on ``id``,
+    ``type``, and ``error_message``, is case-insensitive, and the
+    returned ``total`` reflects the full filtered count.
+    """
+
+    def test_search_matches_id_fragment(self, jobs_repo):
+        job = jobs_repo.create("entity_extraction", {})
+        jobs_repo.create("mood_backfill", {})
+        fragment = job.id[:8]
+        jobs, total = jobs_repo.list_jobs(search=fragment)
+        assert total == 1
+        assert [j.id for j in jobs] == [job.id]
+
+    def test_search_matches_type(self, jobs_repo):
+        jobs_repo.create("entity_extraction", {})
+        jobs_repo.create("mood_backfill", {})
+        jobs, total = jobs_repo.list_jobs(search="mood_backfill")
+        assert total == 1
+        assert all(j.type == "mood_backfill" for j in jobs)
+
+    def test_search_matches_error_message_substring(self, jobs_repo):
+        job = jobs_repo.create("entity_extraction", {})
+        jobs_repo.mark_failed(job.id, "connection timeout to provider")
+        jobs_repo.create("mood_backfill", {})
+        jobs, total = jobs_repo.list_jobs(search="timeout")
+        assert total == 1
+        assert jobs[0].id == job.id
+
+    def test_search_is_case_insensitive(self, jobs_repo):
+        job = jobs_repo.create("entity_extraction", {})
+        jobs_repo.mark_failed(job.id, "Fatal ERROR Occurred")
+        jobs_repo.create("mood_backfill", {})
+        jobs, total = jobs_repo.list_jobs(search="fatal error")
+        assert total == 1
+        assert jobs[0].id == job.id
+
+    def test_search_type_case_insensitive(self, jobs_repo):
+        jobs_repo.create("mood_backfill", {})
+        jobs, total = jobs_repo.list_jobs(search="MOOD")
+        assert total == 1
+
+    def test_search_returns_only_matching_rows(self, jobs_repo):
+        jobs_repo.create("mood_backfill", {})
+        jobs_repo.create("entity_extraction", {})
+        jobs, total = jobs_repo.list_jobs(search="entity")
+        assert total == 1
+        assert all(j.type == "entity_extraction" for j in jobs)
+
+    def test_total_reflects_all_matches_beyond_page(self, jobs_repo):
+        for _ in range(5):
+            jobs_repo.create("mood_backfill", {})
+        jobs_repo.create("entity_extraction", {})
+        jobs, total = jobs_repo.list_jobs(search="mood_backfill", limit=2)
+        assert total == 5
+        assert len(jobs) == 2
+        assert total > len(jobs)
+
+    def test_blank_search_is_ignored(self, jobs_repo):
+        jobs_repo.create("mood_backfill", {})
+        jobs_repo.create("entity_extraction", {})
+        _, total = jobs_repo.list_jobs(search="   ")
+        assert total == 2
+
+    def test_search_composes_with_status_filter(self, jobs_repo):
+        failed = jobs_repo.create("mood_backfill", {})
+        jobs_repo.mark_failed(failed.id, "boom")
+        jobs_repo.create("mood_backfill", {})  # stays queued
+        jobs, total = jobs_repo.list_jobs(search="mood", status="failed")
+        assert total == 1
+        assert jobs[0].id == failed.id
+
+    def test_search_composes_with_type_filter(self, jobs_repo):
+        keep = jobs_repo.create("mood_backfill", {})
+        jobs_repo.mark_failed(keep.id, "network glitch")
+        other = jobs_repo.create("entity_extraction", {})
+        jobs_repo.mark_failed(other.id, "network glitch")
+        jobs, total = jobs_repo.list_jobs(
+            search="network", job_type="mood_backfill"
+        )
+        assert total == 1
+        assert jobs[0].id == keep.id

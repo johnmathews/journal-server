@@ -200,7 +200,10 @@ see [`jobs.md`](jobs.md#jobrunner)):
 Read-side (`api/storylines.py`):
 
 * `GET /api/storylines` — paginated list, `{items, total, limit, offset}`; each item carries
-  `unread_count` and `chapter_count` (batch-fetched, no N+1).
+  `unread_count` and `chapter_count` (batch-fetched, no N+1). Accepts an optional `status`
+  filter and a `search` query param — a case-insensitive substring match against storyline
+  `name` and `description`, applied in SQL before `limit`/`offset` so it searches the whole
+  table (`total` reflects the filtered count).
 * `GET /api/storylines/{id}` — storyline summary + `chapters: [meta]` (`id, seq, title, state,
   entry_count, first_entry_date, last_entry_date, published_at, read_at, citation_count`), `seq`
   ASC so the draft is naturally last.

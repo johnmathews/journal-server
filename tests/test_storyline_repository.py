@@ -362,6 +362,148 @@ class TestStorylineCRUD:
         assert refreshed.last_extension_check_at.startswith("20")
 
 
+# ── Whole-dataset text search (W1) ───────────────────────────────
+
+
+class TestListSearch:
+    """`list_storylines(search=...)` + `count_storylines(search=...)`:
+    whole-dataset text search over name + description, evaluated in SQL
+    before LIMIT/OFFSET so `total` reflects the filtered count."""
+
+    def _make(
+        self,
+        repo: SQLiteStorylineRepository,
+        factory: ConnectionFactory,
+        user_id: int,
+        name: str,
+        description: str = "",
+    ) -> Storyline:
+        store = SQLiteEntityStore(factory)
+        ent = store.create_entity(
+            entity_type="activity",
+            canonical_name=f"E-{name}-{description}",
+            description="",
+            first_seen="2026-01-01",
+            user_id=user_id,
+        )
+        return repo.create_storyline(
+            user_id=user_id, entity_ids=[ent.id], name=name,
+            description=description,
+        )
+
+    def test_search_matches_name(
+        self,
+        repo: SQLiteStorylineRepository,
+        factory: ConnectionFactory,
+        seed_user: int,
+    ) -> None:
+        self._make(repo, factory, seed_user, "Running")
+        self._make(repo, factory, seed_user, "Cooking")
+        rows = repo.list_storylines(seed_user, search="Run")
+        assert [r.name for r in rows] == ["Running"]
+
+    def test_search_matches_description(
+        self,
+        repo: SQLiteStorylineRepository,
+        factory: ConnectionFactory,
+        seed_user: int,
+    ) -> None:
+        self._make(repo, factory, seed_user, "Alpha", "about marathon training")
+        self._make(repo, factory, seed_user, "Beta", "about cooking")
+        rows = repo.list_storylines(seed_user, search="marathon")
+        assert [r.name for r in rows] == ["Alpha"]
+
+    def test_search_is_case_insensitive(
+        self,
+        repo: SQLiteStorylineRepository,
+        factory: ConnectionFactory,
+        seed_user: int,
+    ) -> None:
+        self._make(repo, factory, seed_user, "Running")
+        rows = repo.list_storylines(seed_user, search="rUnN")
+        assert [r.name for r in rows] == ["Running"]
+
+    def test_search_is_whitespace_trimmed(
+        self,
+        repo: SQLiteStorylineRepository,
+        factory: ConnectionFactory,
+        seed_user: int,
+    ) -> None:
+        self._make(repo, factory, seed_user, "Running")
+        self._make(repo, factory, seed_user, "Cooking")
+        rows = repo.list_storylines(seed_user, search="  Run  ")
+        assert [r.name for r in rows] == ["Running"]
+
+    def test_search_returns_only_matching_rows(
+        self,
+        repo: SQLiteStorylineRepository,
+        factory: ConnectionFactory,
+        seed_user: int,
+    ) -> None:
+        self._make(repo, factory, seed_user, "Running")
+        self._make(repo, factory, seed_user, "Cycling")
+        self._make(repo, factory, seed_user, "Cooking")
+        rows = repo.list_storylines(seed_user, search="c")
+        # "Cycling" and "Cooking" match; "Running" does not.
+        assert {r.name for r in rows} == {"Cycling", "Cooking"}
+
+    def test_empty_or_whitespace_search_is_ignored(
+        self,
+        repo: SQLiteStorylineRepository,
+        factory: ConnectionFactory,
+        seed_user: int,
+    ) -> None:
+        self._make(repo, factory, seed_user, "Running")
+        self._make(repo, factory, seed_user, "Cooking")
+        assert len(repo.list_storylines(seed_user, search="")) == 2
+        assert len(repo.list_storylines(seed_user, search="   ")) == 2
+        assert repo.count_storylines(seed_user, search="   ") == 2
+
+    def test_count_reflects_all_matches_beyond_page(
+        self,
+        repo: SQLiteStorylineRepository,
+        factory: ConnectionFactory,
+        seed_user: int,
+    ) -> None:
+        # Seed 5 matching storylines, plus 2 non-matching.
+        for i in range(5):
+            self._make(repo, factory, seed_user, f"Marathon-{i}")
+        self._make(repo, factory, seed_user, "Cooking")
+        self._make(repo, factory, seed_user, "Cycling")
+        page = repo.list_storylines(
+            seed_user, search="marathon", limit=2, offset=0,
+        )
+        assert len(page) == 2  # limited page
+        # count is the whole filtered total, not the page size.
+        assert repo.count_storylines(seed_user, search="marathon") == 5
+        assert repo.count_storylines(seed_user, search="marathon") > len(page)
+
+    def test_search_respects_user_isolation(
+        self,
+        repo: SQLiteStorylineRepository,
+        factory: ConnectionFactory,
+        seed_user: int,
+    ) -> None:
+        self._make(repo, factory, seed_user, "Running")
+        assert repo.list_storylines(seed_user + 999, search="Run") == []
+        assert repo.count_storylines(seed_user + 999, search="Run") == 0
+
+    def test_search_combines_with_status_filter(
+        self,
+        repo: SQLiteStorylineRepository,
+        factory: ConnectionFactory,
+        seed_user: int,
+    ) -> None:
+        active = self._make(repo, factory, seed_user, "Running active")
+        archived = self._make(repo, factory, seed_user, "Running archived")
+        repo.update_storyline_status(archived.id, "archived", seed_user)
+        rows = repo.list_storylines(seed_user, status="active", search="Running")
+        assert [r.id for r in rows] == [active.id]
+        assert repo.count_storylines(
+            seed_user, status="active", search="Running",
+        ) == 1
+
+
 # ── Anchors ──────────────────────────────────────────────────────
 
 

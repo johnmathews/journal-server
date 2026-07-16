@@ -423,6 +423,22 @@ class TestListJobsRoute:
             j["type"] == "entity_extraction" for j in resp.json()["items"]
         )
 
+    def test_search_filters_whole_dataset(
+        self, client: TestClient, job_runner: JobRunner
+    ) -> None:
+        r1 = client.post("/api/entities/extract", json={"stale_only": True})
+        assert r1.status_code in (200, 202), r1.text
+        r2 = client.post("/api/mood/backfill", json={"mode": "stale-only"})
+        assert r2.status_code in (200, 202), r2.text
+        job_runner.shutdown(wait=True, cancel_futures=False)
+
+        resp = client.get("/api/jobs?search=mood")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert len(data["items"]) == 1
+        assert all("mood" in j["type"] for j in data["items"])
+
     def test_pagination(
         self, client: TestClient, job_runner: JobRunner
     ) -> None:

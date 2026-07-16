@@ -275,6 +275,31 @@ class TestListStorylines:
         resp = client.get("/api/storylines?limit=nope")
         assert resp.status_code == 400
 
+    def test_list_search_filters_items_and_total(
+        self,
+        app_with_storylines: tuple[TestClient, dict[str, Any]],
+    ) -> None:
+        client, ctx = app_with_storylines
+        repo: SQLiteStorylineRepository = ctx["repo"]
+        # Three matching + two non-matching storylines.
+        for i in range(3):
+            repo.create_storyline(
+                user_id=_TEST_USER_ID, entity_ids=[ctx["entity_id"]],
+                name=f"Marathon {i}",
+            )
+        for name in ("Cooking", "Cycling"):
+            repo.create_storyline(
+                user_id=_TEST_USER_ID, entity_ids=[ctx["entity_id"]],
+                name=name,
+            )
+        resp = client.get("/api/storylines?search=marathon&limit=2")
+        assert resp.status_code == 200
+        body = resp.json()
+        # total reflects the whole-table filtered count, not the page size.
+        assert body["total"] == 3
+        assert len(body["items"]) == 2
+        assert all("Marathon" in item["name"] for item in body["items"])
+
 
 class TestStorylineDetail:
     def test_detail_returns_chapters_seq_asc_draft_last(
