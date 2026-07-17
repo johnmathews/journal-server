@@ -1,17 +1,56 @@
 {
-  "userId": 12345,
+  "userId": 100000001,
   "mostRecentVO2Max": {
     "generic": {
-      "vo2MaxValue": 51.0
-    }
+      "calendarDate": "2026-04-15",
+      "vo2MaxValue": 51.0,
+      "vo2MaxPreciseValue": 51.2
+    },
+    "cycling": null
   },
   "mostRecentTrainingLoadBalance": {
-    "calendarDate": "2026-04-15",
-    "metricsTrainingLoadAcute": 412.5,
-    "metricsTrainingLoadChronic": 380.0,
-    "trainingBalanceFeedbackPhrase": "OPTIMAL"
+    "metricsTrainingLoadBalanceDTOMap": {
+      "3300000001": {
+        "calendarDate": "2026-04-15",
+        "deviceId": 3300000001,
+        "monthlyLoadAerobicHigh": 933.75,
+        "monthlyLoadAerobicLow": 1769.9,
+        "monthlyLoadAnaerobic": 0.0,
+        "primaryTrainingDevice": true,
+        "trainingBalanceFeedbackPhrase": "ANAEROBIC_SHORTAGE"
+      }
+    },
+    "recordedDevices": [
+      { "deviceId": 3300000001, "deviceName": "Forerunner 955" }
+    ],
+    "userId": 100000001
   },
   "mostRecentTrainingStatus": {
-    "trainingStatus": "PRODUCTIVE"
+    "lastPrimarySyncDate": "2026-04-15",
+    "latestTrainingStatusData": {
+      "3300000001": {
+        "acuteTrainingLoadDTO": {
+          "acwrPercent": 42,
+          "acwrStatus": "OPTIMAL",
+          "acwrStatusFeedback": "FEEDBACK_2",
+          "dailyAcuteChronicWorkloadRatio": 1.08,
+          "dailyTrainingLoadAcute": 412,
+          "dailyTrainingLoadChronic": 380,
+          "maxTrainingLoadChronic": 700.5,
+          "minTrainingLoadChronic": 350.6
+        },
+        "calendarDate": "2026-04-15",
+        "deviceId": 3300000001,
+        "primaryTrainingDevice": true,
+        "sport": "RUNNING",
+        "subSport": "GENERIC",
+        "trainingStatus": 4,
+        "trainingStatusFeedbackPhrase": "MAINTAINING_2"
+      }
+    },
+    "recordedDevices": [
+      { "deviceId": 3300000001, "deviceName": "Forerunner 955" }
+    ],
+    "userId": 100000001
   }
 }

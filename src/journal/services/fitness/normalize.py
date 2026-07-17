@@ -43,6 +43,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
 from journal.models import FitnessActivity, FitnessDaily
+from journal.providers.garmin import extract_training_load
 from journal.services.fitness._activity_type_map import (
     coarse_garmin,
     coarse_strava,
@@ -412,7 +413,7 @@ def _garmin_daily_from_raws(
     sleep_dto = sleep.get("dailySleepDTO") or {}
     sleep_scores = sleep_dto.get("sleepScores") or {}
     sleep_overall = sleep_scores.get("overall") or {}
-    tlb = training_load.get("mostRecentTrainingLoadBalance") or {}
+    load_acute, load_chronic = extract_training_load(training_load)
 
     return FitnessDaily(
         user_id=user_id,
@@ -446,10 +447,8 @@ def _garmin_daily_from_raws(
         body_battery_high=_bounded_int_or_none(bb_first.get("charged"), lo=0, hi=100),
         body_battery_low=_bounded_int_or_none(bb_first.get("drained"), lo=0, hi=100),
         stress_avg=_bounded_int_or_none(stress.get("avgStressLevel"), lo=0, hi=100),
-        training_load_acute=_float_or_none(tlb.get("metricsTrainingLoadAcute")),
-        training_load_chronic=_float_or_none(
-            tlb.get("metricsTrainingLoadChronic"),
-        ),
+        training_load_acute=load_acute,
+        training_load_chronic=load_chronic,
         training_readiness=_bounded_int_or_none(
             readiness_first.get("score"), lo=0, hi=100,
         ),

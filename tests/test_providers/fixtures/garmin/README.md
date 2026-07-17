@@ -1,16 +1,26 @@
 # Garmin fixtures
 
-**FIXTURE SOURCE: hand-crafted; replace at W13.**
+**FIXTURE SOURCE: mostly hand-crafted; `training_status.json` swapped for a
+real anonymised capture (2026-07-17).**
 
-Until P0.2 + W6 are exercised end-to-end (W13 — first live smoke test), there is no
-real recorded response we can use. The JSON in this directory is hand-written to
-match the shape of what `garminconnect`'s endpoint methods actually return — based
-on inspection of the SDK source at version 0.3.3 — field for field. At W13, record
-one anonymised real-account response per file (one per endpoint) and replace these.
+Most JSON here is still hand-written to match the shape of what `garminconnect`'s
+endpoint methods return — based on inspection of the SDK source at version 0.3.3 —
+field for field. The remaining hand-crafted files should each be replaced with one
+anonymised real-account response as the endpoints are exercised end-to-end.
 
-If a test fails after the W13 swap, treat it as a real bug — the hand-crafted
-fixture diverging from the real API shape is exactly the failure mode this
-discipline catches. (Same convention as `../strava/README.md`.)
+`training_status.json` **has** been replaced: it is a real (anonymised — `userId`
+and `deviceId` scrubbed) capture of `get_training_status`. The hand-crafted version
+guessed the acute/chronic load lived under
+`mostRecentTrainingLoadBalance.metricsTrainingLoad{Acute,Chronic}`, but the real
+response nests them under
+`mostRecentTrainingStatus.latestTrainingStatusData.<deviceId>.acuteTrainingLoadDTO`
+as `dailyTrainingLoad{Acute,Chronic}`. That divergence silently produced NULL
+training load for every synced day until it was caught — exactly the failure mode
+this discipline warns about.
+
+If a test fails after a fixture swap, treat it as a real bug — the hand-crafted
+fixture diverging from the real API shape is exactly what this discipline catches.
+(Same convention as `../strava/README.md`.)
 
 ## Field-extraction contract (what the adapter reads from each payload)
 
@@ -28,8 +38,8 @@ so adding more extracted fields later doesn't require fixture changes.
 | `get_body_battery` | `body_battery_high` | `[0].charged` (max charge over the day) |
 | `get_body_battery` | `body_battery_low` | `[0].drained` (max drain over the day) |
 | `get_stress_data` | `stress_avg` | `avgStressLevel` |
-| `get_training_status` | `training_load_acute` | `mostRecentTrainingLoadBalance.metricsTrainingLoadAcute` |
-| `get_training_status` | `training_load_chronic` | `mostRecentTrainingLoadBalance.metricsTrainingLoadChronic` |
+| `get_training_status` | `training_load_acute` | `mostRecentTrainingStatus.latestTrainingStatusData.<deviceId>.acuteTrainingLoadDTO.dailyTrainingLoadAcute` |
+| `get_training_status` | `training_load_chronic` | `mostRecentTrainingStatus.latestTrainingStatusData.<deviceId>.acuteTrainingLoadDTO.dailyTrainingLoadChronic` |
 | `get_training_readiness` | `training_readiness` | `[0].score` |
 | `get_activities_by_date` | each list element → `GarminActivitySummary` | see `list_activities_response.json` |
 

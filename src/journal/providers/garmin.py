@@ -343,7 +343,7 @@ class GarminConnectGarminProvider:
         sleep_dto = (sleep or {}).get("dailySleepDTO") or {}
         sleep_scores = sleep_dto.get("sleepScores") or {}
         sleep_overall = sleep_scores.get("overall") or {}
-        tlb = (training_status or {}).get("mostRecentTrainingLoadBalance") or {}
+        load_acute, load_chronic = extract_training_load(training_status)
         readiness_first: dict[str, Any] = {}
         if isinstance(training_readiness, list) and training_readiness:
             first = training_readiness[0]
@@ -369,10 +369,8 @@ class GarminConnectGarminProvider:
             body_battery_high=_int_or_none(bb_first.get("charged")),
             body_battery_low=_int_or_none(bb_first.get("drained")),
             stress_avg=_int_or_none((stress or {}).get("avgStressLevel")),
-            training_load_acute=_float_or_none(tlb.get("metricsTrainingLoadAcute")),
-            training_load_chronic=_float_or_none(
-                tlb.get("metricsTrainingLoadChronic"),
-            ),
+            training_load_acute=load_acute,
+            training_load_chronic=load_chronic,
             training_readiness=_int_or_none(readiness_first.get("score")),
             extras={},
             raw_payloads_per_endpoint={
@@ -475,3 +473,51 @@ def _float_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def extract_training_load(training_status: Any) -> tuple[float | None, float | None]:
+    """Pull ``(acute, chronic)`` daily training load from a Garmin trainingstatus payload.
+
+    Garmin's ``get_training_status`` response nests the values under
+    ``mostRecentTrainingStatus.latestTrainingStatusData.<deviceId>.acuteTrainingLoadDTO``
+    as ``dailyTrainingLoadAcute`` / ``dailyTrainingLoadChronic``. They are **not**
+    under ``mostRecentTrainingLoadBalance`` (that key carries only monthly
+    aerobic/anaerobic balance) — reading the wrong path is exactly the bug this
+    helper fixes, and centralising the extraction keeps the live-sync adapter
+    (:meth:`GarminConnectGarminProvider.get_daily`) and the raw-payload
+    re-normaliser (``services/fitness/normalize.py``) from drifting apart again.
+
+    ``latestTrainingStatusData`` is a map keyed by device id and may hold more
+    than one device; prefer the one flagged ``primaryTrainingDevice`` and fall
+    back to any device that reports an ``acuteTrainingLoadDTO``.
+
+    Returns ``(None, None)`` when the payload is missing/empty or no device
+    reports a training-load DTO. A real ``0`` load is preserved — rest days
+    legitimately report ``dailyTrainingLoadAcute == 0``.
+    """
+    status = training_status if isinstance(training_status, dict) else {}
+    most_recent = status.get("mostRecentTrainingStatus")
+    per_device = most_recent.get("latestTrainingStatusData") if isinstance(
+        most_recent, dict,
+    ) else None
+    if not isinstance(per_device, dict):
+        return None, None
+
+    chosen: dict[str, Any] | None = None
+    for entry in per_device.values():
+        if not isinstance(entry, dict):
+            continue
+        dto = entry.get("acuteTrainingLoadDTO")
+        if not isinstance(dto, dict):
+            continue
+        if chosen is None:
+            chosen = dto
+        if entry.get("primaryTrainingDevice"):
+            chosen = dto
+            break
+    if chosen is None:
+        return None, None
+    return (
+        _float_or_none(chosen.get("dailyTrainingLoadAcute")),
+        _float_or_none(chosen.get("dailyTrainingLoadChronic")),
+    )
