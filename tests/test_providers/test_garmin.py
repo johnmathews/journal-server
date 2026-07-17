@@ -21,6 +21,7 @@ from journal.providers.garmin import (
     GarminProvider,
     GarminRateLimitError,
     SupportsUnattendedRelogin,
+    extract_training_load,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "garmin"
@@ -183,7 +184,7 @@ def test_get_daily_aggregates_all_fields_from_fixtures() -> None:
     assert metrics.body_battery_high == 78
     assert metrics.body_battery_low == 41
     assert metrics.stress_avg == 31
-    assert metrics.training_load_acute == pytest.approx(412.5)
+    assert metrics.training_load_acute == pytest.approx(412.0)
     assert metrics.training_load_chronic == pytest.approx(380.0)
     assert metrics.training_readiness == 78
 
@@ -638,3 +639,102 @@ def test_relogin_without_credentials_raises_auth_error_before_upstream() -> None
     with pytest.raises(GarminAuthError):
         provider.relogin_with_password()
     assert clients == []  # no client was even constructed
+
+
+# extract_training_load — the field-path fix (real Garmin nesting) --------
+
+
+def _training_status(
+    *, acute: object, chronic: object, device: str = "3300000001",
+    primary: bool = True,
+) -> dict[str, Any]:
+    """Build a minimal trainingstatus payload in Garmin's real nesting."""
+    return {
+        "mostRecentTrainingStatus": {
+            "latestTrainingStatusData": {
+                device: {
+                    "primaryTrainingDevice": primary,
+                    "acuteTrainingLoadDTO": {
+                        "dailyTrainingLoadAcute": acute,
+                        "dailyTrainingLoadChronic": chronic,
+                    },
+                },
+            },
+        },
+    }
+
+
+def test_extract_training_load_reads_acute_chronic_dto() -> None:
+    acute, chronic = extract_training_load(
+        _training_status(acute=412, chronic=380),
+    )
+    assert acute == pytest.approx(412.0)
+    assert chronic == pytest.approx(380.0)
+
+
+def test_extract_training_load_preserves_zero_load() -> None:
+    """Rest days legitimately report 0 — it must not collapse to None."""
+    acute, chronic = extract_training_load(_training_status(acute=0, chronic=219))
+    assert acute == 0.0
+    assert chronic == pytest.approx(219.0)
+
+
+def test_extract_training_load_prefers_primary_device() -> None:
+    payload = {
+        "mostRecentTrainingStatus": {
+            "latestTrainingStatusData": {
+                "1111": {
+                    "primaryTrainingDevice": False,
+                    "acuteTrainingLoadDTO": {
+                        "dailyTrainingLoadAcute": 10,
+                        "dailyTrainingLoadChronic": 20,
+                    },
+                },
+                "2222": {
+                    "primaryTrainingDevice": True,
+                    "acuteTrainingLoadDTO": {
+                        "dailyTrainingLoadAcute": 412,
+                        "dailyTrainingLoadChronic": 380,
+                    },
+                },
+            },
+        },
+    }
+    acute, chronic = extract_training_load(payload)
+    assert acute == pytest.approx(412.0)
+    assert chronic == pytest.approx(380.0)
+
+
+def test_extract_training_load_falls_back_to_any_device_with_dto() -> None:
+    """No device flagged primary → take any that reports a DTO."""
+    acute, chronic = extract_training_load(
+        _training_status(acute=99, chronic=88, primary=False),
+    )
+    assert acute == pytest.approx(99.0)
+    assert chronic == pytest.approx(88.0)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {},
+        {"mostRecentTrainingStatus": None},
+        {"mostRecentTrainingStatus": {"latestTrainingStatusData": {}}},
+        # The OLD (wrong) path — must now yield nothing, proving the bug is fixed.
+        {
+            "mostRecentTrainingLoadBalance": {
+                "metricsTrainingLoadAcute": 412.5,
+                "metricsTrainingLoadChronic": 380.0,
+            },
+        },
+        # Device present but no training-load DTO yet.
+        {
+            "mostRecentTrainingStatus": {
+                "latestTrainingStatusData": {"1111": {"calendarDate": "2026-04-15"}},
+            },
+        },
+    ],
+)
+def test_extract_training_load_missing_yields_none(payload: Any) -> None:
+    assert extract_training_load(payload) == (None, None)

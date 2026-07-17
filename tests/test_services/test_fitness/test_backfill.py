@@ -186,9 +186,16 @@ class _RecordingGarminProvider:
                 "body_battery": [{"charged": 90, "drained": 30}],
                 "stress": {"avgStressLevel": 25},
                 "training_load": {
-                    "mostRecentTrainingLoadBalance": {
-                        "metricsTrainingLoadAcute": 120.0,
-                        "metricsTrainingLoadChronic": 110.0,
+                    "mostRecentTrainingStatus": {
+                        "latestTrainingStatusData": {
+                            "3300000001": {
+                                "primaryTrainingDevice": True,
+                                "acuteTrainingLoadDTO": {
+                                    "dailyTrainingLoadAcute": 120,
+                                    "dailyTrainingLoadChronic": 110,
+                                },
+                            },
+                        },
                     },
                 },
                 "training_readiness": [{"score": 75}],

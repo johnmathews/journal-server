@@ -117,9 +117,16 @@ _GARMIN_DAILY_FIXTURE: dict[str, Any] = {
     "body_battery": [{"date": "2026-04-15", "charged": 78, "drained": 41}],
     "stress": {"avgStressLevel": 31},
     "training_load": {
-        "mostRecentTrainingLoadBalance": {
-            "metricsTrainingLoadAcute": 412.5,
-            "metricsTrainingLoadChronic": 380.0,
+        "mostRecentTrainingStatus": {
+            "latestTrainingStatusData": {
+                "3300000001": {
+                    "primaryTrainingDevice": True,
+                    "acuteTrainingLoadDTO": {
+                        "dailyTrainingLoadAcute": 412,
+                        "dailyTrainingLoadChronic": 380,
+                    },
+                },
+            },
         },
     },
     "training_readiness": [{"score": 78}],
@@ -302,7 +309,7 @@ def test_garmin_daily_fan_in_six_endpoints_to_one_row(
     assert daily["body_battery_high"] == 78
     assert daily["body_battery_low"] == 41
     assert daily["stress_avg"] == 31
-    assert daily["training_load_acute"] == pytest.approx(412.5)
+    assert daily["training_load_acute"] == pytest.approx(412.0)
     assert daily["training_load_chronic"] == pytest.approx(380.0)
     assert daily["training_readiness"] == 78
 
