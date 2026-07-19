@@ -67,6 +67,7 @@ services:
       - STRAVA_REFRESH_TOKEN=${STRAVA_REFRESH_TOKEN}
       - GARMIN_USERNAME=${GARMIN_USERNAME}
       - GARMIN_PASSWORD=${GARMIN_PASSWORD}
+      - FITNESS_CREDENTIAL_KEY=${FITNESS_CREDENTIAL_KEY}
     volumes:
       - /srv/media/config/journal/data:/data
       - /srv/media/config/journal/context:/app/context
