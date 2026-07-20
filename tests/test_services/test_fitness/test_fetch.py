@@ -232,6 +232,65 @@ def _make_garmin(
     )
 
 
+class _FakeCooldown:
+    """Records rate-limit blocks; never hot (so re-login paths proceed)."""
+
+    def __init__(self) -> None:
+        self.blocks = 0
+
+    def record_block(self) -> None:
+        self.blocks += 1
+
+    def check(self) -> float | None:
+        return None
+
+
+def test_garmin_rate_limit_during_fetch_is_transient_and_arms_cooldown(
+    repo: FitnessRepository, config: Any, db_conn: sqlite3.Connection,
+) -> None:
+    """A ``GarminRateLimitError`` from the data path is a transient failure,
+    NOT ``auth_broken``: the credentials are fine, so auth must not flip to
+    broken and no auth-broken Pushover fires. The shared upstream cooldown is
+    armed (back off), and the run is tagged ``GarminRateLimitError`` with the
+    enriched message so the rate-limit mode is distinguishable in the DB from a
+    genuine 401 auth death."""
+    from journal.providers.garmin import GarminRateLimitError
+
+    _seed_auth(repo, "garmin")
+    fake = _FakeGarminProvider()
+    fake.raise_on_get_daily = GarminRateLimitError(
+        "Too many requests: API Error 429 [status=429 retry-after=120]",
+    )
+    notifier = _FakeNotifier()
+    cooldown = _FakeCooldown()
+    svc = _make_garmin(
+        repo=repo, config=config, fake=fake, notifier=notifier,
+        upstream_cooldown=cooldown,
+    )
+
+    result = svc.run_sync(
+        user_id=1,
+        since=datetime(2026, 5, 8, tzinfo=UTC),
+        until=datetime(2026, 5, 8, 23, 59, tzinfo=UTC),
+    )
+
+    assert result.status == "transient_failure"
+    assert cooldown.blocks == 1
+    # Credentials are fine — auth stays ok, no auth-broken notification.
+    auth = repo.get_auth_state(user_id=1, source="garmin")
+    assert auth is not None
+    assert auth.auth_status == "ok"
+    assert notifier.auth_broken_calls == []
+    # Run row tagged so the two failure modes are distinguishable.
+    run = db_conn.execute(
+        "SELECT status, error_class, error_message FROM fitness_sync_runs"
+        " WHERE user_id=1 ORDER BY id DESC LIMIT 1",
+    ).fetchone()
+    assert run["status"] == "transient_failure"
+    assert run["error_class"] == "GarminRateLimitError"
+    assert "status=429" in run["error_message"]
+
+
 # ── Tests ────────────────────────────────────────────────────────────
 
 

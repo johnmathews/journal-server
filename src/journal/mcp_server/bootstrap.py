@@ -267,6 +267,7 @@ def _build_fitness_callables(
             password=password,
             tokens_blob=tokens_blob,
             persist_tokens=_persist,
+            request_delay_s=config.fitness_garmin_request_delay_s,
         )
 
     garmin_fetch = GarminFetchService(

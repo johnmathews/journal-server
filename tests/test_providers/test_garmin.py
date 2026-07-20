@@ -37,6 +37,9 @@ class _FakeClient:
     def __init__(self) -> None:
         self.loaded_blob: str | None = None
         self.dump_value: str = '{"di_token":"d","di_refresh_token":"r","di_client_id":"c"}'
+        # Mirrors garth.Client.last_resp — the last HTTP response, whose
+        # headers carry Cloudflare / rate-limit signals. None until set.
+        self.last_resp: Any = None
 
     def loads(self, blob: str) -> None:
         self.loaded_blob = blob
@@ -130,6 +133,8 @@ def _make_provider(
     tokens_blob: str | None = None,
     tokens_path: Path | None = None,
     persist_calls: list[str] | None = None,
+    request_delay_s: float = 0.0,
+    sleep_fn: Any = None,
 ) -> tuple[GarminConnectGarminProvider, _FakeGarmin, list[str]]:
     captured: list[str] = persist_calls if persist_calls is not None else []
     holder: dict[str, _FakeGarmin] = {}
@@ -146,6 +151,9 @@ def _make_provider(
         holder["c"] = c
         return c
 
+    extra: dict[str, Any] = {"request_delay_s": request_delay_s}
+    if sleep_fn is not None:
+        extra["sleep_fn"] = sleep_fn
     provider = GarminConnectGarminProvider(
         username="user@example.com",
         password="hunter2",
@@ -153,8 +161,91 @@ def _make_provider(
         tokens_path=tokens_path,
         persist_tokens=captured.append,
         client_factory=factory,  # type: ignore[arg-type]
+        **extra,
     )
     return provider, holder.get("c", fake or _FakeGarmin()), captured
+
+
+class _FakeResp:
+    """Stand-in for a ``requests.Response`` — only ``headers`` is read."""
+
+    def __init__(self, headers: dict[str, str]) -> None:
+        self.headers = headers
+
+
+# ── Rate-limit classification + request throttle (Garmin diagnostics) ──
+
+
+def test_get_daily_throttles_between_endpoint_calls() -> None:
+    """With a request delay set, each of the six daily endpoints is preceded
+    by a throttle sleep — spreading the burst that trips Garmin's Cloudflare
+    limiter after a multi-day window builds up."""
+    fake = _FakeGarmin()
+    sleeps: list[float] = []
+    provider, _, _ = _make_provider(
+        fake=fake, request_delay_s=2.0, sleep_fn=sleeps.append,
+    )
+    provider.login()
+    provider.get_daily("2026-07-15")
+    assert sleeps == [2.0] * 6
+
+
+def test_get_daily_zero_delay_does_not_throttle() -> None:
+    fake = _FakeGarmin()
+    sleeps: list[float] = []
+    provider, _, _ = _make_provider(
+        fake=fake, request_delay_s=0.0, sleep_fn=sleeps.append,
+    )
+    provider.login()
+    provider.get_daily("2026-07-15")
+    assert sleeps == []
+
+
+def test_get_daily_429_raises_rate_limit_not_auth() -> None:
+    """A 429 on a data call is a rate-limit, never an auth failure — so the
+    fetch service does not misfile it as ``auth_broken``."""
+    fake = _FakeGarmin()
+    fake.queue_error(
+        "get_sleep_data",
+        GarminConnectTooManyRequestsError("Too many requests: API Error 429"),
+    )
+    provider, _, _ = _make_provider(fake=fake)
+    provider.login()
+    with pytest.raises(GarminRateLimitError):
+        provider.get_daily("2026-07-15")
+
+
+def test_get_daily_cloudflare_block_classified_as_rate_limit() -> None:
+    """A Cloudflare bot-challenge that the SDK surfaces as an *auth* error is
+    reclassified as a rate-limit via the ``cf-mitigated`` response header."""
+    fake = _FakeGarmin()
+    fake.client.last_resp = _FakeResp({"cf-ray": "abc123", "cf-mitigated": "challenge"})
+    fake.queue_error(
+        "get_sleep_data",
+        GarminConnectAuthenticationError("API Error 403 - "),
+    )
+    provider, _, _ = _make_provider(fake=fake)
+    provider.login()
+    with pytest.raises(GarminRateLimitError):
+        provider.get_daily("2026-07-15")
+
+
+def test_get_daily_genuine_401_stays_auth_error_and_reports_status() -> None:
+    """A bare 401 with a Cloudflare edge header but no *block* signal stays an
+    auth error (cf-ray alone is not a rate-limit — every Garmin response has
+    one), and the message carries the HTTP status + cf-ray for the sync log."""
+    fake = _FakeGarmin()
+    fake.client.last_resp = _FakeResp({"cf-ray": "abc123"})
+    fake.queue_error(
+        "get_sleep_data",
+        GarminConnectAuthenticationError("API Error 401 - "),
+    )
+    provider, _, _ = _make_provider(fake=fake)
+    provider.login()
+    with pytest.raises(GarminAuthError) as excinfo:
+        provider.get_daily("2026-07-15")
+    assert "status=401" in str(excinfo.value)
+    assert "cf-ray=abc123" in str(excinfo.value)
 
 
 # 1. Replay-driven happy path -----------------------------------------

@@ -553,6 +553,18 @@ class Config:
             "FITNESS_SYNC_ENABLED", "true"
         ).lower() in ("1", "true", "yes", "on")
     )
+    # Seconds to sleep between consecutive Garmin API calls during a sync
+    # (providers/garmin.py). Garmin fronts its API with Cloudflare and
+    # rate-limits bursts; one sync fires ~7 calls/day and the window grows
+    # after an outage, so back-to-back calls can trip a 403/429 block. A
+    # small delay spreads the burst. 0 disables throttling (pre-2026-07
+    # behaviour). Default 2.0s ≈ 14s per one-day sync — invisible for a
+    # background job, well under any plausible rate ceiling.
+    fitness_garmin_request_delay_s: float = field(
+        default_factory=lambda: float(
+            os.environ.get("FITNESS_GARMIN_REQUEST_DELAY_S", "2.0"),
+        ),
+    )
 
     # Hard floor for entry dates (services/entry_dates.py). No entry may
     # be created or re-dated before this ISO date; the ceiling is always
@@ -612,6 +624,10 @@ class Config:
         if self.fitness_health_broken_degraded_hours < 1:
             raise ValueError(
                 "FITNESS_HEALTH_BROKEN_DEGRADED_HOURS must be >= 1"
+            )
+        if self.fitness_garmin_request_delay_s < 0:
+            raise ValueError(
+                "FITNESS_GARMIN_REQUEST_DELAY_S must be >= 0"
             )
         if self.fitness_credential_key:
             # Deferred import: journal.services.fitness modules import

@@ -202,6 +202,32 @@ class _FetchServiceBase:
                 status="auth_broken", run_id=run_id,
                 rows_fetched=0, rows_normalized=0,
             )
+        except GarminRateLimitError as exc:
+            # A Cloudflare / 429 block during fetch is transient — the
+            # credentials are fine, so we must NOT flip auth to broken or fire
+            # the auth-broken Pushover (that would misreport a rate limit as a
+            # dead session and trigger a doomed unattended re-login). Arm the
+            # shared upstream cooldown so the connect UI and unattended
+            # re-login back off, record as transient_failure, and tag the run
+            # with GarminRateLimitError + the enriched message so this failure
+            # mode is distinguishable from a genuine 401 in the sync-run log.
+            cooldown = getattr(self, "_upstream_cooldown", None)
+            if cooldown is not None:
+                cooldown.record_block()
+            log.warning(
+                "Fitness sync %s for user %d hit an upstream rate limit: %s",
+                self.SOURCE, user_id, exc,
+            )
+            self._repo.finish_sync_run(
+                run_id, status="transient_failure",
+                error_class=exc.__class__.__name__,
+                error_message=str(exc),
+            )
+            self._maybe_fire_threshold_alert(user_id)
+            return FitnessSyncResult(
+                status="transient_failure", run_id=run_id,
+                rows_fetched=0, rows_normalized=0,
+            )
         except FitnessAuthError as exc:
             transitioned = self._repo.transition_auth(
                 user_id=user_id, source=self.SOURCE,

@@ -795,6 +795,52 @@ If a Garmin re-auth itself keeps failing with 429 / `upstream_rate_limited`
 Stop retrying (each attempt re-arms the block) and use the split-IP
 mint/import recovery in [§2c-bis](#2c-bis-garmin--split-ip-recovery-when-cloudflare-blocks-the-server).
 
+### Distinguishing a dead session from a rate-limit (the two Garmin failure modes)
+
+A Garmin sync failure is one of two things, and they need opposite responses:
+
+1. **Dead session (auth).** The stored token blob is genuinely rejected — a
+   bare HTTP **401**. Fix: an unattended re-login with saved credentials (§6),
+   or a manual reconnect. This is recorded as `status=auth_broken`,
+   `error_class=FitnessAuthError`.
+2. **Rate-limit / Cloudflare block (transient).** Garmin is throttling the
+   server's IP — a **429**, or a **403** carrying a `cf-mitigated` /
+   `Retry-After` header. The credentials are fine; re-logging-in from the same
+   IP only deepens the block. Recorded as `status=transient_failure`,
+   `error_class=GarminRateLimitError`, and it arms the shared upstream cooldown
+   (so the connect UI and unattended re-login back off) **without** flipping
+   `auth_status` to broken or firing an auth-broken Pushover.
+
+Since 2026-07 the sync-run `error_message` is **self-diagnosing**: it carries
+the HTTP status and any Cloudflare headers, e.g.
+`… [status=401 cf-ray=abc123]` (dead session) vs
+`… [status=429 retry-after=120]` or `… [status=403 cf-mitigated=challenge]`
+(rate-limit). Read it straight off the run row:
+
+```bash
+docker exec journal-server python3 -c "
+import sqlite3; c=sqlite3.connect('/data/journal.db')
+for r in c.execute(\"SELECT started_at,status,error_class,error_message \
+FROM fitness_sync_runs WHERE source='garmin' AND status!='success' \
+ORDER BY started_at DESC LIMIT 10\"): print(r)
+"
+```
+
+**Request throttle.** To avoid provoking mode 2 in the first place,
+`FITNESS_GARMIN_REQUEST_DELAY_S` (default `2.0`s) spaces out the ~7 API calls
+per synced day. A sync's request burst grows after an outage (the window spans
+every missed day until the last success), so this delay is what keeps a
+multi-day catch-up under Garmin's rate ceiling. See
+[`configuration.md`](configuration.md#optional--fitness-integration).
+
+> **Note — the per-run day window is not yet capped.** A long outage still
+> fetches every missed day in one run (throttled, so ~0.5 req/s, not a burst).
+> A hard days-per-run cap was deferred because the resume cursor is the last
+> *successful run's start time*, not the last *fetched date* — capping naively
+> would skip the un-fetched middle days. A safe cap needs a real per-source
+> sync cursor; until then, recover a large gap with an explicit
+> [backfill](#3-historical-backfill).
+
 ### `POST /api/fitness/sync/{source}` returns 503
 
 Only Strava can 503 here — `STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET` is

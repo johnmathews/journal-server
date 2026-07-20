@@ -711,6 +711,7 @@ def _garmin_provider_factory(
             password=password,
             tokens_blob=tokens_blob,
             persist_tokens=_persist,
+            request_delay_s=config.fitness_garmin_request_delay_s,
         )
 
     return _factory
