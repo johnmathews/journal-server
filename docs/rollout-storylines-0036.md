@@ -2,8 +2,8 @@
 
 **Status:** steps 1–3 completed 2026-07-12/13 (deployed, all four storylines bootstrapped and
 verified — storyline 3's sweep initially aborted on an Anthropic usage limit with zero writes, as
-designed, and was re-run successfully). **Step 4 (migration 0037, drop legacy tables) is still
-pending and must ship in a LATER release.** Companion to [`storylines.md`](storylines.md) and
+designed, and was re-run successfully). **Step 4 (drop legacy tables, next free migration `0039`) is
+still pending and must ship in a LATER release.** Companion to [`storylines.md`](storylines.md) and
 [`superpowers/specs/2026-07-12-storylines-redesign-design.md`](superpowers/specs/2026-07-12-storylines-redesign-design.md).
 
 Migration `0036_storylines_draft_published.sql` reshapes the storylines schema (draft/published
@@ -69,19 +69,23 @@ which is safe to retry from.
 
 ## 4. Drop legacy tables (next release, never same deploy)
 
-Once every storyline has been verified against the new engine, ship a follow-up migration `0037`
-that drops the two legacy holdovers:
+Once every storyline has been verified against the new engine, ship a follow-up migration as the
+**next free number** that drops the two legacy holdovers. When this rollout was written the drop was
+reserved for `0037`, but `0037` (`entry_date_confirmed`) and `0038` (`mood_scores_unique_dimension`)
+have since been taken by unrelated work — so the drop is now **`0039`**. Take whatever is next free
+at the time you ship it:
 
 ```sql
 DROP TABLE IF EXISTS storyline_panels_legacy;
 ```
 
 (`storyline_chapters_legacy` from the 0036 migration's freeze step is a `TEMP` table — connection-
-scoped, already gone by the time any later migration runs — so 0037 only needs to drop the
-permanent `storyline_panels_legacy` table.)
+scoped, already gone by the time any later migration runs — so the drop migration only needs to drop
+the permanent `storyline_panels_legacy` table.)
 
-**Never ship 0036 and 0037 in the same release.** The gap between them is the verification window:
+**Never ship 0036 and the drop migration in the same release** (moot now that 0036 shipped
+2026-07-12, but the principle stands for the drop). The gap between them is the verification window:
 0036 is designed to be safely re-run or rolled back to (nothing destructive happens to the old
-panel data), but 0037 is a one-way door. Shipping them together removes the ability to inspect or
+panel data), but the drop is a one-way door. Shipping them together removes the ability to inspect or
 recover the pre-redesign narrative if the bootstrap sweep or the new engine turns out to have a
 problem only visible in prod.
