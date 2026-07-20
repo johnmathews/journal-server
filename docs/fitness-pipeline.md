@@ -128,10 +128,20 @@ machine owns:
 2. **Auth-broken classification.** A `FitnessAuthError` from the provider
    transitions `fitness_auth_state.auth_status` to `broken`, stamps
    `auth_broken_since`, fires the once-per-transition Pushover via the
-   notifier, and returns `status="auth_broken"`.
-3. **Transient classification.** Any other exception is recorded as
+   notifier, and returns `status="auth_broken"`. For Garmin this is the
+   genuine-401 (dead-session) case; a rate-limit that the SDK surfaces as an
+   auth error is reclassified in the provider (see next).
+3. **Rate-limit classification (Garmin).** A `GarminRateLimitError` — a 429,
+   or a 401/403 carrying an active Cloudflare block (`cf-mitigated` /
+   `Retry-After`) or a textual rate-limit signal — is recorded as
+   `transient_failure` (`error_class=GarminRateLimitError`) and **arms the
+   shared upstream cooldown**, but deliberately does **not** flip
+   `auth_status` to broken or fire the auth-broken Pushover: the credentials
+   are fine, so re-logging-in would only deepen the block. See
+   [`fitness-operations.md` §7](fitness-operations.md#distinguishing-a-dead-session-from-a-rate-limit-the-two-garmin-failure-modes).
+4. **Transient classification.** Any other exception is recorded as
    `transient_failure` with the friendly error message.
-4. **Audit trail.** Every code path produces a `fitness_sync_runs` row —
+5. **Audit trail.** Every code path produces a `fitness_sync_runs` row —
    the durable record the webapp reads, `fitness-status` prints, and
    `/api/health` filters on.
 
