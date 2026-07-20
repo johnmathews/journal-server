@@ -40,7 +40,9 @@ not here. Authentication failures from any endpoint surface as a typed
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterator
+import re
+import time
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -102,6 +104,60 @@ def looks_rate_limited(*texts: str) -> bool:
     """True when any text carries a rate-limit / bot-challenge signal."""
     blob = " ".join(t for t in texts if t).lower()
     return any(signal in blob for signal in RATE_LIMIT_SIGNALS)
+
+
+# garminconnect builds errors as "API Error {status} - {detail}"; pull the
+# HTTP status back out so a failure log distinguishes 401 (auth) from
+# 403/429 (Cloudflare / rate-limit).
+_STATUS_CODE_RE = re.compile(r"(?:API Error|Error|HTTP)\s*(\d{3})")
+
+
+def _status_code(text: str) -> str | None:
+    match = _STATUS_CODE_RE.search(text)
+    return match.group(1) if match else None
+
+
+def _last_response_headers(client: Garmin | None) -> Mapping[str, str]:
+    """Best-effort read of the underlying garth client's last HTTP response
+    headers — the source of Cloudflare / rate-limit signals. Never raises:
+    diagnostics must not crash a sync."""
+    resp = getattr(getattr(client, "client", None), "last_resp", None)
+    headers = getattr(resp, "headers", None)
+    return headers if isinstance(headers, Mapping) else {}
+
+
+def _header(headers: Mapping[str, str], name: str) -> str | None:
+    return (
+        headers.get(name)
+        or headers.get(name.lower())
+        or headers.get(name.title())
+    )
+
+
+def describe_garmin_error(exc: Exception, client: Garmin | None) -> str:
+    """Annotate a bare SDK error (``API Error 401 - ``) with the HTTP status
+    and any Cloudflare / rate-limit response headers, so one sync-run log line
+    tells a genuine auth 401 apart from a Cloudflare / 429 block."""
+    headers = _last_response_headers(client)
+    bits = [f"status={_status_code(str(exc)) or '?'}"]
+    for name in ("cf-ray", "cf-mitigated", "Retry-After"):
+        value = _header(headers, name)
+        if value:
+            bits.append(f"{name.lower()}={value}")
+    return f"{exc} [{' '.join(bits)}]"
+
+
+def _is_rate_limited(exc: Exception, client: Garmin | None) -> bool:
+    """Whether a data-call failure is a rate-limit / bot-challenge rather than
+    a genuine auth rejection. ``cf-ray`` alone does NOT count — Garmin fronts
+    *every* response with Cloudflare; only an active block (``cf-mitigated`` /
+    ``Retry-After``), a 429, or a textual rate-limit signal does."""
+    headers = _last_response_headers(client)
+    if _header(headers, "cf-mitigated") or _header(headers, "Retry-After"):
+        return True
+    if _status_code(str(exc)) == "429":
+        return True
+    return looks_rate_limited(str(exc))
 
 
 @dataclass(frozen=True)
@@ -207,6 +263,8 @@ class GarminConnectGarminProvider:
         tokens_path: Path | None = None,
         persist_tokens: PersistTokensFn | None = None,
         client_factory: Callable[..., Garmin] = Garmin,
+        request_delay_s: float = 0.0,
+        sleep_fn: Callable[[float], None] = time.sleep,
     ) -> None:
         self._username = username
         self._password = password
@@ -215,6 +273,14 @@ class GarminConnectGarminProvider:
         self._persist = persist_tokens
         self._client_factory = client_factory
         self._client: Garmin | None = None
+        # Throttle between data calls to avoid tripping Garmin's Cloudflare
+        # rate limiter on a multi-day sync window. 0 = no delay.
+        self._request_delay_s = request_delay_s
+        self._sleep_fn = sleep_fn
+
+    def _throttle(self) -> None:
+        if self._request_delay_s > 0:
+            self._sleep_fn(self._request_delay_s)
 
     # -- Login + token-loading sequence -----------------------------
 
@@ -333,12 +399,16 @@ class GarminConnectGarminProvider:
     def get_daily(self, date: str) -> GarminDailyMetrics:
         client = self._require_client()
 
-        sleep = _call(client.get_sleep_data, date)
-        hrv = _call(client.get_hrv_data, date)
-        body_battery = _call(client.get_body_battery, date)
-        stress = _call(client.get_stress_data, date)
-        training_status = _call(client.get_training_status, date)
-        training_readiness = _call(client.get_training_readiness, date)
+        def call(fn: Callable[[str], Any]) -> Any:
+            self._throttle()
+            return _call(client, fn, date)
+
+        sleep = call(client.get_sleep_data)
+        hrv = call(client.get_hrv_data)
+        body_battery = call(client.get_body_battery)
+        stress = call(client.get_stress_data)
+        training_status = call(client.get_training_status)
+        training_readiness = call(client.get_training_readiness)
 
         sleep_dto = (sleep or {}).get("dailySleepDTO") or {}
         sleep_scores = sleep_dto.get("sleepScores") or {}
@@ -391,10 +461,15 @@ class GarminConnectGarminProvider:
         client = self._require_client()
         startdate = after.astimezone(UTC).strftime("%Y-%m-%d")
         enddate = before.astimezone(UTC).strftime("%Y-%m-%d")
+        self._throttle()
         try:
             activities = client.get_activities_by_date(startdate, enddate)
+        except GarminConnectTooManyRequestsError as exc:
+            raise GarminRateLimitError(describe_garmin_error(exc, client)) from exc
         except GarminConnectAuthenticationError as exc:
-            raise GarminAuthError(str(exc)) from exc
+            if _is_rate_limited(exc, client):
+                raise GarminRateLimitError(describe_garmin_error(exc, client)) from exc
+            raise GarminAuthError(describe_garmin_error(exc, client)) from exc
         for activity in activities or []:
             yield _summary_from_garmin(activity)
 
@@ -408,12 +483,23 @@ class GarminConnectGarminProvider:
         return self._client
 
 
-def _call(fn: Callable[[str], Any], date: str) -> Any:
-    """Invoke a per-day SDK getter, translating auth errors to GarminAuthError."""
+def _call(client: Garmin, fn: Callable[[str], Any], date: str) -> Any:
+    """Invoke a per-day SDK getter, classifying failures as rate-limit vs auth
+    and annotating the message with the HTTP status + Cloudflare headers.
+
+    A 429, or a 401/403 carrying an active Cloudflare block (``cf-mitigated`` /
+    ``Retry-After``) or a textual rate-limit signal, becomes
+    :class:`GarminRateLimitError` (transient — back off). A bare 401 stays
+    :class:`GarminAuthError` (the dead-blob signature the fetch service
+    recovers from via unattended re-login)."""
     try:
         return fn(date)
+    except GarminConnectTooManyRequestsError as exc:
+        raise GarminRateLimitError(describe_garmin_error(exc, client)) from exc
     except GarminConnectAuthenticationError as exc:
-        raise GarminAuthError(str(exc)) from exc
+        if _is_rate_limited(exc, client):
+            raise GarminRateLimitError(describe_garmin_error(exc, client)) from exc
+        raise GarminAuthError(describe_garmin_error(exc, client)) from exc
 
 
 def _summary_from_garmin(activity: dict[str, Any]) -> GarminActivitySummary:

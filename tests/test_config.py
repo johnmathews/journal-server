@@ -465,6 +465,23 @@ def test_fitness_sync_enabled_respects_env_false(monkeypatch: pytest.MonkeyPatch
     assert Config().fitness_sync_enabled is False
 
 
+def test_fitness_garmin_request_delay_default_and_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("FITNESS_GARMIN_REQUEST_DELAY_S", raising=False)
+    assert Config().fitness_garmin_request_delay_s == 2.0
+    monkeypatch.setenv("FITNESS_GARMIN_REQUEST_DELAY_S", "0.5")
+    assert Config().fitness_garmin_request_delay_s == 0.5
+
+
+def test_fitness_garmin_request_delay_negative_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FITNESS_GARMIN_REQUEST_DELAY_S", "-1")
+    with pytest.raises(ValueError, match="FITNESS_GARMIN_REQUEST_DELAY_S"):
+        Config()
+
+
 def test_answer_config_defaults(monkeypatch):
     for var in ("ANSWER_PROVIDER", "ANSWER_MODEL", "ANSWER_CONTEXT_ENTRIES"):
         monkeypatch.delenv(var, raising=False)
