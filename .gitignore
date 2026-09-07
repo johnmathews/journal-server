@@ -34,6 +34,15 @@ htmlcov/
 .coverage
 .coverage.*
 
+# Tool caches. These stayed out of `git status` only because pytest and
+# ruff each write a self-ignoring .gitignore inside their own cache — an
+# accident of tooling, not a choice this repo made. Ignore them by policy.
+.pytest_cache/
+.ruff_cache/
+
+# superpowers session artifacts (review diffs; the commits are in git).
+.superpowers/
+
 # Data — NEVER commit personal journal content
 *.db
 *.db-wal
