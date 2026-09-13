@@ -16,9 +16,9 @@ dependencies = [
     "itsdangerous>=2.2,<3",
     "cryptography>=50.0,<51",
     "Pillow>=12.2,<13",
-    "pillow-heif>=1.6.0,<2",
+    "pillow-heif>=1.7.0,<2",
     "stravalib~=2.6",
-    "garminconnect==0.3.11",
+    "garminconnect==0.3.13",
 ]
 
 [project.scripts]
