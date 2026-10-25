@@ -20,3 +20,11 @@ updates:
         update-types:
           - "minor"
           - "patch"
+
+  # Keep the SHA-pinned GitHub Actions in .github/workflows/ current. Each
+  # pin carries its release tag as a trailing comment, which Dependabot
+  # updates alongside the SHA.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
