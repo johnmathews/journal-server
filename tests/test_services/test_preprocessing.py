@@ -159,7 +159,7 @@ class TestEnhanceContrast:
             for y in range(50):
                 img.putpixel((x, y), 100)
         result = _enhance_contrast(img)
-        pixels = list(result.getdata())
+        pixels = list(result.get_flattened_data())
         assert min(pixels) < 100  # darkened
         assert max(pixels) > 150  # brightened
 

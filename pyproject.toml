@@ -15,7 +15,7 @@ dependencies = [
     "argon2-cffi>=25.1,<26",
     "itsdangerous>=2.2,<3",
     "cryptography>=50.0,<51",
-    "Pillow>=12.2,<13",
+    "Pillow>=13.0,<14",
     "pillow-heif>=1.6.0,<2",
     "stravalib~=2.6",
     "garminconnect==0.3.11",
