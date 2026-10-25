@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Personal journal insight engine — ingest handwritten pages and voice notes, query with natural language"
 requires-python = ">=3.13"
 dependencies = [
-    "anthropic>=0.117.0,<1",
+    "anthropic>=1.4.0,<2",
     "google-genai==2.22.0",
     "openai>=2.46.0,<3",
     "chromadb-client>=1.5.9,<2",
