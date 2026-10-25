@@ -364,8 +364,10 @@ reference). Initialization is idempotent — the `_init_services()` function gua
 
 ## Deployment
 
-Docker Compose stack with three services running on the `media` VM. New images are pulled and restarted manually
-(`docker compose pull && docker compose up -d`); there is no Ansible playbook in the loop.
+Docker Compose stack with three services running on the `media` VM. Since 2026-10-25 What's Up Docker on `media`
+redeploys `journal-server` and `journal-webapp` within about a minute of a new `latest` on ghcr; `journal-chromadb` is
+still pulled and restarted by hand (`docker compose pull && docker compose up -d`). See
+`docs/production-deployment.md` § "Image source and update workflow".
 
 - `journal-server` — Python app running MCP server + REST API. Host port `8400`. The repo's `compose.yml` pins this to
   `127.0.0.1:8400` for the loopback-only stance recommended in `docs/security.md`; the production compose on `media`

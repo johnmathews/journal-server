@@ -83,7 +83,16 @@ restart.
 Images are built and pushed to `ghcr.io/johnmathews/journal-{server,webapp,chromadb}` by
 GitHub Actions on push to `main` (see each repo's `.github/workflows/`).
 
-**There is no auto-update.** The operator updates the stack manually:
+**`journal-server` and `journal-webapp` auto-deploy.** Since 2026-10-25 a What's Up Docker
+(WUD) container on `media` polls ghcr every minute; when the `latest` digest of either image
+changes, it pulls the image and recreates that service, usually within about a minute of
+the publish. **A merge to `main` that passes CI is therefore a production deploy.** The
+publish gate is this repo's `build-and-push` job, which `needs` both test jobs.
+`journal-chromadb` is deliberately not watched and still updates only by hand. WUD is
+configured from the home-server repo (`roles/media_vm`); its
+`documentation/wud.md` covers pausing it and rolling back.
+
+Manual update (ChromaDB, or as an override when WUD is paused):
 
 ```bash
 ssh media
@@ -92,15 +101,15 @@ docker compose pull journal-server journal-webapp journal-chromadb
 docker compose up -d
 ```
 
-This is a known fragility — image tags are pinned to `:latest`, so an upstream regression
-lands on the host the next time `pull` is run. Pinning to image SHAs in the compose file,
-or running Watchtower with a label allowlist scoped to the journal containers, would be a
-meaningful robustness improvement. Out of scope for now; flagged here so future work has
-context.
+There is no automatic rollback. `journal-server` migrates its database one way on start, so
+undoing a bad release means pinning the previous SHA tag and pausing WUD, not just
+re-pulling (`wud.md` §5).
 
 ## Deploy runbook (releasing a new build)
 
 Use this whenever a change has merged to `main` and needs to reach the running stack.
+For `journal-server` and `journal-webapp`, WUD has usually already done the pull + up by the
+time CI finishes; the checks below still apply.
 Deploying is **pull + up**; migrations apply themselves. The steps below add the checks
 that turn "it pulled" into "it's actually serving the new code with the schema it expects".
 
@@ -286,9 +295,12 @@ themselves are reproducible from `ghcr.io` and don't need to be backed up.
   services are mirrored at [`deploy/docker-compose.prod.yml`](../deploy/docker-compose.prod.yml)
   with a sync-provenance header. Residual risk: the mirror goes stale if VM-side
   edits aren't re-synced — check the header's last-synced date when in doubt.
-- **All images pinned to `:latest`, no auto-update.** A bad release on `main` becomes
-  the operator's problem the next time they run `docker compose pull`. Mitigation:
-  pin to SHAs, or add Watchtower with a label allowlist.
+- **All images pinned to `:latest`, and server + webapp auto-deploy.** Since 2026-10-25
+  What's Up Docker redeploys `journal-server` and `journal-webapp` within about a minute
+  of a new `latest` on ghcr (`journal-chromadb` is not watched). A bad release on `main`
+  reaches production as soon as CI publishes it, so the CI gate (tests + `pip-audit`) is
+  the only check before deploy. Rollback is manual: pin a SHA tag and pause WUD
+  (home-server `documentation/wud.md` §5).
 - **Custom `journal-chromadb` image.** It is built locally from `Dockerfile.chromadb` and
   pushed to `ghcr.io/johnmathews/journal-chromadb`, not pulled from upstream
   `chromadb/chroma`. A ChromaDB version bump requires a coordinated rebuild.
