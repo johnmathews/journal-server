@@ -1,3 +1,7 @@
+> **This repository has moved.** It is now the `server/` folder of the monorepo
+> [johnmathews/journal](https://github.com/johnmathews/journal/tree/main/server), with full history
+> (merged 2026-11-11). This repo is archived and read-only; open issues and PRs there.
+
 # Journal Analysis Tool
 
 A personal journal insight engine that ingests handwritten journal pages, voice notes, and fitness data, then answers
